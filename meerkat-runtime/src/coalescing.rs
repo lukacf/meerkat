@@ -208,6 +208,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(!is_coalescing_eligible(&input));
     }
@@ -311,6 +312,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         // Different kinds → different scope → no supersession

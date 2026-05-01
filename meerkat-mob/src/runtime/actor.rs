@@ -2552,6 +2552,7 @@ impl MobActor {
                     None
                 },
                 turn_metadata: None,
+                build_only_overrides: None,
             });
 
             let (_outcome, completion_handle) = adapter

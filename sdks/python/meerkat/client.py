@@ -342,6 +342,18 @@ def _runtime_turn_metadata(
     return metadata or None
 
 
+def _mob_spawn_spec_wire(spec: MobSpawnSpec | dict[str, Any]) -> dict[str, Any]:
+    wire = _wire_value(spec)
+    if not isinstance(wire, dict):
+        return dict(wire)
+    metadata = _runtime_turn_metadata(wire.get("turn_metadata"))
+    if metadata:
+        wire["turn_metadata"] = metadata
+    else:
+        wire.pop("turn_metadata", None)
+    return wire
+
+
 class MeerkatClient:
     """Async client that manages a Meerkat agent runtime via rkat-rpc.
 
@@ -1442,7 +1454,7 @@ class MeerkatClient:
     ) -> MobSpawnManyResult:
         params: dict[str, Any] = {
             "mob_id": mob_id,
-            "specs": _wire_value(specs),
+            "specs": [_mob_spawn_spec_wire(spec) for spec in specs],
         }
         result = await self._request("mob/spawn_many", params)
         entries = result.get("results")

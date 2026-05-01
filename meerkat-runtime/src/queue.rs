@@ -104,6 +104,7 @@ mod tests {
             text: "test".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         })
     }
 

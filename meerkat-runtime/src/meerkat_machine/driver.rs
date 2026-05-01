@@ -1876,6 +1876,7 @@ mod tests {
             text: "drive the queue".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let resume_id = resume_input.id().clone();
         let prompt_id = prompt_input.id().clone();

@@ -379,6 +379,70 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     assert result.results[1].error == "profile missing"
 
 
+@pytest.mark.asyncio
+async def test_spawn_mob_members_normalizes_nested_turn_metadata():
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "results": [
+                {
+                    "ok": True,
+                    "agent_identity": "worker-1",
+                    "member_ref": _make_member_ref("mob-1", "worker-1"),
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.spawn_mob_members(
+        "mob-1",
+        [
+            {
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "turn_metadata": {
+                    "additional_instructions": ["stay focused"],
+                    "connection_ref": {
+                        "realm": "dev",
+                        "binding": "default_anthropic",
+                    },
+                },
+            }
+        ],
+    )
+
+    assert calls == [
+        (
+            "mob/spawn_many",
+            {
+                "mob_id": "mob-1",
+                "specs": [
+                    {
+                        "profile": "worker",
+                        "agent_identity": "worker-1",
+                        "turn_metadata": {
+                            "additional_instructions": [
+                                {"kind": "user", "body": "stay focused"}
+                            ],
+                            "connection_ref": {
+                                "action": "set",
+                                "value": {
+                                    "realm": "dev",
+                                    "binding": "default_anthropic",
+                                },
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    ]
+
+
 def test_generated_mob_create_ensure_reconcile_preserve_nested_param_types():
     from meerkat.generated.types import (
         MobCreateParams as GeneratedMobCreateParams,

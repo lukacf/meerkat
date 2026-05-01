@@ -62,6 +62,7 @@ fn runtime_prompt_and_flow_step_reject_runtime_owned_turn_metadata_stamps() {
         text: "hello".to_string(),
         blocks: None,
         turn_metadata: None,
+        build_only_overrides: None,
     });
     let mut prompt_value = serde_json::to_value(prompt).expect("serialize prompt");
     prompt_value["turn_metadata"] = json!({

@@ -325,6 +325,7 @@ fn make_prompt(text: &str) -> Input {
         text: text.into(),
         blocks: None,
         turn_metadata: None,
+        build_only_overrides: None,
     })
 }
 
@@ -353,6 +354,7 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
             },
         ]),
         turn_metadata: None,
+        build_only_overrides: None,
     })
 }
 

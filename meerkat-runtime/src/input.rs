@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
-    RuntimeTurnMetadata,
+    RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata,
 };
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
@@ -294,6 +294,9 @@ pub struct PromptInput {
         deserialize_with = "deserialize_public_runtime_turn_metadata"
     )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+    /// Build-only overrides for materializing a deferred first turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_only_overrides: Option<RuntimeBuildOnlyTurnOverrides>,
 }
 
 impl PromptInput {
@@ -313,6 +316,7 @@ impl PromptInput {
             text: text.into(),
             blocks: None,
             turn_metadata,
+            build_only_overrides: None,
         }
     }
 
@@ -341,7 +345,16 @@ impl PromptInput {
             text,
             blocks,
             turn_metadata,
+            build_only_overrides: None,
         }
+    }
+
+    pub fn with_build_only_overrides(
+        mut self,
+        overrides: Option<RuntimeBuildOnlyTurnOverrides>,
+    ) -> Self {
+        self.build_only_overrides = overrides.filter(|overrides| !overrides.is_empty());
+        self
     }
 }
 
@@ -908,6 +921,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "prompt");
@@ -927,6 +941,7 @@ mod tests {
                 )),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
         let mut json = serde_json::to_value(&input).unwrap();
         let object = json
@@ -959,6 +974,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let mut json = serde_json::to_value(&input).unwrap();
         json["header"]["provider_params"] = serde_json::json!({ "temperature": 0.9 });
@@ -1009,6 +1025,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let mut json = serde_json::to_value(&input).unwrap();
         json["header"]["visibility"]["provider_params"] = serde_json::json!({ "temperature": 0.9 });
@@ -1342,6 +1359,7 @@ mod tests {
             text: "hi".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert_eq!(prompt.kind(), InputKind::Prompt);
 

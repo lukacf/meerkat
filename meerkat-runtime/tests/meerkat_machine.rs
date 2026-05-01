@@ -44,6 +44,7 @@ fn make_prompt(text: &str) -> Input {
         text: text.into(),
         blocks: None,
         turn_metadata: None,
+        build_only_overrides: None,
     })
 }
 

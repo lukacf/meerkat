@@ -201,6 +201,7 @@ mod tests {
             text: "hi".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
     }

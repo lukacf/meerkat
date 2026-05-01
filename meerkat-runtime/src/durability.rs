@@ -102,6 +102,7 @@ mod tests {
             text: "hi".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -113,6 +114,7 @@ mod tests {
             text: "hi".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(validate_durability(&input).is_ok());
     }
@@ -124,6 +126,7 @@ mod tests {
             text: "hi".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(validate_durability(&input).is_ok());
     }

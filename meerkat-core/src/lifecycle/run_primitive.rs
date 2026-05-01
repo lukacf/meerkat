@@ -11,7 +11,7 @@ use crate::connection::ConnectionRef;
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
-use crate::types::{HandlingMode, RenderMetadata};
+use crate::types::{HandlingMode, OutputSchema, RenderMetadata};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -1401,6 +1401,34 @@ pub struct RuntimeTurnMetadata {
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
+/// Build-time deferred first-turn overrides carried with the admitted prompt.
+///
+/// These are intentionally separate from [`RuntimeTurnMetadata`]: they do not
+/// describe turn behavior for an already-materialized session. They only apply
+/// while materializing the first turn of a deferred/stale session and must
+/// survive input durability/replay alongside the prompt that requested them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeBuildOnlyTurnOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output_retries: Option<u32>,
+}
+
+impl RuntimeBuildOnlyTurnOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.max_tokens.is_none()
+            && self.system_prompt.is_none()
+            && self.output_schema.is_none()
+            && self.structured_output_retries.is_none()
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeTurnMetadataFields {
@@ -1612,6 +1640,9 @@ pub struct StagedRunInput {
     /// Optional turn semantics that must survive crash recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+    /// Build-only deferred first-turn overrides that must survive input replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_only_overrides: Option<RuntimeBuildOnlyTurnOverrides>,
 }
 
 /// The ONLY type core receives from the runtime layer for run execution.
@@ -1648,6 +1679,13 @@ impl RunPrimitive {
     pub fn turn_metadata(&self) -> Option<&RuntimeTurnMetadata> {
         match self {
             RunPrimitive::StagedInput(staged) => staged.turn_metadata.as_ref(),
+            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
+        }
+    }
+
+    pub fn build_only_overrides(&self) -> Option<&RuntimeBuildOnlyTurnOverrides> {
+        match self {
+            RunPrimitive::StagedInput(staged) => staged.build_only_overrides.as_ref(),
             RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
         }
     }
@@ -1821,6 +1859,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![],
             turn_metadata: None,
+            build_only_overrides: None,
         })
     }
 
@@ -1894,6 +1933,7 @@ mod tests {
             }],
             contributing_input_ids: vec![],
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(p.is_context_only_immediate());
     }
@@ -1912,6 +1952,7 @@ mod tests {
             }],
             contributing_input_ids: vec![],
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(!p.is_context_only_immediate());
     }
@@ -1927,6 +1968,7 @@ mod tests {
             }],
             contributing_input_ids: vec![],
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert!(!p.is_context_only_immediate());
     }
@@ -1945,6 +1987,7 @@ mod tests {
                 execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
 
         assert!(p.is_context_only_apply_without_turn());
@@ -1969,6 +2012,7 @@ mod tests {
                 ),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
 
         assert!(p.is_peer_response_terminal_context_and_run());
@@ -2125,6 +2169,7 @@ mod tests {
                 })),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         };
         let json = serde_json::to_value(&staged).unwrap();
         let parsed: StagedRunInput = serde_json::from_value(json).unwrap();
@@ -2139,6 +2184,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new(), InputId::new()],
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let json = serde_json::to_value(&primitive).unwrap();
         assert_eq!(json["primitive_type"], "staged_input");
@@ -2169,6 +2215,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: ids.clone(),
             turn_metadata: None,
+            build_only_overrides: None,
         });
         assert_eq!(primitive.contributing_input_ids(), &ids);
 

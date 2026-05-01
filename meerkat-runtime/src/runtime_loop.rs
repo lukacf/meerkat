@@ -7,7 +7,9 @@
 //! under the hood).
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
+use meerkat_core::lifecycle::run_primitive::{
+    RunApplyBoundary, RunPrimitive, RuntimeBuildOnlyTurnOverrides, StagedRunInput,
+};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::turn_execution_authority::ContentShape as TurnContentShape;
 
@@ -87,6 +89,37 @@ pub(crate) fn merge_batch_turn_metadata(
         }
     }
     Ok(acc.filter(|m| !m.is_empty()))
+}
+
+pub(crate) fn merge_batch_build_only_overrides(
+    inputs: &[(meerkat_core::lifecycle::InputId, Input)],
+) -> Result<
+    Option<RuntimeBuildOnlyTurnOverrides>,
+    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+> {
+    let mut found: Option<RuntimeBuildOnlyTurnOverrides> = None;
+    for (_, input) in inputs {
+        let Input::Prompt(prompt) = input else {
+            continue;
+        };
+        let Some(overrides) = prompt
+            .build_only_overrides
+            .as_ref()
+            .filter(|overrides| !overrides.is_empty())
+        else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "build_only_overrides",
+                    reason: "multiple runtime inputs in one batch carried build-only turn overrides",
+                },
+            );
+        }
+        found = Some(overrides.clone());
+    }
+    Ok(found)
 }
 
 fn resolve_completion_waiters(
@@ -332,6 +365,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     // Merge turn metadata from ALL inputs in the batch, not just the first.
     // Scalar conflicts are typed errors; collection fields accumulate.
     let turn_metadata = merge_batch_turn_metadata(inputs, semantics)?;
+    let build_only_overrides = merge_batch_build_only_overrides(inputs)?;
 
     Ok(RunPrimitive::StagedInput(StagedRunInput {
         boundary,
@@ -339,6 +373,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
         context_appends,
         contributing_input_ids,
         turn_metadata,
+        build_only_overrides,
     }))
 }
 
@@ -953,13 +988,56 @@ mod tests {
             text: text.into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         })
+    }
+
+    fn make_prompt_with_build_only(text: &str, system_prompt: &str) -> Input {
+        let mut input = make_prompt(text);
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.build_only_overrides = Some(RuntimeBuildOnlyTurnOverrides {
+                system_prompt: Some(system_prompt.to_string()),
+                max_tokens: Some(256),
+                output_schema: None,
+                structured_output_retries: Some(3),
+            });
+        }
+        input
     }
 
     #[test]
     fn input_to_prompt_extracts_text() {
         let input = make_prompt("hello world");
         assert_eq!(input_to_prompt(&input), "hello world");
+    }
+
+    #[test]
+    fn prompt_build_only_overrides_survive_staged_primitive_replay() {
+        let input = make_prompt_with_build_only("hello world", "deferred system");
+        let primitive = input_to_primitive(&input, input.id().clone())
+            .expect("single prompt build-only overrides should stage");
+        let replayed: RunPrimitive =
+            serde_json::from_value(serde_json::to_value(&primitive).unwrap()).unwrap();
+        let overrides = replayed
+            .build_only_overrides()
+            .expect("build-only overrides must be durable on the staged primitive");
+        assert_eq!(overrides.system_prompt.as_deref(), Some("deferred system"));
+        assert_eq!(overrides.max_tokens, Some(256));
+        assert_eq!(overrides.structured_output_retries, Some(3));
+        assert!(overrides.output_schema.is_none());
+    }
+
+    #[test]
+    fn batched_build_only_overrides_conflict_before_apply() {
+        let first = make_prompt_with_build_only("first", "system a");
+        let second = make_prompt_with_build_only("second", "system b");
+        let err = inputs_to_primitive_with_boundary(
+            &[(first.id().clone(), first), (second.id().clone(), second)],
+            RunApplyBoundary::RunStart,
+        )
+        .expect_err("multiple build-only prompt overrides in one batch must be rejected");
+        assert_eq!(err.field, "build_only_overrides");
+        assert!(err.reason.contains("multiple runtime inputs"));
     }
 
     #[test]

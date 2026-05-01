@@ -577,6 +577,7 @@ mod tests {
             text: "hello".into(),
             blocks: None,
             turn_metadata: None,
+            build_only_overrides: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
@@ -607,6 +608,7 @@ mod tests {
                 handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);

@@ -27,6 +27,7 @@ fn make_prompt_input(text: &str) -> Input {
         text: text.into(),
         blocks: None,
         turn_metadata: None,
+        build_only_overrides: None,
     })
 }
 
@@ -300,6 +301,7 @@ async fn reject_derived_prompt() {
         text: "hi".into(),
         blocks: None,
         turn_metadata: None,
+        build_only_overrides: None,
     });
     let result = driver.accept_input(input).await.unwrap();
     assert!(result.is_rejected());

@@ -66,6 +66,22 @@ pub(crate) async fn apply_executor_effect(
     should_stop
 }
 
+/// Stop the concrete executor task after a runtime-loop boundary commit has
+/// already rolled back. This is not a semantic `StopRuntimeExecutor` command:
+/// the driver state remains the rollback state accepted by the machine.
+pub(crate) async fn stop_executor_after_boundary_commit_rollback(
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    reason: String,
+) -> bool {
+    if let Err(error) = executor.stop_runtime_executor(reason).await {
+        tracing::warn!(
+            error = %error,
+            "failed to stop runtime loop executor after boundary commit rollback"
+        );
+    }
+    true
+}
+
 /// Drain any ready executor effects before starting another unit of
 /// ordinary queued work.
 pub(crate) async fn drain_ready_executor_effects(

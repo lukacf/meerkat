@@ -8,6 +8,7 @@
 //! The test stands up an axum mock server for the token endpoint, counts
 //! the number of token exchanges, and validates the request form + the
 //! authorization header the authorizer emits on the real outbound request.
+//! Token reuse is only expected when backed by AuthMachine lease truth.
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "azure-ad"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -342,6 +343,14 @@ fn creds(token_url_host: &str) -> AzureClientCredentials {
     }
 }
 
+fn azure_lease_key() -> LeaseKey {
+    LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("azure_foundry").unwrap(),
+        Some(ProfileId::parse("foundry_azure_ad").unwrap()),
+    )
+}
+
 #[tokio::test]
 async fn authorize_adds_bearer_header_from_token_endpoint() {
     let mock = start_mock("azure-access-token-xyz", 3600).await;
@@ -365,8 +374,8 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
         .unwrap();
     assert_eq!(auth.1, "Bearer azure-access-token-xyz");
     assert!(
-        authorizer.expires_at().is_some(),
-        "Azure AD token expiry must be observable through HttpAuthorizer"
+        authorizer.expires_at().is_none(),
+        "unobserved Azure AD authorizer must not expose private token freshness"
     );
 
     let captured = mock.captured.lock().unwrap();
@@ -383,10 +392,12 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
 #[tokio::test]
 async fn token_is_cached_between_authorize_calls() {
     let mock = start_mock("cached-token", 3600).await;
+    let lease_handle: Arc<dyn AuthLeaseHandle> = Arc::new(RecordingAuthLeaseHandle::default());
     let authorizer = AzureAdAuthorizer::new(
         "https://cognitiveservices.azure.com/.default",
         creds(&mock.base_url),
     )
+    .with_auth_lease_observer(lease_handle, azure_lease_key())
     .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
 
     for _ in 0..5 {
@@ -407,12 +418,40 @@ async fn token_is_cached_between_authorize_calls() {
 }
 
 #[tokio::test]
-async fn short_lived_token_expiry_is_observable_and_refetched() {
-    let mock = start_mock("short-lived-token", 30).await;
+async fn unobserved_authorizer_does_not_reuse_private_token_cache() {
+    let mock = start_mock("unleased-token", 3600).await;
     let authorizer = AzureAdAuthorizer::new(
         "https://cognitiveservices.azure.com/.default",
         creds(&mock.base_url),
     )
+    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://example.foundry.azure.com/v1/messages",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
+
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "without AuthMachine lease truth, Azure must not reuse a private freshness cache"
+    );
+}
+
+#[tokio::test]
+async fn short_lived_token_expiry_is_observable_and_refetched() {
+    let mock = start_mock("short-lived-token", 30).await;
+    let lease_handle: Arc<dyn AuthLeaseHandle> = Arc::new(RecordingAuthLeaseHandle::default());
+    let authorizer = AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds(&mock.base_url),
+    )
+    .with_auth_lease_observer(lease_handle, azure_lease_key())
     .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
 
     for _ in 0..2 {

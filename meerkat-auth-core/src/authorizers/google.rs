@@ -26,7 +26,7 @@ use thiserror::Error;
 
 use super::{
     EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
-    oauth_endpoint_failure_is_permanent, token_is_fresh_at,
+    oauth_endpoint_failure_is_permanent,
 };
 use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
@@ -117,8 +117,12 @@ fn default_expires_in() -> u64 {
 
 struct CachedToken {
     access_token: String,
+    lease_generation: u64,
+}
+
+struct FetchedToken {
+    access_token: String,
     expires_at: DateTime<Utc>,
-    lease_generation: Option<u64>,
 }
 
 // --- Authorizer -------------------------------------------------------
@@ -222,26 +226,27 @@ impl GoogleAuthAuthorizer {
         if let Some(observer) = &self.lease_observer {
             return observer.expires_at();
         }
-        self.cache.lock().as_ref().map(|token| token.expires_at)
+        None
     }
 
     fn fresh_cached_token(&self, now: DateTime<Utc>) -> Result<Option<String>, AuthError> {
-        if let Some((access_token, expires_at, lease_generation)) = {
+        let Some(observer) = &self.lease_observer else {
+            return Ok(None);
+        };
+
+        let Some((access_token, lease_generation)) = ({
             let guard = self.cache.lock();
             guard
                 .as_ref()
-                .map(|t| (t.access_token.clone(), t.expires_at, t.lease_generation))
-        } {
-            let fresh = if let Some(observer) = &self.lease_observer {
-                observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)?
-            } else {
-                token_is_fresh_at(expires_at, now)
-            };
-            if fresh {
-                return Ok(Some(access_token));
-            }
+                .map(|t| (t.access_token.clone(), t.lease_generation))
+        }) else {
+            return Ok(None);
+        };
+
+        if !observer.cached_token_is_fresh(&self.label, lease_generation, now)? {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(access_token))
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
@@ -260,7 +265,7 @@ impl GoogleAuthAuthorizer {
             None
         };
 
-        let mut token = match self.chain {
+        let token = match self.chain {
             GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
                 Ok(token) => token,
                 Err(err) => {
@@ -291,14 +296,19 @@ impl GoogleAuthAuthorizer {
         let access = token.access_token.clone();
         let expires_at = token.expires_at;
         if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            token.lease_generation =
-                Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
+            let lease_generation =
+                observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+            *self.cache.lock() = Some(CachedToken {
+                access_token: access.clone(),
+                lease_generation,
+            });
+        } else {
+            *self.cache.lock() = None;
         }
-        *self.cache.lock() = Some(token);
         Ok(access)
     }
 
-    async fn fetch_full_chain(&self) -> Result<CachedToken, GoogleAuthError> {
+    async fn fetch_full_chain(&self) -> Result<FetchedToken, GoogleAuthError> {
         // 1. Service account file
         if let Some(path) = (self.env_lookup)("GOOGLE_APPLICATION_CREDENTIALS") {
             return self.fetch_from_service_account(&PathBuf::from(path)).await;
@@ -324,7 +334,7 @@ impl GoogleAuthAuthorizer {
     async fn fetch_from_service_account(
         &self,
         path: &PathBuf,
-    ) -> Result<CachedToken, GoogleAuthError> {
+    ) -> Result<FetchedToken, GoogleAuthError> {
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| GoogleAuthError::Io(e.to_string()))?;
@@ -381,14 +391,13 @@ impl GoogleAuthAuthorizer {
             .json()
             .await
             .map_err(|e| GoogleAuthError::Json(e.to_string()))?;
-        Ok(CachedToken {
+        Ok(FetchedToken {
             access_token: body.access_token,
             expires_at: Utc::now() + Duration::seconds(body.expires_in as i64),
-            lease_generation: None,
         })
     }
 
-    async fn fetch_from_user_adc(&self, path: &PathBuf) -> Result<CachedToken, GoogleAuthError> {
+    async fn fetch_from_user_adc(&self, path: &PathBuf) -> Result<FetchedToken, GoogleAuthError> {
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| GoogleAuthError::Io(e.to_string()))?;
@@ -424,14 +433,13 @@ impl GoogleAuthAuthorizer {
             .json()
             .await
             .map_err(|e| GoogleAuthError::Json(e.to_string()))?;
-        Ok(CachedToken {
+        Ok(FetchedToken {
             access_token: body.access_token,
             expires_at: Utc::now() + Duration::seconds(body.expires_in as i64),
-            lease_generation: None,
         })
     }
 
-    async fn fetch_from_metadata(&self) -> Result<CachedToken, GoogleAuthError> {
+    async fn fetch_from_metadata(&self) -> Result<FetchedToken, GoogleAuthError> {
         let resp = self
             .http
             .get(self.metadata_url())
@@ -451,10 +459,9 @@ impl GoogleAuthAuthorizer {
             .json()
             .await
             .map_err(|e| GoogleAuthError::Json(e.to_string()))?;
-        Ok(CachedToken {
+        Ok(FetchedToken {
             access_token: body.access_token,
             expires_at: Utc::now() + Duration::seconds(body.expires_in as i64),
-            lease_generation: None,
         })
     }
 }

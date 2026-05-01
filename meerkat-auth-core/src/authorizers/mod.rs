@@ -2,14 +2,15 @@
 //! AWS (SigV4 for Bedrock), Google (ADC + metadata), Azure AD
 //! (client-credentials OAuth2).
 //!
-//! Each authorizer acquires and caches a credential/token and adds the
-//! appropriate `Authorization` (and service-specific) headers on every
-//! call to [`meerkat_core::HttpAuthorizer::authorize`].
+//! Cloud authorizers acquire credential material and add the appropriate
+//! `Authorization` (and service-specific) headers on every call to
+//! [`meerkat_core::HttpAuthorizer::authorize`]. Token-material reuse is gated
+//! by AuthMachine lease truth rather than by private freshness checks.
 
 use std::sync::Arc;
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
@@ -45,8 +46,7 @@ impl LeaseFreshnessObserver {
     pub(crate) fn cached_token_is_fresh(
         &self,
         authorizer_label: &str,
-        expires_at: DateTime<Utc>,
-        lease_generation: Option<u64>,
+        lease_generation: u64,
         now: DateTime<Utc>,
     ) -> Result<bool, AuthError> {
         let snapshot = self.handle.snapshot(&self.lease_key);
@@ -61,16 +61,6 @@ impl LeaseFreshnessObserver {
             | None => return Ok(false),
         }
 
-        let Some(lease_generation) = lease_generation else {
-            tracing::warn!(
-                authorizer = %authorizer_label,
-                lease_key = %self.lease_key,
-                snapshot_generation = snapshot.generation,
-                "cloud authorizer cache has no auth lease generation; refreshing"
-            );
-            return Ok(false);
-        };
-
         if snapshot.generation != lease_generation {
             tracing::warn!(
                 authorizer = %authorizer_label,
@@ -82,28 +72,15 @@ impl LeaseFreshnessObserver {
             return Ok(false);
         }
 
-        let expected_expires_at = epoch_secs(expires_at);
         let Some(lease_expires_at) = snapshot.expires_at else {
             tracing::warn!(
                 authorizer = %authorizer_label,
                 lease_key = %self.lease_key,
-                cached_expires_at = expected_expires_at,
                 snapshot_generation = snapshot.generation,
                 "cloud authorizer cache has no auth lease expiry truth; refreshing"
             );
             return Ok(false);
         };
-        if lease_expires_at != expected_expires_at {
-            tracing::warn!(
-                authorizer = %authorizer_label,
-                lease_key = %self.lease_key,
-                cached_expires_at = expected_expires_at,
-                lease_expires_at,
-                snapshot_generation = snapshot.generation,
-                "cloud authorizer cache disagrees with auth lease truth; refreshing"
-            );
-            return Ok(false);
-        }
 
         Ok(lease_epoch_secs_is_fresh_at(lease_expires_at, now))
     }
@@ -144,10 +121,14 @@ impl LeaseFreshnessObserver {
     fn try_begin_refresh(&self, authorizer_label: &str) -> Result<LeaseRefreshStart, AuthError> {
         match self.handle.snapshot(&self.lease_key).phase {
             Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
-                self.handle
-                    .begin_refresh(&self.lease_key)
-                    .map_err(|err| self.observer_error(authorizer_label, "begin_refresh", err))?;
-                Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh))
+                match self.handle.begin_refresh(&self.lease_key) {
+                    Ok(()) => Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh)),
+                    Err(err) => match self.handle.snapshot(&self.lease_key).phase {
+                        Some(AuthLeasePhase::Refreshing) => Ok(LeaseRefreshStart::WaitForInFlight),
+                        Some(AuthLeasePhase::ReauthRequired) => Err(AuthError::Expired),
+                        _ => Err(self.observer_error(authorizer_label, "begin_refresh", err)),
+                    },
+                }
             }
             Some(AuthLeasePhase::ReauthRequired) => Err(AuthError::Expired),
             Some(AuthLeasePhase::Refreshing) => Ok(LeaseRefreshStart::WaitForInFlight),
@@ -217,11 +198,6 @@ pub(crate) enum LeaseRefreshLifecycle {
 enum LeaseRefreshStart {
     Started(LeaseRefreshLifecycle),
     WaitForInFlight,
-}
-
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-pub(crate) fn token_is_fresh_at(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    expires_at - now > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
@@ -300,6 +276,10 @@ mod tests {
         snapshot: Mutex<AuthLeaseSnapshot>,
         generation: Mutex<u64>,
         accepted_generations: Mutex<Vec<u64>>,
+    }
+
+    struct BeginRefreshRaceAuthLeaseHandle {
+        snapshot: Mutex<AuthLeaseSnapshot>,
     }
 
     impl Default for SnapshotRaceAuthLeaseHandle {
@@ -392,6 +372,73 @@ mod tests {
         }
     }
 
+    impl Default for BeginRefreshRaceAuthLeaseHandle {
+        fn default() -> Self {
+            Self {
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::Valid),
+                    expires_at: Some(1_800_000_000),
+                    generation: 7,
+                }),
+            }
+        }
+    }
+
+    impl AuthLeaseHandle for BeginRefreshRaceAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            _lease_key: &LeaseKey,
+            _expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            unreachable!("begin-refresh race test must not acquire")
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            unreachable!("begin-refresh race test must not mark expiring")
+        }
+
+        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Refreshing),
+                expires_at: Some(1_800_000_000),
+                generation: 8,
+            };
+            Err(DslTransitionError::no_matching(
+                "begin_refresh",
+                "another actor moved the lease into refreshing",
+            ))
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            unreachable!("begin-refresh race test must not complete refresh")
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            unreachable!("begin-refresh race test must not fail refresh")
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            unreachable!("begin-refresh race test must not require reauth")
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            unreachable!("begin-refresh race test must not release")
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
     fn lease_key() -> LeaseKey {
         LeaseKey::new(
             RealmId::parse("dev").unwrap(),
@@ -435,6 +482,17 @@ mod tests {
 
         assert_eq!(handle.accepted_generations(), vec![1]);
         assert_eq!(generation, 1);
+    }
+
+    #[test]
+    fn begin_refresh_race_waits_for_inflight_refresh() {
+        let handle = Arc::new(BeginRefreshRaceAuthLeaseHandle::default());
+        let lease_key = lease_key();
+        let observer = LeaseFreshnessObserver::new(handle, lease_key);
+
+        let start = observer.try_begin_refresh("race-test").unwrap();
+
+        assert_eq!(start, LeaseRefreshStart::WaitForInFlight);
     }
 }
 

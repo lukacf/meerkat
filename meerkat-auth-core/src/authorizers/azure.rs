@@ -12,8 +12,9 @@
 //!   2. Environment variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
 //!   3. `AZURE_AUTHORITY_HOST` override (defaults to `login.microsoftonline.com`)
 //!
-//! Tokens are cached in memory until 60s before expiry; refresh is
-//! single-flight via an internal mutex.
+//! Token material is reused only while AuthMachine lease truth says the
+//! corresponding lease generation is still fresh; refresh is single-flight via
+//! an internal mutex.
 
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{LeaseFreshnessObserver, oauth_endpoint_failure_is_permanent, token_is_fresh_at};
+use super::{LeaseFreshnessObserver, oauth_endpoint_failure_is_permanent};
 use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
@@ -93,8 +94,12 @@ struct TokenResponse {
 
 struct CachedToken {
     access_token: String,
+    lease_generation: u64,
+}
+
+struct FetchedToken {
+    access_token: String,
     expires_at: DateTime<Utc>,
-    lease_generation: Option<u64>,
 }
 
 pub struct AzureAdAuthorizer {
@@ -155,7 +160,7 @@ impl AzureAdAuthorizer {
         )
     }
 
-    async fn fetch_token(&self) -> Result<CachedToken, AzureAuthError> {
+    async fn fetch_token(&self) -> Result<FetchedToken, AzureAuthError> {
         let form = vec![
             ("grant_type", "client_credentials".to_string()),
             ("client_id", self.creds.client_id.clone()),
@@ -182,10 +187,9 @@ impl AzureAdAuthorizer {
             .await
             .map_err(|e| AzureAuthError::InvalidResponse(e.to_string()))?;
         let expires_at = Utc::now() + Duration::seconds(body.expires_in as i64);
-        Ok(CachedToken {
+        Ok(FetchedToken {
             access_token: body.access_token,
             expires_at,
-            lease_generation: None,
         })
     }
 
@@ -193,26 +197,27 @@ impl AzureAdAuthorizer {
         if let Some(observer) = &self.lease_observer {
             return observer.expires_at();
         }
-        self.cache.lock().as_ref().map(|token| token.expires_at)
+        None
     }
 
     fn fresh_cached_token(&self, now: DateTime<Utc>) -> Result<Option<String>, AuthError> {
-        if let Some((access_token, expires_at, lease_generation)) = {
+        let Some(observer) = &self.lease_observer else {
+            return Ok(None);
+        };
+
+        let Some((access_token, lease_generation)) = ({
             let guard = self.cache.lock();
             guard
                 .as_ref()
-                .map(|t| (t.access_token.clone(), t.expires_at, t.lease_generation))
-        } {
-            let fresh = if let Some(observer) = &self.lease_observer {
-                observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)?
-            } else {
-                token_is_fresh_at(expires_at, now)
-            };
-            if fresh {
-                return Ok(Some(access_token));
-            }
+                .map(|t| (t.access_token.clone(), t.lease_generation))
+        }) else {
+            return Ok(None);
+        };
+
+        if !observer.cached_token_is_fresh(&self.label, lease_generation, now)? {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(access_token))
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
@@ -233,7 +238,7 @@ impl AzureAdAuthorizer {
         };
 
         // Miss — fetch a fresh token.
-        let mut new_token = match self.fetch_token().await {
+        let new_token = match self.fetch_token().await {
             Ok(token) => token,
             Err(err) => {
                 if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
@@ -249,10 +254,15 @@ impl AzureAdAuthorizer {
         let access = new_token.access_token.clone();
         let expires_at = new_token.expires_at;
         if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            new_token.lease_generation =
-                Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
+            let lease_generation =
+                observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+            *self.cache.lock() = Some(CachedToken {
+                access_token: access.clone(),
+                lease_generation,
+            });
+        } else {
+            *self.cache.lock() = None;
         }
-        *self.cache.lock() = Some(new_token);
         Ok(access)
     }
 }

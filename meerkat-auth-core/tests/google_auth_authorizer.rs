@@ -9,7 +9,8 @@
 //! - Metadata path: GETs `metadata.google.internal/.../default/token` with
 //!   `Metadata-Flavor: Google`.
 //! - ComputeOnly chain: skips SA + user-ADC, only hits metadata.
-//! - Token caching: repeat `authorize` calls reuse the cached token.
+//! - Token-material reuse: repeat `authorize` calls reuse material only when
+//!   backed by AuthMachine lease truth.
 //!
 //! All three endpoints are mocked via axum. The SA path uses an RSA
 //! private key fixture in `tests/fixtures/test_sa_key.pem`.
@@ -385,6 +386,14 @@ fn write_user_adc(dir: &std::path::Path, token_url: &str) -> std::path::PathBuf 
     path
 }
 
+fn google_lease_key() -> LeaseKey {
+    LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("gemini").unwrap(),
+        Some(ProfileId::parse("google_adc").unwrap()),
+    )
+}
+
 // --- Service account path ---------------------------------------------
 
 #[tokio::test]
@@ -422,8 +431,8 @@ async fn service_account_path_signs_jwt_and_gets_token() {
         .unwrap();
     assert_eq!(auth.1, "Bearer sa-access-token");
     assert!(
-        authorizer.expires_at().is_some(),
-        "service-account token expiry must be observable through HttpAuthorizer"
+        authorizer.expires_at().is_none(),
+        "unobserved Google authorizer must not expose private token freshness"
     );
     assert_eq!(mock.counter.load(Ordering::SeqCst), 1);
     let captured = mock.captured.lock().unwrap();
@@ -552,8 +561,10 @@ async fn token_is_cached_between_calls() {
             }
         }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
     };
+    let lease_handle: Arc<dyn AuthLeaseHandle> = Arc::new(RecordingAuthLeaseHandle::default());
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(lease_handle, google_lease_key())
         .with_token_url_override(format!("{}/token", mock.base_url));
 
     for _ in 0..4 {
@@ -569,6 +580,42 @@ async fn token_is_cached_between_calls() {
         mock.counter.load(Ordering::SeqCst),
         1,
         "expected single fetch with caching"
+    );
+}
+
+#[tokio::test]
+async fn unobserved_authorizer_does_not_reuse_private_token_cache() {
+    let mock = start_mock("unleased-sa-token").await;
+    let tempdir = tempfile::tempdir().unwrap();
+    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
+    let env_lookup = {
+        let sa_path = sa_path.clone();
+        Arc::new(move |k: &str| {
+            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
+                Some(sa_path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+    };
+    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+        .with_home_dir(tempdir.path())
+        .with_token_url_override(format!("{}/token", mock.base_url));
+
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://x.googleapis.com/",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
+
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "without AuthMachine lease truth, Google must not reuse a private freshness cache"
     );
 }
 
@@ -750,8 +797,10 @@ async fn short_lived_token_expiry_is_observable_and_refetched() {
             }
         }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
     };
+    let lease_handle: Arc<dyn AuthLeaseHandle> = Arc::new(RecordingAuthLeaseHandle::default());
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(lease_handle, google_lease_key())
         .with_token_url_override(format!("{}/token", mock.base_url));
 
     for _ in 0..2 {

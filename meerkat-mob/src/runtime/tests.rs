@@ -493,6 +493,8 @@ struct MockSessionService {
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
+    cancel_after_boundary_supported: AtomicBool,
+    cancel_after_boundary_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
     create_session_delay_ms: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -546,6 +548,8 @@ impl MockSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
+            cancel_after_boundary_supported: AtomicBool::new(true),
+            cancel_after_boundary_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
             create_session_delay_ms: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -776,6 +780,15 @@ impl MockSessionService {
 
     fn interrupt_call_count(&self) -> u64 {
         self.interrupt_calls.load(Ordering::Relaxed)
+    }
+
+    fn cancel_after_boundary_call_count(&self) -> u64 {
+        self.cancel_after_boundary_calls.load(Ordering::Relaxed)
+    }
+
+    fn set_cancel_after_boundary_supported(&self, enabled: bool) {
+        self.cancel_after_boundary_supported
+            .store(enabled, Ordering::Relaxed);
     }
 
     fn inject_call_count(&self) -> u64 {
@@ -1214,6 +1227,26 @@ impl SessionService for MockSessionService {
         // poll loop in `stop_autonomous_member` doesn't spin to its 1s cap.
         self.active_sessions.write().await.remove(id);
         Ok(())
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.cancel_after_boundary_calls
+            .fetch_add(1, Ordering::Relaxed);
+        if !self.cancel_after_boundary_supported.load(Ordering::Relaxed) {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary".to_string(),
+            ));
+        }
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
+            return Ok(());
+        }
+        Err(SessionError::NotRunning { id: id.clone() })
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -2962,8 +2995,10 @@ struct LiveExternalPeerHarness {
     binding: crate::RuntimeBinding,
     runtime: Arc<meerkat_comms::CommsRuntime>,
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
+    interrupt_count: Arc<std::sync::atomic::AtomicUsize>,
     bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
+    hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     fail_next_authorize: Arc<AtomicBool>,
@@ -3006,12 +3041,20 @@ impl LiveExternalPeerHarness {
         self.bind_count.load(Ordering::Relaxed)
     }
 
+    fn interrupt_count(&self) -> usize {
+        self.interrupt_count.load(Ordering::Relaxed)
+    }
+
     async fn bind_protocol_versions(&self) -> Vec<super::bridge_protocol::BridgeProtocolVersion> {
         self.bind_protocol_versions.read().await.clone()
     }
 
     async fn delivered_input_ids(&self) -> Vec<String> {
         self.delivered_inputs.read().await.clone()
+    }
+
+    async fn hard_cancel_reasons(&self) -> Vec<String> {
+        self.hard_cancel_reasons.read().await.clone()
     }
 
     async fn received_intents(&self) -> Vec<String> {
@@ -3066,10 +3109,14 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let responder_bind_count = bind_count.clone();
+    let interrupt_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let responder_interrupt_count = interrupt_count.clone();
     let bind_protocol_versions = Arc::new(RwLock::new(Vec::new()));
     let responder_bind_protocol_versions = bind_protocol_versions.clone();
     let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
     let responder_delivered_inputs = delivered_inputs.clone();
+    let hard_cancel_reasons = Arc::new(RwLock::new(Vec::new()));
+    let responder_hard_cancel_reasons = hard_cancel_reasons.clone();
     let delivery_responses = Arc::new(RwLock::new(HashMap::new()));
     let responder_delivery_responses = delivery_responses.clone();
     let received_intents = Arc::new(RwLock::new(Vec::new()));
@@ -3216,6 +3263,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                                 deliver_member_input: true,
                                                                 observe_member: true,
                                                                 interrupt_member: true,
+                                                                hard_cancel_member: false,
                                                                 retire_member: true,
                                                                 destroy_member: true,
                                                                 wire_member: true,
@@ -3326,10 +3374,23 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     .expect("revoke ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
+                                    responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
                                     })
                                     .expect("interrupt ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::HardCancelMember(
+                                    payload,
+                                ) => {
+                                    responder_hard_cancel_reasons
+                                        .write()
+                                        .await
+                                        .push(payload.reason);
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("hard-cancel ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                                     payload,
@@ -3543,8 +3604,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         binding,
         runtime,
         bind_count,
+        interrupt_count,
         bind_protocol_versions,
         delivered_inputs,
+        hard_cancel_reasons,
         received_intents,
         supervisor_state,
         fail_next_authorize,
@@ -3930,6 +3993,10 @@ impl SessionService for PersistedListingSessionService {
         self.inner.interrupt(id).await
     }
 
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
+    }
+
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         self.inner.read(id).await
     }
@@ -4105,6 +4172,10 @@ impl SessionService for InactiveReadSessionService {
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.interrupt(id).await
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -14305,7 +14376,7 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
 }
 
 #[tokio::test]
-async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
+async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("cancel-target");
     let member_ref = handle
@@ -14322,6 +14393,7 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .bridge_session_id()
         .cloned()
         .expect("session-backed target");
+    let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
 
     handle
@@ -14329,10 +14401,14 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .await
         .expect("force cancel should succeed");
 
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "force-cancel must request cooperative boundary cancel"
+    );
     assert_eq!(
         service.interrupt_call_count(),
-        baseline_interrupts + 1,
-        "force-cancel must route through the runtime adapter interrupt path exactly once"
+        baseline_interrupts,
+        "force-cancel must not use hard session interrupt authority"
     );
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
@@ -14351,6 +14427,206 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
     assert!(
         service.read(&session_id).await.is_ok(),
         "force-cancel must leave the backing session reachable"
+    );
+}
+
+#[tokio::test]
+async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cancel() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("runtime-unsupported-boundary");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn runtime-backed target");
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("member exists");
+    service.set_cancel_after_boundary_supported(false);
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    let error = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await
+        .expect_err("unsupported runtime-backed boundary cancel must not report success");
+
+    assert!(
+        matches!(&error, MobError::Internal(message) if message.contains("cancel_after_boundary")),
+        "runtime-backed unsupported boundary cancel should surface through the adapter path, got {error:?}"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "runtime-backed cancel_all_work should attempt exactly one live boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "runtime-backed unsupported boundary cancel must not fall back to hard interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_interrupt() {
+    let service = Arc::new(MockSessionService::new());
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter boundary".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-boundary".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let wake = service
+        .keep_alive_notifiers
+        .read()
+        .await
+        .get(&session.session_id)
+        .cloned()
+        .expect("keep-alive session should install a cooperative wake notifier");
+    let notified = wake.notified();
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    provisioner
+        .interrupt_member(&member_ref)
+        .await
+        .expect("no-adapter member interrupt should request cooperative boundary cancel");
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("no-adapter cooperative boundary cancel should wake the waiting turn");
+
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "no-adapter member interrupt must request cooperative boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "no-adapter member interrupt must not use hard session interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_cancel() {
+    let service = Arc::new(MockSessionService::new());
+    service.set_cancel_after_boundary_supported(false);
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter unsupported boundary".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-unsupported-boundary".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    let error = provisioner
+        .interrupt_member(&member_ref)
+        .await
+        .expect_err("unsupported boundary cancel must not be reported as success");
+
+    assert!(
+        matches!(
+            error,
+            MobError::SessionError(SessionError::Unsupported(ref operation))
+                if operation == "cancel_after_boundary"
+        ),
+        "unsupported cooperative boundary cancel should surface as a session error, got {error:?}"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "no-adapter interrupt should attempt cooperative boundary cancel before failing"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "unsupported cooperative boundary cancel must not fall back to hard interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_explicit_hard_cancel_member_without_adapter_still_uses_hard_interrupt() {
+    let service = Arc::new(MockSessionService::new());
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter hard cancel".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-hard-cancel".to_string()),
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    provisioner
+        .hard_cancel_member(&member_ref, "explicit no-adapter force cancel")
+        .await
+        .expect("no-adapter hard_cancel_member should remain explicit hard cancel");
+
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts + 1,
+        "explicit no-adapter force cancel should use hard session interrupt"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "explicit force cancel must not be downgraded to boundary cancel"
     );
 }
 
@@ -16012,6 +16288,7 @@ fn test_top_level_mob_schema_does_not_duplicate_bridge_protocol_effects() {
         "BridgeDeliverMemberInput",
         "BridgeObserveMember",
         "BridgeInterruptMember",
+        "BridgeHardCancelMember",
         "BridgeRetireMember",
         "BridgeDestroyMember",
         "BridgeWireMember",
@@ -18490,8 +18767,8 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .retire(AgentIdentity::from("w-1"))
         .await
         .expect("retire worker");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that retire succeeds (above).
     assert!(
         handle
@@ -18535,8 +18812,8 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     );
 
     handle.stop().await.expect("stop");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that stop succeeds (above) and the
     // mob transitions to Stopped.
     assert_eq!(
@@ -18590,8 +18867,8 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     );
 
     handle.destroy().await.expect("destroy");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that destroy succeeds (above) and
     // transitions to Destroyed.
     assert_eq!(
@@ -22344,6 +22621,42 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
         }
         other => panic!("expected BackendPeer member ref, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_force_cancel_peer_only_external_member_uses_cooperative_bridge_interrupt() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-force-cancel",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-cancel")).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-cancel");
+    spec.binding = Some(external.binding());
+    let spawn = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn peer-only external member");
+
+    handle
+        .force_cancel_member(spawn.agent_identity.clone())
+        .await
+        .expect("force-cancel peer-only external member");
+
+    assert_eq!(
+        external.interrupt_count(),
+        1,
+        "peer-only force-cancel must use the cooperative interrupt bridge command"
+    );
+    assert_eq!(
+        external.hard_cancel_reasons().await,
+        Vec::<String>::new(),
+        "peer-only force-cancel must not use the hard-cancel bridge command"
+    );
 }
 
 #[tokio::test]

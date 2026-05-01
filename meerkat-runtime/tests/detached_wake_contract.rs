@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use meerkat_core::RunBoundaryReceipt;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
@@ -109,7 +108,11 @@ impl CoreExecutor for ResultExecutor {
             },
         ))
     }
-    async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -153,7 +156,17 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
             ))
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -219,7 +232,17 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
             let mut executor = ResultExecutor;
             executor.apply(run_id, primitive).await
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -309,7 +332,17 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             let mut executor = ResultExecutor;
             executor.apply(run_id, primitive).await
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -441,7 +474,17 @@ async fn choke_004_completion_during_running_defers_wake() {
                 },
             ))
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -576,7 +619,17 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 run_result,
             ))
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

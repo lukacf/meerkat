@@ -25,7 +25,7 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineCommand::AcceptWithCompletion { session_id, input } => {
-                let (driver, completions, wake_tx, control_tx, control_handle) = {
+                let (driver, completions, wake_tx, effect_tx, boundary_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
@@ -36,8 +36,8 @@ impl MeerkatMachine {
                         entry.driver.clone(),
                         entry.completions.clone(),
                         entry.wake_sender(),
-                        entry.control_sender(),
-                        entry.control_handle(),
+                        entry.effect_sender(),
+                        entry.boundary_handle(),
                     )
                 };
 
@@ -155,7 +155,7 @@ impl MeerkatMachine {
                         }
                     }
                 };
-                let signal = if let Some(input_id) = accepted_input_id {
+                let (signal, runtime_effect) = if let Some(input_id) = accepted_input_id {
                     let (_, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
@@ -181,9 +181,19 @@ impl MeerkatMachine {
                         let mut driver = driver.lock().await;
                         driver.absorb_post_admission_effects(&effects);
                     }
-                    Self::post_admission_signal_from_effects(&effects)
+                    let signal = Self::post_admission_signal_from_effects(&effects);
+                    let runtime_effect =
+                        crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                            &effects,
+                        )
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "canonical AcceptWithCompletion emitted invalid runtime effect facts: {reason}"
+                            ))
+                        })?;
+                    (signal, runtime_effect)
                 } else {
-                    signal
+                    (signal, None)
                 };
 
                 if signal.should_wake()
@@ -192,24 +202,21 @@ impl MeerkatMachine {
                     let _ = wake_tx.try_send(());
                 }
                 if signal.should_interrupt_yielding()
-                    && let Some(ref tx) = control_tx
+                    && let (Some(tx), Some(projected_effect)) = (&effect_tx, runtime_effect.clone())
                 {
-                    let _ = tx.try_send(
-                        meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-                    );
+                    let _ = tx.try_send(projected_effect.into_effect());
                 }
                 if signal.should_interrupt_yielding()
-                    && let Some(control_handle) = control_handle
+                    && let (Some(boundary_handle), Some(projected_effect)) =
+                        (boundary_handle, runtime_effect)
                 {
-                    let result = control_handle
-                        .control(
-                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-                        )
+                    let result = boundary_handle
+                        .cancel_after_boundary(projected_effect.reason().to_string())
                         .await;
                     if let Err(err) = result {
                         tracing::trace!(
                             error = %err,
-                            "out-of-band InterruptYielding control was not applied"
+                            "out-of-band boundary cancel was not applied"
                         );
                     }
                 }

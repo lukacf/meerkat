@@ -1472,7 +1472,9 @@ pub(crate) fn machine_realize_recovered_runtime_state(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let applied = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut *auth,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                    reason: "runtime state sync stopped executor".to_string(),
+                },
             )
             .is_ok();
             drop(auth);

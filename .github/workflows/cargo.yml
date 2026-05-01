@@ -211,6 +211,9 @@ jobs:
         with:
           prefix-key: rmat-audit
 
+      - name: Effect authority audit
+        run: ./scripts/audit-effect-authority.sh
+
       - name: Ownership ledger drift
         run: ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift
 

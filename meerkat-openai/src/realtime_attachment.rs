@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 
 use meerkat_runtime::{
     Input, MeerkatMachine, PromptInput, RealtimeAttachmentSignalAuthority,
-    RealtimeAttachmentStatus, RuntimeDriverError, SessionServiceRuntimeExt,
+    RealtimeAttachmentStatus, RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt,
 };
 
 enum OpenAiLiveTaskState {
@@ -225,6 +225,13 @@ async fn run_openai_live_event_loop(
     }
 }
 
+fn realtime_interrupt_not_ready_is_noop(state: RuntimeState) -> bool {
+    matches!(
+        state,
+        RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Destroyed
+    )
+}
+
 async fn handle_openai_live_event(
     runtime: &Arc<MeerkatMachine>,
     tool_dispatch_host: &dyn RealtimeAttachmentToolDispatchHost,
@@ -243,8 +250,16 @@ async fn handle_openai_live_event(
             Ok(())
         }
         OpenAiLiveServerEvent::InputAudioBufferSpeechStarted { .. } => {
-            match runtime.interrupt_current_run(session_id).await {
-                Ok(()) | Err(RuntimeDriverError::NotReady { .. }) => Ok(()),
+            match runtime
+                .hard_cancel_current_run(session_id, "OpenAI realtime speech started")
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(RuntimeDriverError::NotReady { state })
+                    if realtime_interrupt_not_ready_is_noop(state) =>
+                {
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         }
@@ -312,9 +327,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{
-        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{SessionId, ToolCall, ToolResult};
@@ -322,13 +336,16 @@ mod tests {
     use serde_json::json;
     use tokio::sync::{Mutex, Notify};
 
-    use super::{OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost};
+    use super::{
+        OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
+        realtime_interrupt_not_ready_is_noop,
+    };
     use meerkat_llm_core::LlmError;
     use meerkat_runtime::{
         HydratedSessionLlmState, Input, MeerkatMachine, PromptInput, RealtimeAttachmentStatus,
-        ResolvedSessionLlmReconfigure, RuntimeDriverError, SessionLlmCapabilitySurface,
-        SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
-        SessionServiceRuntimeExt,
+        ResolvedSessionLlmReconfigure, RuntimeDriverError, RuntimeState,
+        SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
+        SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
     };
 
     struct NoopExecutor;
@@ -353,7 +370,17 @@ mod tests {
             ))
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -386,7 +413,17 @@ mod tests {
             ))
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -615,8 +652,29 @@ mod tests {
             allow_finish: Arc<Notify>,
         }
 
+        struct BlockingExecutorInterruptHandle {
+            cancel_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl CoreExecutorInterruptHandle for BlockingExecutorInterruptHandle {
+            async fn hard_cancel_current_run(
+                &self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
         #[async_trait]
         impl CoreExecutor for BlockingExecutor {
+            fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+                Some(Arc::new(BlockingExecutorInterruptHandle {
+                    cancel_calls: Arc::clone(&self.cancel_calls),
+                }))
+            }
+
             async fn apply(
                 &mut self,
                 run_id: RunId,
@@ -640,13 +698,17 @@ mod tests {
                 })
             }
 
-            async fn control(
+            async fn cancel_after_boundary(
                 &mut self,
-                command: RunControlCommand,
+                _reason: String,
             ) -> Result<(), CoreExecutorError> {
-                if matches!(command, RunControlCommand::CancelCurrentRun { .. }) {
-                    self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-                }
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
                 Ok(())
             }
         }
@@ -681,6 +743,17 @@ mod tests {
             apply_finished,
             allow_finish,
         )
+    }
+
+    #[test]
+    fn realtime_interrupt_not_ready_noop_rejects_terminal_runtime_states() {
+        assert!(realtime_interrupt_not_ready_is_noop(RuntimeState::Idle));
+        assert!(realtime_interrupt_not_ready_is_noop(RuntimeState::Attached));
+        assert!(realtime_interrupt_not_ready_is_noop(
+            RuntimeState::Destroyed
+        ));
+        assert!(!realtime_interrupt_not_ready_is_noop(RuntimeState::Retired));
+        assert!(!realtime_interrupt_not_ready_is_noop(RuntimeState::Stopped));
     }
 
     #[tokio::test]
@@ -995,19 +1068,6 @@ mod tests {
             .expect("executor apply should start");
 
         release_event.notify_waiters();
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(
-            cancel_calls.load(Ordering::SeqCst),
-            0,
-            "runtime interrupt should stay deferred while apply is still running"
-        );
-
-        allow_finish.notify_waiters();
-        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
-            .await
-            .expect("executor apply should finish once released");
-        let _ = completion_handle.wait().await;
-
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if cancel_calls.load(Ordering::SeqCst) == 1 {
@@ -1017,7 +1077,19 @@ mod tests {
             }
         })
         .await
-        .expect("speech started should route through runtime interrupt");
+        .expect("speech started should hard-cancel the live run while apply is still running");
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .expect("executor apply should finish once released");
+        let _ = completion_handle.wait().await;
+
+        assert_eq!(
+            cancel_calls.load(Ordering::SeqCst),
+            1,
+            "speech started should route exactly one hard cancel through runtime interrupt"
+        );
 
         let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
             &runtime,

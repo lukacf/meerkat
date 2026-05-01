@@ -168,6 +168,14 @@ mod tests {
             Ok(())
         }
 
+        async fn hard_cancel_member(
+            &self,
+            _member_ref: &MemberRef,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+
         async fn start_turn(
             &self,
             _member_ref: &MemberRef,

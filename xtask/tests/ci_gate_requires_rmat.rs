@@ -277,3 +277,24 @@ fn machine_authority_changed_detector_classifies_paths() {
     assert_machine_authority_detector(&[".github/workflows/cargo.yml"], true);
     assert_machine_authority_detector(&["scripts/machine-authority-changed"], true);
 }
+
+#[test]
+fn required_rmat_lanes_run_effect_authority_audit() {
+    let cargo_workflow_path = workflow_yml_path("cargo.yml");
+    let cargo_workflow = std::fs::read_to_string(&cargo_workflow_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", cargo_workflow_path.display()));
+    assert!(
+        cargo_workflow.contains("./scripts/audit-effect-authority.sh"),
+        "{} rmat-audit job must run scripts/audit-effect-authority.sh before the xtask RMAT audit",
+        cargo_workflow_path.display(),
+    );
+
+    let buildbuddy_lane_path = repo_path("scripts/buildbuddy-bazel-poc");
+    let buildbuddy_lane = std::fs::read_to_string(&buildbuddy_lane_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", buildbuddy_lane_path.display()));
+    assert!(
+        buildbuddy_lane.contains("//:audit_effect_authority_test"),
+        "{} rmat-audit-rbe lane must include the Bazel effect-authority audit target",
+        buildbuddy_lane_path.display(),
+    );
+}

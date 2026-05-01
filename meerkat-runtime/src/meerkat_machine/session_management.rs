@@ -105,7 +105,9 @@ impl MeerkatMachine {
             RuntimeState::Retired => Some(super::dsl::MeerkatMachineInput::Retire {
                 session_id: super::dsl::SessionId::from_domain(session_id),
             }),
-            RuntimeState::Stopped => Some(super::dsl::MeerkatMachineInput::StopRuntimeExecutor),
+            RuntimeState::Stopped => Some(super::dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                reason: "recovered stopped runtime".to_string(),
+            }),
             RuntimeState::Destroyed => Some(super::dsl::MeerkatMachineInput::Destroy {
                 session_id: super::dsl::SessionId::from_domain(session_id),
             }),
@@ -185,6 +187,7 @@ impl MeerkatMachine {
             current_capability_surface: None,
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
             phase: RegistrationPhase::Queuing,
+            provisional_interrupt_handle: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
         };
@@ -263,6 +266,29 @@ impl MeerkatMachine {
                 },
             )
             .await;
+    }
+
+    /// Install a temporary live interrupt handle for a prepared session before
+    /// its runtime loop executor is attached.
+    ///
+    /// Runtime-backed surfaces use this during eager session materialization:
+    /// the session service owns the first turn until `create_session` returns,
+    /// but explicit user interrupts must still route through
+    /// `MeerkatMachine::hard_cancel_current_run`.
+    pub async fn install_prepared_session_interrupt_handle(
+        &self,
+        session_id: &SessionId,
+        handle: Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        entry.clear_dead_attachment();
+        entry.install_provisional_interrupt_handle(handle);
+        Ok(())
     }
 
     pub(super) async fn ensure_session_with_executor_inner(
@@ -373,6 +399,7 @@ impl MeerkatMachine {
                             capability_surface_status:
                                 SessionLlmCapabilitySurfaceStatus::Unresolved,
                             phase: RegistrationPhase::Queuing,
+                            provisional_interrupt_handle: None,
                             dsl_authority,
                             drain_slot: CommsDrainSlot::new(),
                         },
@@ -457,9 +484,10 @@ impl MeerkatMachine {
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
-        let control_handle = executor.control_handle();
+        let boundary_handle = executor.boundary_handle();
+        let interrupt_handle = executor.interrupt_handle();
         let (wake_tx, wake_rx) = mpsc::channel(16);
-        let (control_tx, control_rx) = mpsc::channel(16);
+        let (effect_tx, effect_rx) = mpsc::channel(16);
         let entry_cursor_state = {
             let sessions = self.sessions.read().await;
             sessions
@@ -471,7 +499,7 @@ impl MeerkatMachine {
                 driver.clone(),
                 executor,
                 wake_rx,
-                control_rx,
+                effect_rx,
                 Some(completions.clone()),
                 Some(completion_feed),
                 entry_cursor_state,
@@ -500,8 +528,9 @@ impl MeerkatMachine {
                             Some(loop_handle) => {
                                 entry.attach_runtime_loop(
                                     wake_tx.clone(),
-                                    control_tx,
-                                    control_handle,
+                                    effect_tx,
+                                    boundary_handle,
+                                    interrupt_handle,
                                     loop_handle,
                                 );
                                 (true, false)
@@ -674,22 +703,6 @@ impl MeerkatMachine {
             }
             Err(_) => false,
         }
-    }
-
-    /// Cancel the currently-running turn for a registered session.
-    pub async fn interrupt_current_run(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::InterruptCurrentRun {
-                session_id: session_id.clone(),
-            },
-        )
-        .await
-        .map_err(MeerkatMachine::driver_error_from_command_error)
-        .map(|_| ())
     }
 
     /// Request cancellation at the next safe boundary for the currently-running turn.

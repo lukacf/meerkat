@@ -81,7 +81,7 @@ pub enum RunEvent {
         recoverable: bool,
     },
 
-    /// A run was cancelled via `RunControlCommand::CancelCurrentRun`.
+    /// A run was cancelled through the live hard-interrupt capability.
     RunCancelled {
         /// The ID of the run.
         run_id: RunId,

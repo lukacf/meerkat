@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 # Root package marker for Bazel module extension labels.
 
 filegroup(
@@ -124,6 +126,16 @@ filegroup(
         "//xtask:package_runfiles",
     ],
     visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "audit_effect_authority_test",
+    srcs = ["scripts/audit-effect-authority.sh"],
+    data = [":workspace_runfiles"],
+    size = "small",
+    tags = [
+        "fast",
+    ],
 )
 
 test_suite(

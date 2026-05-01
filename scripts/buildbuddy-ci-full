@@ -89,7 +89,7 @@ run_logged machine-authority \
   bash -lc './scripts/repo-cargo xtask machine-codegen --all && git diff --exit-code && ./scripts/repo-cargo xtask machine-check-drift --all && ./scripts/repo-cargo xtask machine-verify --all && ./scripts/repo-cargo xtask protocol-codegen && git diff --exit-code && ./scripts/repo-cargo xtask audit-generated-headers'
 
 run_logged rmat-audit \
-  bash -lc './scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift && ./scripts/repo-cargo run -p xtask -- rmat-audit --strict'
+  bash -lc './scripts/audit-effect-authority.sh && ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift && ./scripts/repo-cargo run -p xtask -- rmat-audit --strict'
 
 run_logged seam-inventory \
   ./scripts/repo-cargo run -p xtask -- seam-inventory --strict

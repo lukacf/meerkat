@@ -5472,8 +5472,7 @@ impl MobActor {
             .map(|entry| entry.agent_identity.clone())
     }
 
-    /// P1-T05: retire() removes a meerkat.
-    /// Force-cancel a member's in-flight turn via session interrupt.
+    /// P1-T05: force-cancel a member's in-flight turn cooperatively.
     ///
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.

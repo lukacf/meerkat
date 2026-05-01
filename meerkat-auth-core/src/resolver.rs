@@ -188,12 +188,19 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         ManagedStoreLifecycle::Authorized
     };
 
-    if !crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode) {
-        return Ok(managed_store_tokens(store, key, tokens, lifecycle));
-    }
-
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        return match AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key)) {
+        let snapshot = auth_lease.snapshot(&lease_key);
+        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        if !crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode)
+            && phase == AuthStatusPhase::Unknown
+            && snapshot.generation == 0
+            && snapshot.phase.is_none()
+            && !snapshot.credential_present
+        {
+            return Ok(managed_store_tokens(store, key, tokens, lifecycle));
+        }
+
+        return match phase {
             AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {
                 Ok(managed_store_tokens(store, key, tokens, lifecycle))
             }
@@ -209,7 +216,11 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         };
     }
 
-    Err(interactive_login_error(binding))
+    if crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode) {
+        Err(interactive_login_error(binding))
+    } else {
+        Ok(managed_store_tokens(store, key, tokens, lifecycle))
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -759,6 +770,17 @@ mod tests {
                 },
             })
         }
+
+        fn released() -> Arc<Self> {
+            Arc::new(Self {
+                snapshot: AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    credential_present: false,
+                    generation: 1,
+                },
+            })
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -898,6 +920,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(secret, "sk-runtime");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_non_oauth_source_rejects_released_auth_lifecycle() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(&key, &PersistedTokens::api_key("sk-stale"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(StaticAuthLeaseHandle::released());
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::MissingSecret)
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

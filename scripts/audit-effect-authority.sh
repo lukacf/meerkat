@@ -75,6 +75,25 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/driver"
+  cat >"$tmpdir/meerkat-runtime/src/driver/sneaky.rs" <<'EOF'
+fn bad(session_id: SessionId, reason: String) {
+    let _ = MeerkatMachineCommand::InterruptCurrentRun
+    {
+        session_id,
+        reason,
+    };
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: non-peer split InterruptCurrentRun command fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
 fn bad() {
@@ -452,6 +471,74 @@ run_rg() {
   (cd "$root" && capture_rg -n "$pattern" . --glob '!target/**' --glob '!scripts/audit-effect-authority.sh' --glob '!audit_effect_authority_test' "$@")
 }
 
+scan_direct_interrupt_command_construction() {
+  local files
+  local file
+  local found
+  local matches=""
+
+  files="$(cd "$root" && capture_rg --files . \
+    --glob '!target/**' \
+    --glob '!scripts/audit-effect-authority.sh' \
+    --glob '!audit_effect_authority_test' \
+    --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
+    --glob '!meerkat-runtime/src/meerkat_machine/dispatch_session.rs' \
+    --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
+    --glob '!meerkat-runtime/tests/**' \
+    --glob '!**/tests/**' \
+    --glob '!**/*tests.rs')"
+
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    [[ "$file" == *.rs ]] || continue
+    found="$("$AWK_BIN" -v file="$file" '
+      function reset_pending() {
+        pending = 0
+        pending_line = 0
+        pending_text = ""
+      }
+      function report(line_no, text) {
+        print file ":" line_no ":" text
+      }
+      {
+        line = $0
+        if (pending) {
+          if (line ~ /^[[:space:]]*$/ || line ~ /^[[:space:]]*\/\//) {
+            next
+          }
+          if (line ~ /^[[:space:]]*\{/) {
+            if (line !~ /\{[[:space:]]*\.\.[[:space:]]*\}/) {
+              report(pending_line, pending_text)
+            }
+            reset_pending()
+            next
+          }
+          reset_pending()
+        }
+        if (line ~ /^[[:space:]]*\/\//) {
+          next
+        }
+        if (line ~ /MeerkatMachineCommand::InterruptCurrentRun/) {
+          if (line ~ /MeerkatMachineCommand::InterruptCurrentRun[[:space:]]*\{/) {
+            if (line !~ /\{[[:space:]]*\.\.[[:space:]]*\}/) {
+              report(NR, line)
+            }
+          } else {
+            pending = 1
+            pending_line = NR
+            pending_text = line
+          }
+        }
+      }
+    ' "$root/$file")"
+    if [[ -n "$found" ]]; then
+      matches+="$found"$'\n'
+    fi
+  done <<<"$files"
+
+  printf '%s' "$matches"
+}
+
 strip_core_executor_interrupt_impls() {
   "$AWK_BIN" '
     function brace_delta(line, opened, closed, copy) {
@@ -628,14 +715,7 @@ direct_interrupt_current_run="$(run_rg '\.interrupt_current_run(_with_reason)?\(
   --glob '!**/*tests.rs')"
 report_matches "direct interrupt_current_run callsites are forbidden outside runtime tests" "$direct_interrupt_current_run"
 
-direct_interrupt_command="$(run_rg 'MeerkatMachineCommand::InterruptCurrentRun[[:space:]]*\{' \
-  --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
-  --glob '!meerkat-runtime/src/meerkat_machine/dispatch_session.rs' \
-  --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
-  --glob '!meerkat-runtime/tests/**' \
-  --glob '!**/tests/**' \
-  --glob '!**/*tests.rs')"
-direct_interrupt_command="$(filter_rg "$direct_interrupt_command" -v '\{[[:space:]]*\.\.[[:space:]]*\}')"
+direct_interrupt_command="$(scan_direct_interrupt_command_construction)"
 report_matches "direct InterruptCurrentRun command construction is forbidden outside the session command API" "$direct_interrupt_command"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \

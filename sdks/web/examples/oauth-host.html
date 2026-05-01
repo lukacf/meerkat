@@ -149,7 +149,7 @@
         out.textContent = '';
 
         const cfg = withConnectionRef({ realm: 'hosted', binding: 'chatgpt' }, {
-          model: 'gpt-5.2',
+          turnMetadata: { model: 'gpt-5.2' },
           systemPrompt: 'You are concise.',
         });
 

@@ -89,7 +89,7 @@ fn session_accept_input_rejects_retired_top_level_turn_metadata() {
             "model": "retired-top-level-model"
         }
     }))
-    .expect_err("session/accept_input must not accept a second top-level metadata carrier");
+    .expect_err("typed accept-input params must not accept a second top-level metadata carrier");
 
     let message = err.to_string();
     assert!(

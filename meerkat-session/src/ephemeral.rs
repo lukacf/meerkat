@@ -3283,11 +3283,7 @@ mod runtime_turn_metadata_tests {
                 StartTurnRequest {
                     prompt: ContentInput::Text("reaction".to_string()),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
                     pre_turn_context_appends: vec![PendingSystemContextAppend {
                         text: "terminal peer context".to_string(),
                         source: Some("peer_response_terminal:test:req".to_string()),
@@ -3356,14 +3352,7 @@ mod runtime_turn_metadata_tests {
                 StartTurnRequest {
                     prompt: ContentInput::Text("reaction".to_string()),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: Some(TurnToolOverlay {
-                        allowed_tools: Some(vec!["flow_tool".to_string()]),
-                        blocked_tools: None,
-                    }),
                     pre_turn_context_appends: vec![PendingSystemContextAppend {
                         text: "must not leak before setup succeeds".to_string(),
                         source: Some("peer_response_terminal:test:req".to_string()),
@@ -3372,6 +3361,10 @@ mod runtime_turn_metadata_tests {
                     }],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        flow_tool_overlay: Some(TurnToolOverlay {
+                            allowed_tools: Some(vec!["flow_tool".to_string()]),
+                            blocked_tools: None,
+                        }),
                         ..Default::default()
                     }),
                 },

@@ -23,6 +23,7 @@ use meerkat_runtime::{
     MeerkatMachineCommandClassificationRecord, canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
+    canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest,
     canonical_meerkat_machine_runtime_internal_input_variant_manifest,
     canonical_meerkat_machine_runtime_internal_manifest,
 };
@@ -401,32 +402,18 @@ fn assert_meerkat_runtime_internal_manifest_body_uses_typed_records(
     );
 }
 
-fn assert_user_interrupt_dispatch_uses_typed_runtime_internal_evidence(
-    path: &str,
-    start_marker: &str,
-) {
-    let source = std::fs::read_to_string(repo_root().join(path)).expect("read dispatch source");
-    let body = function_body(&source, start_marker, "");
-    assert!(
-        body.contains("stage_session_runtime_internal_dsl_input"),
-        "{path} user interrupt dispatch must route through the typed runtime-internal staging authority"
-    );
-    assert!(
-        body.contains("MeerkatMachineRuntimeInternalInput::InterruptCurrentRun"),
-        "{path} user interrupt dispatch must name InterruptCurrentRun through typed runtime-internal evidence"
-    );
-    assert!(
-        !body.contains("\"InterruptCurrentRun\""),
-        "{path} user interrupt dispatch must not carry an unchecked string label for InterruptCurrentRun"
-    );
-}
-
 fn assert_runtime_internal_stager_validates_typed_manifest(path: &str, start_marker: &str) {
     let source = std::fs::read_to_string(repo_root().join(path)).expect("read stager source");
     let body = function_body(&source, start_marker, "");
     assert!(
         body.contains("canonical_meerkat_machine_runtime_internal_input_variant_manifest()"),
         "{path} runtime-internal stager must validate against the typed production manifest"
+    );
+    assert!(
+        body.contains(
+            "canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()"
+        ),
+        "{path} fieldless runtime-internal stager must validate against the typed fieldless manifest"
     );
     assert!(
         body.contains("input.input_variant()"),
@@ -443,20 +430,6 @@ fn assert_no_local_runtime_internal_stager_alphabet(path: &str) {
     assert!(
         !source.contains("enum MeerkatMachineRuntimeInternalDslInput"),
         "{path} runtime-internal stager must not maintain a local shadow input alphabet"
-    );
-}
-
-fn assert_fieldless_runtime_internal_conversion_is_typed(path: &str, start_marker: &str) {
-    let source = std::fs::read_to_string(repo_root().join(path)).expect("read conversion source");
-    let body = function_body(&source, start_marker, "");
-    assert!(
-        body.contains("Self::InterruptCurrentRun")
-            && body.contains("dsl::MeerkatMachineInput::InterruptCurrentRun"),
-        "{path} fieldless runtime-internal conversion must couple typed evidence to the generated DSL input"
-    );
-    assert!(
-        !body.contains("\"InterruptCurrentRun\""),
-        "{path} fieldless runtime-internal conversion must not use a string gate"
     );
 }
 
@@ -650,10 +623,6 @@ fn flow_authority_manifest_does_not_project_through_strings() {
 
 #[test]
 fn user_interrupt_path_uses_typed_runtime_internal_authority() {
-    assert_user_interrupt_dispatch_uses_typed_runtime_internal_evidence(
-        "meerkat-runtime/src/meerkat_machine/dispatch_session.rs",
-        "async fn dispatch_user_interrupt",
-    );
     assert_runtime_internal_stager_validates_typed_manifest(
         "meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
         "pub(super) fn stage_runtime_internal_dsl_transition_on_authority",
@@ -661,9 +630,39 @@ fn user_interrupt_path_uses_typed_runtime_internal_authority() {
     assert_no_local_runtime_internal_stager_alphabet(
         "meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
     );
-    assert_fieldless_runtime_internal_conversion_is_typed(
-        "meerkat-runtime/src/meerkat_machine_types.rs",
-        "pub(crate) fn fieldless_dsl_input",
+}
+
+#[test]
+fn fieldless_runtime_internal_inputs_are_typed_generated_manifest() {
+    let schema = meerkat_machine();
+    let runtime_internal_inputs = schema
+        .runtime_internal_inputs
+        .iter()
+        .map(InputVariantId::as_str)
+        .collect::<BTreeSet<_>>();
+    let generated_fieldless_runtime_internal_inputs = schema
+        .inputs
+        .variants
+        .iter()
+        .filter(|variant| {
+            variant.fields.is_empty() && runtime_internal_inputs.contains(variant.name.as_str())
+        })
+        .map(|variant| {
+            MeerkatMachineInput::variant_manifest()
+                .iter()
+                .copied()
+                .find(|input_variant| input_variant.as_str() == variant.name.as_str())
+                .expect("fieldless runtime-internal input must exist in generated manifest")
+        })
+        .collect::<BTreeSet<_>>();
+    let typed_fieldless_manifest =
+        canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        typed_fieldless_manifest, generated_fieldless_runtime_internal_inputs,
+        "fieldless runtime-internal inputs must be owned by the typed fieldless manifest"
     );
 }
 

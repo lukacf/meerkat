@@ -48,7 +48,13 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
-use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_mob_machine as schema_mob_machine,
+    mob_machine::{
+        MobMachineInput as SchemaMobMachineInput,
+        MobMachineInputVariant as SchemaMobMachineInputVariant,
+    },
+};
 use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
@@ -25290,7 +25296,7 @@ struct MobRuntimeParitySchemaTransitionSummary {
 
 #[derive(Debug, Clone)]
 struct MobRuntimeParitySchemaRow {
-    input_variant: String,
+    input_variant: SchemaMobMachineInputVariant,
     classification: MobRuntimeParityClassification,
     left: Vec<MobRuntimeParitySchemaTransitionSummary>,
     right: Vec<MobRuntimeParitySchemaTransitionSummary>,
@@ -25623,42 +25629,58 @@ fn mob_runtime_parity_target_pairs() -> &'static [(MobRuntimeParityPhase, MobRun
 }
 
 fn mob_runtime_parity_probe_for_input_variant(
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
 ) -> Option<MobRuntimeParityProbeInput> {
     match input_variant {
-        "Spawn" => Some(MobRuntimeParityProbeInput::Spawn),
-        "EnsureMember" => Some(MobRuntimeParityProbeInput::EnsureMember),
-        "Reconcile" => Some(MobRuntimeParityProbeInput::Reconcile),
-        "SubmitWork" => Some(MobRuntimeParityProbeInput::SubmitWork),
-        "RunFlow" => Some(MobRuntimeParityProbeInput::RunFlow),
-        "CancelFlow" => Some(MobRuntimeParityProbeInput::CancelFlow),
-        "Retire" => Some(MobRuntimeParityProbeInput::Retire),
-        "Respawn" => Some(MobRuntimeParityProbeInput::Respawn),
-        "RetireAll" => Some(MobRuntimeParityProbeInput::RetireAll),
-        "WireMembers" => Some(MobRuntimeParityProbeInput::WireMembers),
-        "UnwireMembers" => Some(MobRuntimeParityProbeInput::UnwireMembers),
-        "WireExternalPeer" => Some(MobRuntimeParityProbeInput::WireExternalPeer),
-        "UnwireExternalPeer" => Some(MobRuntimeParityProbeInput::UnwireExternalPeer),
-        "ExternalTurn" => Some(MobRuntimeParityProbeInput::ExternalTurn),
-        "InternalTurn" => Some(MobRuntimeParityProbeInput::InternalTurn),
-        "CancelWork" => Some(MobRuntimeParityProbeInput::CancelWork),
-        "CancelAllWork" => Some(MobRuntimeParityProbeInput::CancelAllWork),
-        "Stop" => Some(MobRuntimeParityProbeInput::Stop),
-        "Resume" => Some(MobRuntimeParityProbeInput::Resume),
-        "Complete" => Some(MobRuntimeParityProbeInput::Complete),
-        "Reset" => Some(MobRuntimeParityProbeInput::Reset),
-        "Destroy" => Some(MobRuntimeParityProbeInput::Destroy),
-        "TaskCreate" => Some(MobRuntimeParityProbeInput::TaskCreate),
-        "TaskUpdate" => Some(MobRuntimeParityProbeInput::TaskUpdate),
-        "SubscribeAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAgentEvents),
-        "SubscribeAllAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents),
-        "SubscribeMobEvents" => Some(MobRuntimeParityProbeInput::SubscribeMobEvents),
-        "RecordOperatorActionProvenance" => {
+        SchemaMobMachineInputVariant::Spawn => Some(MobRuntimeParityProbeInput::Spawn),
+        SchemaMobMachineInputVariant::EnsureMember => {
+            Some(MobRuntimeParityProbeInput::EnsureMember)
+        }
+        SchemaMobMachineInputVariant::Reconcile => Some(MobRuntimeParityProbeInput::Reconcile),
+        SchemaMobMachineInputVariant::SubmitWork => Some(MobRuntimeParityProbeInput::SubmitWork),
+        SchemaMobMachineInputVariant::RunFlow => Some(MobRuntimeParityProbeInput::RunFlow),
+        SchemaMobMachineInputVariant::CancelFlow => Some(MobRuntimeParityProbeInput::CancelFlow),
+        SchemaMobMachineInputVariant::Retire => Some(MobRuntimeParityProbeInput::Retire),
+        SchemaMobMachineInputVariant::Respawn => Some(MobRuntimeParityProbeInput::Respawn),
+        SchemaMobMachineInputVariant::RetireAll => Some(MobRuntimeParityProbeInput::RetireAll),
+        SchemaMobMachineInputVariant::WireMembers => Some(MobRuntimeParityProbeInput::WireMembers),
+        SchemaMobMachineInputVariant::UnwireMembers => {
+            Some(MobRuntimeParityProbeInput::UnwireMembers)
+        }
+        SchemaMobMachineInputVariant::WireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::WireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::UnwireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::UnwireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::CancelWork => Some(MobRuntimeParityProbeInput::CancelWork),
+        SchemaMobMachineInputVariant::CancelAllWork => {
+            Some(MobRuntimeParityProbeInput::CancelAllWork)
+        }
+        SchemaMobMachineInputVariant::Stop => Some(MobRuntimeParityProbeInput::Stop),
+        SchemaMobMachineInputVariant::Resume => Some(MobRuntimeParityProbeInput::Resume),
+        SchemaMobMachineInputVariant::Complete => Some(MobRuntimeParityProbeInput::Complete),
+        SchemaMobMachineInputVariant::Reset => Some(MobRuntimeParityProbeInput::Reset),
+        SchemaMobMachineInputVariant::Destroy => Some(MobRuntimeParityProbeInput::Destroy),
+        SchemaMobMachineInputVariant::TaskCreate => Some(MobRuntimeParityProbeInput::TaskCreate),
+        SchemaMobMachineInputVariant::TaskUpdate => Some(MobRuntimeParityProbeInput::TaskUpdate),
+        SchemaMobMachineInputVariant::SubscribeAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeAllAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeMobEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeMobEvents)
+        }
+        SchemaMobMachineInputVariant::RecordOperatorActionProvenance => {
             Some(MobRuntimeParityProbeInput::RecordOperatorActionProvenance)
         }
-        "SetSpawnPolicy" => Some(MobRuntimeParityProbeInput::SetSpawnPolicy),
-        "Shutdown" => Some(MobRuntimeParityProbeInput::Shutdown),
-        "ForceCancel" => Some(MobRuntimeParityProbeInput::ForceCancel),
+        SchemaMobMachineInputVariant::SetSpawnPolicy => {
+            Some(MobRuntimeParityProbeInput::SetSpawnPolicy)
+        }
+        SchemaMobMachineInputVariant::Shutdown => Some(MobRuntimeParityProbeInput::Shutdown),
+        SchemaMobMachineInputVariant::ForceCancel => Some(MobRuntimeParityProbeInput::ForceCancel),
         _ => None,
     }
 }
@@ -26820,15 +26842,16 @@ fn mob_runtime_parity_transition_enabled(
 fn mob_runtime_parity_schema_transition_summaries_for_phase_input(
     schema: &MachineSchema,
     phase: &str,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Vec<MobRuntimeParitySchemaTransitionSummary> {
+    let input_variant_name = input_variant.as_str();
     let mut summaries = schema
         .transitions
         .iter()
         .filter(|transition| {
             transition.on.kind() == TriggerKind::Input
-                && transition.on.variant_str() == input_variant
+                && transition.on.variant_str() == input_variant_name
                 && transition.from.iter().any(|from| from.as_str() == phase)
                 && mob_runtime_parity_transition_enabled(transition, representative)
         })
@@ -26905,7 +26928,7 @@ fn mob_runtime_parity_schema_row_for_input(
     schema: &MachineSchema,
     left_phase: MobRuntimeParityPhase,
     right_phase: MobRuntimeParityPhase,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     left_representative: Option<&MobRuntimeParitySnapshotSummary>,
     right_representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Option<MobRuntimeParitySchemaRow> {
@@ -26939,7 +26962,7 @@ fn mob_runtime_parity_schema_row_for_input(
     );
 
     Some(MobRuntimeParitySchemaRow {
-        input_variant: input_variant.to_string(),
+        input_variant,
         classification: classify_mob_runtime_parity_schema_row(&left, &right),
         left,
         right,
@@ -26958,47 +26981,47 @@ async fn build_mob_runtime_parity_pair_report(
         .map(|v| v.as_str())
         .collect::<BTreeSet<_>>();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (mut probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_parity_row(
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                        MobRuntimeParityClassification::SameSurface,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = !surface_only_inputs.contains(input_variant_name);
+        let (mut probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_parity_row(
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                    MobRuntimeParityClassification::SameSurface,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None => (
+                None,
+                Some("surface-only input: runtime probe not required".to_string()),
+            ),
+        };
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -27011,7 +27034,7 @@ async fn build_mob_runtime_parity_pair_report(
         }
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: schema_row.classification,
             schema_left: schema_row.left,
@@ -27063,47 +27086,47 @@ async fn build_mob_runtime_full_pair_report(
         .map(|v| v.as_str())
         .collect::<BTreeSet<_>>();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing full {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_full_parity_row(
-                        schema,
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = !surface_only_inputs.contains(input_variant_name);
+        let (probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_full_parity_row(
+                    schema,
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None => (
+                None,
+                Some("surface-only input: runtime probe not required".to_string()),
+            ),
+        };
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -27125,7 +27148,7 @@ async fn build_mob_runtime_full_pair_report(
         };
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: effective_schema_classification,
             schema_left: schema_row.left,
@@ -27165,41 +27188,74 @@ async fn build_mob_runtime_full_pair_report(
     }
 }
 
-fn mob_runtime_parity_probe_variant_name(probe: MobRuntimeParityProbeInput) -> &'static str {
+fn mob_runtime_parity_probe_input_variant(
+    probe: MobRuntimeParityProbeInput,
+) -> Option<SchemaMobMachineInputVariant> {
     match probe {
-        MobRuntimeParityProbeInput::Spawn => "Spawn",
-        MobRuntimeParityProbeInput::EnsureMember => "EnsureMember",
-        MobRuntimeParityProbeInput::Reconcile => "Reconcile",
-        MobRuntimeParityProbeInput::SubmitWork => "SubmitWork",
-        MobRuntimeParityProbeInput::RunFlow => "RunFlow",
-        MobRuntimeParityProbeInput::CancelFlow => "CancelFlow",
-        MobRuntimeParityProbeInput::Retire => "Retire",
-        MobRuntimeParityProbeInput::Respawn => "Respawn",
-        MobRuntimeParityProbeInput::RetireAll => "RetireAll",
-        MobRuntimeParityProbeInput::WireMembers => "WireMembers",
-        MobRuntimeParityProbeInput::UnwireMembers => "UnwireMembers",
-        MobRuntimeParityProbeInput::WireExternalPeer => "WireExternalPeer",
-        MobRuntimeParityProbeInput::UnwireExternalPeer => "UnwireExternalPeer",
-        MobRuntimeParityProbeInput::ExternalTurn => "ExternalTurn",
-        MobRuntimeParityProbeInput::InternalTurn => "InternalTurn",
-        MobRuntimeParityProbeInput::CancelWork => "CancelWork",
-        MobRuntimeParityProbeInput::CancelAllWork => "CancelAllWork",
-        MobRuntimeParityProbeInput::Stop => "Stop",
-        MobRuntimeParityProbeInput::Resume => "Resume",
-        MobRuntimeParityProbeInput::Complete => "Complete",
-        MobRuntimeParityProbeInput::Reset => "Reset",
-        MobRuntimeParityProbeInput::Destroy => "Destroy",
-        MobRuntimeParityProbeInput::TaskCreate => "TaskCreate",
-        MobRuntimeParityProbeInput::TaskUpdate => "TaskUpdate",
-        MobRuntimeParityProbeInput::SubscribeAgentEvents => "SubscribeAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => "SubscribeAllAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeMobEvents => "SubscribeMobEvents",
-        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
-            "RecordOperatorActionProvenance"
+        MobRuntimeParityProbeInput::Spawn => Some(SchemaMobMachineInputVariant::Spawn),
+        MobRuntimeParityProbeInput::EnsureMember => {
+            Some(SchemaMobMachineInputVariant::EnsureMember)
         }
-        MobRuntimeParityProbeInput::SetSpawnPolicy => "SetSpawnPolicy",
-        MobRuntimeParityProbeInput::Shutdown => "Shutdown",
-        MobRuntimeParityProbeInput::ForceCancel => "ForceCancel",
+        MobRuntimeParityProbeInput::Reconcile => Some(SchemaMobMachineInputVariant::Reconcile),
+        MobRuntimeParityProbeInput::SubmitWork => Some(SchemaMobMachineInputVariant::SubmitWork),
+        MobRuntimeParityProbeInput::RunFlow => Some(SchemaMobMachineInputVariant::RunFlow),
+        MobRuntimeParityProbeInput::CancelFlow => Some(SchemaMobMachineInputVariant::CancelFlow),
+        MobRuntimeParityProbeInput::Retire => Some(SchemaMobMachineInputVariant::Retire),
+        MobRuntimeParityProbeInput::Respawn => Some(SchemaMobMachineInputVariant::Respawn),
+        MobRuntimeParityProbeInput::RetireAll => Some(SchemaMobMachineInputVariant::RetireAll),
+        MobRuntimeParityProbeInput::WireMembers => Some(SchemaMobMachineInputVariant::WireMembers),
+        MobRuntimeParityProbeInput::UnwireMembers => {
+            Some(SchemaMobMachineInputVariant::UnwireMembers)
+        }
+        MobRuntimeParityProbeInput::WireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::WireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::UnwireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::UnwireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::ExternalTurn | MobRuntimeParityProbeInput::InternalTurn => None,
+        MobRuntimeParityProbeInput::CancelWork => Some(SchemaMobMachineInputVariant::CancelWork),
+        MobRuntimeParityProbeInput::CancelAllWork => {
+            Some(SchemaMobMachineInputVariant::CancelAllWork)
+        }
+        MobRuntimeParityProbeInput::Stop => Some(SchemaMobMachineInputVariant::Stop),
+        MobRuntimeParityProbeInput::Resume => Some(SchemaMobMachineInputVariant::Resume),
+        MobRuntimeParityProbeInput::Complete => Some(SchemaMobMachineInputVariant::Complete),
+        MobRuntimeParityProbeInput::Reset => Some(SchemaMobMachineInputVariant::Reset),
+        MobRuntimeParityProbeInput::Destroy => Some(SchemaMobMachineInputVariant::Destroy),
+        MobRuntimeParityProbeInput::TaskCreate => Some(SchemaMobMachineInputVariant::TaskCreate),
+        MobRuntimeParityProbeInput::TaskUpdate => Some(SchemaMobMachineInputVariant::TaskUpdate),
+        MobRuntimeParityProbeInput::SubscribeAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAllAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeMobEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeMobEvents)
+        }
+        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
+            Some(SchemaMobMachineInputVariant::RecordOperatorActionProvenance)
+        }
+        MobRuntimeParityProbeInput::SetSpawnPolicy => {
+            Some(SchemaMobMachineInputVariant::SetSpawnPolicy)
+        }
+        MobRuntimeParityProbeInput::Shutdown => Some(SchemaMobMachineInputVariant::Shutdown),
+        MobRuntimeParityProbeInput::ForceCancel => Some(SchemaMobMachineInputVariant::ForceCancel),
+    }
+}
+
+#[test]
+fn mob_runtime_parity_probe_manifest_round_trips_through_typed_generated_variants() {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
+            continue;
+        };
+        assert_eq!(
+            mob_runtime_parity_probe_input_variant(probe).expect("typed probe variant"),
+            input_variant,
+            "mob runtime parity probe mapping must round-trip through typed generated input variants"
+        );
     }
 }
 
@@ -27722,10 +27778,10 @@ fn mob_modeled_kernel_input(
     before: &MobRuntimeParitySnapshotSummary,
     probe: MobRuntimeParityProbeInput,
 ) -> Result<meerkat_machine_kernels::test_oracle::KernelInput, String> {
-    let variant = meerkat_machine_schema::identity::InputVariantId::parse(
-        mob_runtime_parity_probe_variant_name(probe),
-    )
-    .expect("valid variant slug");
+    let input_variant = mob_runtime_parity_probe_input_variant(probe)
+        .ok_or_else(|| format!("{probe:?} has no MobMachine input variant"))?;
+    let variant = meerkat_machine_schema::identity::InputVariantId::parse(input_variant.as_str())
+        .expect("valid variant slug");
     let input_variant = schema
         .inputs
         .variant_named(&variant)
@@ -27941,16 +27997,15 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
         MobRuntimeParityPhase::Stopped,
         MobRuntimeParityPhase::Completed,
     ] {
-        for input_variant in &schema.inputs.variants {
-            if surface_only_inputs.contains(input_variant.name.as_str()) {
+        for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+            let input_variant_name = input_variant.as_str();
+            if surface_only_inputs.contains(input_variant_name) {
                 continue;
             }
-            let Some(probe) =
-                mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str())
-            else {
+            let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
                 rows.push(MobModeledStateRowReport {
                     phase: phase.schema_name().to_string(),
-                    input_variant: input_variant.name.as_str().to_string(),
+                    input_variant: input_variant_name.to_string(),
                     aligned: false,
                     differing_keys: vec!["unprobed".to_string()],
                     runtime: MobModeledStateRuntimeReport {
@@ -27986,7 +28041,7 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
 
             rows.push(MobModeledStateRowReport {
                 phase: phase.schema_name().to_string(),
-                input_variant: input_variant.name.as_str().to_string(),
+                input_variant: input_variant_name.to_string(),
                 aligned,
                 differing_keys,
                 runtime: runtime_report,

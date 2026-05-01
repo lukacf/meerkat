@@ -53,7 +53,7 @@ impl MeerkatMachine {
         let previous_dsl_state = match self
             .stage_session_runtime_internal_dsl_input(
                 session_id,
-                crate::meerkat_machine_types::MeerkatMachineRuntimeInternalInput::InterruptCurrentRun,
+                crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::InterruptCurrentRun,
             )
             .await
         {

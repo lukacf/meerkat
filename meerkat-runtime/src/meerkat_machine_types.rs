@@ -614,38 +614,42 @@ pub fn canonical_meerkat_machine_runtime_internal_input_variant_manifest()
         .collect()
 }
 
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+-> IndexSet<MeerkatMachineInputVariant> {
+    MeerkatMachineFieldlessRuntimeInternalInput::ALL
+        .iter()
+        .copied()
+        .map(MeerkatMachineFieldlessRuntimeInternalInput::input_variant)
+        .collect()
+}
+
 macro_rules! meerkat_machine_runtime_internal_inputs {
-    ($($variant:ident),+ $(,)?) => {
+    ($($reason:ident => [$($variant:ident),+ $(,)?]),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum MeerkatMachineRuntimeInternalInput {
-            $($variant),+
+            $($($variant),+),+
         }
 
         impl MeerkatMachineRuntimeInternalInput {
             pub const ALL: &'static [Self] = &[
-                $(Self::$variant),+
+                $($(Self::$variant),+),+
             ];
 
             #[must_use]
             pub const fn input_variant(self) -> MeerkatMachineInputVariant {
                 match self {
-                    $(Self::$variant => MeerkatMachineInputVariant::$variant,)+
+                    $($(Self::$variant => MeerkatMachineInputVariant::$variant,)+)+
                 }
             }
 
             #[must_use]
             pub const fn reason(self) -> MeerkatMachineRuntimeInternalReason {
-                if matches!(self, Self::InterruptCurrentRun) {
-                    MeerkatMachineRuntimeInternalReason::UserInterruptDispatch
-                } else {
-                    MeerkatMachineRuntimeInternalReason::RuntimeInternalProductionPath
-                }
-            }
-
-            pub(crate) fn fieldless_dsl_input(self) -> Option<dsl::MeerkatMachineInput> {
                 match self {
-                    Self::InterruptCurrentRun => Some(dsl::MeerkatMachineInput::InterruptCurrentRun),
-                    _ => None,
+                    $(
+                        $(Self::$variant)|+ => MeerkatMachineRuntimeInternalReason::$reason,
+                    )+
                 }
             }
         }
@@ -653,159 +657,340 @@ macro_rules! meerkat_machine_runtime_internal_inputs {
 }
 
 meerkat_machine_runtime_internal_inputs!(
-    AbandonInput,
-    AbortOp,
-    AbortLiveTopologyBeforeDetach,
-    AcknowledgeTerminal,
-    AddDirectPeerEndpoint,
-    AdvanceSessionContext,
-    ApplyLiveTopologyIdentity,
-    ApplyLiveTopologyVisibility,
-    ApplyMobPeerOverlay,
-    AttachMobIngress,
-    AttachSessionIngress,
-    AuthorizeSupervisor,
-    BeginLiveTopologyReconfigure,
-    BeginRealtimeBinding,
-    BeginRealtimeReconnectCycle,
-    BindSupervisor,
-    BoundaryComplete,
-    BoundaryContinue,
-    BudgetExhausted,
-    CancelNow,
-    CancelOp,
-    CancelWaitAll,
-    CancellationObserved,
-    ChangeLane,
-    ClassifyRealtimeClientInputSubmitted,
-    ClassifyRealtimeMidTurnActivity,
-    ClassifyRealtimeTurnTerminated,
-    ClearLocalEndpoint,
-    ClearRealtimeReconnectProgress,
-    CoalesceInput,
-    CommitDeferredNames,
-    CommitVisibilityFilter,
-    CompleteOp,
-    CompleteUntilChangedSwitchTurnReconfigure,
-    CompleteLiveTopology,
-    ConsumeInput,
-    ConsumeOnAccept,
-    DetachIngress,
-    DetachRealtimeBinding,
-    DrainExitedClean,
-    DrainExitedRespawnable,
-    EnterExtraction,
-    ExhaustRealtimeReconnectCycle,
-    ExtractionStart,
-    ExtractionValidationFailed,
-    ExtractionValidationPassed,
-    FailOp,
-    FailLiveTopologyAfterDetach,
-    FatalFailure,
-    ForceCancelNoRun,
-    IncrementAttemptCount,
-    InterruptCurrentRun,
-    InteractionStreamAttached,
-    InteractionStreamClosedEarly,
-    InteractionStreamCompleted,
-    InteractionStreamExpired,
-    InteractionStreamReserved,
-    LlmReturnedTerminal,
-    LlmReturnedToolCalls,
-    MarkApplied,
-    MarkAppliedPendingConsumption,
-    MarkLiveTopologyDetached,
-    McpServerConnectPending,
-    McpServerConnected,
-    McpServerDisconnected,
-    McpServerFailed,
-    McpServerReload,
-    ModelRoutingStatus,
-    OpsBarrierSatisfied,
-    PeerReadyOp,
-    PeerRequestReceived,
-    PeerRequestSent,
-    PeerRequestTimedOut,
-    PeerResponseProgressArrived,
-    PeerResponseReplied,
-    PeerResponseTerminalArrived,
-    PrimitiveApplied,
-    ProductOutputStarted,
-    ProductTurnCommitted,
-    ProductTurnInFlight,
-    ProductTurnInterrupted,
-    ProductTurnTerminal,
-    ProgressReportedOp,
-    ProjectRealtimeIntent,
-    QueueAccepted,
-    RecordBoundarySeq,
-    PublishLocalEndpoint,
-    PublishRealtimeSignal,
-    RealtimeProjectionAdvanceObserved,
-    RealtimeProjectionRefreshed,
-    RealtimeProjectionReset,
-    RecoverableFailure,
-    RecoverInputLifecycle,
-    RegisterOp,
-    RegisterPendingOps,
-    RemoveDirectPeerEndpoint,
-    ReplaceRealtimeBinding,
-    RequestCancelAfterBoundary,
-    RequestFiniteSwitchTurn,
-    RequestUntilChangedSwitchTurn,
-    RequestWaitAll,
-    RequireRealtimeReattach,
-    RequireRealtimeReattachForAuthority,
-    RetireCompletedOp,
-    RetireRequestedOp,
-    RetryRequested,
-    RevokeSupervisor,
-    RollbackStaged,
-    RunCancelled,
-    RunCompleted,
-    RunFailed,
-    RuntimeExecutorExited,
-    SatisfyWaitAll,
-    ScheduleRealtimeReconnectRetry,
-    SetModelRoutingBaseline,
-    SpawnDrain,
-    StageDeferredNames,
-    StageForRun,
-    StageVisibilityFilter,
-    StartConversationRun,
-    StartImmediateAppend,
-    StartImmediateContext,
-    StartOp,
-    SteerAccepted,
-    StopDrain,
-    SupersedeInput,
-    SurfaceApplyBoundary,
-    SurfaceCallFinished,
-    SurfaceCallStarted,
-    SurfaceFinalizeRemovalClean,
-    SurfaceFinalizeRemovalForced,
-    SurfaceMarkPendingFailed,
-    SurfaceMarkPendingSucceeded,
-    SurfaceSnapshotAligned,
-    SurfaceShutdown,
-    SurfaceRegister,
-    SurfaceStageAdd,
-    SurfaceStageReload,
-    SurfaceStageRemove,
-    SyncVisibilityRevisions,
-    SupervisorTrustEdgePublishFailed,
-    SupervisorTrustEdgePublished,
-    SupervisorTrustEdgeRevokeFailed,
-    SupervisorTrustEdgeRevoked,
-    TerminateOp,
-    TimeBudgetExceeded,
-    ToolCallsResolved,
-    TurnLimitReached,
+    InputQueueLifecycle => [
+        AbandonInput,
+        AdvanceSessionContext,
+        BudgetExhausted,
+        ChangeLane,
+        CoalesceInput,
+        ConsumeInput,
+        ConsumeOnAccept,
+        MarkApplied,
+        MarkAppliedPendingConsumption,
+        QueueAccepted,
+        RecoverInputLifecycle,
+        RetryRequested,
+        RollbackStaged,
+        StageForRun,
+        StartConversationRun,
+        StartImmediateAppend,
+        StartImmediateContext,
+        SteerAccepted,
+        SupersedeInput,
+    ],
+    OperationLifecycle => [
+        AbortOp,
+        CancelOp,
+        CancelWaitAll,
+        CompleteOp,
+        FailOp,
+        IncrementAttemptCount,
+        OpsBarrierSatisfied,
+        PeerReadyOp,
+        ProgressReportedOp,
+        RegisterOp,
+        RegisterPendingOps,
+        RequestWaitAll,
+        RetireCompletedOp,
+        RetireRequestedOp,
+        SatisfyWaitAll,
+        StartOp,
+        TerminateOp,
+    ],
+    RunExecutionLifecycle => [
+        AcknowledgeTerminal,
+        BoundaryComplete,
+        BoundaryContinue,
+        LlmReturnedTerminal,
+        LlmReturnedToolCalls,
+        PrimitiveApplied,
+        ProductOutputStarted,
+        ProductTurnCommitted,
+        ProductTurnInFlight,
+        ProductTurnTerminal,
+        RecordBoundarySeq,
+        RunCompleted,
+        RunFailed,
+        RuntimeExecutorExited,
+        TimeBudgetExceeded,
+        ToolCallsResolved,
+        TurnLimitReached,
+    ],
+    CancellationLifecycle => [
+        CancelNow,
+        CancellationObserved,
+        ForceCancelNoRun,
+        ProductTurnInterrupted,
+        RequestCancelAfterBoundary,
+        RunCancelled,
+    ],
+    LiveTopologyReconfiguration => [
+        AbortLiveTopologyBeforeDetach,
+        ApplyLiveTopologyIdentity,
+        ApplyLiveTopologyVisibility,
+        BeginLiveTopologyReconfigure,
+        CompleteLiveTopology,
+        CompleteUntilChangedSwitchTurnReconfigure,
+        FailLiveTopologyAfterDetach,
+        MarkLiveTopologyDetached,
+    ],
+    RealtimeBindingLifecycle => [
+        BeginRealtimeBinding,
+        BeginRealtimeReconnectCycle,
+        ClassifyRealtimeClientInputSubmitted,
+        ClassifyRealtimeMidTurnActivity,
+        ClassifyRealtimeTurnTerminated,
+        ClearRealtimeReconnectProgress,
+        DetachRealtimeBinding,
+        ExhaustRealtimeReconnectCycle,
+        InteractionStreamAttached,
+        InteractionStreamClosedEarly,
+        InteractionStreamCompleted,
+        InteractionStreamExpired,
+        InteractionStreamReserved,
+        ProjectRealtimeIntent,
+        PublishRealtimeSignal,
+        RealtimeProjectionAdvanceObserved,
+        RealtimeProjectionRefreshed,
+        RealtimeProjectionReset,
+        ReplaceRealtimeBinding,
+        RequireRealtimeReattach,
+        RequireRealtimeReattachForAuthority,
+        ScheduleRealtimeReconnectRetry,
+    ],
+    CommsIngressLifecycle => [
+        AddDirectPeerEndpoint,
+        ApplyMobPeerOverlay,
+        AttachMobIngress,
+        AttachSessionIngress,
+        BindSupervisor,
+        ClearLocalEndpoint,
+        DetachIngress,
+        DrainExitedClean,
+        DrainExitedRespawnable,
+        PublishLocalEndpoint,
+        RemoveDirectPeerEndpoint,
+        SpawnDrain,
+        StopDrain,
+    ],
+    SupervisorTrustLifecycle => [
+        AuthorizeSupervisor,
+        RevokeSupervisor,
+        SupervisorTrustEdgePublishFailed,
+        SupervisorTrustEdgePublished,
+        SupervisorTrustEdgeRevokeFailed,
+        SupervisorTrustEdgeRevoked,
+    ],
+    PeerRequestLifecycle => [
+        PeerRequestReceived,
+        PeerRequestSent,
+        PeerRequestTimedOut,
+        PeerResponseProgressArrived,
+        PeerResponseReplied,
+        PeerResponseTerminalArrived,
+    ],
+    VisibilityAuthorityLifecycle => [
+        CommitDeferredNames,
+        CommitVisibilityFilter,
+        StageDeferredNames,
+        StageVisibilityFilter,
+        SyncVisibilityRevisions,
+    ],
+    ExtractionLifecycle => [
+        EnterExtraction,
+        ExtractionStart,
+        ExtractionValidationFailed,
+        ExtractionValidationPassed,
+    ],
+    McpServerLifecycle => [
+        McpServerConnectPending,
+        McpServerConnected,
+        McpServerDisconnected,
+        McpServerFailed,
+        McpServerReload,
+    ],
+    ModelRoutingLifecycle => [
+        ModelRoutingStatus,
+        RequestFiniteSwitchTurn,
+        RequestUntilChangedSwitchTurn,
+        SetModelRoutingBaseline,
+    ],
+    ExternalSurfaceLifecycle => [
+        SurfaceApplyBoundary,
+        SurfaceCallFinished,
+        SurfaceCallStarted,
+        SurfaceFinalizeRemovalClean,
+        SurfaceFinalizeRemovalForced,
+        SurfaceMarkPendingFailed,
+        SurfaceMarkPendingSucceeded,
+        SurfaceRegister,
+        SurfaceShutdown,
+        SurfaceSnapshotAligned,
+        SurfaceStageAdd,
+        SurfaceStageReload,
+        SurfaceStageRemove,
+    ],
+    FailureRecoveryLifecycle => [
+        FatalFailure,
+        RecoverableFailure,
+    ],
+    UserInterruptDispatch => [
+        InterruptCurrentRun,
+    ],
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeerkatMachineRuntimeInternalReason {
-    RuntimeInternalProductionPath,
+    InputQueueLifecycle,
+    OperationLifecycle,
+    RunExecutionLifecycle,
+    CancellationLifecycle,
+    LiveTopologyReconfiguration,
+    RealtimeBindingLifecycle,
+    CommsIngressLifecycle,
+    SupervisorTrustLifecycle,
+    PeerRequestLifecycle,
+    VisibilityAuthorityLifecycle,
+    ExtractionLifecycle,
+    McpServerLifecycle,
+    ModelRoutingLifecycle,
+    ExternalSurfaceLifecycle,
+    FailureRecoveryLifecycle,
+    UserInterruptDispatch,
+}
+
+macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
+    ($($authority:ident => [$($variant:ident),+ $(,)?]),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum MeerkatMachineFieldlessRuntimeInternalInput {
+            $($($variant),+),+
+        }
+
+        impl MeerkatMachineFieldlessRuntimeInternalInput {
+            pub const ALL: &'static [Self] = &[
+                $($(Self::$variant),+),+
+            ];
+
+            #[must_use]
+            pub const fn runtime_internal_input(self) -> MeerkatMachineRuntimeInternalInput {
+                match self {
+                    $($(Self::$variant => MeerkatMachineRuntimeInternalInput::$variant,)+)+
+                }
+            }
+
+            #[must_use]
+            pub const fn input_variant(self) -> MeerkatMachineInputVariant {
+                self.runtime_internal_input().input_variant()
+            }
+
+            #[must_use]
+            pub const fn authority(self) -> MeerkatMachineFieldlessRuntimeInternalAuthority {
+                match self {
+                    $(
+                        $(Self::$variant)|+ => MeerkatMachineFieldlessRuntimeInternalAuthority::$authority,
+                    )+
+                }
+            }
+
+            #[must_use]
+            pub const fn requires_typed_runtime_internal_stager(self) -> bool {
+                matches!(
+                    self.authority(),
+                    MeerkatMachineFieldlessRuntimeInternalAuthority::UserInterruptDispatch
+                )
+            }
+
+            pub(crate) const fn dsl_input_variant(self) -> dsl::MeerkatMachineInputVariant {
+                match self {
+                    $($(Self::$variant => dsl::MeerkatMachineInputVariant::$variant,)+)+
+                }
+            }
+
+            pub(crate) fn dsl_input(self) -> dsl::MeerkatMachineInput {
+                match self {
+                    $($(Self::$variant => dsl::MeerkatMachineInput::$variant,)+)+
+                }
+            }
+
+            pub(crate) fn from_dsl_input_variant(
+                variant: dsl::MeerkatMachineInputVariant,
+            ) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|input| input.dsl_input_variant() == variant)
+            }
+
+            pub(crate) fn reject_raw_dsl_input(
+                input: &dsl::MeerkatMachineInput,
+            ) -> Result<(), String> {
+                if let Some(fieldless) = Self::from_dsl_input_variant(input.variant())
+                    && fieldless.requires_typed_runtime_internal_stager()
+                {
+                    let variant = fieldless.input_variant();
+                    return Err(format!(
+                        "fieldless runtime-internal input {variant:?} must use typed runtime-internal staging authority"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+meerkat_machine_fieldless_runtime_internal_inputs!(
+    RuntimeOwner => [
+        RuntimeExecutorExited,
+        PrimitiveApplied,
+        LlmReturnedTerminal,
+        ToolCallsResolved,
+        BoundaryContinue,
+        BoundaryComplete,
+        ExtractionStart,
+        ExtractionValidationPassed,
+        CancelNow,
+        RequestCancelAfterBoundary,
+        CancellationObserved,
+        TurnLimitReached,
+        BudgetExhausted,
+        TimeBudgetExceeded,
+        ForceCancelNoRun,
+        CancelWaitAll,
+        StopDrain,
+        DrainExitedClean,
+        DrainExitedRespawnable,
+        SurfaceShutdown,
+        BeginRealtimeBinding,
+        ReplaceRealtimeBinding,
+        DetachRealtimeBinding,
+        RequireRealtimeReattach,
+        ExhaustRealtimeReconnectCycle,
+        ClearRealtimeReconnectProgress,
+        MarkLiveTopologyDetached,
+        ApplyLiveTopologyIdentity,
+        ApplyLiveTopologyVisibility,
+        CompleteLiveTopology,
+        AbortLiveTopologyBeforeDetach,
+        FailLiveTopologyAfterDetach,
+        ProductTurnInFlight,
+        ProductTurnCommitted,
+        ProductOutputStarted,
+        ProductTurnInterrupted,
+        ProductTurnTerminal,
+        ClassifyRealtimeClientInputSubmitted,
+        ClassifyRealtimeMidTurnActivity,
+        ClassifyRealtimeTurnTerminated,
+        DetachIngress,
+        ClearLocalEndpoint,
+    ],
+    UserInterruptDispatch => [
+        InterruptCurrentRun,
+    ],
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeerkatMachineFieldlessRuntimeInternalAuthority {
+    RuntimeOwner,
     UserInterruptDispatch,
 }
 

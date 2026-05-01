@@ -46,6 +46,18 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
             }
         })
         .collect();
+    let variant_accessors: Vec<_> = enum_def
+        .variants
+        .iter()
+        .map(|v| {
+            let vname = &v.name;
+            if v.fields.is_empty() {
+                quote! { Self::#vname => #variant_name::#vname }
+            } else {
+                quote! { Self::#vname { .. } => #variant_name::#vname }
+            }
+        })
+        .collect();
 
     quote! {
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +90,14 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
             #[must_use]
             pub fn variant_manifest() -> &'static [#variant_name] {
                 Self::VARIANT_MANIFEST
+            }
+
+            #[doc(hidden)]
+            #[must_use]
+            pub const fn variant(&self) -> #variant_name {
+                match self {
+                    #(#variant_accessors),*
+                }
             }
         }
     }

@@ -401,6 +401,13 @@ fn generated_meerkat_input_variants() -> BTreeSet<MeerkatMachineInputVariant> {
         .collect()
 }
 
+fn generated_meerkat_input_variant_named(name: &str) -> Option<MeerkatMachineInputVariant> {
+    MeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .find(|variant| variant.as_str() == name)
+}
+
 fn mob_catalog_input_variants(
     inputs: impl IntoIterator<Item = MobMachineCatalogInput>,
 ) -> BTreeSet<MobMachineInputVariant> {
@@ -619,6 +626,12 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
 fn meerkat_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
     let catalog_inputs = generated_meerkat_input_variants();
     let records = meerkat_runtime::canonical_meerkat_machine_runtime_internal_classifications();
+    let distinct_reasons = records.iter().fold(Vec::new(), |mut reasons, record| {
+        if !reasons.contains(&record.reason) {
+            reasons.push(record.reason);
+        }
+        reasons
+    });
     let classified = records
         .iter()
         .map(|record| record.input.input_variant())
@@ -642,6 +655,10 @@ fn meerkat_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
         !records.is_empty(),
         "runtime-internal MeerkatMachine paths must be declared by typed production records"
     );
+    assert!(
+        distinct_reasons.len() >= 8,
+        "runtime-internal MeerkatMachine paths must be anchored to real typed owner/path categories, got {distinct_reasons:?}"
+    );
     assert_eq!(
         classified, declared,
         "typed MeerkatMachine runtime-internal records must exactly match schema.runtime_internal_inputs"
@@ -661,6 +678,37 @@ fn meerkat_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
         interrupt_reason,
         meerkat_runtime::MeerkatMachineRuntimeInternalReason::UserInterruptDispatch,
         "public user interrupt path must have typed production evidence"
+    );
+}
+
+#[test]
+fn meerkat_runtime_parity_fieldless_runtime_internal_manifest_matches_schema() {
+    let schema = dsl_meerkat_machine_production_schema();
+    let runtime_internal_inputs = schema
+        .runtime_internal_inputs
+        .iter()
+        .map(InputVariantId::as_str)
+        .collect::<BTreeSet<_>>();
+    let fieldless_runtime_internal_inputs = schema
+        .inputs
+        .variants
+        .iter()
+        .filter(|variant| {
+            variant.fields.is_empty() && runtime_internal_inputs.contains(variant.name.as_str())
+        })
+        .map(|variant| {
+            generated_meerkat_input_variant_named(variant.name.as_str())
+                .expect("runtime-internal schema variant must exist in generated manifest")
+        })
+        .collect::<BTreeSet<_>>();
+    let typed_fieldless_manifest =
+        meerkat_runtime::canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        typed_fieldless_manifest, fieldless_runtime_internal_inputs,
+        "fieldless runtime-internal inputs must be declared by the typed fieldless manifest"
     );
 }
 

@@ -22,6 +22,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::meerkat_machine::dsl as mm_dsl;
+use crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput;
 use meerkat_core::handles::DslTransitionError;
 
 /// Bridge the generated kernel's `MeerkatMachineTransitionError` into a
@@ -145,6 +146,8 @@ impl HandleDslAuthority {
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
         let mut guard = self
             .inner
             .lock()
@@ -189,6 +192,8 @@ impl HandleDslAuthority {
         context: &'static str,
         sample: impl FnOnce(&[mm_dsl::MeerkatMachineEffect]) -> S,
     ) -> Result<S, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
         let mut guard = self
             .inner
             .lock()

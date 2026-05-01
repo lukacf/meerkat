@@ -707,6 +707,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
     ) -> Result<(), String> {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id).ok_or_else(|| {
             format!(

@@ -2522,9 +2522,14 @@ mod tests {
         });
         let err = serde_json::from_value::<MobTurnStartParams>(retired)
             .expect_err("retired skill references should preserve compatibility error");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("skill_references is retired"),
-            "unexpected error: {err}"
+            message.contains("turn_metadata.skill_references"),
+            "retired skill reference diagnostics must point to canonical metadata: {message}"
+        );
+        assert!(
+            !message.contains("skill_refs"),
+            "retired skill reference diagnostics must not advertise retired skill_refs: {message}"
         );
     }
 

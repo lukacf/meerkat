@@ -318,4 +318,24 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn start_turn_params_retired_skill_references_points_to_turn_metadata() {
+        let params = serde_json::json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "start",
+            "skill_references": ["legacy/ref"]
+        });
+        let err = serde_json::from_value::<StartTurnParams>(params)
+            .expect_err("retired skill references should be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("turn_metadata.skill_references"),
+            "retired skill reference diagnostics must point to canonical metadata: {message}"
+        );
+        assert!(
+            !message.contains("skill_refs"),
+            "retired skill reference diagnostics must not advertise retired skill_refs: {message}"
+        );
+    }
 }

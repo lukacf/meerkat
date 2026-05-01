@@ -437,7 +437,7 @@ let mut agent = factory.build_agent(build, &config).await?;
 
 `AgentBuildConfig` also carries:
 - `silent_comms_intents: Vec<String>` — intents injected silently (no LLM turn)
-- `preload_skills: Option<Vec<SkillKey>>` — skills to inject at session creation
+- `turn_metadata.skill_references` / `turnMetadata.skillReferences` — public skill injection carrier for session creation and per-turn requests
 - `runtime_build_mode: RuntimeBuildMode` — required, determines ops lifecycle ownership
 
 ### Runtime build mode

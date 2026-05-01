@@ -41,7 +41,7 @@ where
 {
     let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
     Err(serde::de::Error::custom(
-        "skill_references is retired; use structured skill_refs",
+        "skill_references is retired; use turn_metadata.skill_references",
     ))
 }
 

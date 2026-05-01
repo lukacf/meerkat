@@ -127,7 +127,7 @@ Every runtime skill reference resolves to:
 
 The source identity registry applies source lifecycle gates and lineage/remap rules before load. Disabled or retired sources fail resolution; configured source rotations, renames, splits, and merges require explicit lineage and per-skill remap entries where needed.
 
-Legacy slash-delimited strings are no longer accepted by wire `skill_refs`. Some local CLI paths still accept a bare skill slug as a convenience, but API and tool surfaces should use structured keys.
+Legacy slash-delimited strings are no longer accepted by `turn_metadata.skill_references`. Some local CLI paths still accept a bare skill slug as a convenience, but API and tool surfaces should use structured keys.
 
 ## Rendering
 

@@ -454,7 +454,6 @@ let result = service.create_session(CreateSessionRequest {
     system_prompt: None,
     max_tokens: None,
     event_tx: None,
-    skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     build: None,
     labels: None,
@@ -630,7 +629,7 @@ Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Re
 
 Skill loading is runtime-root aware. Workspace realms can discover project `.rkat/skills`; non-workspace realms use realm runtime roots and configured repositories.
 
-Canonical skill identity is `SkillKey { source_uuid, skill_name }`. `preload_skills` carries plain `SkillKey` objects; API `skill_refs` carries tagged `SkillRef` objects (`kind: "structured"`, `source_uuid`, `skill_name`). Do not describe slash-delimited skill IDs as a public wire format.
+Canonical skill identity is `SkillKey { source_uuid, skill_name }`. Public session creation and per-turn injection carry typed keys through `turn_metadata.skill_references` (or `turnMetadata.skillReferences` in TypeScript). Do not describe slash-delimited skill IDs or top-level skill fields as a public wire format.
 
 **Skill introspection** surfaces:
 

@@ -211,6 +211,13 @@ impl AnthropicOAuthRuntime {
             .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
     }
 
+    fn token_is_fresh(tokens: &PersistedTokens) -> bool {
+        tokens
+            .expires_at
+            .is_some_and(|expiry| expiry - Utc::now() > Duration::seconds(60))
+            && tokens.primary_secret.is_some()
+    }
+
     /// Return a valid token bundle, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
     /// tokens are persisted yet.
@@ -223,43 +230,54 @@ impl AnthropicOAuthRuntime {
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
 
         // Fresh enough? Use cached.
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && persisted.primary_secret.is_some()
-        {
+        if Self::token_is_fresh(&persisted) {
             return Ok(persisted);
         }
 
-        // Need to refresh. Must have a refresh_token.
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(AnthropicOAuthError::MissingRefreshToken)?;
-
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let refreshed = self
-            .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result =
-                            exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+        let token_store = Arc::clone(&self.token_store);
+        let key = self.key.clone();
+        let refreshed =
+            self.refresh_coord
+                .with_refresh(
+                    self.key.clone(),
+                    Box::new(move || {
+                        let http = http.clone();
+                        let endpoints = endpoints.clone();
+                        let token_store = Arc::clone(&token_store);
+                        let key = key.clone();
+                        Box::pin(async move {
+                            let current = token_store
+                                .load(&key)
                                 .await
-                                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::ClaudeAiOauth,
-                            Some(refresh_token),
-                        )
-                        .map_err(|e| RefreshError::Refresh(e.to_string()))
-                    })
-                }),
-            )
-            .await?;
+                                .map_err(|e| RefreshError::Refresh(e.to_string()))?
+                                .ok_or_else(|| {
+                                    RefreshError::Refresh(
+                                        "persisted tokens disappeared before OAuth refresh".into(),
+                                    )
+                                })?;
+                            if AnthropicOAuthRuntime::token_is_fresh(&current) {
+                                return Ok(current);
+                            }
+                            // Need to refresh. Must have a refresh_token.
+                            let refresh_token = current.refresh_token.clone().ok_or_else(|| {
+                                RefreshError::Refresh("missing refresh_token".into())
+                            })?;
+                            let result =
+                                exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+                                    .await
+                                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                            oauth_result_to_persisted(
+                                result,
+                                PersistedAuthMode::ClaudeAiOauth,
+                                Some(refresh_token),
+                            )
+                            .map_err(|e| RefreshError::Refresh(e.to_string()))
+                        })
+                    }),
+                )
+                .await?;
 
         Ok(refreshed)
     }

@@ -182,6 +182,13 @@ impl GoogleCodeAssistOAuthRuntime {
             .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
     }
 
+    fn token_is_fresh(tokens: &PersistedTokens) -> bool {
+        tokens
+            .expires_at
+            .is_some_and(|expiry| expiry - Utc::now() > Duration::seconds(60))
+            && tokens.primary_secret.is_some()
+    }
+
     pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
@@ -189,45 +196,57 @@ impl GoogleCodeAssistOAuthRuntime {
             .load()
             .await?
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && persisted.primary_secret.is_some()
-        {
+        if Self::token_is_fresh(&persisted) {
             return Ok(persisted);
         }
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(GoogleCodeAssistOAuthError::MissingRefreshToken)?;
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
+        let token_store = Arc::clone(&self.token_store);
+        let key = self.key.clone();
         // Google requires the client_secret for refresh on installed apps.
-        let refreshed = self
-            .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result = exchange_refresh_token(
-                            &http,
-                            &endpoints,
-                            &refresh_token,
-                            Some(CODE_ASSIST_CLIENT_SECRET),
-                        )
-                        .await
-                        .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::GoogleOauth,
-                            Some(refresh_token),
-                        )
-                        .map_err(|e| RefreshError::Refresh(e.to_string()))
-                    })
-                }),
-            )
-            .await?;
+        let refreshed =
+            self.refresh_coord
+                .with_refresh(
+                    self.key.clone(),
+                    Box::new(move || {
+                        let http = http.clone();
+                        let endpoints = endpoints.clone();
+                        let token_store = Arc::clone(&token_store);
+                        let key = key.clone();
+                        Box::pin(async move {
+                            let current = token_store
+                                .load(&key)
+                                .await
+                                .map_err(|e| RefreshError::Refresh(e.to_string()))?
+                                .ok_or_else(|| {
+                                    RefreshError::Refresh(
+                                        "persisted tokens disappeared before OAuth refresh".into(),
+                                    )
+                                })?;
+                            if GoogleCodeAssistOAuthRuntime::token_is_fresh(&current) {
+                                return Ok(current);
+                            }
+                            let refresh_token = current.refresh_token.clone().ok_or_else(|| {
+                                RefreshError::Refresh("missing refresh_token".into())
+                            })?;
+                            let result = exchange_refresh_token(
+                                &http,
+                                &endpoints,
+                                &refresh_token,
+                                Some(CODE_ASSIST_CLIENT_SECRET),
+                            )
+                            .await
+                            .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                            oauth_result_to_persisted(
+                                result,
+                                PersistedAuthMode::GoogleOauth,
+                                Some(refresh_token),
+                            )
+                            .map_err(|e| RefreshError::Refresh(e.to_string()))
+                        })
+                    }),
+                )
+                .await?;
         Ok(refreshed)
     }
 

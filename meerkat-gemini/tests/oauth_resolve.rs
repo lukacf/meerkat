@@ -168,9 +168,10 @@ async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
     store
         .save(
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted_google_oauth(
-                "fresh-google-access",
-            )),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                &persisted_google_oauth("fresh-google-access"),
+                1,
+            ),
         )
         .await
         .unwrap();

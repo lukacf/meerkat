@@ -293,6 +293,7 @@ struct TokenCommitSnapshot {
     lease_key: LeaseKey,
     previous: Option<PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
+    lifecycle_generation: u64,
 }
 
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
@@ -324,7 +325,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
             format!("TokenStore save failed: {e}"),
         ));
     }
-    publish_saved_tokens_and_restore_on_lifecycle_failure(
+    let transition = publish_saved_tokens_and_restore_on_lifecycle_failure(
         id.clone(),
         store.as_ref(),
         auth_lease.as_ref(),
@@ -339,6 +340,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         lease_key,
         previous,
         previous_lifecycle,
+        lifecycle_generation: transition.generation,
     };
     if mark_for_rehydration {
         mark_token_commit_lifecycle_published_unlocked(
@@ -360,7 +362,10 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), RpcResponse> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+        tokens,
+        commit.lifecycle_generation,
+    );
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(store, auth_lease, commit).await {
             Ok(()) => {
@@ -419,7 +424,19 @@ async fn rollback_token_commit(
                     &commit.previous_lifecycle,
                     Some(previous),
                 )
-                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?
+                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
+                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
+                if restored_snapshot.credential_present {
+                    let restored_previous =
+                        meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                            previous,
+                            restored_snapshot.generation,
+                        );
+                    store
+                        .save(&commit.key, &restored_previous)
+                        .await
+                        .map_err(|e| format!("TokenStore rollback marker save failed: {e}"))?;
+                }
             }
             _ => {
                 auth_lease
@@ -607,28 +624,28 @@ async fn publish_saved_tokens_and_restore_on_lifecycle_failure(
     key: &TokenKey,
     tokens: &PersistedTokens,
     previous: Option<&PersistedTokens>,
-) -> Result<(), RpcResponse> {
-    if let Err(e) =
-        meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens)
-    {
-        if let Err(rollback_error) =
-            restore_tokens_after_lifecycle_failure(store, key, previous).await
-        {
-            return Err(RpcResponse::error(
+) -> Result<meerkat_core::handles::AuthLeaseTransition, RpcResponse> {
+    match meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens) {
+        Ok(transition) => Ok(transition),
+        Err(e) => {
+            if let Err(rollback_error) =
+                restore_tokens_after_lifecycle_failure(store, key, previous).await
+            {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
+                    ),
+                ));
+            }
+            Err(RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
-                format!(
-                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                ),
-            ));
+                format!("AuthMachine lifecycle acquire failed: {e}"),
+            ))
         }
-        return Err(RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("AuthMachine lifecycle acquire failed: {e}"),
-        ));
     }
-    Ok(())
 }
 
 async fn restore_tokens_after_lifecycle_failure(

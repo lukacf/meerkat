@@ -20,7 +20,8 @@ use super::token_store::{
 };
 use crate::connection::ConnectionRef;
 use crate::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,16 +83,24 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
     )
 }
 
-pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
+fn mark_tokens_lifecycle_published_inner(
+    tokens: &PersistedTokens,
+    generation: Option<u64>,
+) -> PersistedTokens {
     if !persisted_auth_mode_uses_oauth_login_lifecycle(tokens.auth_mode) {
         return tokens.clone();
     }
 
     let mut marked = tokens.clone();
-    let marker = serde_json::json!({
+    let mut marker = serde_json::json!({
         "published": true,
         "version": 1,
     });
+    if let Some(generation) = generation
+        && let Some(marker) = marker.as_object_mut()
+    {
+        marker.insert("generation".to_string(), serde_json::json!(generation));
+    }
     match &mut marked.metadata {
         serde_json::Value::Object(map) => {
             map.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
@@ -112,6 +121,17 @@ pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTok
     marked
 }
 
+pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(tokens, None)
+}
+
+pub fn mark_tokens_lifecycle_published_for_generation(
+    tokens: &PersistedTokens,
+    generation: u64,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(tokens, Some(generation))
+}
+
 pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
     tokens
         .metadata
@@ -121,14 +141,24 @@ pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
         .unwrap_or(false)
 }
 
+pub fn tokens_lifecycle_published_generation(tokens: &PersistedTokens) -> Option<u64> {
+    if !tokens_lifecycle_published(tokens) {
+        return None;
+    }
+    tokens
+        .metadata
+        .get(TOKEN_LIFECYCLE_METADATA_KEY)
+        .and_then(|marker| marker.get("generation"))
+        .and_then(serde_json::Value::as_u64)
+}
+
 pub fn publish_token_lifecycle_acquired(
     handle: &dyn AuthLeaseHandle,
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
-) -> Result<(), DslTransitionError> {
+) -> Result<AuthLeaseTransition, DslTransitionError> {
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))?;
-    Ok(())
+    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
 }
 
 pub fn publish_token_lifecycle_released(

@@ -162,6 +162,15 @@ pub enum ManagedStoreLifecycle {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn oauth_lifecycle_marker_matches_snapshot(
+    tokens: &PersistedTokens,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+) -> bool {
+    meerkat_core::tokens_lifecycle_published_generation(tokens)
+        .is_some_and(|generation| generation == snapshot.generation)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn load_managed_store_tokens_with_lifecycle(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
@@ -182,7 +191,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     } else {
         None
     };
-    let tokens = store
+    let mut tokens = store
         .load(&key)
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
@@ -214,7 +223,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             && !snapshot.credential_present
             && meerkat_core::tokens_lifecycle_published(&tokens)
         {
-            meerkat_core::publish_token_lifecycle_acquired(
+            let transition = meerkat_core::publish_token_lifecycle_acquired(
                 auth_lease.as_ref(),
                 &binding.connection_ref,
                 &tokens,
@@ -224,8 +233,34 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                     "AuthMachine lifecycle acquire failed: {e}"
                 ))
             })?;
+            let marked = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                &tokens,
+                transition.generation,
+            );
+            if marked != tokens {
+                if let Err(save_error) = store.save(&key, &marked).await {
+                    let rollback = auth_lease
+                        .release_credential_lifecycle(&lease_key)
+                        .err()
+                        .map(|e| format!("; AuthMachine lifecycle rollback failed: {e}"))
+                        .unwrap_or_default();
+                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                        "TokenStore lifecycle marker generation save failed after AuthMachine lifecycle acquire: {save_error}{rollback}"
+                    )));
+                }
+                tokens = marked;
+            }
             snapshot = auth_lease.snapshot(&lease_key);
             phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        }
+        if is_oauth_login
+            && matches!(
+                phase,
+                AuthStatusPhase::Valid | AuthStatusPhase::Expiring | AuthStatusPhase::Expired
+            )
+            && !oauth_lifecycle_marker_matches_snapshot(&tokens, &snapshot)
+        {
+            return Err(interactive_login_error(binding));
         }
         if !is_oauth_login
             && phase == AuthStatusPhase::Unknown
@@ -327,7 +362,7 @@ pub fn publish_managed_store_tokens_lifecycle(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     tokens: &PersistedTokens,
-) -> Result<(), ProviderAuthError> {
+) -> Result<meerkat_core::handles::AuthLeaseTransition, ProviderAuthError> {
     if AuthStatusPhase::from_lease_expires_at(
         (env.now)(),
         Some(meerkat_core::persisted_token_expires_at_epoch_secs(tokens)),
@@ -339,7 +374,7 @@ pub fn publish_managed_store_tokens_lifecycle(
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-    meerkat_core::publish_token_lifecycle_acquired(
+    let transition = meerkat_core::publish_token_lifecycle_acquired(
         auth_lease.as_ref(),
         &binding.connection_ref,
         tokens,
@@ -349,7 +384,8 @@ pub fn publish_managed_store_tokens_lifecycle(
             "AuthMachine lifecycle acquire failed: {e}"
         ))
     })?;
-    require_credential_lifecycle_authority(env, binding)
+    require_credential_lifecycle_authority(env, binding)?;
+    Ok(transition)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -369,7 +405,6 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     } else {
         None
     };
-    let committed = meerkat_core::mark_tokens_lifecycle_published(refreshed);
     let previous_snapshot = previous.lifecycle_snapshot.as_ref().ok_or_else(|| {
         ProviderAuthError::SourceResolutionFailed(
             "managed_store OAuth refresh missing AuthMachine lifecycle snapshot".into(),
@@ -381,9 +416,13 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
     let current_snapshot = auth_lease.snapshot(&lease_key);
+    let current_committed = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+        refreshed,
+        current_snapshot.generation,
+    );
     if current_tokens.as_ref() != Some(&previous.tokens) {
         if let Some(current) = current_tokens.as_ref()
-            && current == &committed
+            && current == &current_committed
             && matches!(
                 AuthStatusPhase::from_lease_snapshot((env.now)(), &current_snapshot),
                 AuthStatusPhase::Valid | AuthStatusPhase::Expiring
@@ -403,7 +442,11 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         ));
     }
 
-    publish_managed_store_tokens_lifecycle(env, binding, refreshed)?;
+    let transition = publish_managed_store_tokens_lifecycle(env, binding, refreshed)?;
+    let committed = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+        refreshed,
+        transition.generation,
+    );
     if let Err(save_error) = previous.store.save(&previous.key, &committed).await {
         let mut rollback_errors = Vec::new();
         if let Err(err) = auth_lease.release_credential_lifecycle(&lease_key) {
@@ -411,6 +454,7 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
                 "AuthMachine lifecycle rollback release failed: {err}"
             ));
         }
+        let mut restored_previous = previous.tokens.clone();
         if let Err(err) = meerkat_core::restore_token_lifecycle_snapshot(
             auth_lease.as_ref(),
             &lease_key,
@@ -418,8 +462,16 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
             Some(&previous.tokens),
         ) {
             rollback_errors.push(format!("AuthMachine lifecycle rollback failed: {err}"));
+        } else if previous_snapshot.credential_present {
+            let restored_snapshot = auth_lease.snapshot(&lease_key);
+            if restored_snapshot.credential_present {
+                restored_previous = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                    &previous.tokens,
+                    restored_snapshot.generation,
+                );
+            }
         }
-        if let Err(err) = previous.store.save(&previous.key, &previous.tokens).await {
+        if let Err(err) = previous.store.save(&previous.key, &restored_previous).await {
             rollback_errors.push(format!("TokenStore rollback save failed: {err}"));
         }
         let rollback_suffix = if rollback_errors.is_empty() {
@@ -893,12 +945,16 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     impl StaticAuthLeaseHandle {
         fn valid() -> Arc<Self> {
+            Self::valid_generation(1)
+        }
+
+        fn valid_generation(generation: u64) -> Arc<Self> {
             Arc::new(Self {
                 snapshot: AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::Valid),
                     expires_at: None,
                     credential_present: true,
-                    generation: 1,
+                    generation,
                 },
             })
         }
@@ -1167,6 +1223,36 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn managed_store_oauth_source_rejects_marker_from_stale_lifecycle_generation() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let mut stale_tokens = chatgpt_oauth_tokens("stale-generation-access");
+        stale_tokens.metadata = serde_json::json!({
+            "meerkat_auth_lifecycle": {
+                "published": true,
+                "version": 1,
+                "generation": 1,
+            },
+        });
+        store.save(&key, &stale_tokens).await.unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2));
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn managed_store_oauth_resolution_holds_lifecycle_guard_until_commit_boundary() {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
@@ -1175,9 +1261,10 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published(&chatgpt_oauth_tokens(
-                    "expired-access",
-                )),
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                    &chatgpt_oauth_tokens("expired-access"),
+                    1,
+                ),
             )
             .await
             .unwrap();
@@ -1274,8 +1361,10 @@ mod tests {
         let key = TokenKey::from_connection_ref(&binding.connection_ref);
         let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
         let auth_lease = StaticAuthLeaseHandle::valid();
-        let previous_tokens =
-            meerkat_core::mark_tokens_lifecycle_published(&chatgpt_oauth_tokens("expired-access"));
+        let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+            &chatgpt_oauth_tokens("expired-access"),
+            1,
+        );
         store.save(&key, &previous_tokens).await.unwrap();
         let previous = ManagedStoreTokens {
             store: Arc::clone(&store),

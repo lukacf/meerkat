@@ -199,6 +199,7 @@ struct TokenCommitSnapshot {
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
+    lifecycle_generation: u64,
 }
 
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
@@ -223,29 +224,35 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
             format!("TokenStore save failed: {e}"),
         )
     })?;
-    if let Err(e) =
-        meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens)
-    {
-        if let Err(rollback_error) =
-            restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
-        {
+    let transition = match meerkat_core::publish_token_lifecycle_acquired(
+        auth_lease,
+        connection_ref,
+        tokens,
+    ) {
+        Ok(transition) => transition,
+        Err(e) => {
+            if let Err(rollback_error) =
+                restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
+            {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
+                    ),
+                ));
+            }
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                ),
+                format!("AuthMachine lifecycle acquire failed: {e}"),
             ));
         }
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("AuthMachine lifecycle acquire failed: {e}"),
-        ));
-    }
+    };
     let commit = TokenCommitSnapshot {
         key,
         lease_key,
         previous,
         previous_lifecycle,
+        lifecycle_generation: transition.generation,
     };
     if mark_for_rehydration {
         mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
@@ -260,7 +267,10 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+        tokens,
+        commit.lifecycle_generation,
+    );
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, commit).await {
             Ok(()) => {
@@ -289,6 +299,9 @@ fn publish_resolved_auth_lease(
         return Ok(());
     }
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    if auth_lease.snapshot(&lease_key).credential_present {
+        return Ok(());
+    }
     let expires_at = connection
         .auth_lease
         .expires_at()
@@ -338,7 +351,19 @@ async fn rollback_token_commit(
                     &commit.previous_lifecycle,
                     Some(previous),
                 )
-                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?
+                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
+                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
+                if restored_snapshot.credential_present {
+                    let restored_previous =
+                        meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                            previous,
+                            restored_snapshot.generation,
+                        );
+                    token_store
+                        .save(&commit.key, &restored_previous)
+                        .await
+                        .map_err(|e| format!("TokenStore rollback marker save failed: {e}"))?;
+                }
             }
             _ => {
                 auth_lease

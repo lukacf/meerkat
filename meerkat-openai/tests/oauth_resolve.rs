@@ -10,7 +10,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use axum::Router;
 use axum::extract::Form;
@@ -332,6 +335,27 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
     }
 }
 
+struct StoreUpdatingRefreshCoordinator {
+    store: Arc<dyn TokenStore>,
+    key: TokenKey,
+    tokens: PersistedTokens,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for StoreUpdatingRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        _key: TokenKey,
+        refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        self.store
+            .save(&self.key, &self.tokens)
+            .await
+            .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+        refresh_fn().await
+    }
+}
+
 // --- OpenAI managed_chatgpt_oauth ------------------------------------
 
 #[tokio::test]
@@ -354,7 +378,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
@@ -395,7 +419,7 @@ async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
@@ -439,7 +463,7 @@ async fn openai_managed_chatgpt_oauth_rehydrates_empty_auth_lifecycle_with_persi
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
@@ -535,7 +559,7 @@ async fn openai_managed_chatgpt_oauth_rehydrates_expired_empty_auth_lifecycle_be
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
@@ -765,6 +789,91 @@ async fn openai_chatgpt_oauth_runtime_refresh_is_uncommitted() {
 }
 
 #[tokio::test]
+async fn openai_chatgpt_oauth_runtime_reloads_store_after_refresh_coordination() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let endpoint_calls = Arc::clone(&calls);
+    let app = Router::new().route(
+        "/oauth/token",
+        post(move |Form(_form): Form<serde_json::Value>| {
+            let endpoint_calls = Arc::clone(&endpoint_calls);
+            async move {
+                endpoint_calls.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "access_token": "unexpected-provider-refresh",
+                    "refresh_token": "unexpected-rt",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "scope": "openid profile email offline_access",
+                }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &key,
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ChatgptOauth,
+                primary_secret: Some("expired-chatgpt-access".into()),
+                refresh_token: Some("stale-rt".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+                last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
+                scopes: vec![],
+                account_id: Some("acct-1".into()),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+    let already_committed = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("already-committed-access".into()),
+        refresh_token: Some("rotated-rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: vec![],
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    let coord = Arc::new(StoreUpdatingRefreshCoordinator {
+        store: Arc::clone(&store),
+        key: key.clone(),
+        tokens: already_committed.clone(),
+    });
+    let endpoints = OAuthEndpoints {
+        client_id: o_oauth::CHATGPT_CLIENT_ID.into(),
+        authorize_url: o_oauth::CHATGPT_AUTHORIZE_URL.into(),
+        token_url: format!("http://{addr}/oauth/token"),
+        device_code_url: None,
+        redirect_uri: "http://127.0.0.1:0/callback".into(),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        extra_headers: vec![],
+    };
+    let runtime = o_oauth::OpenAiOAuthRuntime::new(store, coord, endpoints, key);
+
+    let resolved = runtime.get_or_refresh_tokens_uncommitted().await.unwrap();
+
+    assert_eq!(resolved, already_committed);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "runtime should adopt already committed fresh tokens after refresh coordination"
+    );
+}
+
+#[tokio::test]
 async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_publication_fails() {
     let store = Arc::new(EphemeralTokenStore::new());
     let old_expiry = Utc::now() - ChronoDuration::minutes(5);
@@ -786,7 +895,7 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
     store
         .save(
             &key,
-            &meerkat_core::mark_tokens_lifecycle_published(&old_tokens),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&old_tokens, 1),
         )
         .await
         .unwrap();
@@ -845,7 +954,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
@@ -883,7 +992,7 @@ async fn openai_external_chatgpt_tokens_rehydrates_empty_lifecycle_as_expired() 
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();

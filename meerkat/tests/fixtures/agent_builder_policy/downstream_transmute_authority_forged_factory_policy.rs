@@ -19,10 +19,9 @@ fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthori
     // SAFETY: the current authority representation is public and transparent
     // over `NonZeroUsize`, so downstream unsafe code can fabricate it.
     unsafe {
-        std::mem::transmute::<
-            NonZeroUsize,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(seal)
+        std::mem::transmute::<NonZeroUsize, meerkat_agent_build_authority::AgentFactoryBuildAuthority>(
+            seal,
+        )
     }
 }
 

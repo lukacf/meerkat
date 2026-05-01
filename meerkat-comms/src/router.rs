@@ -25,7 +25,7 @@ use crate::inproc::{InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
-use crate::trust::{TrustedPeer, TrustedPeers};
+use crate::trust::{TrustError, TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::PeerId;
 
@@ -101,9 +101,9 @@ pub struct Router {
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Canonical peer IDs supplied at descriptor registration time, keyed by
-    /// signing pubkey. This preserves explicit `PeerId`s for legacy
-    /// zero-pubkey descriptors where deriving from the pubkey would collapse
-    /// every entry onto the all-zero pubkey hash.
+    /// signing pubkey. This preserves explicit `PeerId`s for descriptor
+    /// registrations where the runtime owns a stable routing id in addition
+    /// to the peer's signing key.
     trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
     /// Directory-filter side-channel for private (control-plane) trust
     /// edges. Membership here is additive to `trusted_peers`: the peer
@@ -211,14 +211,20 @@ impl Router {
         self.trusted_peers.read().has_peers()
     }
 
-    pub fn add_trusted_peer(&self, peer: TrustedPeer) {
+    pub fn add_trusted_peer(&self, peer: TrustedPeer) -> Result<(), TrustError> {
         let peer_id = peer_id_from_pubkey(&peer.pubkey);
-        self.add_trusted_peer_with_peer_id(peer_id, peer);
+        self.add_trusted_peer_with_peer_id(peer_id, peer)
     }
 
-    pub(crate) fn add_trusted_peer_with_peer_id(&self, peer_id: PeerId, peer: TrustedPeer) {
-        self.trusted_peer_ids.write().insert(peer.pubkey, peer_id);
-        self.trusted_peers.write().upsert(peer);
+    pub(crate) fn add_trusted_peer_with_peer_id(
+        &self,
+        peer_id: PeerId,
+        peer: TrustedPeer,
+    ) -> Result<(), TrustError> {
+        let pubkey = peer.pubkey;
+        self.trusted_peers.write().upsert(peer)?;
+        self.trusted_peer_ids.write().insert(pubkey, peer_id);
+        Ok(())
     }
 
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
@@ -248,11 +254,12 @@ impl Router {
             .peers
             .iter()
             .find(|peer| {
-                peer_ids
-                    .get(&peer.pubkey)
-                    .copied()
-                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id
+                !peer.pubkey.is_zero()
+                    && peer_ids
+                        .get(&peer.pubkey)
+                        .copied()
+                        .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
+                        == *peer_id
             })
             .cloned()
     }

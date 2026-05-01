@@ -1101,6 +1101,13 @@ impl CoreCommsRuntime for CommsRuntime {
             .peers
             .iter()
             .filter_map(|peer| {
+                if peer.pubkey.is_zero() {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        "skipping zero-pubkey trusted peer in ingress runtime snapshot"
+                    );
+                    return None;
+                }
                 let name = match PeerName::new(peer.name.clone()) {
                     Ok(name) => name,
                     Err(err) => {
@@ -1962,7 +1969,9 @@ impl CommsRuntime {
         peer.addr = parse_peer_address(&peer.addr)
             .map_err(SendError::Validation)?
             .to_string();
-        self.router.add_trusted_peer(peer);
+        self.router
+            .add_trusted_peer(peer)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         Ok(())
     }
 
@@ -1972,7 +1981,9 @@ impl CommsRuntime {
     ) -> Result<(), SendError> {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
-        self.router.add_trusted_peer_with_peer_id(peer_id, peer);
+        self.router
+            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         Ok(())
     }
 
@@ -2004,7 +2015,9 @@ impl CommsRuntime {
             .map_err(SendError::Validation)?
             .to_string();
         let pubkey = peer.pubkey;
-        self.router.add_trusted_peer(peer);
+        self.router
+            .add_trusted_peer(peer)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         self.router.mark_private(pubkey);
         Ok(())
     }
@@ -2015,7 +2028,9 @@ impl CommsRuntime {
     ) -> Result<(), SendError> {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
-        self.router.add_trusted_peer_with_peer_id(peer_id, peer);
+        self.router
+            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
         self.router.mark_private_peer_id(peer_id);
         Ok(())
     }
@@ -2119,6 +2134,13 @@ impl CommsRuntime {
         {
             let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
+                if peer.pubkey.is_zero() {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        "skipping zero-pubkey trusted peer in peer directory"
+                    );
+                    continue;
+                }
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
                 }
@@ -3534,12 +3556,14 @@ mod tests {
         install_test_peer_request_response_authority(&runtime);
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted.upsert(crate::TrustedPeer {
-                name: peer_name.clone(),
-                pubkey: peer.public_key(),
-                addr: format!("inproc://{peer_name}"),
-                meta: crate::PeerMeta::default(),
-            });
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: peer_name.clone(),
+                    pubkey: peer.public_key(),
+                    addr: format!("inproc://{peer_name}"),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
         }
         // Peer must also trust the runtime: the receive-side admission gate
         // now drops untrusted envelopes with `UntrustedSender` instead of
@@ -4436,6 +4460,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_peer_ingress_runtime_snapshot_skips_direct_zero_pubkey_trust_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runtime = CommsRuntime::new(test_runtime_config("peer-runtime-zero-snapshot", &tmp))
+            .await
+            .unwrap();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+
+        runtime
+            .trusted_peers_shared()
+            .write()
+            .peers
+            .push(crate::TrustedPeer {
+                name: "zero-peer".to_string(),
+                pubkey: zero_pubkey,
+                addr: "inproc://zero-peer".to_string(),
+                meta: crate::PeerMeta::default(),
+            });
+
+        let snapshot = CoreCommsRuntime::peer_ingress_runtime_snapshot(&runtime)
+            .await
+            .expect("peer runtime snapshot should be available");
+
+        assert!(
+            snapshot.trusted_peers.is_empty(),
+            "direct-injected zero-pubkey trust must not enter the machine snapshot"
+        );
+        assert!(
+            CoreCommsRuntime::peers(&runtime).await.is_empty(),
+            "direct-injected zero-pubkey trust must not enter the peer directory"
+        );
+        assert!(
+            !runtime
+                .trusted_peers_shared()
+                .read()
+                .is_trusted(&zero_pubkey),
+            "direct-injected zero-pubkey trust must not pass admission lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn test_peer_ingress_runtime_snapshot_reflects_dropped_peer_authority_state() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("peer-runtime-dropped", &tmp);
@@ -5263,6 +5327,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_register_trusted_peer_zero_pubkey_is_rejected_at_raw_boundary() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("raw-zero-pubkey-{suffix}")).unwrap();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+
+        let result = runtime
+            .register_trusted_peer(crate::TrustedPeer {
+                name: format!("raw-zero-peer-{suffix}"),
+                pubkey: zero_pubkey,
+                addr: format!("inproc://raw-zero-peer-{suffix}"),
+                meta: crate::PeerMeta::default(),
+            })
+            .await;
+
+        match result {
+            Err(SendError::Validation(message)) => {
+                assert!(
+                    message.contains("pubkey") && message.contains("non-zero"),
+                    "unexpected validation message: {message}"
+                );
+            }
+            other => panic!("raw zero-pubkey trust registration must fail, got {other:?}"),
+        }
+        assert!(
+            !runtime
+                .trusted_peers_shared()
+                .read()
+                .is_trusted(&zero_pubkey),
+            "raw zero-pubkey peer must not enter the shared trust authority"
+        );
+        let inbox = runtime.inbox.lock().await;
+        assert_eq!(
+            inbox.peer_authority_trusts_peer_for_test(&zero_pubkey),
+            Some(false),
+            "classified inbox authority must not trust the rejected zero pubkey"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_startup_rejects_persisted_zero_pubkey_trust() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("persisted-zero-pubkey", &tmp);
+        tokio::fs::write(
+            &config.trusted_peers_path,
+            serde_json::json!({
+                "peers": [{
+                    "name": "persisted-zero-peer",
+                    "pubkey": PubKey::new([0u8; 32]).to_pubkey_string(),
+                    "addr": "inproc://persisted-zero-peer"
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let error = match CommsRuntime::new(config).await {
+            Ok(_) => panic!("runtime startup must reject persisted zero-pubkey trust"),
+            Err(error) => error,
+        };
+
+        match error {
+            CommsRuntimeError::TrustLoadError(message) => {
+                assert!(
+                    message.contains("pubkey") && message.contains("non-zero"),
+                    "unexpected trust-load error: {message}"
+                );
+            }
+            other => panic!("unexpected runtime startup error: {other:?}"),
+        }
+    }
+
     #[test]
     fn test_core_runtime_public_key_is_exposed_via_trait() {
         let runtime = CommsRuntime::inproc_only("pub-key-trait").unwrap();
@@ -5422,12 +5559,14 @@ mod tests {
 
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted.upsert(crate::TrustedPeer {
-                name: peer_name.clone(),
-                pubkey: peer.public_key(),
-                addr: format!("inproc://{peer_name}"),
-                meta: crate::PeerMeta::default(),
-            });
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: peer_name.clone(),
+                    pubkey: peer.public_key(),
+                    addr: format!("inproc://{peer_name}"),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
         }
 
         let peers = CoreCommsRuntime::peers(&runtime).await;
@@ -5468,18 +5607,22 @@ mod tests {
 
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted.upsert(crate::TrustedPeer {
-                name: unknown_name.clone(),
-                pubkey: unknown_pubkey,
-                addr: "http://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            });
-            trusted.upsert(crate::TrustedPeer {
-                name: schemeless_name.clone(),
-                pubkey: schemeless_pubkey,
-                addr: "127.0.0.1:4201".to_string(),
-                meta: crate::PeerMeta::default(),
-            });
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: unknown_name.clone(),
+                    pubkey: unknown_pubkey,
+                    addr: "http://127.0.0.1:4200".to_string(),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: schemeless_name.clone(),
+                    pubkey: schemeless_pubkey,
+                    addr: "127.0.0.1:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
         }
 
         let peers = CoreCommsRuntime::peers(&runtime).await;
@@ -5843,12 +5986,14 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted.upsert(crate::TrustedPeer {
-                name: peer_name.clone(),
-                pubkey: peer.public_key(),
-                addr: format!("inproc://{peer_name}"),
-                meta: crate::PeerMeta::default(),
-            });
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: peer_name.clone(),
+                    pubkey: peer.public_key(),
+                    addr: format!("inproc://{peer_name}"),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
         }
 
         let all_peers = CoreCommsRuntime::peers(&runtime).await;
@@ -6009,12 +6154,14 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted.upsert(crate::TrustedPeer {
-                name: peer_name.clone(),
-                pubkey: peer.public_key(),
-                addr: format!("inproc://{peer_name}"),
-                meta: crate::PeerMeta::default(),
-            });
+            trusted
+                .upsert(crate::TrustedPeer {
+                    name: peer_name.clone(),
+                    pubkey: peer.public_key(),
+                    addr: format!("inproc://{peer_name}"),
+                    meta: crate::PeerMeta::default(),
+                })
+                .expect("valid test peer should upsert");
         }
         // Receive side must also trust the sender after the silent-drop fix.
         // Use `add_trusted_peer` so the classified queue's trust set syncs.

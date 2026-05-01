@@ -63,9 +63,15 @@ fn upsert_allows_replacement_by_peer_id() {
     let mut store = TrustStore::new();
     let id = PeerId::new();
 
-    assert!(store.upsert(entry(id, "alice", 1)).is_none());
+    assert!(
+        store
+            .upsert(entry(id, "alice", 1))
+            .expect("initial upsert succeeds")
+            .is_none()
+    );
     let prior = store
         .upsert(entry(id, "alice-v2", 2))
+        .expect("replacement upsert succeeds")
         .expect("upsert returns prior entry");
     assert_eq!(prior.name.as_str(), "alice");
 

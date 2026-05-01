@@ -4,6 +4,10 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_meerkat_machine, dsl_meerkat_machine_production_schema,
     dsl_mob_machine, dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine,
+    meerkat_machine::{MeerkatMachineInput, MeerkatMachineInputVariant},
+    meerkat_machine_runtime_internal_input_variants,
+    mob_machine::{MobMachineInput, MobMachineInputVariant},
+    mob_machine_runtime_internal_input_variants,
 };
 use meerkat_machine_schema::identity::{EnumVariantId, IdentityError, InputVariantId};
 use meerkat_machine_schema::{
@@ -302,77 +306,6 @@ fn phase1_schema_drift_item_counts() -> BTreeMap<String, usize> {
     counts
 }
 
-const MOB_RUNTIME_PARITY_REAL_ENTRYPOINT_PROBED_INPUT_VARIANTS: &[MobMachineCatalogInput] = &[
-    MobMachineCatalogInput::Spawn,
-    MobMachineCatalogInput::EnsureMember,
-    MobMachineCatalogInput::Reconcile,
-    MobMachineCatalogInput::SubmitWork,
-    MobMachineCatalogInput::RunFlow,
-    MobMachineCatalogInput::CancelFlow,
-    MobMachineCatalogInput::Retire,
-    MobMachineCatalogInput::Respawn,
-    MobMachineCatalogInput::RetireAll,
-    MobMachineCatalogInput::WireMembers,
-    MobMachineCatalogInput::UnwireMembers,
-    MobMachineCatalogInput::WireExternalPeer,
-    MobMachineCatalogInput::UnwireExternalPeer,
-    MobMachineCatalogInput::CancelWork,
-    MobMachineCatalogInput::CancelAllWork,
-    MobMachineCatalogInput::Stop,
-    MobMachineCatalogInput::Resume,
-    MobMachineCatalogInput::Complete,
-    MobMachineCatalogInput::Reset,
-    MobMachineCatalogInput::Destroy,
-    MobMachineCatalogInput::TaskCreate,
-    MobMachineCatalogInput::TaskUpdate,
-    MobMachineCatalogInput::SubscribeAgentEvents,
-    MobMachineCatalogInput::SubscribeAllAgentEvents,
-    MobMachineCatalogInput::SubscribeMobEvents,
-    MobMachineCatalogInput::RecordOperatorActionProvenance,
-    MobMachineCatalogInput::SetSpawnPolicy,
-    MobMachineCatalogInput::Shutdown,
-    MobMachineCatalogInput::ForceCancel,
-];
-
-fn mob_runtime_parity_real_entrypoint_probe_manifest_mismatches(
-    schema: &MachineSchema,
-) -> Vec<String> {
-    let catalog_inputs = schema
-        .inputs
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let probed = MOB_RUNTIME_PARITY_REAL_ENTRYPOINT_PROBED_INPUT_VARIANTS
-        .iter()
-        .map(|input| input.as_str())
-        .collect::<BTreeSet<_>>();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(InputVariantId::as_str)
-        .collect::<BTreeSet<_>>();
-    let runtime_internal_inputs = schema
-        .runtime_internal_inputs
-        .iter()
-        .map(InputVariantId::as_str)
-        .collect::<BTreeSet<_>>();
-    let mut mismatches = Vec::new();
-
-    for input in &probed {
-        if !catalog_inputs.contains(input) {
-            mismatches.push(format!("real_entrypoint_probe_only.{input}"));
-        }
-    }
-    for input in catalog_inputs.difference(&surface_only_inputs) {
-        if !probed.contains(input) && !runtime_internal_inputs.contains(input) {
-            mismatches.push(format!("catalog_input_unclassified.{input}"));
-        }
-    }
-
-    mismatches
-}
-
 fn repo_root() -> PathBuf {
     if let Some(root) = std::env::var_os("WORKSPACE_ROOT") {
         return PathBuf::from(root);
@@ -383,17 +316,31 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn mob_catalog_input_names(
-    inputs: impl IntoIterator<Item = MobMachineCatalogInput>,
-) -> BTreeSet<&'static str> {
-    inputs
-        .into_iter()
-        .map(MobMachineCatalogInput::as_str)
+fn generated_mob_input_variants() -> BTreeSet<MobMachineInputVariant> {
+    MobMachineInput::variant_manifest()
+        .iter()
+        .copied()
         .collect()
 }
 
-fn critical_mob_runtime_command_inputs() -> BTreeSet<&'static str> {
-    mob_catalog_input_names([
+fn generated_meerkat_input_variants() -> BTreeSet<MeerkatMachineInputVariant> {
+    MeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .collect()
+}
+
+fn mob_catalog_input_variants(
+    inputs: impl IntoIterator<Item = MobMachineCatalogInput>,
+) -> BTreeSet<MobMachineInputVariant> {
+    inputs
+        .into_iter()
+        .map(MobMachineCatalogInput::input_variant)
+        .collect()
+}
+
+fn critical_mob_runtime_command_inputs() -> BTreeSet<MobMachineInputVariant> {
+    mob_catalog_input_variants([
         MobMachineCatalogInput::RunFlow,
         MobMachineCatalogInput::CancelFlow,
         MobMachineCatalogInput::TaskCreate,
@@ -462,13 +409,7 @@ fn mob_flow_projection_kernels_are_audited_as_non_canonical_support() {
         .into_iter()
         .map(|schema| schema.machine.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    let mob_schema = dsl_mob_machine();
-    let mob_inputs = mob_schema
-        .inputs
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str())
-        .collect::<BTreeSet<_>>();
+    let mob_inputs = generated_mob_input_variants();
     let audit = meerkat_mob::run::flow_projection_kernel_audit();
 
     assert_eq!(
@@ -500,9 +441,21 @@ fn mob_flow_projection_kernels_are_audited_as_non_canonical_support() {
             entry.module
         );
     }
-    let flow_authority_inputs = meerkat_mob::run::canonical_flow_authority_input_manifest()
+    let expected_flow_authority_inputs = std::iter::once(MobMachineCatalogInput::RunFlow)
+        .chain(
+            audit
+                .iter()
+                .flat_map(|entry| entry.owning_inputs.iter().copied()),
+        )
+        .map(MobMachineCatalogInput::input_variant)
+        .collect::<BTreeSet<_>>();
+    let flow_authority_inputs = meerkat_mob::run::canonical_flow_authority_input_variant_manifest()
         .into_iter()
         .collect::<BTreeSet<_>>();
+    assert_eq!(
+        flow_authority_inputs, expected_flow_authority_inputs,
+        "flow authority input manifest must exactly match the audited MobMachine authority alphabet"
+    );
     assert!(
         flow_authority_inputs.is_subset(&mob_inputs),
         "flow authority input manifest must name only canonical MobMachine inputs"
@@ -511,17 +464,12 @@ fn mob_flow_projection_kernels_are_audited_as_non_canonical_support() {
 
 #[test]
 fn mob_runtime_parity_production_command_manifest_closes_command_backed_inputs() {
-    let schema = dsl_mob_machine();
-    let catalog_inputs = schema
-        .inputs
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let production_command_manifest = meerkat_mob::canonical_mob_machine_command_manifest()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let command_backed_runtime_inputs = mob_catalog_input_names([
+    let catalog_inputs = generated_mob_input_variants();
+    let production_command_manifest =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let command_backed_runtime_inputs = mob_catalog_input_variants([
         MobMachineCatalogInput::RunFlow,
         MobMachineCatalogInput::CancelFlow,
         MobMachineCatalogInput::EnsureMember,
@@ -547,9 +495,10 @@ fn mob_runtime_parity_production_command_manifest_closes_command_backed_inputs()
 
 #[test]
 fn mob_runtime_parity_critical_command_inputs_cannot_be_shell_mechanics() {
-    let production_runtime_path = meerkat_mob::canonical_mob_machine_command_manifest()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let production_runtime_path =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
     let critical = critical_mob_runtime_command_inputs();
 
     assert!(
@@ -560,23 +509,19 @@ fn mob_runtime_parity_critical_command_inputs_cannot_be_shell_mechanics() {
 
 #[test]
 fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
-    let schema = dsl_mob_machine();
-    let catalog_inputs = schema
-        .inputs
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str())
-        .collect::<BTreeSet<_>>();
+    let catalog_inputs = generated_mob_input_variants();
     let records = meerkat_mob::canonical_mob_machine_runtime_internal_classifications();
     let classified = records
         .iter()
-        .map(|record| record.input.as_str())
+        .map(|record| record.input.input_variant())
         .collect::<BTreeSet<_>>();
-    let declared = schema
-        .runtime_internal_inputs
-        .iter()
-        .map(InputVariantId::as_str)
+    let declared = mob_machine_runtime_internal_input_variants()
+        .into_iter()
         .collect::<BTreeSet<_>>();
+    let typed_manifest =
+        meerkat_mob::canonical_mob_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
 
     assert!(
         !records.is_empty(),
@@ -586,9 +531,13 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
         classified, declared,
         "typed runtime-internal records must exactly match schema.runtime_internal_inputs"
     );
+    assert_eq!(
+        typed_manifest, declared,
+        "runtime-internal manifest must expose typed generated input variants"
+    );
     for record in records {
         assert!(
-            catalog_inputs.contains(record.input.as_str()),
+            catalog_inputs.contains(&record.input.input_variant()),
             "runtime-internal record {:?} must name a catalog input",
             record.input
         );
@@ -596,32 +545,132 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
 }
 
 #[test]
-fn mob_runtime_parity_runtime_internal_inputs_are_not_counted_as_real_probes() {
-    let schema = dsl_mob_machine();
-    let catalog_inputs = schema
-        .inputs
-        .variants
+fn meerkat_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
+    let catalog_inputs = generated_meerkat_input_variants();
+    let records = meerkat_runtime::canonical_meerkat_machine_runtime_internal_classifications();
+    let distinct_reasons = records.iter().fold(Vec::new(), |mut reasons, record| {
+        if !reasons.contains(&record.reason) {
+            reasons.push(record.reason);
+        }
+        reasons
+    });
+    let classified = records
         .iter()
-        .map(|variant| variant.name.as_str())
+        .map(|record| record.input.input_variant())
         .collect::<BTreeSet<_>>();
-    let runtime_internal_inputs = schema
-        .runtime_internal_inputs
+    let declared = meerkat_machine_runtime_internal_input_variants()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let typed_manifest =
+        meerkat_runtime::canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let interrupt_reason = records
         .iter()
-        .map(InputVariantId::as_str)
-        .collect::<BTreeSet<_>>();
-    let probed = MOB_RUNTIME_PARITY_REAL_ENTRYPOINT_PROBED_INPUT_VARIANTS
-        .iter()
-        .map(|input| input.as_str())
-        .collect::<BTreeSet<_>>();
+        .find(|record| {
+            record.input.input_variant() == MeerkatMachineInputVariant::InterruptCurrentRun
+        })
+        .map(|record| record.reason)
+        .expect("InterruptCurrentRun production evidence");
 
     assert!(
-        runtime_internal_inputs.is_subset(&catalog_inputs),
-        "runtime-internal declarations must name only catalog inputs"
+        !records.is_empty(),
+        "runtime-internal MeerkatMachine paths must be declared by typed production records"
     );
     assert!(
-        runtime_internal_inputs.is_disjoint(&probed),
-        "runtime-internal MobMachine inputs must not be counted as real entrypoint probes; \
-         those paths need dedicated production-path evidence before joining the probe manifest"
+        distinct_reasons.len() >= 8,
+        "runtime-internal MeerkatMachine paths must be anchored to real typed owner/path categories, got {distinct_reasons:?}"
+    );
+    assert_eq!(
+        classified, declared,
+        "typed MeerkatMachine runtime-internal records must exactly match schema.runtime_internal_inputs"
+    );
+    assert_eq!(
+        typed_manifest, declared,
+        "MeerkatMachine runtime-internal manifest must expose typed generated input variants"
+    );
+    for record in records {
+        assert!(
+            catalog_inputs.contains(&record.input.input_variant()),
+            "runtime-internal MeerkatMachine record {:?} must name a catalog input",
+            record.input
+        );
+    }
+    assert_eq!(
+        interrupt_reason,
+        meerkat_runtime::MeerkatMachineRuntimeInternalReason::UserInterruptDispatch,
+        "public user interrupt path must have typed production evidence"
+    );
+}
+
+#[test]
+fn meerkat_runtime_parity_fieldless_runtime_internal_manifest_matches_schema() {
+    let typed_owner_manifest = meerkat_runtime::MeerkatMachineFieldlessRuntimeInternalInput::ALL
+        .iter()
+        .copied()
+        .map(meerkat_runtime::MeerkatMachineFieldlessRuntimeInternalInput::input_variant)
+        .collect::<BTreeSet<_>>();
+    let typed_fieldless_manifest =
+        meerkat_runtime::canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let typed_runtime_internal_manifest =
+        meerkat_runtime::canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        typed_fieldless_manifest, typed_owner_manifest,
+        "fieldless runtime-internal inputs must be declared by the typed fieldless manifest"
+    );
+    assert!(
+        typed_fieldless_manifest.is_subset(&typed_runtime_internal_manifest),
+        "fieldless runtime-internal inputs must be a typed subset of runtime-internal production evidence"
+    );
+}
+
+#[test]
+fn mob_runtime_parity_legacy_manifests_preserve_string_api() {
+    let command_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_command_manifest()
+            .into_iter()
+            .collect();
+    let typed_command_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        command_manifest, typed_command_manifest,
+        "legacy MobMachine command manifest must remain a string projection of the typed manifest"
+    );
+
+    let runtime_internal_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_runtime_internal_manifest()
+            .into_iter()
+            .collect();
+    let typed_runtime_internal_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        runtime_internal_manifest, typed_runtime_internal_manifest,
+        "legacy MobMachine runtime-internal manifest must remain a string projection of the typed manifest"
+    );
+
+    let flow_authority_manifest: BTreeSet<&'static str> =
+        meerkat_mob::run::canonical_flow_authority_input_manifest()
+            .into_iter()
+            .collect();
+    let typed_flow_authority_manifest: BTreeSet<&'static str> =
+        meerkat_mob::run::canonical_flow_authority_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        flow_authority_manifest, typed_flow_authority_manifest,
+        "legacy flow authority manifest must remain a string projection of the typed manifest"
     );
 }
 
@@ -647,47 +696,6 @@ fn mob_machine_native_reducer_helpers_are_formally_defined() {
             "native helper `{helper}` must have a generated TLA operator definition"
         );
     }
-}
-
-#[test]
-fn mob_runtime_parity_probe_inventory_does_not_overclaim_real_entrypoints() {
-    let schema = dsl_mob_machine();
-    let mismatches = mob_runtime_parity_real_entrypoint_probe_manifest_mismatches(&schema);
-    assert!(
-        mismatches.is_empty(),
-        "Mob runtime parity real-entrypoint probe manifest must name only catalog inputs; got {mismatches:#?}"
-    );
-}
-
-#[test]
-fn mob_runtime_parity_probe_inventory_rejects_probe_only_inputs() {
-    let mut schema = dsl_mob_machine();
-    schema
-        .inputs
-        .variants
-        .retain(|variant| variant.name.as_str() != "Spawn");
-
-    assert_eq!(
-        mob_runtime_parity_real_entrypoint_probe_manifest_mismatches(&schema),
-        vec!["real_entrypoint_probe_only.Spawn"],
-        "the real-entrypoint probe manifest must fail if it names a non-catalog input"
-    );
-}
-
-#[test]
-fn mob_runtime_parity_probe_inventory_does_not_pretend_to_close_new_runtime_inputs() {
-    let mut schema = dsl_mob_machine();
-    schema.inputs.variants.push(VariantSchema {
-        name: EnumVariantId::parse("NewRuntimeInput").expect("variant id"),
-        fields: vec![],
-    });
-
-    assert_eq!(
-        mob_runtime_parity_real_entrypoint_probe_manifest_mismatches(&schema),
-        vec!["catalog_input_unclassified.NewRuntimeInput"],
-        "adding a non-surface MobMachine input must fail until it has a real entrypoint probe or \
-         a typed runtime-internal classification"
-    );
 }
 
 #[test]

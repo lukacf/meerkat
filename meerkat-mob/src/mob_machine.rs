@@ -223,19 +223,37 @@ pub(crate) enum MobMachineCommandResult {
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
+    canonical_mob_machine_command_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_mob_machine_command_input_variant_manifest() -> IndexSet<MobMachineInputVariant> {
     canonical_mob_machine_command_classifications()
         .into_iter()
-        .flat_map(|record| record.classification.catalog_inputs())
-        .map(MobMachineCatalogInput::as_str)
+        .flat_map(|record| record.classification.catalog_input_variants())
         .collect()
 }
 
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_mob_machine_runtime_internal_manifest() -> IndexSet<&'static str> {
+    canonical_mob_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_mob_machine_runtime_internal_input_variant_manifest()
+-> IndexSet<MobMachineInputVariant> {
     canonical_mob_machine_runtime_internal_classifications()
         .iter()
-        .map(|record| record.input.as_str())
+        .map(|record| record.input.input_variant())
         .collect()
 }
 
@@ -546,6 +564,65 @@ impl MobMachineCatalogInput {
             Self::KickoffResolveFailed => "KickoffResolveFailed",
             Self::KickoffCancelRequested => "KickoffCancelRequested",
             Self::KickoffClear => "KickoffClear",
+        }
+    }
+}
+
+impl MobMachineCommandVariant {
+    #[must_use]
+    pub const fn catalog_input(self) -> Option<MobMachineCatalogInput> {
+        match self {
+            #[cfg(test)]
+            Self::FlowTrackerCounts
+            | Self::OrchestratorSnapshot
+            | Self::LifecycleSnapshot
+            | Self::DslT2Snapshot
+            | Self::ListMembersMatching
+            | Self::Wire
+            | Self::Unwire => None,
+            #[cfg(not(test))]
+            Self::ListMembersMatching | Self::Wire | Self::Unwire => None,
+            Self::RunFlow => Some(MobMachineCatalogInput::RunFlow),
+            Self::CancelFlow => Some(MobMachineCatalogInput::CancelFlow),
+            Self::FlowStatus => Some(MobMachineCatalogInput::FlowStatus),
+            Self::Spawn => Some(MobMachineCatalogInput::Spawn),
+            Self::EnsureMember => Some(MobMachineCatalogInput::EnsureMember),
+            Self::Reconcile => Some(MobMachineCatalogInput::Reconcile),
+            Self::Retire => Some(MobMachineCatalogInput::Retire),
+            Self::Respawn => Some(MobMachineCatalogInput::Respawn),
+            Self::RetireAll => Some(MobMachineCatalogInput::RetireAll),
+            Self::SubmitWork => Some(MobMachineCatalogInput::SubmitWork),
+            Self::CancelWork => Some(MobMachineCatalogInput::CancelWork),
+            Self::CancelAllWork => Some(MobMachineCatalogInput::CancelAllWork),
+            Self::Stop => Some(MobMachineCatalogInput::Stop),
+            Self::Resume => Some(MobMachineCatalogInput::Resume),
+            Self::Complete => Some(MobMachineCatalogInput::Complete),
+            Self::Reset => Some(MobMachineCatalogInput::Reset),
+            Self::Destroy => Some(MobMachineCatalogInput::Destroy),
+            Self::TaskCreate => Some(MobMachineCatalogInput::TaskCreate),
+            Self::TaskUpdate => Some(MobMachineCatalogInput::TaskUpdate),
+            Self::TaskList => Some(MobMachineCatalogInput::TaskList),
+            Self::TaskGet => Some(MobMachineCatalogInput::TaskGet),
+            Self::McpServerStates => Some(MobMachineCatalogInput::McpServerStates),
+            Self::RosterSnapshot => Some(MobMachineCatalogInput::RosterSnapshot),
+            Self::ListMembers => Some(MobMachineCatalogInput::ListMembers),
+            Self::ListMembersIncludingRetiring => {
+                Some(MobMachineCatalogInput::ListMembersIncludingRetiring)
+            }
+            Self::ListAllMembers => Some(MobMachineCatalogInput::ListAllMembers),
+            Self::MemberStatus => Some(MobMachineCatalogInput::MemberStatus),
+            Self::SubscribeAgentEvents => Some(MobMachineCatalogInput::SubscribeAgentEvents),
+            Self::SubscribeAllAgentEvents => Some(MobMachineCatalogInput::SubscribeAllAgentEvents),
+            Self::SubscribeMobEvents => Some(MobMachineCatalogInput::SubscribeMobEvents),
+            Self::PollEvents => Some(MobMachineCatalogInput::PollEvents),
+            Self::ReplayAllEvents => Some(MobMachineCatalogInput::ReplayAllEvents),
+            Self::RecordOperatorActionProvenance => {
+                Some(MobMachineCatalogInput::RecordOperatorActionProvenance)
+            }
+            Self::GetMember => Some(MobMachineCatalogInput::GetMember),
+            Self::SetSpawnPolicy => Some(MobMachineCatalogInput::SetSpawnPolicy),
+            Self::Shutdown => Some(MobMachineCatalogInput::Shutdown),
+            Self::ForceCancel => Some(MobMachineCatalogInput::ForceCancel),
         }
     }
 }

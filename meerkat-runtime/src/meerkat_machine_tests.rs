@@ -24,7 +24,13 @@ use meerkat_machine_kernels::test_oracle::{
     GeneratedMachineKernel, KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
     TransitionRefusal,
 };
-use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine as schema_meerkat_machine;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as schema_meerkat_machine,
+    meerkat_machine::{
+        MeerkatMachineInput as SchemaMeerkatMachineInput,
+        MeerkatMachineInputVariant as SchemaMeerkatMachineInputVariant,
+    },
+};
 use meerkat_machine_schema::{MachineSchema, TypeRef};
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -3079,16 +3085,16 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         "test probe should observe the store after durable destroyed commit",
     );
 
-    let sessions = adapter.sessions.read().await;
-    let entry = sessions
-        .get(&session_id)
-        .expect("destroy keeps the session entry available for terminal snapshots");
-    assert_eq!(
-        entry.control_snapshot().phase,
-        RuntimeState::Destroyed,
-        "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
-    );
     {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("destroy keeps the session entry available for terminal snapshots");
+        assert_eq!(
+            entry.control_snapshot().phase,
+            RuntimeState::Destroyed,
+            "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+        );
         let authority = entry
             .dsl_authority
             .lock()
@@ -3099,7 +3105,6 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             "durable destroyed state must not race ahead of canonical DSL destroy truth",
         );
     }
-    drop(sessions);
 
     store.release_destroy_commit.notify_waiters();
     let report = tokio::time::timeout(Duration::from_secs(2), destroy_task)
@@ -4380,6 +4385,53 @@ async fn hard_cancel_current_run_returns_not_ready_without_attached_loop() {
         }
         other => panic!("expected NotReady(Idle), got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn raw_fieldless_runtime_internal_stage_is_rejected_before_dsl_apply() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let err = adapter
+        .stage_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+            "raw interrupt bypass probe",
+        )
+        .await
+        .expect_err(
+            "raw fieldless runtime-internal input must not stage through the generic DSL gate",
+        );
+
+    assert!(
+        err.contains("must use typed runtime-internal staging authority"),
+        "raw fieldless runtime-internal staging must fail before DSL apply, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn raw_fieldless_runtime_internal_routed_input_is_rejected_before_dsl_apply() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let err = adapter
+        .apply_routed_meerkat_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+        )
+        .await
+        .expect_err(
+            "raw fieldless runtime-internal input must not apply through routed input delivery",
+        );
+
+    assert!(
+        err.contains("must use typed runtime-internal staging authority"),
+        "raw fieldless runtime-internal routed input must fail before DSL apply, got {err}"
+    );
 }
 
 #[tokio::test]
@@ -15601,7 +15653,7 @@ struct RuntimeParitySchemaTransitionSummary {
 
 #[derive(Debug, Clone)]
 struct RuntimeParitySchemaRow {
-    input_variant: String,
+    input_variant: SchemaMeerkatMachineInputVariant,
     classification: RuntimeParityClassification,
     left: Vec<RuntimeParitySchemaTransitionSummary>,
     right: Vec<RuntimeParitySchemaTransitionSummary>,
@@ -15889,47 +15941,95 @@ fn runtime_parity_target_pairs() -> &'static [(RuntimeParityPhase, RuntimeParity
     ]
 }
 
-fn runtime_parity_probe_for_input_variant(input_variant: &str) -> Option<RuntimeParityProbeInput> {
+fn runtime_parity_probe_for_input_variant(
+    input_variant: SchemaMeerkatMachineInputVariant,
+) -> Option<RuntimeParityProbeInput> {
     match input_variant {
-        "RegisterSession" => Some(RuntimeParityProbeInput::RegisterSession),
-        "UnregisterSession" => Some(RuntimeParityProbeInput::UnregisterSession),
-        "EnsureSessionWithExecutor" => Some(RuntimeParityProbeInput::EnsureSessionWithExecutor),
-        "SetSilentIntents" => Some(RuntimeParityProbeInput::SetSilentIntents),
-        "ReconfigureSessionLlmIdentity" => {
+        SchemaMeerkatMachineInputVariant::RegisterSession => {
+            Some(RuntimeParityProbeInput::RegisterSession)
+        }
+        SchemaMeerkatMachineInputVariant::UnregisterSession => {
+            Some(RuntimeParityProbeInput::UnregisterSession)
+        }
+        SchemaMeerkatMachineInputVariant::EnsureSessionWithExecutor => {
+            Some(RuntimeParityProbeInput::EnsureSessionWithExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::SetSilentIntents => {
+            Some(RuntimeParityProbeInput::SetSilentIntents)
+        }
+        SchemaMeerkatMachineInputVariant::ReconfigureSessionLlmIdentity => {
             Some(RuntimeParityProbeInput::ReconfigureSessionLlmIdentity)
         }
-        "ContainsSession" => Some(RuntimeParityProbeInput::ContainsSession),
-        "SessionHasExecutor" => Some(RuntimeParityProbeInput::SessionHasExecutor),
-        "SessionHasComms" => Some(RuntimeParityProbeInput::SessionHasComms),
-        "OpsLifecycleRegistry" => Some(RuntimeParityProbeInput::OpsLifecycleRegistry),
-        "PrepareBindings" => Some(RuntimeParityProbeInput::PrepareBindings),
-        "InputState" => Some(RuntimeParityProbeInput::InputState),
-        "ListActiveInputs" => Some(RuntimeParityProbeInput::ListActiveInputs),
-        "SetPeerIngressContext" => Some(RuntimeParityProbeInput::SetPeerIngressContext),
-        "NotifyDrainExited" => Some(RuntimeParityProbeInput::NotifyDrainExited),
-        "InterruptCurrentRun" => Some(RuntimeParityProbeInput::InterruptCurrentRun),
-        "CancelAfterBoundary" => Some(RuntimeParityProbeInput::CancelAfterBoundary),
-        "StagePersistentFilter" => Some(RuntimeParityProbeInput::StagePersistentFilter),
-        "RequestDeferredTools" => Some(RuntimeParityProbeInput::RequestDeferredTools),
-        "PublishCommittedVisibleSet" => Some(RuntimeParityProbeInput::PublishCommittedVisibleSet),
-        "AbortAll" => Some(RuntimeParityProbeInput::AbortAll),
-        "Abort" => Some(RuntimeParityProbeInput::Abort),
-        "Wait" => Some(RuntimeParityProbeInput::Wait),
-        "Ingest" => Some(RuntimeParityProbeInput::Ingest),
-        "PublishEvent" => Some(RuntimeParityProbeInput::PublishEvent),
-        "Recover" => Some(RuntimeParityProbeInput::Recover),
-        "Retire" => Some(RuntimeParityProbeInput::Retire),
-        "Recycle" => Some(RuntimeParityProbeInput::Recycle),
-        "RuntimeState" => Some(RuntimeParityProbeInput::RuntimeState),
-        "LoadBoundaryReceipt" => Some(RuntimeParityProbeInput::LoadBoundaryReceipt),
-        "AcceptWithCompletion" => Some(RuntimeParityProbeInput::AcceptWithCompletion),
-        "AcceptWithoutWake" => Some(RuntimeParityProbeInput::AcceptWithoutWake),
-        "Prepare" => Some(RuntimeParityProbeInput::Prepare),
-        "Commit" => Some(RuntimeParityProbeInput::Commit),
-        "Fail" => Some(RuntimeParityProbeInput::Fail),
-        "Reset" => Some(RuntimeParityProbeInput::Reset),
-        "StopRuntimeExecutor" => Some(RuntimeParityProbeInput::StopRuntimeExecutor),
-        "Destroy" => Some(RuntimeParityProbeInput::Destroy),
+        SchemaMeerkatMachineInputVariant::ContainsSession => {
+            Some(RuntimeParityProbeInput::ContainsSession)
+        }
+        SchemaMeerkatMachineInputVariant::SessionHasExecutor => {
+            Some(RuntimeParityProbeInput::SessionHasExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::SessionHasComms => {
+            Some(RuntimeParityProbeInput::SessionHasComms)
+        }
+        SchemaMeerkatMachineInputVariant::OpsLifecycleRegistry => {
+            Some(RuntimeParityProbeInput::OpsLifecycleRegistry)
+        }
+        SchemaMeerkatMachineInputVariant::PrepareBindings => {
+            Some(RuntimeParityProbeInput::PrepareBindings)
+        }
+        SchemaMeerkatMachineInputVariant::InputState => Some(RuntimeParityProbeInput::InputState),
+        SchemaMeerkatMachineInputVariant::ListActiveInputs => {
+            Some(RuntimeParityProbeInput::ListActiveInputs)
+        }
+        SchemaMeerkatMachineInputVariant::SetPeerIngressContext => {
+            Some(RuntimeParityProbeInput::SetPeerIngressContext)
+        }
+        SchemaMeerkatMachineInputVariant::NotifyDrainExited => {
+            Some(RuntimeParityProbeInput::NotifyDrainExited)
+        }
+        SchemaMeerkatMachineInputVariant::InterruptCurrentRun => {
+            Some(RuntimeParityProbeInput::InterruptCurrentRun)
+        }
+        SchemaMeerkatMachineInputVariant::CancelAfterBoundary => {
+            Some(RuntimeParityProbeInput::CancelAfterBoundary)
+        }
+        SchemaMeerkatMachineInputVariant::StagePersistentFilter => {
+            Some(RuntimeParityProbeInput::StagePersistentFilter)
+        }
+        SchemaMeerkatMachineInputVariant::RequestDeferredTools => {
+            Some(RuntimeParityProbeInput::RequestDeferredTools)
+        }
+        SchemaMeerkatMachineInputVariant::PublishCommittedVisibleSet => {
+            Some(RuntimeParityProbeInput::PublishCommittedVisibleSet)
+        }
+        SchemaMeerkatMachineInputVariant::AbortAll => Some(RuntimeParityProbeInput::AbortAll),
+        SchemaMeerkatMachineInputVariant::Abort => Some(RuntimeParityProbeInput::Abort),
+        SchemaMeerkatMachineInputVariant::Wait => Some(RuntimeParityProbeInput::Wait),
+        SchemaMeerkatMachineInputVariant::Ingest => Some(RuntimeParityProbeInput::Ingest),
+        SchemaMeerkatMachineInputVariant::PublishEvent => {
+            Some(RuntimeParityProbeInput::PublishEvent)
+        }
+        SchemaMeerkatMachineInputVariant::Recover => Some(RuntimeParityProbeInput::Recover),
+        SchemaMeerkatMachineInputVariant::Retire => Some(RuntimeParityProbeInput::Retire),
+        SchemaMeerkatMachineInputVariant::Recycle => Some(RuntimeParityProbeInput::Recycle),
+        SchemaMeerkatMachineInputVariant::RuntimeState => {
+            Some(RuntimeParityProbeInput::RuntimeState)
+        }
+        SchemaMeerkatMachineInputVariant::LoadBoundaryReceipt => {
+            Some(RuntimeParityProbeInput::LoadBoundaryReceipt)
+        }
+        SchemaMeerkatMachineInputVariant::AcceptWithCompletion => {
+            Some(RuntimeParityProbeInput::AcceptWithCompletion)
+        }
+        SchemaMeerkatMachineInputVariant::AcceptWithoutWake => {
+            Some(RuntimeParityProbeInput::AcceptWithoutWake)
+        }
+        SchemaMeerkatMachineInputVariant::Prepare => Some(RuntimeParityProbeInput::Prepare),
+        SchemaMeerkatMachineInputVariant::Commit => Some(RuntimeParityProbeInput::Commit),
+        SchemaMeerkatMachineInputVariant::Fail => Some(RuntimeParityProbeInput::Fail),
+        SchemaMeerkatMachineInputVariant::Reset => Some(RuntimeParityProbeInput::Reset),
+        SchemaMeerkatMachineInputVariant::StopRuntimeExecutor => {
+            Some(RuntimeParityProbeInput::StopRuntimeExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::Destroy => Some(RuntimeParityProbeInput::Destroy),
         _ => None,
     }
 }
@@ -16582,7 +16682,9 @@ fn runtime_modeled_kernel_input(
     before: &RuntimeParitySnapshotSummary,
     probe: RuntimeParityProbeInput,
 ) -> Result<KernelInput, String> {
-    let variant_name = runtime_parity_probe_variant_name(probe).to_string();
+    let variant_name = runtime_parity_probe_input_variant(probe)
+        .as_str()
+        .to_string();
     let input_variant = schema
         .inputs
         .variant_named(&variant_name)
@@ -16702,45 +16804,108 @@ fn runtime_modeled_kernel_input(
     Ok(KernelInput { variant, fields })
 }
 
-fn runtime_parity_probe_variant_name(probe: RuntimeParityProbeInput) -> &'static str {
+fn runtime_parity_probe_input_variant(
+    probe: RuntimeParityProbeInput,
+) -> SchemaMeerkatMachineInputVariant {
     match probe {
-        RuntimeParityProbeInput::RegisterSession => "RegisterSession",
-        RuntimeParityProbeInput::UnregisterSession => "UnregisterSession",
-        RuntimeParityProbeInput::EnsureSessionWithExecutor => "EnsureSessionWithExecutor",
-        RuntimeParityProbeInput::SetSilentIntents => "SetSilentIntents",
-        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => "ReconfigureSessionLlmIdentity",
-        RuntimeParityProbeInput::ContainsSession => "ContainsSession",
-        RuntimeParityProbeInput::SessionHasExecutor => "SessionHasExecutor",
-        RuntimeParityProbeInput::SessionHasComms => "SessionHasComms",
-        RuntimeParityProbeInput::OpsLifecycleRegistry => "OpsLifecycleRegistry",
-        RuntimeParityProbeInput::PrepareBindings => "PrepareBindings",
-        RuntimeParityProbeInput::InputState => "InputState",
-        RuntimeParityProbeInput::ListActiveInputs => "ListActiveInputs",
-        RuntimeParityProbeInput::SetPeerIngressContext => "SetPeerIngressContext",
-        RuntimeParityProbeInput::NotifyDrainExited => "NotifyDrainExited",
-        RuntimeParityProbeInput::InterruptCurrentRun => "InterruptCurrentRun",
-        RuntimeParityProbeInput::CancelAfterBoundary => "CancelAfterBoundary",
-        RuntimeParityProbeInput::StagePersistentFilter => "StagePersistentFilter",
-        RuntimeParityProbeInput::RequestDeferredTools => "RequestDeferredTools",
-        RuntimeParityProbeInput::PublishCommittedVisibleSet => "PublishCommittedVisibleSet",
-        RuntimeParityProbeInput::AbortAll => "AbortAll",
-        RuntimeParityProbeInput::Abort => "Abort",
-        RuntimeParityProbeInput::Wait => "Wait",
-        RuntimeParityProbeInput::Ingest => "Ingest",
-        RuntimeParityProbeInput::PublishEvent => "PublishEvent",
-        RuntimeParityProbeInput::Recover => "Recover",
-        RuntimeParityProbeInput::Retire => "Retire",
-        RuntimeParityProbeInput::Recycle => "Recycle",
-        RuntimeParityProbeInput::RuntimeState => "RuntimeState",
-        RuntimeParityProbeInput::LoadBoundaryReceipt => "LoadBoundaryReceipt",
-        RuntimeParityProbeInput::AcceptWithCompletion => "AcceptWithCompletion",
-        RuntimeParityProbeInput::AcceptWithoutWake => "AcceptWithoutWake",
-        RuntimeParityProbeInput::Prepare => "Prepare",
-        RuntimeParityProbeInput::Commit => "Commit",
-        RuntimeParityProbeInput::Fail => "Fail",
-        RuntimeParityProbeInput::Reset => "Reset",
-        RuntimeParityProbeInput::StopRuntimeExecutor => "StopRuntimeExecutor",
-        RuntimeParityProbeInput::Destroy => "Destroy",
+        RuntimeParityProbeInput::RegisterSession => {
+            SchemaMeerkatMachineInputVariant::RegisterSession
+        }
+        RuntimeParityProbeInput::UnregisterSession => {
+            SchemaMeerkatMachineInputVariant::UnregisterSession
+        }
+        RuntimeParityProbeInput::EnsureSessionWithExecutor => {
+            SchemaMeerkatMachineInputVariant::EnsureSessionWithExecutor
+        }
+        RuntimeParityProbeInput::SetSilentIntents => {
+            SchemaMeerkatMachineInputVariant::SetSilentIntents
+        }
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => {
+            SchemaMeerkatMachineInputVariant::ReconfigureSessionLlmIdentity
+        }
+        RuntimeParityProbeInput::ContainsSession => {
+            SchemaMeerkatMachineInputVariant::ContainsSession
+        }
+        RuntimeParityProbeInput::SessionHasExecutor => {
+            SchemaMeerkatMachineInputVariant::SessionHasExecutor
+        }
+        RuntimeParityProbeInput::SessionHasComms => {
+            SchemaMeerkatMachineInputVariant::SessionHasComms
+        }
+        RuntimeParityProbeInput::OpsLifecycleRegistry => {
+            SchemaMeerkatMachineInputVariant::OpsLifecycleRegistry
+        }
+        RuntimeParityProbeInput::PrepareBindings => {
+            SchemaMeerkatMachineInputVariant::PrepareBindings
+        }
+        RuntimeParityProbeInput::InputState => SchemaMeerkatMachineInputVariant::InputState,
+        RuntimeParityProbeInput::ListActiveInputs => {
+            SchemaMeerkatMachineInputVariant::ListActiveInputs
+        }
+        RuntimeParityProbeInput::SetPeerIngressContext => {
+            SchemaMeerkatMachineInputVariant::SetPeerIngressContext
+        }
+        RuntimeParityProbeInput::NotifyDrainExited => {
+            SchemaMeerkatMachineInputVariant::NotifyDrainExited
+        }
+        RuntimeParityProbeInput::InterruptCurrentRun => {
+            SchemaMeerkatMachineInputVariant::InterruptCurrentRun
+        }
+        RuntimeParityProbeInput::CancelAfterBoundary => {
+            SchemaMeerkatMachineInputVariant::CancelAfterBoundary
+        }
+        RuntimeParityProbeInput::StagePersistentFilter => {
+            SchemaMeerkatMachineInputVariant::StagePersistentFilter
+        }
+        RuntimeParityProbeInput::RequestDeferredTools => {
+            SchemaMeerkatMachineInputVariant::RequestDeferredTools
+        }
+        RuntimeParityProbeInput::PublishCommittedVisibleSet => {
+            SchemaMeerkatMachineInputVariant::PublishCommittedVisibleSet
+        }
+        RuntimeParityProbeInput::AbortAll => SchemaMeerkatMachineInputVariant::AbortAll,
+        RuntimeParityProbeInput::Abort => SchemaMeerkatMachineInputVariant::Abort,
+        RuntimeParityProbeInput::Wait => SchemaMeerkatMachineInputVariant::Wait,
+        RuntimeParityProbeInput::Ingest => SchemaMeerkatMachineInputVariant::Ingest,
+        RuntimeParityProbeInput::PublishEvent => SchemaMeerkatMachineInputVariant::PublishEvent,
+        RuntimeParityProbeInput::Recover => SchemaMeerkatMachineInputVariant::Recover,
+        RuntimeParityProbeInput::Retire => SchemaMeerkatMachineInputVariant::Retire,
+        RuntimeParityProbeInput::Recycle => SchemaMeerkatMachineInputVariant::Recycle,
+        RuntimeParityProbeInput::RuntimeState => SchemaMeerkatMachineInputVariant::RuntimeState,
+        RuntimeParityProbeInput::LoadBoundaryReceipt => {
+            SchemaMeerkatMachineInputVariant::LoadBoundaryReceipt
+        }
+        RuntimeParityProbeInput::AcceptWithCompletion => {
+            SchemaMeerkatMachineInputVariant::AcceptWithCompletion
+        }
+        RuntimeParityProbeInput::AcceptWithoutWake => {
+            SchemaMeerkatMachineInputVariant::AcceptWithoutWake
+        }
+        RuntimeParityProbeInput::Prepare => SchemaMeerkatMachineInputVariant::Prepare,
+        RuntimeParityProbeInput::Commit => SchemaMeerkatMachineInputVariant::Commit,
+        RuntimeParityProbeInput::Fail => SchemaMeerkatMachineInputVariant::Fail,
+        RuntimeParityProbeInput::Reset => SchemaMeerkatMachineInputVariant::Reset,
+        RuntimeParityProbeInput::StopRuntimeExecutor => {
+            SchemaMeerkatMachineInputVariant::StopRuntimeExecutor
+        }
+        RuntimeParityProbeInput::Destroy => SchemaMeerkatMachineInputVariant::Destroy,
+    }
+}
+
+#[test]
+fn runtime_parity_probe_manifest_round_trips_through_typed_generated_variants() {
+    for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+    {
+        let Some(probe) = runtime_parity_probe_for_input_variant(input_variant) else {
+            continue;
+        };
+        assert_eq!(
+            runtime_parity_probe_input_variant(probe),
+            input_variant,
+            "runtime parity probe mapping must round-trip through typed generated input variants"
+        );
     }
 }
 
@@ -18406,8 +18571,9 @@ async fn probe_runtime_parity_row(
 fn runtime_parity_schema_transition_summaries_for_phase_input(
     schema: &MachineSchema,
     phase: &str,
-    input_variant: &str,
+    input_variant: SchemaMeerkatMachineInputVariant,
 ) -> Vec<RuntimeParitySchemaTransitionSummary> {
+    let input_variant_name = input_variant.as_str();
     let mut summaries = schema
         .transitions
         .iter()
@@ -18415,7 +18581,7 @@ fn runtime_parity_schema_transition_summaries_for_phase_input(
             matches!(
                 &transition.on,
                 meerkat_machine_schema::TriggerMatch::Input { variant, .. }
-                    if variant.as_str() == input_variant
+                    if variant.as_str() == input_variant_name
             ) && transition.from.iter().any(|from| from.as_str() == phase)
         })
         .map(|transition| RuntimeParitySchemaTransitionSummary {
@@ -18501,23 +18667,26 @@ fn runtime_parity_schema_rows_for_pair(
 ) -> Vec<RuntimeParitySchemaRow> {
     let mut rows = Vec::new();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+    {
         let left = runtime_parity_schema_transition_summaries_for_phase_input(
             schema,
             left_phase.schema_name(),
-            input_variant.name.as_str(),
+            input_variant,
         );
         let right = runtime_parity_schema_transition_summaries_for_phase_input(
             schema,
             right_phase.schema_name(),
-            input_variant.name.as_str(),
+            input_variant,
         );
         if left.is_empty() && right.is_empty() {
             continue;
         }
 
         rows.push(RuntimeParitySchemaRow {
-            input_variant: input_variant.name.as_str().to_string(),
+            input_variant,
             classification: classify_runtime_parity_schema_row(&left, &right),
             left,
             right,
@@ -18544,7 +18713,7 @@ async fn build_runtime_parity_pair_report(
     for schema_row in runtime_parity_schema_rows_for_pair(static_schema, left_phase, right_phase) {
         let probe_required = !surface_only_inputs.contains(schema_row.input_variant.as_str());
         let probe =
-            runtime_parity_probe_for_input_variant(&schema_row.input_variant).map(|probe_input| {
+            runtime_parity_probe_for_input_variant(schema_row.input_variant).map(|probe_input| {
                 Box::pin(probe_runtime_parity_row(
                     modeled_schema,
                     left_phase,
@@ -18581,7 +18750,7 @@ async fn build_runtime_parity_pair_report(
         };
 
         rows.push(RuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             static_schema_classification: schema_row.classification,
             static_schema_left: schema_row.left,
@@ -18696,15 +18865,18 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
         RuntimeParityPhase::Retired,
         RuntimeParityPhase::Stopped,
     ] {
-        for input_variant in &schema.inputs.variants {
-            if surface_only_inputs.contains(input_variant.name.as_str()) {
+        for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+            .iter()
+            .copied()
+        {
+            let input_variant_name = input_variant.as_str();
+            if surface_only_inputs.contains(input_variant_name) {
                 continue;
             }
-            let Some(probe) = runtime_parity_probe_for_input_variant(input_variant.name.as_str())
-            else {
+            let Some(probe) = runtime_parity_probe_for_input_variant(input_variant) else {
                 rows.push(RuntimeModeledStateRowReport {
                     phase: phase.schema_name().to_string(),
-                    input_variant: input_variant.name.as_str().to_string(),
+                    input_variant: input_variant_name.to_string(),
                     aligned: false,
                     differing_keys: vec!["unprobed".to_string()],
                     runtime: RuntimeModeledStateRuntimeReport {
@@ -18740,7 +18912,7 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
 
             rows.push(RuntimeModeledStateRowReport {
                 phase: phase.schema_name().to_string(),
-                input_variant: input_variant.name.as_str().to_string(),
+                input_variant: input_variant_name.to_string(),
                 aligned,
                 differing_keys,
                 runtime: runtime_report,

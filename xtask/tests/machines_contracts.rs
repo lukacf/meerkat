@@ -220,7 +220,7 @@ fn peer_response_terminal_projection_ratchet_rejects_core_string_identity_bus() 
     fs::create_dir_all(&core).expect("create core dir");
     fs::write(
         core.join("handles.rs"),
-        r#"
+        r"
 pub struct PeerResponseTerminalSource {
     pub transport_identity: Option<String>,
     pub route_identity: String,
@@ -236,7 +236,7 @@ impl PeerResponseTerminalFact {
         peer_response_terminal_context_key(&self.source.route_identity, &self.correlation_id)
     }
 }
-"#,
+",
     )
     .expect("write core handles file");
 
@@ -277,22 +277,22 @@ fn peer_response_terminal_projection_ratchet_rejects_shell_peer_name_identity_bu
     fs::create_dir_all(rpc.join("handlers")).expect("create rpc handlers dir");
     fs::write(
         contracts.join("runtime.rs"),
-        r#"
+        r"
 pub struct SessionPeerResponseTerminalParams {
     pub peer_name: PeerName,
 }
-"#,
+",
     )
     .expect("write contract boundary file");
     fs::write(
         rpc.join("session_runtime.rs"),
-        r#"
+        r"
 fn bad(peer_name: PeerName) {
     let route = PeerResponseTerminalRouteIdentity::parse(peer_name.as_str().to_string());
     let display = PeerResponseTerminalDisplayIdentity::parse(peer_name.as_str().to_string());
     let _ = peer_response_terminal_input(&peer_name, request_id, status, result);
 }
-"#,
+",
     )
     .expect("write rpc boundary file");
 

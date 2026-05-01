@@ -3593,15 +3593,14 @@ impl SessionRuntime {
         }
 
         #[cfg(feature = "mob")]
-        if let Some(mob_state) = self.mob_state() {
-            if mob_state.owns_live_bridge_session(session_id).await
-                || mob_state.owns_persisted_bridge_session(session_id).await
-            {
-                match mob_state.session_service().read(session_id).await {
-                    Ok(_) => return Ok(true),
-                    Err(SessionError::NotFound { .. }) => {}
-                    Err(err) => return Err(session_error_to_rpc(err)),
-                }
+        if let Some(mob_state) = self.mob_state()
+            && (mob_state.owns_live_bridge_session(session_id).await
+                || mob_state.owns_persisted_bridge_session(session_id).await)
+        {
+            match mob_state.session_service().read(session_id).await {
+                Ok(_) => return Ok(true),
+                Err(SessionError::NotFound { .. }) => {}
+                Err(err) => return Err(session_error_to_rpc(err)),
             }
         }
 

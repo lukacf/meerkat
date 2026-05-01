@@ -700,7 +700,8 @@ impl MeerkatMcpState {
             factory = factory.user_config_root(user_root);
         }
 
-        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
@@ -1158,6 +1159,14 @@ fn mcp_turn_metadata(
     (!metadata.is_empty()).then_some(metadata)
 }
 
+fn mcp_create_turn_metadata_model(
+    requested_model: Option<&str>,
+    provider: Option<Provider>,
+    resolved_model: &str,
+) -> Option<String> {
+    (requested_model.is_some() || provider.is_some()).then(|| resolved_model.to_string())
+}
+
 fn resume_turn_metadata(
     input: McpTurnMetadataInput,
 ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
@@ -1243,6 +1252,16 @@ async fn apply_mcp_resume_keep_alive_override(
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
         .await;
     Ok(())
+}
+
+fn mcp_resume_should_rematerialize(error: &SessionError) -> bool {
+    match error {
+        SessionError::NotFound { .. } => true,
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(message)) => {
+            message.contains("stored-session recovery via non-canonical runtime-binding providers")
+        }
+        _ => false,
+    }
 }
 
 /// Tool result provided by the MCP client
@@ -2869,7 +2888,7 @@ async fn handle_meerkat_run(
         skill_references: skill_references.clone(),
         flow_tool_overlay: None,
         additional_instructions: input.additional_instructions.clone(),
-        model: input.model.clone(),
+        model: mcp_create_turn_metadata_model(input.model.as_deref(), provider_override, &model),
         provider: provider_override,
         provider_params: input.provider_params.clone(),
         provider_for_params,
@@ -3216,9 +3235,13 @@ async fn handle_meerkat_resume(
         )),
     };
 
+    let mut session_rematerialized = false;
     let result = if needs_rebuild {
         match state.service.create_session(create_req).await {
-            Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
+            Ok(_) => {
+                session_rematerialized = true;
+                state.service.start_turn(&session_id, make_turn_req()).await
+            }
             Err(error) => Err(error),
         }
     } else {
@@ -3229,9 +3252,12 @@ async fn handle_meerkat_resume(
         // from a prior meerkat_run in the same MCP server process).
         match state.service.start_turn(&session_id, make_turn_req()).await {
             Ok(run_result) => Ok(run_result),
-            Err(SessionError::NotFound { .. }) => {
+            Err(error) if mcp_resume_should_rematerialize(&error) => {
                 match state.service.create_session(create_req).await {
-                    Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
+                    Ok(_) => {
+                        session_rematerialized = true;
+                        state.service.start_turn(&session_id, make_turn_req()).await
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -3264,7 +3290,7 @@ async fn handle_meerkat_resume(
     // Manage comms drain lifecycle for rebuilt sessions after the session
     // commit boundary. keep_alive may commit independently of turn success.
     #[cfg(feature = "comms")]
-    if session_exists && needs_rebuild {
+    if session_exists && (needs_rebuild || session_rematerialized) {
         let comms_rt = state.service.comms_runtime(&session_id).await;
         state
             .runtime_adapter
@@ -3619,6 +3645,20 @@ mod tests {
         assert!(metadata.provider_params.is_some());
         assert!(metadata.connection_ref.is_some());
         assert!(metadata.keep_alive.is_some());
+    }
+
+    #[test]
+    fn mcp_create_provider_only_metadata_includes_resolved_model() {
+        assert_eq!(
+            mcp_create_turn_metadata_model(None, Some(meerkat_core::Provider::OpenAI), "gpt-5.4"),
+            Some("gpt-5.4".to_string()),
+            "provider-only MCP run must carry resolved model in RuntimeTurnMetadata"
+        );
+        assert_eq!(
+            mcp_create_turn_metadata_model(None, None, "gpt-5.4"),
+            None,
+            "default run without provider/model should not stamp metadata identity"
+        );
     }
 
     #[test]
@@ -4675,6 +4715,51 @@ mod tests {
             err.message.contains("comms_name"),
             "unexpected error: {}",
             err.message
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn mcp_resume_keep_alive_rematerialization_refreshes_peer_ingress() {
+        let (state, session_id) =
+            state_with_persisted_session_metadata(false, Some("persisted-agent".to_string())).await;
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings");
+        state
+            .upsert_mcp_adapter(
+                &session_id,
+                Arc::new(meerkat_mcp::McpRouterAdapter::new(
+                    McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
+                )),
+            )
+            .await;
+        assert!(
+            state.service.comms_runtime(&session_id).await.is_none(),
+            "fixture must start without live service comms runtime"
+        );
+        assert!(
+            !state.runtime_adapter.session_has_comms(&session_id).await,
+            "fixture must start without adapter comms binding"
+        );
+
+        let input: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": session_id.to_string(),
+            "prompt": "resume after restart",
+            "keep_alive": true
+        }))
+        .expect("valid resume input");
+        let result = Box::pin(handle_meerkat_resume(&state, input, None, None)).await;
+        assert!(
+            result.is_ok(),
+            "resume should succeed with persisted comms_name: {result:?}"
+        );
+
+        assert!(
+            state.runtime_adapter.session_has_comms(&session_id).await,
+            "rematerialized MCP resume must refresh peer ingress with recovered comms runtime"
         );
     }
 

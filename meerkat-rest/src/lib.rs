@@ -935,6 +935,14 @@ fn rest_create_turn_metadata(
     (!metadata.is_empty()).then_some(metadata)
 }
 
+fn rest_create_turn_metadata_model(
+    requested_model: Option<&str>,
+    provider: Option<Provider>,
+    resolved_model: &str,
+) -> Option<String> {
+    (requested_model.is_some() || provider.is_some()).then(|| resolved_model.to_string())
+}
+
 fn runtime_metadata_provider_params_for_build(
     metadata: Option<&RuntimeTurnMetadata>,
 ) -> Option<Value> {
@@ -2770,7 +2778,7 @@ async fn create_session_inner(
     let initial_turn_metadata = rest_create_turn_metadata(
         skill_references.clone(),
         req.additional_instructions.clone(),
-        model_override.as_ref().map(ToString::to_string),
+        rest_create_turn_metadata_model(model_override.as_deref(), req.provider, &model),
         req.provider,
         req.provider_params.clone(),
         provider_for_params,
@@ -2888,7 +2896,10 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
-        provider: req.provider,
+        provider: initial_turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.provider)
+            .or(req.provider),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -6285,6 +6296,20 @@ mod tests {
             panic!("keep-alive true should set a policy");
         };
         assert_eq!(keep_alive.policy, KeepAliveMode::Pinned);
+    }
+
+    #[test]
+    fn test_rest_create_provider_only_metadata_includes_resolved_model() {
+        assert_eq!(
+            rest_create_turn_metadata_model(None, Some(Provider::OpenAI), "gpt-5.4"),
+            Some("gpt-5.4".to_string()),
+            "provider-only REST create must carry resolved model in RuntimeTurnMetadata"
+        );
+        assert_eq!(
+            rest_create_turn_metadata_model(None, None, "gpt-5.4"),
+            None,
+            "default create without provider/model should not stamp metadata identity"
+        );
     }
 
     #[test]

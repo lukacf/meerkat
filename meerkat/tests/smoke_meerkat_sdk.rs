@@ -1359,18 +1359,20 @@ mod scenario_10_memory {
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
         let authority = {
-            unsafe extern "Rust" {
-                #[link_name = "__meerkat_agent_factory_build_authority_new"]
-                fn mint_agent_factory_build_authority()
-                -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
-            }
+            const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
+            // SAFETY: the canonical factory seal constant is non-zero.
+            #[allow(unsafe_code)]
+            let seal =
+                unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
 
-            // SAFETY: the bridge symbol is intentionally outside the public
-            // Rust API. This smoke test composes factory-equivalent persisted
+            // SAFETY: this smoke test composes factory-equivalent persisted
             // session/build metadata and runtime turn-state handle above.
             #[allow(unsafe_code)]
             unsafe {
-                mint_agent_factory_build_authority()
+                std::mem::transmute::<
+                    std::num::NonZeroUsize,
+                    meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+                >(seal)
             }
         };
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(

@@ -155,6 +155,9 @@ fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> boo
 
 fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
     !source.contains("new_for_agent_factory")
+        && !source.contains("export_name")
+        && !source.contains("link_name")
+        && !source.contains("extern \"Rust\"")
         && !source.contains("pub const fn")
         && !source.contains("pub unsafe fn")
         && !source.contains("pub const unsafe fn")
@@ -162,7 +165,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("pub fn mint")
         && source.matches("pub fn ").count() == 1
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
-        && source.contains("seal: &'static private::Seal")
+        && source.contains("seal: NonZeroUsize")
 }
 
 fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
@@ -354,7 +357,7 @@ meerkat-core = {{ path = "{}" }}
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
-        .arg("check")
+        .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
         .arg(temp.path().join("Cargo.toml"))
@@ -368,10 +371,9 @@ meerkat-core = {{ path = "{}" }}
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("new_for_agent_factory")
-            && (stderr.contains("no function")
-                || stderr.contains("no associated item")
-                || stderr.contains("not found")),
+        stderr.contains("__meerkat_agent_factory_build_authority_new")
+            || stderr.contains("mint_agent_factory_build_authority")
+            || stderr.contains("link_name"),
         "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())

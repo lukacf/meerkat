@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,16 +21,15 @@ use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
 #[allow(unsafe_code)]
 fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    unsafe extern "Rust" {
-        #[link_name = "__meerkat_agent_factory_build_authority_new"]
-        fn mint_agent_factory_build_authority()
-        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
-    }
+    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
+    // SAFETY: the canonical factory seal constant is non-zero.
+    let seal = unsafe { NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
 
-    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
-    // This helper is private to the facade factory module and is only called
-    // after `AgentFactory::build_agent` has composed factory policy metadata.
-    unsafe { mint_agent_factory_build_authority() }
+    // SAFETY: `AgentFactoryBuildAuthority` is a transparent wrapper around the
+    // private non-zero seal validated by `meerkat-agent-build-authority`. This
+    // helper is private to the facade factory module and is only called after
+    // `AgentFactory::build_agent` has composed factory policy metadata.
+    unsafe { std::mem::transmute::<NonZeroUsize, _>(seal) }
 }
 
 /// Default system prompt for wasm32 builds.

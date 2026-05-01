@@ -818,16 +818,18 @@ impl SessionAgentBuilder for RealAgentBuilder {
 
 #[allow(unsafe_code)]
 fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    unsafe extern "Rust" {
-        #[link_name = "__meerkat_agent_factory_build_authority_new"]
-        fn mint_agent_factory_build_authority()
-        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
-    }
+    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
+    // SAFETY: the canonical factory seal constant is non-zero.
+    let seal = unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
 
-    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
-    // Session integration tests construct factory-equivalent session metadata,
-    // build state, and runtime turn-state handles before finalizing.
-    unsafe { mint_agent_factory_build_authority() }
+    // SAFETY: session integration tests construct factory-equivalent session
+    // metadata, build state, and runtime turn-state handles before finalizing.
+    unsafe {
+        std::mem::transmute::<
+            std::num::NonZeroUsize,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+        >(seal)
+    }
 }
 
 fn make_service(builder: MockAgentBuilder) -> Arc<EphemeralSessionService<MockAgentBuilder>> {

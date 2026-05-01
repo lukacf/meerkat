@@ -9,6 +9,16 @@ fn fabricated<T>() -> T {
     panic!("compile-only fixture should never run")
 }
 
+fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    unsafe extern "Rust" {
+        #[link_name = "__meerkat_agent_factory_build_authority_new"]
+        fn mint_agent_factory_build_authority()
+        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
+    }
+
+    unsafe { mint_agent_factory_build_authority() }
+}
+
 async fn forged_factory_policy_entrypoint() {
     let _facade_type_check = std::mem::size_of::<meerkat::AgentBuilder>();
     let mut session = Session::new();
@@ -45,9 +55,7 @@ async fn forged_factory_policy_entrypoint() {
     let client: Arc<dyn AgentLlmClient> = fabricated();
     let tools: Arc<dyn AgentToolDispatcher> = fabricated();
     let store: Arc<dyn AgentSessionStore> = fabricated();
-    let authority = unsafe {
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
-    };
+    let authority = forged_authority();
 
     let _ = meerkat_core::agent::build_agent_after_factory_policy(
         authority, builder, client, tools, store,
@@ -57,4 +65,5 @@ async fn forged_factory_policy_entrypoint() {
 
 fn main() {
     let _ = Provider::OpenAI;
+    assert!(forged_authority().is_canonical_factory_authority());
 }

@@ -239,10 +239,28 @@ impl PersistentRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.accept_resolved_input_with_admission_signal(input, resolved, None)
+            .await
+    }
+
+    pub(crate) async fn accept_resolved_input_with_admission_signal(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+        mut admission_signal: Option<
+            &mut crate::meerkat_machine_types::RuntimeAdmissionCommitSignal,
+        >,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         let input_for_recovery = input.clone();
 
         let mut outcome = self.inner.accept_resolved_input(input, resolved).await?;
+
+        if matches!(outcome, AcceptOutcome::Accepted { .. })
+            && let Some(signal) = admission_signal.as_deref_mut()
+        {
+            signal.fire();
+        }
 
         if let AcceptOutcome::Accepted {
             ref input_id,

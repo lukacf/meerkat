@@ -61,6 +61,8 @@ impl MeerkatMachine {
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
+                let mut admission_signal =
+                    RuntimeAdmissionCommitSignal::new(admission_committed_hook.take());
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     let runtime_idle = state.is_idle_or_attached();
@@ -91,19 +93,24 @@ impl MeerkatMachine {
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
                     let result = match driver
-                        .accept_resolved_input(input, resolved.clone())
+                        .accept_resolved_input(input, resolved.clone(), Some(&mut admission_signal))
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {
                         Ok(r) => r,
-                        Err(err) => return Err(err),
+                        Err(err) => {
+                            if admission_signal.committed() {
+                                return Err(RuntimeDriverError::PostAdmissionFailure {
+                                    operation: crate::RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+                                    reason: err.to_string(),
+                                });
+                            }
+                            return Err(err);
+                        }
                     };
 
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
-                            if let Some(hook) = admission_committed_hook.take() {
-                                hook();
-                            }
                             let accepted_input_id = input_id.clone();
                             let is_terminal = driver
                                 .as_driver()
@@ -283,7 +290,7 @@ impl MeerkatMachine {
                     let mut resolved = resolved;
                     resolved.policy.wake_mode = crate::policy::WakeMode::None;
                     let result = match driver
-                        .accept_resolved_input(input, resolved)
+                        .accept_resolved_input(input, resolved, None)
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {

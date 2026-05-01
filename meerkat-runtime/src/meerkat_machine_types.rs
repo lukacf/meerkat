@@ -52,6 +52,31 @@ use crate::traits::{
 /// lifecycle decisions in the hook.
 pub type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
 
+pub(crate) struct RuntimeAdmissionCommitSignal {
+    hook: Option<RuntimeAdmissionCommittedHook>,
+    committed: bool,
+}
+
+impl RuntimeAdmissionCommitSignal {
+    pub(crate) fn new(hook: Option<RuntimeAdmissionCommittedHook>) -> Self {
+        Self {
+            hook,
+            committed: false,
+        }
+    }
+
+    pub(crate) fn fire(&mut self) {
+        self.committed = true;
+        if let Some(hook) = self.hook.take() {
+            hook();
+        }
+    }
+
+    pub(crate) fn committed(&self) -> bool {
+        self.committed
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeAttachmentStatus {

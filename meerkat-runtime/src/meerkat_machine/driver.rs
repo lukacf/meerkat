@@ -154,10 +154,22 @@ impl DriverEntry {
         &mut self,
         input: Input,
         resolved: ResolvedAdmission,
+        admission_signal: Option<&mut crate::meerkat_machine_types::RuntimeAdmissionCommitSignal>,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         match self {
-            DriverEntry::Ephemeral(d) => d.accept_resolved_input(input, resolved).await,
-            DriverEntry::Persistent(d) => d.accept_resolved_input(input, resolved).await,
+            DriverEntry::Ephemeral(d) => {
+                let outcome = d.accept_resolved_input(input, resolved).await?;
+                if matches!(outcome, AcceptOutcome::Accepted { .. })
+                    && let Some(signal) = admission_signal
+                {
+                    signal.fire();
+                }
+                Ok(outcome)
+            }
+            DriverEntry::Persistent(d) => {
+                d.accept_resolved_input_with_admission_signal(input, resolved, admission_signal)
+                    .await
+            }
         }
     }
 

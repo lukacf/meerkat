@@ -1016,6 +1016,128 @@ mod tests {
         let _ = task.await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_session_create_persistent_accept_storage_wait_preserves_admitted_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let blob_externalization_entered = Arc::new(tokio::sync::Notify::new());
+        let release_blob_externalization = Arc::new(tokio::sync::Notify::new());
+        let blob_store = Arc::new(BlockingBlobStore {
+            entered: Arc::clone(&blob_externalization_entered),
+            release: Arc::clone(&release_blob_externalization),
+        });
+        let blob_store_for_runtime: Arc<dyn meerkat_core::BlobStore> = blob_store;
+        let (runtime, _config_store) = build_persistent_test_runtime_with_llm_and_blob_store(
+            &temp,
+            Arc::new(MockLlmClient),
+            blob_store_for_runtime,
+        );
+        let session_id = runtime
+            .create_session(
+                meerkat::AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+            )
+            .await
+            .expect("test session should be staged");
+        let runtime_adapter = runtime.runtime_adapter();
+        runtime_adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    Arc::clone(&runtime),
+                    session_id.clone(),
+                )),
+            )
+            .await;
+
+        let request_executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(10), &runtime_adapter);
+        let request_key = "rpc-create-persistent-pre-return-admission".to_string();
+        let context = request_executor
+            .try_begin_request(
+                request_key.clone(),
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+        context
+            .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
+            .await
+            .expect("request lifecycle should bind to the session authority");
+
+        let runtime_for_cleanup = Arc::clone(&runtime);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(meerkat::surface::request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cleanup);
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = runtime.archive_session(&session_id).await;
+            }
+        }));
+
+        let (hook_entered_tx, hook_entered_rx) = std::sync::mpsc::channel();
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_id_for_turn = session_id.clone();
+        let context_for_hook = context.clone();
+        let (event_tx, _event_rx) = mpsc::channel::<
+            meerkat_core::EventEnvelope<meerkat_core::event::AgentEvent>,
+        >(NOTIFICATION_CHANNEL_CAPACITY);
+        let task = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn_via_runtime_with_admission_hook(
+                    &session_id_for_turn,
+                    meerkat_core::types::ContentInput::Blocks(vec![
+                        meerkat_core::types::ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: meerkat_core::types::ImageData::Inline {
+                                data: "AAAA".to_string(),
+                            },
+                        },
+                    ]),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(Box::new(move || {
+                        context_for_hook.disarm_unpublished_cleanup();
+                        hook_entered_tx
+                            .send(())
+                            .expect("test should observe admission hook");
+                    })),
+                )
+                .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            blob_externalization_entered.notified(),
+        )
+        .await
+        .expect("persistent driver should block in blob externalization after inner admission");
+        hook_entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("runtime admission hook must fire before persistent accept awaits storage");
+        request_executor
+            .finish_unpublished(&request_key)
+            .await
+            .expect("finishing the unpublished request should succeed");
+        assert_eq!(request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "persistent accept cleanup must be disarmed before storage awaits can be aborted"
+        );
+
+        task.abort();
+        release_blob_externalization.notify_waiters();
+        let _ = task.await;
+    }
+
     #[tokio::test]
     async fn rpc_session_create_pre_admission_turn_failure_archives_pending_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -1372,6 +1494,45 @@ mod tests {
         }
     }
 
+    struct BlockingBlobStore {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::BlobStore for BlockingBlobStore {
+        async fn put_image(
+            &self,
+            media_type: &str,
+            _data: &str,
+        ) -> Result<meerkat_core::BlobRef, meerkat_core::BlobStoreError> {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(meerkat_core::BlobRef {
+                blob_id: meerkat_core::BlobId::new("blocking-test-image"),
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(
+            &self,
+            blob_id: &meerkat_core::BlobId,
+        ) -> Result<meerkat_core::BlobPayload, meerkat_core::BlobStoreError> {
+            Err(meerkat_core::BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(
+            &self,
+            _blob_id: &meerkat_core::BlobId,
+        ) -> Result<(), meerkat_core::BlobStoreError> {
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            true
+        }
+    }
+
     fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
         Arc::new(meerkat_store::MemoryBlobStore::new())
     }
@@ -1395,6 +1556,33 @@ mod tests {
             config,
             10,
             meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
+            crate::router::NotificationSink::noop(),
+        );
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.set_default_llm_client(Some(llm));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        (Arc::new(runtime), config_store)
+    }
+
+    fn build_persistent_test_runtime_with_llm_and_blob_store(
+        temp: &tempfile::TempDir,
+        llm: Arc<dyn LlmClient>,
+        blob_store: Arc<dyn meerkat_core::BlobStore>,
+    ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_core::ConfigStore>) {
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         let config_store: Arc<dyn meerkat_core::ConfigStore> =

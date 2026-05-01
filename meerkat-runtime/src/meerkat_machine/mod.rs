@@ -45,9 +45,10 @@ use crate::meerkat_machine_types::{
     MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatFormalStateProjection,
     MeerkatInputsSnapshot, MeerkatLedgerSnapshot, MeerkatMachineCommand,
     MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunPrepared,
-    MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot, SessionLlmCapabilityDelta,
-    SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
-    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot, RuntimeAdmissionCommitSignal,
+    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};

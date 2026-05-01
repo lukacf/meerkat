@@ -71,7 +71,10 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(RuntimeControlPlaneError::Internal)?;
-                    let result = match drv.accept_resolved_input(input, resolved.clone()).await {
+                    let result = match drv
+                        .accept_resolved_input(input, resolved.clone(), None)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(err) => {
                             drop(drv);

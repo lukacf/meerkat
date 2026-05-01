@@ -17,6 +17,9 @@ impl MeerkatMachine {
             .await
     }
 
+    // `user_interrupt` is mounted as a private child of `dispatch_session`, so
+    // this live-authority helper is visible only to the admitted interrupt
+    // command arm and not to peer-admission siblings.
     pub(super) async fn interrupt_current_run_inner(
         &self,
         session_id: &SessionId,

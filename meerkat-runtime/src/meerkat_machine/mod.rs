@@ -145,8 +145,6 @@ mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
 mod traits;
-#[path = "../user_interrupt.rs"]
-pub(crate) mod user_interrupt;
 mod visibility;
 
 pub use composition::{MeerkatCompositionSignalDispatcher, MeerkatConsumerSurface};

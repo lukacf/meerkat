@@ -74,6 +74,20 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
 
   mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/mod.rs" <<'EOF'
+#[path = "../user_interrupt.rs"]
+pub(crate) mod user_interrupt;
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: root user_interrupt module fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
   cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
 fn bad(session_id: SessionId, reason: String) {
     let _ = MeerkatMachineCommand::InterruptCurrentRun {
@@ -673,6 +687,11 @@ run_control_name="RunControl""Command"
 core_control_name="CoreExecutor""Control"
 report_matches "$run_control_name references remain" "$(run_rg "\\b${run_control_name}\\b")"
 report_matches "$core_control_name references remain" "$(run_rg "\\b${core_control_name}\\b")"
+
+if [[ -f "$root/meerkat-runtime/src/meerkat_machine/mod.rs" ]]; then
+  root_user_interrupt_module="$(capture_rg -n 'mod[[:space:]]+user_interrupt|path[[:space:]]*=[[:space:]]*"\\.\\./user_interrupt\\.rs"' "$root/meerkat-runtime/src/meerkat_machine/mod.rs")"
+  report_matches "user_interrupt authority module must not be mounted as a meerkat_machine sibling" "$root_user_interrupt_module"
+fi
 
 peer_matches=""
 hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('

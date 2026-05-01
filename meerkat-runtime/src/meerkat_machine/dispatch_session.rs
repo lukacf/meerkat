@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "../user_interrupt.rs"]
+mod user_interrupt;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionBindingPreparation {
     /// The runtime binding itself is the semantic event: apply

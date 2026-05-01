@@ -34,6 +34,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1222,6 +1223,21 @@ fn request_cancelled_tool_error() -> ToolCallError {
         "request cancelled before start",
         None,
     )
+}
+
+async fn reject_if_cancelled_before_mcp_service_admission<F>(
+    request_context: Option<&RequestContext>,
+    cleanup: F,
+) -> Result<(), ToolCallError>
+where
+    F: Future<Output = ()>,
+{
+    if request_context.is_some_and(RequestContext::cancel_already_requested) {
+        cleanup.await;
+        Err(request_cancelled_tool_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2807,6 +2823,13 @@ async fn handle_meerkat_run(
         input.enable_mob,
     ));
 
+    reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
+        let _ = state.service.archive(&session_id).await;
+        state.runtime_adapter.unregister_session(&session_id).await;
+        ingress.clear_session(&session_id).await;
+    })
+    .await?;
+
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
@@ -2966,6 +2989,11 @@ async fn handle_meerkat_resume(
         .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
 
+    let runtime_entry_existed_before_prepare = state
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .is_some();
     let resume_bindings = state
         .runtime_adapter
         .prepare_bindings(session_id.clone())
@@ -3113,6 +3141,13 @@ async fn handle_meerkat_resume(
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         input.enable_mob,
     ));
+
+    reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
+        if !runtime_entry_existed_before_prepare {
+            state.runtime_adapter.unregister_session(&session_id).await;
+        }
+    })
+    .await?;
 
     let result = if needs_rebuild {
         let req = CreateSessionRequest {
@@ -3348,8 +3383,11 @@ mod tests {
     use super::*;
     use futures::stream;
     use meerkat::Session;
-    use meerkat::surface::{SurfaceRequestExecutor, noop_request_action};
+    use meerkat::surface::{
+        CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
+    };
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
 
     fn unwrap_payload(value: Value) -> Value {
@@ -4284,6 +4322,38 @@ mod tests {
         assert_eq!(
             err.code,
             meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_request_cancel_after_action_install_rejects_before_service_admission() {
+        use meerkat::surface::CancelOutcome;
+
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let context = executor.begin_request("req-cancel-before-admission", noop_request_action());
+        let install = context
+            .install_cancel_action_or_cancelled(noop_request_action())
+            .await;
+        assert_eq!(install, CancelActionInstallOutcome::Installed);
+
+        let outcome = executor.cancel_request(context.key()).await;
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned_for_gate = Arc::clone(&cleaned);
+        let err = reject_if_cancelled_before_mcp_service_admission(Some(&context), async move {
+            cleaned_for_gate.store(true, Ordering::SeqCst);
+        })
+        .await
+        .expect_err("cancel after action install must reject before service admission");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "pre-admission cancel gate must run cleanup"
         );
     }
 

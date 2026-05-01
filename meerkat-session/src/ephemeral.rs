@@ -1247,7 +1247,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
         Self::require_runtime_execution_kind_stamp(&req)?;
-        match self.start_turn(id, req).await {
+        match self.start_turn_runtime_owned(id, req).await {
             Ok(run_result) => {
                 self.build_runtime_output(
                     id,
@@ -1531,6 +1531,102 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .send_replace(map_turn_phase_to_session_state(phase));
         }
     }
+
+    pub(crate) async fn start_turn_runtime_owned(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn_inner(id, req).await
+    }
+
+    async fn start_turn_inner(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
+
+        {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            let identity = handle.llm_identity_rx.borrow().clone();
+            self.validate_prompt_video_input(&prompt, &identity).await?;
+
+            // Atomic busy check via compare-and-swap. This is the single
+            // point of admission — if two callers race, exactly one wins.
+            Self::request_start_turn(id, handle)?;
+
+            if let Some(system_prompt) = req.system_prompt {
+                let allows_override = {
+                    let guard = lock_deferred_turn_state(&handle.deferred_turn_state);
+                    guard.allows_initial_turn_overrides()
+                };
+                if !allows_override {
+                    Self::try_abort_admitted_turn(handle);
+                    return Err(SessionError::Unsupported(
+                        "system_prompt override is only allowed on a deferred session's first turn"
+                            .to_string(),
+                    ));
+                }
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .command_tx
+                    .send(SessionCommand::UpdateSystemPrompt {
+                        system_prompt,
+                        reply_tx,
+                    })
+                    .await
+                    .map_err(|_| {
+                        Self::try_abort_admitted_turn(handle);
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            "Session task has exited".to_string(),
+                        ))
+                    })?;
+                let update_result = reply_rx.await.map_err(|_| {
+                    Self::try_abort_admitted_turn(handle);
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "Session task dropped reply channel".to_string(),
+                    ))
+                })?;
+                update_result.map_err(|error| {
+                    Self::try_abort_admitted_turn(handle);
+                    SessionError::Agent(error)
+                })?;
+            }
+
+            let pre_turn_context_appends = req.pre_turn_context_appends;
+            let turn_metadata = req.turn_metadata;
+            handle
+                .command_tx
+                .send(SessionCommand::StartTurn {
+                    prompt,
+                    event_tx: req.event_tx,
+                    result_tx,
+                    pre_turn_context_appends,
+                    turn_metadata,
+                })
+                .await
+                .map_err(|_| {
+                    Self::try_abort_admitted_turn(handle);
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "Session task has exited".to_string(),
+                    ))
+                })?;
+        }
+
+        let result = result_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the result channel".to_string(),
+            ))
+        })?;
+
+        result.map_err(SessionError::Agent)
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1540,6 +1636,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         if let Some(build) = req.build.as_ref() {
             build
                 .validate_runtime_owned_turn_metadata_carrier()
+                .map_err(|message| SessionError::Agent(AgentError::ConfigError(message)))?;
+            build
+                .validate_public_initial_turn_metadata_stamps()
                 .map_err(|message| SessionError::Agent(AgentError::ConfigError(message)))?;
         }
 
@@ -1805,87 +1904,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
-
-        {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&prompt, &identity).await?;
-
-            // Atomic busy check via compare-and-swap. This is the single
-            // point of admission — if two callers race, exactly one wins.
-            Self::request_start_turn(id, handle)?;
-
-            if let Some(system_prompt) = req.system_prompt {
-                let allows_override = {
-                    let guard = lock_deferred_turn_state(&handle.deferred_turn_state);
-                    guard.allows_initial_turn_overrides()
-                };
-                if !allows_override {
-                    Self::try_abort_admitted_turn(handle);
-                    return Err(SessionError::Unsupported(
-                        "system_prompt override is only allowed on a deferred session's first turn"
-                            .to_string(),
-                    ));
-                }
-                let (reply_tx, reply_rx) = oneshot::channel();
-                handle
-                    .command_tx
-                    .send(SessionCommand::UpdateSystemPrompt {
-                        system_prompt,
-                        reply_tx,
-                    })
-                    .await
-                    .map_err(|_| {
-                        Self::try_abort_admitted_turn(handle);
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            "Session task has exited".to_string(),
-                        ))
-                    })?;
-                let update_result = reply_rx.await.map_err(|_| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        "Session task dropped reply channel".to_string(),
-                    ))
-                })?;
-                update_result.map_err(|error| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(error)
-                })?;
-            }
-
-            let pre_turn_context_appends = req.pre_turn_context_appends;
-            let turn_metadata = req.turn_metadata;
-            handle
-                .command_tx
-                .send(SessionCommand::StartTurn {
-                    prompt,
-                    event_tx: req.event_tx,
-                    result_tx,
-                    pre_turn_context_appends,
-                    turn_metadata,
-                })
-                .await
-                .map_err(|_| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        "Session task has exited".to_string(),
-                    ))
-                })?;
-        }
-
-        let result = result_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the result channel".to_string(),
-            ))
-        })?;
-
-        result.map_err(SessionError::Agent)
+        req.validate_public_turn_metadata_stamps()
+            .map_err(|message| SessionError::Agent(AgentError::ConfigError(message)))?;
+        self.start_turn_inner(id, req).await
     }
 
     async fn set_session_client(
@@ -3304,7 +3325,6 @@ mod runtime_turn_metadata_tests {
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
                     initial_turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         skill_references: Some(vec![skill.clone()]),
                         ..Default::default()
                     }),
@@ -3321,6 +3341,103 @@ mod runtime_turn_metadata_tests {
                 .expect("observed skill references lock poisoned"),
             vec![Some(vec![skill])],
             "eager first turn must forward the full runtime metadata carrier"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_create_session_rejects_runtime_owned_initial_turn_stamps() {
+        let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
+        let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
+        let run_context_counts = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references,
+                observed_context_texts,
+                run_context_counts,
+                fail_flow_overlay_set: false,
+            },
+            1,
+        );
+
+        let error = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("hello".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    initial_turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect_err("direct service create must reject runtime-owned stamps");
+
+        assert!(
+            error.to_string().contains("runtime-owned")
+                && error.to_string().contains("execution_kind"),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_start_turn_rejects_runtime_owned_turn_stamps() {
+        let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
+        let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
+        let run_context_counts = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references,
+                observed_context_texts,
+                run_context_counts,
+                fail_flow_overlay_set: false,
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred session should create");
+
+        let error = service
+            .start_turn(
+                &result.session_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("reaction".to_string()),
+                    system_prompt: None,
+                    event_tx: None,
+                    pre_turn_context_appends: Vec::new(),
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .expect_err("direct service start_turn must reject runtime-owned stamps");
+
+        assert!(
+            error.to_string().contains("runtime-owned")
+                && error.to_string().contains("execution_kind"),
+            "unexpected rejection reason: {error}"
         );
     }
 
@@ -3367,10 +3484,7 @@ mod runtime_turn_metadata_tests {
                         idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                         accepted_at: meerkat_core::time_compat::SystemTime::now(),
                     }],
-                    turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                        ..Default::default()
-                    }),
+                    turn_metadata: Some(RuntimeTurnMetadata::default()),
                 },
             )
             .await
@@ -3435,7 +3549,6 @@ mod runtime_turn_metadata_tests {
                         accepted_at: meerkat_core::time_compat::SystemTime::now(),
                     }],
                     turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         flow_tool_overlay: Some(TurnToolOverlay {
                             allowed_tools: Some(vec!["flow_tool".to_string()]),
                             blocked_tools: None,

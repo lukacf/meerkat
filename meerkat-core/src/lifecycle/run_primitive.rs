@@ -1430,6 +1430,7 @@ impl RuntimeBuildOnlyTurnOverrides {
 
     pub fn requires_materialization_recovery(&self) -> bool {
         self.max_tokens.is_some()
+            || self.system_prompt.is_some()
             || self.output_schema.is_some()
             || self.structured_output_retries.is_some()
     }
@@ -1489,6 +1490,43 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
 }
 
 impl RuntimeTurnMetadata {
+    /// True when the metadata carries fields that can only be honored by a
+    /// materialized/recovered session turn, not by a context-only append.
+    pub fn has_materialization_recovery_fields(&self) -> bool {
+        self.model.is_some()
+            || self.provider.is_some()
+            || self.provider_params.is_some()
+            || self.connection_ref.is_some()
+    }
+
+    /// True when the metadata carries stamps owned by runtime admission.
+    pub fn has_runtime_owned_stamps(&self) -> bool {
+        self.execution_kind.is_some() || self.peer_response_terminal_apply_intent.is_some()
+    }
+
+    pub fn runtime_owned_stamp_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.execution_kind.is_some() {
+            fields.push("execution_kind");
+        }
+        if self.peer_response_terminal_apply_intent.is_some() {
+            fields.push("peer_response_terminal_apply_intent");
+        }
+        fields
+    }
+
+    pub fn reject_runtime_owned_stamps(&self, context: &str) -> Result<(), String> {
+        let fields = self.runtime_owned_stamp_fields();
+        if fields.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "{context} must not carry runtime-owned turn metadata stamps: {}",
+            fields.join(", ")
+        ))
+    }
+
     /// True when every field is `None` — used to skip serializing empty
     /// metadata carriers on the wire.
     pub fn is_empty(&self) -> bool {

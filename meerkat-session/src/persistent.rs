@@ -1423,7 +1423,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::require_runtime_execution_kind_stamp(&req)?;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
         let pre_turn_context_events = req.pre_turn_context_appends.clone();
-        match self.inner.start_turn(id, req).await {
+        match self.inner.start_turn_runtime_owned(id, req).await {
             Ok(run_result) => {
                 self.build_runtime_output_after_live_mutation(
                     id,
@@ -1469,6 +1469,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
             }
         }
+    }
+
+    pub async fn start_turn_runtime_owned(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self.recover_live_session_from_store_if_needed(id).await?;
+        let result = match self.inner.start_turn_runtime_owned(id, req).await {
+            Ok(result) => result,
+            Err(error) => {
+                if Self::callback_pending_terminal(&error).is_some() {
+                    let _ = self.persist_full_session(id).await;
+                }
+                return Err(error);
+            }
+        };
+
+        let _ = self.persist_full_session(id).await?;
+
+        Ok(result)
     }
 
     fn require_runtime_execution_kind_stamp(req: &StartTurnRequest) -> Result<(), SessionError> {

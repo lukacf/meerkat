@@ -43,10 +43,12 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
-    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
-    noop_request_action, recovery_overrides_from_runtime_turn, request_action,
+    CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, RequestAlreadyExists, RequestContext,
+    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, has_build_only_turn_overrides,
+    has_context_only_materialization_metadata, noop_request_action,
+    recovery_overrides_from_runtime_turn, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -643,19 +645,111 @@ async fn apply_runtime_turn(
                 meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
             ));
         }
+        if has_context_only_materialization_metadata(&recovery_overrides) {
+            return Err(SessionError::Unsupported(
+                CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR.to_string(),
+            ));
+        }
         let RunPrimitive::StagedInput(staged) = primitive else {
             unreachable!("context-only apply without turn only matches staged primitives");
         };
-        return context
+        let appends = pending_system_context_appends(&staged.context_appends);
+        return match context
             .session_service
             .apply_runtime_context_appends_with_boundary(
                 session_id,
-                run_id,
-                pending_system_context_appends(&staged.context_appends),
+                run_id.clone(),
+                appends.clone(),
                 primitive.apply_boundary(),
                 staged.contributing_input_ids.clone(),
             )
-            .await;
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(SessionError::NotFound { .. }) => {
+                let session = context
+                    .session_service
+                    .load_authoritative_session(session_id)
+                    .await?
+                    .ok_or(SessionError::NotFound {
+                        id: session_id.clone(),
+                    })?;
+                let keep_alive = session
+                    .session_metadata()
+                    .map(|metadata| metadata.keep_alive)
+                    .unwrap_or(false);
+                let current_generation = context
+                    .config_runtime
+                    .get()
+                    .await
+                    .ok()
+                    .map(|s| s.generation);
+                let bindings = context
+                    .runtime_adapter
+                    .prepare_bindings(session_id.clone())
+                    .await
+                    .map_err(|e| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!(
+                                "failed to prepare runtime bindings for session {session_id}: {e}"
+                            ),
+                        ))
+                    })?;
+                let recovered = build_recovered_session(
+                    session,
+                    &recovery_overrides,
+                    SurfaceSessionRecoveryContext {
+                        llm_client_override: context
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        external_tools: None,
+                        checkpointer: None,
+                        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+                            bindings,
+                        )),
+                        runtime_owned_recovery: false,
+                        require_runtime_build_mode: true,
+                        realm_id: Some(context.realm.to_string()),
+                        instance_id: context.instance_id.clone(),
+                        backend: Some(context.backend.clone()),
+                        config_generation: current_generation,
+                    },
+                )
+                .map_err(|error| match error {
+                    SurfaceSessionRecoveryError::InvalidOverride(message) => {
+                        SessionError::Unsupported(message)
+                    }
+                    other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        other.to_string(),
+                    )),
+                })?;
+                context
+                    .session_service
+                    .create_session(recovered.into_deferred_create_request())
+                    .await?;
+                #[cfg(feature = "comms")]
+                {
+                    let comms_rt = context.session_service.comms_runtime(session_id).await;
+                    let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+                    context
+                        .runtime_adapter
+                        .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                        .await;
+                }
+                context
+                    .session_service
+                    .apply_runtime_context_appends_with_boundary(
+                        session_id,
+                        run_id,
+                        appends,
+                        primitive.apply_boundary(),
+                        staged.contributing_input_ids.clone(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
     }
 
     let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -5003,6 +5097,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_context_only_runtime_apply_rematerializes_stale_session() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let create_result = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = create_result.session_id;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        state.runtime_adapter.unregister_session(&session_id).await;
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-stale-rematerialize".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context after stale live session"
+                            .to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+
+        let output = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect("context-only apply should rematerialize stale sessions");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
     async fn rest_context_only_runtime_apply_rejects_build_only_overrides() {
         let temp = TempDir::new().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
@@ -5047,6 +5221,50 @@ mod tests {
             error
                 .to_string()
                 .contains(meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_context_only_runtime_apply_rejects_materialization_metadata() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-materialization-metadata".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    model: Some(ModelId::new("gpt-context-only")),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+
+        let error = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &SessionId::new(),
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect_err("context-only runtime applies must reject materialization metadata");
+
+        assert!(
+            error.to_string().contains("context-only")
+                && error.to_string().contains("materialization"),
             "unexpected rejection reason: {error}"
         );
     }

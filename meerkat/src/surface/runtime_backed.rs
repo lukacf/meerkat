@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use meerkat_core::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle,
@@ -9,6 +8,9 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
 use meerkat_core::service::SessionService;
+use meerkat_core::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+};
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
 
@@ -303,6 +305,14 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
                 ));
             }
+            if primitive
+                .turn_metadata()
+                .is_some_and(|metadata| metadata.has_materialization_recovery_fields())
+            {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+                ));
+            }
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -525,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn run_primitive_carries_build_only_system_prompt_into_start_turn_request() {
+    fn run_primitive_rejects_build_only_system_prompt_for_live_start() {
         let primitive =
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
@@ -544,14 +554,15 @@ mod tests {
                 }),
             });
 
-        let req = start_turn_request_from_primitive(&primitive)
-            .expect("system_prompt is the only build-only override a live turn can carry");
+        let error = start_turn_request_from_primitive(&primitive)
+            .expect_err("system_prompt must use recovery/materialization, not live apply");
 
-        assert_eq!(
-            req.system_prompt.as_deref(),
-            Some("runtime deferred system")
+        assert!(
+            error
+                .to_string()
+                .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
         );
-        assert!(req.turn_metadata.is_none());
     }
 
     #[test]
@@ -1356,6 +1367,49 @@ mod tests {
             error
                 .to_string()
                 .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_rejects_context_only_materialization_metadata() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, ModelId, RuntimeExecutionKind, RuntimeTurnMetadata,
+            StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let mut executor =
+            PersistentRuntimeExecutor::new(service, adapter, meerkat_core::SessionId::new());
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![ConversationContextAppend {
+                key: "ctx-materialization-metadata".to_string(),
+                content: CoreRenderable::Text {
+                    text: "context-only runtime context".to_string(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                model: Some(ModelId::new("gpt-context-only")),
+                ..Default::default()
+            }),
+            build_only_overrides: None,
+        });
+
+        let error = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect_err("context-only runtime applies must reject materialization metadata");
+
+        assert!(
+            error.to_string().contains("context-only")
+                && error.to_string().contains("materialization"),
             "unexpected rejection reason: {error}"
         );
     }

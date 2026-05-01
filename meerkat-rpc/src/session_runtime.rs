@@ -45,7 +45,10 @@ use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RunId, has_build_only_turn_overrides};
+use meerkat_core::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, RunId,
+    has_build_only_turn_overrides, has_context_only_materialization_metadata,
+};
 use meerkat_core::{
     Config, ConfigStore, ContentInput, PendingSystemContextAppend, Session, SessionLlmIdentity,
     SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
@@ -2554,20 +2557,78 @@ impl SessionRuntime {
                     data: None,
                 });
             }
+            let recovery_overrides = Self::recovery_overrides_from_turn_and_build_only(
+                primitive.turn_metadata(),
+                primitive.build_only_overrides(),
+            );
+            if has_context_only_materialization_metadata(&recovery_overrides) {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR.to_string(),
+                    data: None,
+                });
+            }
             let RunPrimitive::StagedInput(staged) = primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
-            return self
+            let appends = pending_system_context_appends(&staged.context_appends);
+            return match self
                 .service
                 .apply_runtime_context_appends_with_boundary(
                     session_id,
-                    run_id,
-                    pending_system_context_appends(&staged.context_appends),
+                    run_id.clone(),
+                    appends.clone(),
                     primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(session_error_to_rpc);
+            {
+                Ok(output) => Ok(output),
+                Err(SessionError::NotFound { .. }) => {
+                    let stored_session = self
+                        .load_persisted_session(session_id)
+                        .await?
+                        .ok_or_else(|| RpcError {
+                            code: error::SESSION_NOT_FOUND,
+                            message: format!("session not found: {session_id}"),
+                            data: None,
+                        })?;
+                    let keep_alive = stored_session
+                        .session_metadata()
+                        .map(|metadata| metadata.keep_alive)
+                        .unwrap_or(false);
+                    let create_request = self
+                        .recovered_create_request(session_id, stored_session, recovery_overrides)
+                        .await?;
+                    self.service
+                        .create_session(create_request)
+                        .await
+                        .map_err(session_error_to_rpc)?;
+                    #[cfg(feature = "comms")]
+                    {
+                        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+                        if !owner.is_mob_owned() {
+                            let comms_rt = self.service.comms_runtime(session_id).await;
+                            let comms_rt =
+                                Self::comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+                            self.runtime_adapter
+                                .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                                .await;
+                        }
+                    }
+                    self.service
+                        .apply_runtime_context_appends_with_boundary(
+                            session_id,
+                            run_id,
+                            appends,
+                            primitive.apply_boundary(),
+                            staged.contributing_input_ids.clone(),
+                        )
+                        .await
+                        .map_err(session_error_to_rpc)
+                }
+                Err(error) => Err(session_error_to_rpc(error)),
+            };
         }
 
         let pre_turn_context_appends = match primitive {
@@ -3340,7 +3401,7 @@ impl SessionRuntime {
                 Ok(_) => {
                     let result = self
                         .service
-                        .start_turn(
+                        .start_turn_runtime_owned(
                             session_id,
                             StartTurnRequest {
                                 prompt: first_turn_prompt,
@@ -3456,7 +3517,7 @@ impl SessionRuntime {
             self.hot_swap_llm_client(session_id, metadata).await?;
         }
 
-        match self.service.start_turn(session_id, req).await {
+        match self.service.start_turn_runtime_owned(session_id, req).await {
             Ok(result) => Ok(result),
             Err(SessionError::NotFound { .. }) => {
                 // Attempt persisted session recovery: the session may exist in the
@@ -5324,6 +5385,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_only_runtime_apply_rematerializes_stale_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize runtime session".into(),
+                initial_event_tx,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard_live_session");
+        runtime
+            .runtime_adapter()
+            .unregister_session(&session_id)
+            .await;
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-stale-rematerialize".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context after stale live session"
+                            .to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect("context-only apply should rematerialize stale sessions");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
     async fn context_only_runtime_apply_rejects_build_only_overrides() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -5364,6 +5493,49 @@ mod tests {
 
         assert!(
             error.message.contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_rejects_materialization_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-materialization-metadata".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    model: Some(ModelId::new("gpt-context-only")),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let error = runtime
+            .apply_runtime_turn(
+                &SessionId::new(),
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect_err("context-only runtime applies must reject materialization metadata");
+
+        assert!(
+            error.message.contains("context-only") && error.message.contains("materialization"),
             "unexpected rejection reason: {error:?}"
         );
     }

@@ -793,6 +793,24 @@ impl SessionBuildOptions {
         ))
     }
 
+    /// Public/direct create-session callers must not provide stamps owned by
+    /// runtime admission. Runtime-owned materialization is identified by
+    /// `RuntimeBuildMode::SessionOwned` and is the only path allowed to carry
+    /// stamped first-turn metadata through the service.
+    pub fn validate_public_initial_turn_metadata_stamps(&self) -> Result<(), String> {
+        if matches!(
+            self.runtime_build_mode,
+            crate::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
+        ) {
+            return Ok(());
+        }
+
+        if let Some(metadata) = self.initial_turn_metadata.as_ref() {
+            metadata.reject_runtime_owned_stamps("public create_session initial_turn_metadata")?;
+        }
+        Ok(())
+    }
+
     /// Apply the shared rehydration rule for mob operator access.
     ///
     /// This preserves exact persisted authority when available and otherwise
@@ -964,6 +982,17 @@ pub struct StartTurnRequest {
     /// the session layer derives per-turn policy from this typed carrier
     /// instead of re-inferring or dropping fields.
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+}
+
+impl StartTurnRequest {
+    /// Public/direct service turns may carry user-controllable turn metadata,
+    /// but runtime-owned execution stamps are reserved for `apply_runtime_turn`.
+    pub fn validate_public_turn_metadata_stamps(&self) -> Result<(), String> {
+        if let Some(metadata) = self.turn_metadata.as_ref() {
+            metadata.reject_runtime_owned_stamps("public start_turn turn_metadata")?;
+        }
+        Ok(())
+    }
 }
 
 /// Request to append runtime system context to an existing session.

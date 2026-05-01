@@ -3154,7 +3154,10 @@ async fn handle_meerkat_resume(
         match state.service.create_session(create_req).await {
             Ok(_) => {
                 session_rematerialized = true;
-                state.service.start_turn(&session_id, make_turn_req()).await
+                state
+                    .service
+                    .start_turn_runtime_owned(&session_id, make_turn_req())
+                    .await
             }
             Err(error) => Err(error),
         }
@@ -3164,13 +3167,20 @@ async fn handle_meerkat_resume(
         }
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
-        match state.service.start_turn(&session_id, make_turn_req()).await {
+        match state
+            .service
+            .start_turn_runtime_owned(&session_id, make_turn_req())
+            .await
+        {
             Ok(run_result) => Ok(run_result),
             Err(error) if mcp_resume_should_rematerialize(&error) => {
                 match state.service.create_session(create_req).await {
                     Ok(_) => {
                         session_rematerialized = true;
-                        state.service.start_turn(&session_id, make_turn_req()).await
+                        state
+                            .service
+                            .start_turn_runtime_owned(&session_id, make_turn_req())
+                            .await
                     }
                     Err(error) => Err(error),
                 }

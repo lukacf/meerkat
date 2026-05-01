@@ -5,9 +5,11 @@ use meerkat::{
     CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
     SessionServiceControlExt,
     surface::{
-        BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, SurfaceRuntimeMaterializeError,
-        SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
-        has_build_only_turn_overrides, materialize_session, recovery_overrides_from_runtime_turn,
+        BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+        SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
+        SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
+        has_context_only_materialization_metadata, materialize_session,
+        recovery_overrides_from_runtime_turn,
     },
 };
 use meerkat_core::agent::AgentToolDispatcher;
@@ -552,6 +554,11 @@ async fn apply_runtime_turn(
                 meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
             ));
         }
+        if has_context_only_materialization_metadata(&recovery_overrides) {
+            return Err(SessionError::Unsupported(
+                CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR.to_string(),
+            ));
+        }
         let RunPrimitive::StagedInput(staged) = primitive else {
             unreachable!("context-only apply without turn only matches staged primitives");
         };
@@ -861,6 +868,38 @@ mod tests {
             error
                 .to_string()
                 .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_context_only_runtime_apply_rejects_materialization_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let state = Arc::new(McpRuntimeSessionState::default());
+        let session_id = SessionId::new();
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "gpt-context-only",
+                )),
+                ..Default::default()
+            }),
+            build_only_overrides: None,
+        });
+
+        let error = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
+            .await
+            .expect_err("context-only runtime applies must reject materialization metadata");
+
+        assert!(
+            error.to_string().contains("context-only")
+                && error.to_string().contains("materialization"),
             "unexpected rejection reason: {error}"
         );
     }

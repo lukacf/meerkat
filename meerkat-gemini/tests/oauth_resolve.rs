@@ -304,7 +304,7 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
 }
 
 #[tokio::test]
-async fn google_oauth_refresh_returns_refreshed_expiry_for_lease_publication() {
+async fn google_oauth_runtime_refresh_is_uncommitted() {
     let app = Router::new().route(
         "/token",
         post(|Form(_form): Form<serde_json::Value>| async {
@@ -378,5 +378,11 @@ async fn google_oauth_refresh_returns_refreshed_expiry_for_lease_publication() {
         "refreshed lease expiry must be the new provider expiry, not the old expired value"
     );
     let stored = store.load(runtime.key()).await.unwrap().unwrap();
-    assert_eq!(stored.expires_at, refreshed.expires_at);
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("expired-google-access")
+    );
+    assert_eq!(stored.refresh_token.as_deref(), Some("refresh-google"));
+    assert_eq!(stored.expires_at, Some(old_expiry));
+    assert!(!meerkat_core::tokens_lifecycle_published(&stored));
 }

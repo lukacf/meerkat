@@ -187,13 +187,6 @@ impl OpenAiOAuthRuntime {
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
-    async fn save(&self, tokens: &PersistedTokens) -> Result<(), OpenAiOAuthError> {
-        self.token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
-    }
-
     pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
@@ -241,9 +234,7 @@ impl OpenAiOAuthRuntime {
     }
 
     pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let refreshed = self.get_or_refresh_tokens_uncommitted().await?;
-        self.save(&refreshed).await?;
-        Ok(refreshed)
+        self.get_or_refresh_tokens_uncommitted().await
     }
 
     pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
@@ -274,7 +265,6 @@ impl OpenAiOAuthRuntime {
         };
         let tokens =
             oauth_result_to_persisted(result, PersistedAuthMode::ChatgptOauth, None, account_id)?;
-        self.save(&tokens).await?;
         Ok(tokens)
     }
 }

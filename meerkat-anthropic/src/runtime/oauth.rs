@@ -211,13 +211,6 @@ impl AnthropicOAuthRuntime {
             .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
     }
 
-    async fn save_persisted(&self, tokens: &PersistedTokens) -> Result<(), AnthropicOAuthError> {
-        self.token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
-    }
-
     /// Return a valid token bundle, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
     /// tokens are persisted yet.
@@ -272,14 +265,13 @@ impl AnthropicOAuthRuntime {
     }
 
     pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let refreshed = self.get_or_refresh_tokens_uncommitted().await?;
-        self.save_persisted(&refreshed).await?;
-        Ok(refreshed)
+        self.get_or_refresh_tokens_uncommitted().await
     }
 
     /// Return a valid access token, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
-    /// tokens are persisted yet.
+    /// tokens are persisted yet. Refresh persistence belongs to the
+    /// AuthMachine-managed resolver boundary.
     pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
         let refreshed = self.get_or_refresh_tokens().await?;
         refreshed
@@ -288,8 +280,8 @@ impl AnthropicOAuthRuntime {
     }
 
     /// Complete an interactive login: exchange the authorization code for
-    /// tokens and persist them. Caller supplies `code + pkce_verifier`
-    /// from the loopback callback.
+    /// tokens. Caller supplies `code + pkce_verifier` from the loopback
+    /// callback and owns AuthMachine publication plus persistence.
     pub async fn complete_login(
         &self,
         code: &str,
@@ -299,7 +291,6 @@ impl AnthropicOAuthRuntime {
             exchange_authorization_code(&self.http, &self.endpoints, code, pkce_verifier, None)
                 .await?;
         let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None)?;
-        self.save_persisted(&tokens).await?;
         Ok(tokens)
     }
 
@@ -350,16 +341,13 @@ impl AnthropicOAuthRuntime {
         Ok(tokens)
     }
 
-    /// Console OAuth → API key provisioning. POST to `API_KEY_CREATE_URL`
-    /// with `Authorization: Bearer <access_token>`; the response carries
-    /// the new API key. We persist it as an api_key entry.
+    /// Console OAuth → API key provisioning. The caller owns lifecycle
+    /// admission and persistence.
     pub async fn provision_api_key(
         &self,
         access_token: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let tokens = self.provision_api_key_tokens(access_token).await?;
-        self.save_persisted(&tokens).await?;
-        Ok(tokens)
+        self.provision_api_key_tokens(access_token).await
     }
 }
 

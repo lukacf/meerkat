@@ -3743,6 +3743,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     connection_ref: &ConnectionRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
+    mark_for_rehydration: bool,
 ) -> anyhow::Result<CliTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
@@ -3773,6 +3774,20 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         previous,
         previous_lifecycle,
     };
+    if mark_for_rehydration {
+        mark_cli_token_commit_lifecycle_published_unlocked(store, auth_lease, &commit, tokens)
+            .await?;
+    }
+    Ok(commit)
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn mark_cli_token_commit_lifecycle_published_unlocked(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    commit: &CliTokenCommitSnapshot,
+    tokens: &meerkat_providers::auth_store::PersistedTokens,
+) -> anyhow::Result<()> {
     let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         match rollback_cli_token_commit(store, auth_lease, &commit).await {
@@ -3784,7 +3799,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
             ),
         }
     }
-    Ok(commit)
+    Ok(())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3801,6 +3816,7 @@ async fn save_cli_tokens_and_publish_lifecycle(
         auth_lease,
         connection_ref,
         tokens,
+        true,
     )
     .await?;
     Ok(())
@@ -3891,6 +3907,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
         auth_lease,
         connection_ref,
         tokens,
+        false,
     )
     .await?;
     if let Err(err) =
@@ -3905,6 +3922,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
             }
         }
     }
+    mark_cli_token_commit_lifecycle_published_unlocked(store, auth_lease, &commit, tokens).await?;
     Ok(())
 }
 

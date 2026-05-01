@@ -301,6 +301,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     runtime: &SessionRuntime,
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
+    mark_for_rehydration: bool,
 ) -> Result<TokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_connection_ref(connection_ref);
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
@@ -339,11 +340,29 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous,
         previous_lifecycle,
     };
+    if mark_for_rehydration {
+        mark_token_commit_lifecycle_published_unlocked(
+            id.clone(),
+            store.as_ref(),
+            auth_lease.as_ref(),
+            &commit,
+            tokens,
+        )
+        .await?;
+    }
+    Ok(commit)
+}
+
+async fn mark_token_commit_lifecycle_published_unlocked(
+    id: Option<RpcId>,
+    store: &dyn TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    commit: &TokenCommitSnapshot,
+    tokens: &PersistedTokens,
+) -> Result<(), RpcResponse> {
     let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
-        let message = match rollback_token_commit(store.as_ref(), auth_lease.as_ref(), &commit)
-            .await
-        {
+        let message = match rollback_token_commit(store, auth_lease, commit).await {
             Ok(()) => {
                 format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
             }
@@ -355,7 +374,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         };
         return Err(RpcResponse::error(id, error::INTERNAL_ERROR, message));
     }
-    Ok(commit)
+    Ok(())
 }
 
 async fn save_tokens_and_publish_lifecycle(
@@ -367,9 +386,16 @@ async fn save_tokens_and_publish_lifecycle(
 ) -> Result<(), RpcResponse> {
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_tokens_and_publish_lifecycle_commit_unlocked(id, store, runtime, connection_ref, tokens)
-        .await
-        .map(|_| ())
+    save_tokens_and_publish_lifecycle_commit_unlocked(
+        id,
+        store,
+        runtime,
+        connection_ref,
+        tokens,
+        true,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn rollback_token_commit(
@@ -453,6 +479,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         runtime,
         connection_ref,
         tokens,
+        false,
     )
     .await
     {
@@ -477,7 +504,21 @@ async fn save_tokens_and_consume_device_flow_unlocked(
                 .await,
             )
         }
-        None => None,
+        None => {
+            let auth_lease = runtime.auth_lease_handle();
+            match mark_token_commit_lifecycle_published_unlocked(
+                id,
+                store.as_ref(),
+                auth_lease.as_ref(),
+                &commit,
+                tokens,
+            )
+            .await
+            {
+                Ok(()) => None,
+                Err(resp) => Some(resp),
+            }
+        }
     }
 }
 
@@ -523,6 +564,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         runtime,
         connection_ref,
         tokens,
+        false,
     )
     .await?;
     if let Err(err) =
@@ -534,6 +576,15 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         )
         .await);
     }
+    let auth_lease = runtime.auth_lease_handle();
+    mark_token_commit_lifecycle_published_unlocked(
+        id,
+        store.as_ref(),
+        auth_lease.as_ref(),
+        &commit,
+        tokens,
+    )
+    .await?;
     Ok(())
 }
 
@@ -2027,6 +2078,20 @@ mod tests {
             "expected error message to contain `{expected}`, got `{}`",
             error.message
         );
+    }
+
+    fn chatgpt_oauth_tokens_with_secret(secret: &str) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some(secret.to_string()),
+            refresh_token: Some(format!("{secret}-refresh")),
+            id_token: None,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            last_refresh: Some(chrono::Utc::now()),
+            scopes: Vec::new(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+        }
     }
 
     struct RejectingAuthLeaseHandle;
@@ -3682,6 +3747,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_rollback_clear_failure_leaves_unpublished_tokens() {
+        let store: Arc<dyn TokenStore> = Arc::new(ClearFailingTokenStore::new());
+        let runtime = test_runtime_with_config_and_token_store(
+            config_with_openai_managed_store_binding(),
+            Arc::clone(&store),
+        );
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let key = TokenKey::from_connection_ref(&connection_ref);
+
+        let resp = save_tokens_and_consume_browser_flow(
+            Some(RpcId::Num(1)),
+            &store,
+            &runtime,
+            &connection_ref,
+            &chatgpt_oauth_tokens_with_secret("oauth-new"),
+            BrowserFlowConsume {
+                authority: &RejectBrowserConsumeAuthority,
+                state: "browser-state",
+                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri: "http://127.0.0.1/callback",
+            },
+        )
+        .await
+        .expect_err("consume should fail");
+
+        let error = resp.error.expect("consume should return RPC error");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(error.message.contains("token commit rollback failed"));
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(stored.primary_secret.as_deref(), Some("oauth-new"));
+        assert!(!meerkat_core::tokens_lifecycle_published(&stored));
+    }
+
+    #[tokio::test]
     async fn stale_previous_rollback_preserves_newer_oauth_flow() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
         let store = runtime.token_store().expect("test token store");
@@ -3707,6 +3810,7 @@ mod tests {
             &runtime,
             &connection_ref,
             &failed_tokens,
+            true,
         )
         .await
         .unwrap();
@@ -3788,6 +3892,7 @@ mod tests {
             &runtime,
             &connection_ref,
             &failed_tokens,
+            true,
         )
         .await
         .unwrap();

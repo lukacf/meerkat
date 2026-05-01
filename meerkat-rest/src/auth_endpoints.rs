@@ -206,6 +206,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
+    mark_for_rehydration: bool,
 ) -> Result<TokenCommitSnapshot, (StatusCode, String)> {
     let key = TokenKey::from_connection_ref(connection_ref);
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
@@ -246,6 +247,19 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous,
         previous_lifecycle,
     };
+    if mark_for_rehydration {
+        mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
+            .await?;
+    }
+    Ok(commit)
+}
+
+async fn mark_token_commit_lifecycle_published_unlocked(
+    token_store: &dyn TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    commit: &TokenCommitSnapshot,
+    tokens: &PersistedTokens,
+) -> Result<(), (StatusCode, String)> {
     let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
@@ -260,7 +274,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         };
         return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
     }
-    Ok(commit)
+    Ok(())
 }
 
 fn publish_resolved_auth_lease(
@@ -297,6 +311,7 @@ async fn save_tokens_and_publish_lifecycle(
         auth_lease,
         connection_ref,
         tokens,
+        true,
     )
     .await
     .map(|_| ())
@@ -380,6 +395,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         auth_lease,
         connection_ref,
         tokens,
+        false,
     )
     .await?;
     if let Err(err) = consume_terminal_device_flow(poll_lease) {
@@ -391,6 +407,8 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         )
         .await);
     }
+    mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
+        .await?;
     Ok(())
 }
 
@@ -432,6 +450,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         auth_lease,
         connection_ref,
         tokens,
+        false,
     )
     .await?;
     if let Err(err) =
@@ -446,6 +465,8 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
         )
         .await);
     }
+    mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
+        .await?;
     Ok(())
 }
 
@@ -1660,6 +1681,20 @@ mod tests {
             last_refresh: Some(chrono::Utc::now()),
             scopes: Vec::new(),
             account_id: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn chatgpt_oauth_tokens_with_secret(secret: &str) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some(secret.to_string()),
+            refresh_token: Some(format!("{secret}-refresh")),
+            id_token: None,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            last_refresh: Some(chrono::Utc::now()),
+            scopes: Vec::new(),
+            account_id: Some("acct-1".into()),
             metadata: serde_json::Value::Null,
         }
     }
@@ -3286,6 +3321,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_oauth_rollback_clear_failure_leaves_unpublished_tokens() {
+        let store = ClearFailingTokenStore::new();
+        let auth_lease = RuntimeAuthLeaseHandle::new();
+        let connection_ref = managed_connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+
+        let err = save_tokens_and_consume_browser_flow(
+            &store,
+            &auth_lease,
+            &connection_ref,
+            &chatgpt_oauth_tokens_with_secret("oauth-new"),
+            BrowserFlowConsume {
+                authority: &RejectBrowserConsumeAuthority,
+                state: "browser-state",
+                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri: "http://127.0.0.1/callback",
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("token commit rollback failed"));
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(stored.primary_secret.as_deref(), Some("oauth-new"));
+        assert!(!meerkat_core::tokens_lifecycle_published(&stored));
+    }
+
+    #[tokio::test]
     async fn rest_stale_previous_rollback_preserves_newer_oauth_flow() {
         let store = EphemeralTokenStore::new();
         let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
@@ -3308,6 +3372,7 @@ mod tests {
             auth_lease.as_ref(),
             &connection_ref,
             &failed_tokens,
+            true,
         )
         .await
         .unwrap();
@@ -3386,6 +3451,7 @@ mod tests {
             auth_lease.as_ref(),
             &connection_ref,
             &failed_tokens,
+            true,
         )
         .await
         .unwrap();

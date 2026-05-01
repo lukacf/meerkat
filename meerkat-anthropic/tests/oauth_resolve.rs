@@ -351,7 +351,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
 // --- Expired OAuth bundle → refresh path ------------------------------
 
 #[tokio::test]
-async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
+async fn claude_ai_oauth_runtime_refresh_is_uncommitted() {
     // Mock token endpoint returns a new access_token + refresh_token.
     let app = Router::new().route(
         "/v1/oauth/token",
@@ -430,23 +430,17 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         "refreshed lease expiry must be the new provider expiry, not the old expired value"
     );
 
-    // Verify the new bundle was persisted.
+    // The runtime may refresh, but AuthMachine-owned resolver code owns
+    // publication and durable persistence.
     let updated = store
         .load(&TokenKey::parse("dev", "default_claude").expect("valid slugs"))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        updated.primary_secret.as_deref(),
-        Some("refreshed-access-NEW")
-    );
-    assert_eq!(
-        updated.refresh_token.as_deref(),
-        Some("rotated-refresh"),
-        "refresh_token must rotate when the server returns one"
-    );
-    assert!(updated.expires_at.is_some());
-    assert_eq!(updated.expires_at, refreshed.expires_at);
+    assert_eq!(updated.primary_secret.as_deref(), Some("stale-access"));
+    assert_eq!(updated.refresh_token.as_deref(), Some("valid-refresh"));
+    assert_eq!(updated.expires_at, persisted.expires_at);
+    assert!(!meerkat_core::tokens_lifecycle_published(&updated));
 }
 
 // --- oauth_to_api_key path → persisted api_key ------------------------

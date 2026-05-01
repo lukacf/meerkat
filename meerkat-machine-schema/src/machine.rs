@@ -250,6 +250,9 @@ impl MachineSchema {
         {
             let mut referenced: IndexSet<String> = IndexSet::new();
             collect_named_type_references_machine(self, &mut referenced);
+            for binding in &self.named_types {
+                collect_named_type_references_binding(binding, &mut referenced);
+            }
             for name in &referenced {
                 if !seen_bindings.contains(name.as_str()) {
                     return Err(MachineSchemaError::MissingNamedTypeBinding { name: name.clone() });
@@ -1205,6 +1208,9 @@ fn validate_named_type_binding_payload(
         RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
             validate_type_path_field_presence_set(binding.name.as_str(), fields)
         }
+        RustTypeAtom::TypePathStruct { fields, .. } => {
+            validate_type_path_struct(binding.name.as_str(), fields)
+        }
         _ => Ok(()),
     }
 }
@@ -1225,6 +1231,28 @@ fn validate_type_path_field_presence_set(
             return Err(MachineSchemaError::InvalidStringEnumBinding {
                 name: name.to_owned(),
                 reason: format!("field-presence binding defines duplicate field `{field}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_type_path_struct(
+    name: &str,
+    fields: &[crate::TypePathStructField],
+) -> Result<(), MachineSchemaError> {
+    if fields.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: name.to_owned(),
+            reason: "struct named-type binding must define at least one field".to_owned(),
+        });
+    }
+    let mut seen: IndexSet<&str> = IndexSet::new();
+    for field in fields {
+        if !seen.insert(field.name.as_str()) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!("struct binding defines duplicate field `{}`", field.name),
             });
         }
     }
@@ -1344,6 +1372,16 @@ pub(crate) fn collect_named_type_references_machine(
             collect_named_type_references_type(&param.ty, out);
         }
         collect_named_type_references_type(&helper.returns, out);
+    }
+}
+
+fn collect_named_type_references_binding(binding: &NamedTypeBinding, out: &mut IndexSet<String>) {
+    if let RustTypeAtom::TypePathStruct { fields, .. } = &binding.rust {
+        for field in fields {
+            if let crate::TypePathStructFieldAtom::Named(name) = &field.atom {
+                out.insert(name.as_str().to_owned());
+            }
+        }
     }
 }
 
@@ -1741,6 +1779,21 @@ mod tests {
             vec!["Destroyed".to_owned()]
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_struct_binding_with_missing_nested_named_binding() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .retain(|binding| binding.name.as_str() != "ToolSourceKind");
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingNamedTypeBinding {
+                name: "ToolSourceKind".into(),
+            })
+        );
     }
 
     fn replace_register_op_status_update(schema: &mut MachineSchema, status: &str) {

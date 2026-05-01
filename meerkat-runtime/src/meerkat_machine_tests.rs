@@ -16520,10 +16520,17 @@ fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -
 }
 
 fn runtime_modeled_tool_provenance_inner(provenance: &meerkat_core::ToolProvenance) -> KernelValue {
+    let tool_source_kind = meerkat_machine_schema::identity::NamedTypeId::parse("ToolSourceKind")
+        .expect("ToolSourceKind named type");
     KernelValue::Map(BTreeMap::from([
         (
             KernelValue::String("kind".to_string()),
-            KernelValue::String(runtime_modeled_tool_source_kind_label(&provenance.kind).into()),
+            runtime_modeled_named_value(
+                &tool_source_kind,
+                KernelValue::String(
+                    runtime_modeled_tool_source_kind_label(&provenance.kind).into(),
+                ),
+            ),
         ),
         (
             KernelValue::String("source_id".to_string()),

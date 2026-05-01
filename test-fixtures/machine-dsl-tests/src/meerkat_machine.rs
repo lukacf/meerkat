@@ -1646,6 +1646,29 @@ mod tests {
                     ),
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "ToolSourceKind",
+                &[
+                    "Builtin",
+                    "Shell",
+                    "Comms",
+                    "Memory",
+                    "Schedule",
+                    "Mob",
+                    "MobTasks",
+                    "Callback",
+                    "Mcp",
+                    "RustBundle",
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "ToolProvenance",
+                "crate::meerkat_machine::ToolProvenance",
+                vec![
+                    meerkat_machine_schema::TypePathStructField::named("kind", "ToolSourceKind"),
+                    meerkat_machine_schema::TypePathStructField::string("source_id"),
+                ],
+            ),
             NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::meerkat_machine::ToolVisibilityWitness",
@@ -1760,6 +1783,29 @@ mod tests {
                     meerkat_machine_schema::TypePathEnumStructuralVariant::string_set(
                         "Deny", "names",
                     ),
+                ],
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string_enum(
+                "ToolSourceKind",
+                &[
+                    "Builtin",
+                    "Shell",
+                    "Comms",
+                    "Memory",
+                    "Schedule",
+                    "Mob",
+                    "MobTasks",
+                    "Callback",
+                    "Mcp",
+                    "RustBundle",
+                ],
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::type_path_struct(
+                "ToolProvenance",
+                "crate::meerkat_machine::ToolProvenance",
+                vec![
+                    meerkat_machine_schema::TypePathStructField::named("kind", "ToolSourceKind"),
+                    meerkat_machine_schema::TypePathStructField::string("source_id"),
                 ],
             ),
             meerkat_machine_schema::identity::NamedTypeBinding::type_path_field_presence_set(

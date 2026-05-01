@@ -1267,6 +1267,7 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
         RustTypeAtom::StringEnum { .. } => "String".to_string(),
         RustTypeAtom::TypePath(path)
         | RustTypeAtom::TypePathFieldPresenceSet { path, .. }
+        | RustTypeAtom::TypePathStruct { path, .. }
         | RustTypeAtom::TypePathEnum { path, .. } => path
             .strip_prefix("crate::catalog::")
             .map(|suffix| format!("meerkat_machine_schema::catalog::{suffix}"))
@@ -1286,6 +1287,7 @@ fn render_named_type_definition(
     match atom {
         RustTypeAtom::TypePath(_)
         | RustTypeAtom::TypePathFieldPresenceSet { .. }
+        | RustTypeAtom::TypePathStruct { .. }
         | RustTypeAtom::TypePathEnum { .. } => {
             pushln!(
                 out,

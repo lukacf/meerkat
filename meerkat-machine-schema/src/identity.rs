@@ -319,6 +319,43 @@ impl TypePathEnumStructuralVariant {
     }
 }
 
+/// Field value shapes for structural type-path records.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypePathStructFieldAtom {
+    String,
+    Named(NamedTypeId),
+}
+
+/// One field in a structural record carried by the typed owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathStructField {
+    pub name: FieldId,
+    pub atom: TypePathStructFieldAtom,
+}
+
+impl TypePathStructField {
+    /// Construct a structural field whose value is a string.
+    pub fn string(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural record field slug"),
+            atom: TypePathStructFieldAtom::String,
+        }
+    }
+
+    /// Construct a structural field whose value is another named type.
+    pub fn named(name: &str, type_name: &str) -> Self {
+        #[allow(clippy::expect_used)]
+        let type_name = NamedTypeId::parse(type_name).expect("valid nested named-type slug");
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural record field slug"),
+            atom: TypePathStructFieldAtom::Named(type_name),
+        }
+    }
+}
+
 /// Atomic Rust-level representation used by [`NamedTypeBinding`] to anchor a
 /// DSL-declared named type to the concrete Rust type codegen must emit.
 ///
@@ -349,6 +386,12 @@ pub enum RustTypeAtom {
     TypePathFieldPresenceSet {
         path: String,
         fields: Vec<FieldId>,
+    },
+    /// Fully-qualified Rust struct type path whose model and runtime domains are
+    /// represented as structural records with typed fields.
+    TypePathStruct {
+        path: String,
+        fields: Vec<TypePathStructField>,
     },
     /// Fully-qualified Rust enum type path with explicit unit variants that
     /// can appear as DSL named-variant literals.
@@ -382,6 +425,16 @@ impl RustTypeAtom {
                     ..
                 },
                 Self::TypePathFieldPresenceSet {
+                    fields: right_fields,
+                    ..
+                },
+            ) => left_fields == right_fields,
+            (
+                Self::TypePathStruct {
+                    fields: left_fields,
+                    ..
+                },
+                Self::TypePathStruct {
                     fields: right_fields,
                     ..
                 },
@@ -496,6 +549,28 @@ impl NamedTypeBinding {
                         FieldId::parse(*field).expect("valid field-presence slug")
                     })
                     .collect(),
+            },
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified type
+    /// path and whose generated model/runtime domain is a typed structural
+    /// record.
+    pub fn type_path_struct(
+        name: &str,
+        rust_path: impl Into<String>,
+        fields: Vec<TypePathStructField>,
+    ) -> Self {
+        assert!(
+            !fields.is_empty(),
+            "struct named-type bindings require at least one field"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathStruct {
+                path: rust_path.into(),
+                fields,
             },
         }
     }

@@ -41,8 +41,9 @@ use meerkat_machine_schema::{
     CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
     FeedbackInputRef, Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier,
     Route, RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
-    TransitionSchema, TriggerKind, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypeRef,
-    Update, VariantSchema, canonical_machine_schemas,
+    TransitionSchema, TriggerKind, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant,
+    TypePathStructField, TypePathStructFieldAtom, TypeRef, Update, VariantSchema,
+    canonical_machine_schemas,
 };
 
 fn route_target_variant<'a>(
@@ -2635,6 +2636,11 @@ fn render_named_type_domain_assignment(
             "{{{}}}",
             field_presence_set_samples(fields, sample_cardinality).join(", ")
         ),
+        RustTypeAtom::TypePathStruct { fields, .. } => format!(
+            "{{{}}}",
+            type_path_struct_samples(fields, sample_cardinality, named_samples, named_bindings)
+                .join(", ")
+        ),
         RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
             if sample_cardinality == 0 {
                 return "{}".into();
@@ -2655,6 +2661,7 @@ fn render_named_type_domain_assignment(
     }
 }
 
+#[allow(clippy::panic)]
 fn render_enum_type_domain_assignment(
     name: impl AsRef<str>,
     sample_cardinality: usize,
@@ -2680,9 +2687,11 @@ fn render_enum_type_domain_assignment(
             type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality)
                 .join(", ")
         ),
-        other => panic!(
-            "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
-        ),
+        other => {
+            panic!(
+                "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+            );
+        }
     }
 }
 
@@ -2787,6 +2796,9 @@ fn sample_values_for_named_type(
         RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
             field_presence_set_samples(fields, sample_cardinality)
         }
+        RustTypeAtom::TypePathStruct { fields, .. } => {
+            type_path_struct_samples(fields, sample_cardinality, named_samples, bindings)
+        }
         RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
             if sample_cardinality == 0 {
                 return Vec::new();
@@ -2809,6 +2821,7 @@ fn sample_values_for_named_type(
     }
 }
 
+#[allow(clippy::panic)]
 fn sample_values_for_enum_type(
     name: &str,
     sample_cardinality: usize,
@@ -2823,12 +2836,15 @@ fn sample_values_for_enum_type(
             structural_variants,
             ..
         } => type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality),
-        other => panic!(
-            "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
-        ),
+        other => {
+            panic!(
+                "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+            );
+        }
     }
 }
 
+#[allow(clippy::panic)]
 fn require_named_binding<'a>(
     bindings: &'a BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     name: &str,
@@ -2886,6 +2902,60 @@ fn field_presence_set_samples(
         samples.push(format!("{{{}}}", rendered_fields.join(", ")));
     }
     samples
+}
+
+fn type_path_struct_samples(
+    fields: &[TypePathStructField],
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    let mut samples = vec![Vec::new()];
+    for field in fields {
+        let values =
+            type_path_struct_field_samples(field, sample_cardinality, named_samples, bindings);
+        if values.is_empty() {
+            return Vec::new();
+        }
+
+        let mut next_samples = Vec::new();
+        for sample in &samples {
+            for value in &values {
+                let mut next = sample.clone();
+                next.push(format!("{} |-> {value}", field.name));
+                next_samples.push(next);
+            }
+        }
+        samples = next_samples;
+    }
+
+    samples
+        .into_iter()
+        .map(|fields| format!("[{}]", fields.join(", ")))
+        .collect()
+}
+
+fn type_path_struct_field_samples(
+    field: &TypePathStructField,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    match &field.atom {
+        TypePathStructFieldAtom::String => {
+            if sample_cardinality == 0 {
+                Vec::new()
+            } else {
+                generic_string_samples(sample_cardinality)
+                    .into_iter()
+                    .map(tla_string)
+                    .collect()
+            }
+        }
+        TypePathStructFieldAtom::Named(name) => {
+            sample_values_for_named_type(name.as_str(), sample_cardinality, named_samples, bindings)
+        }
+    }
 }
 
 fn render_type_path_enum_structural_samples(
@@ -2984,6 +3054,23 @@ fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
     else {
         return;
     };
+
+    for canonical_binding in canonical.named_types.iter().filter(|binding| {
+        matches!(
+            binding.rust,
+            meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. }
+        )
+    }) {
+        assert!(
+            schema
+                .named_types
+                .iter()
+                .any(|binding| binding.name == canonical_binding.name),
+            "generated machine `{}` missing canonical named-type `{}` binding",
+            schema.machine,
+            canonical_binding.name
+        );
+    }
 
     for binding in &schema.named_types {
         let Some(canonical_binding) = canonical

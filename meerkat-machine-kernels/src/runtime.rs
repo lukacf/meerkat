@@ -6,13 +6,13 @@ use meerkat_machine_schema::identity::{
 };
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, RouteVariantId, TransitionSchema,
-    TriggerMatch, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypeRef, Update,
+    TriggerMatch, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypePathStructField,
+    TypePathStructFieldAtom, TypeRef, Update,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
-const TOOL_SOURCE_KIND_TYPE: &str = "ToolSourceKind";
 const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,48 +167,33 @@ fn named_value_type_is(type_name: &NamedTypeId, expected: &str) -> bool {
     type_name.as_str() == expected
 }
 
-fn tool_source_kind_matches(schema: &MachineSchema, value: &KernelValue) -> bool {
-    let Ok(type_name) = NamedTypeId::parse(TOOL_SOURCE_KIND_TYPE) else {
+fn tool_provenance_matches(schema: &MachineSchema, value: &KernelValue) -> bool {
+    let Ok(type_name) = NamedTypeId::parse(TOOL_PROVENANCE_TYPE) else {
         return false;
     };
-    let ty = TypeRef::Named(type_name.clone());
+    if !matches!(
+        named_type_atom(schema, &type_name),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. })
+    ) {
+        return false;
+    }
 
+    let ty = TypeRef::Named(type_name.clone());
     match value {
-        KernelValue::String(_) => {
-            let typed_value = KernelValue::Named {
+        KernelValue::Named {
+            type_name: value_type,
+            ..
+        } if value_type == &type_name => value_matches_type(schema, value, &ty),
+        KernelValue::Map(_) => value_matches_type(
+            schema,
+            &KernelValue::Named {
                 type_name,
                 value: Box::new(value.clone()),
-            };
-            value_matches_type(schema, &typed_value, &ty)
-        }
-        other => value_matches_type(schema, other, &ty),
+            },
+            &ty,
+        ),
+        _ => false,
     }
-}
-
-fn tool_provenance_matches(schema: &MachineSchema, value: &KernelValue) -> bool {
-    let value = match value {
-        KernelValue::Named { type_name, value }
-            if named_value_type_is(type_name, TOOL_PROVENANCE_TYPE) =>
-        {
-            value.as_ref()
-        }
-        other => other,
-    };
-
-    let KernelValue::Map(fields) = value else {
-        return false;
-    };
-    if fields.len() != 2 {
-        return false;
-    }
-
-    matches!(
-        fields.get(&string_key("kind")),
-        Some(kind) if tool_source_kind_matches(schema, kind)
-    ) && matches!(
-        fields.get(&string_key("source_id")),
-        Some(KernelValue::String(_))
-    )
 }
 
 fn type_path_field_presence_set_matches(
@@ -1370,6 +1355,7 @@ impl GeneratedMachineKernel {
                     meerkat_machine_schema::RustTypeAtom::StringEnum { .. }
                         | meerkat_machine_schema::RustTypeAtom::TypePathEnum { .. }
                         | meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. }
+                        | meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. }
                 ) | None
             ),
             TypeRef::Enum(_) => true,
@@ -1569,8 +1555,17 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
 }
 
 fn type_has_resolved_named_bindings(schema: &MachineSchema, ty: &TypeRef) -> bool {
+    let mut visiting = BTreeSet::new();
+    type_has_resolved_named_bindings_inner(schema, ty, &mut visiting)
+}
+
+fn type_has_resolved_named_bindings_inner(
+    schema: &MachineSchema,
+    ty: &TypeRef,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
     match ty {
-        TypeRef::Named(name) => named_type_atom(schema, name).is_some(),
+        TypeRef::Named(name) => named_type_has_resolved_named_bindings(schema, name, visiting),
         TypeRef::Enum(name) => {
             let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
                 return false;
@@ -1581,14 +1576,38 @@ fn type_has_resolved_named_bindings(schema: &MachineSchema, ty: &TypeRef) -> boo
             )
         }
         TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
-            type_has_resolved_named_bindings(schema, inner)
+            type_has_resolved_named_bindings_inner(schema, inner, visiting)
         }
         TypeRef::Map(key, value) => {
-            type_has_resolved_named_bindings(schema, key)
-                && type_has_resolved_named_bindings(schema, value)
+            type_has_resolved_named_bindings_inner(schema, key, visiting)
+                && type_has_resolved_named_bindings_inner(schema, value, visiting)
         }
         TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => true,
     }
+}
+
+fn named_type_has_resolved_named_bindings(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    if !visiting.insert(name.as_str().to_owned()) {
+        return false;
+    }
+    let resolved = match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            fields.iter().all(|field| match &field.atom {
+                TypePathStructFieldAtom::String => true,
+                TypePathStructFieldAtom::Named(name) => {
+                    named_type_has_resolved_named_bindings(schema, name, visiting)
+                }
+            })
+        }
+        Some(_) => true,
+        None => false,
+    };
+    visiting.remove(name.as_str());
+    resolved
 }
 
 fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> KernelValue {
@@ -1607,6 +1626,19 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
         Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. }) => {
             KernelValue::Map(BTreeMap::new())
         }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            KernelValue::Map(
+                fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            string_key(field.name.as_str()),
+                            default_value_for_type_path_struct_field(schema, field),
+                        )
+                    })
+                    .collect(),
+            )
+        }
         Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
             unit_variants
                 .first()
@@ -1618,6 +1650,19 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
             .map(|variant| KernelValue::String(variant.as_str().to_owned()))
             .unwrap_or_else(|| KernelValue::String(String::new())),
         None => KernelValue::None,
+    }
+}
+
+fn default_value_for_type_path_struct_field(
+    schema: &MachineSchema,
+    field: &TypePathStructField,
+) -> KernelValue {
+    match &field.atom {
+        TypePathStructFieldAtom::String => KernelValue::String(String::new()),
+        TypePathStructFieldAtom::Named(name) => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(default_value_for_named_type(schema, name)),
+        },
     }
 }
 
@@ -1659,6 +1704,9 @@ fn named_type_inner_matches(
         Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { fields, .. }) => {
             type_path_field_presence_set_matches(schema, name, fields, value)
         }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            type_path_struct_matches(schema, fields, value)
+        }
         Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum {
             unit_variants,
             structural_variants,
@@ -1672,6 +1720,31 @@ fn named_type_inner_matches(
         }
         None => false,
     }
+}
+
+fn type_path_struct_matches(
+    schema: &MachineSchema,
+    expected_fields: &[TypePathStructField],
+    value: &KernelValue,
+) -> bool {
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+    if fields.len() != expected_fields.len() {
+        return false;
+    }
+
+    expected_fields.iter().all(|field| {
+        let Some(value) = fields.get(&string_key(field.name.as_str())) else {
+            return false;
+        };
+        match &field.atom {
+            TypePathStructFieldAtom::String => matches!(value, KernelValue::String(_)),
+            TypePathStructFieldAtom::Named(name) => {
+                value_matches_type(schema, value, &TypeRef::Named(name.clone()))
+            }
+        }
+    })
 }
 
 fn type_path_enum_structural_matches(
@@ -1766,6 +1839,7 @@ fn enum_variant_matches(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::redundant_clone)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 

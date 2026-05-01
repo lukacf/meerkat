@@ -6,7 +6,7 @@ pub mod types;
 
 pub use identity::{
     NamedTypeBinding, RustTypeAtom, TypePathEnumPayloadAtom, TypePathEnumPayloadField,
-    TypePathEnumStructuralVariant,
+    TypePathEnumStructuralVariant, TypePathStructField, TypePathStructFieldAtom,
 };
 pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 

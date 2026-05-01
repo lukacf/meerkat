@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use meerkat_core::turn_execution_authority::ContentShape;
 use meerkat_machine_codegen::{render_machine_ci_cfg, render_machine_semantic_model};
 use meerkat_machine_schema::catalog::dsl::{
@@ -80,7 +82,7 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
     );
     assert_eq!(
         tool_filter_values_line(&rendered),
-        tool_filter_domain(&[r#"{}"#, r#"{"alpha"}"#]),
+        tool_filter_domain(&[r"{}", r#"{"alpha"}"#]),
         "ToolFilterValues must cover the canonical unit plus structural Allow/Deny set samples"
     );
     assert!(
@@ -95,7 +97,7 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
 
     assert_eq!(
         tool_filter_values_line(&rendered),
-        tool_filter_domain(&[r#"{}"#, r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]),
+        tool_filter_domain(&[r"{}", r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]),
         "deep ToolFilterValues must cover differing same-variant structural payloads"
     );
     assert!(
@@ -166,6 +168,38 @@ fn meerkat_ci_cfg_fails_closed_when_structural_named_binding_changes_shape() {
         .iter_mut()
         .find(|binding| binding.name.as_str() == "ToolVisibilityWitness")
         .expect("ToolVisibilityWitness binding");
+    *binding = NamedTypeBinding {
+        name: binding.name.clone(),
+        rust: RustTypeAtom::String,
+    };
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` missing canonical named-type `ToolProvenance` binding"
+)]
+fn meerkat_ci_cfg_fails_closed_when_tool_provenance_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolProvenance");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` named-type `ToolProvenance` binding must match canonical domain shape"
+)]
+fn meerkat_ci_cfg_fails_closed_when_tool_provenance_binding_changes_shape() {
+    let mut schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolProvenance")
+        .expect("ToolProvenance binding");
     *binding = NamedTypeBinding {
         name: binding.name.clone(),
         rust: RustTypeAtom::String,

@@ -22,9 +22,9 @@ use meerkat_machine_schema::{
     CompositionSchemaError, CompositionStateLimits, CompositionWitness, CompositionWitnessField,
     CompositionWitnessInput, CompositionWitnessState, DriverDispatchRoute, Expr, MachineInstance,
     Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
-    RouteVariantId, RustTypeAtom, TypeRef, WatchedEffect, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    meerkat_mob_seam_composition,
+    RouteVariantId, RustTypeAtom, TypePathStructField, TypeRef, WatchedEffect,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
 };
 
 #[test]
@@ -170,15 +170,15 @@ fn peer_ingress_lifecycle_subject_signal_carries_candidate_not_selected_subject(
         .collect::<Vec<_>>();
 
     assert!(
-        fields.iter().any(|name| *name == "from_peer"),
+        fields.contains(&"from_peer"),
         "fallback peer identity should remain a typed input fact"
     );
     assert!(
-        fields.iter().any(|name| *name == "lifecycle_peer_param"),
+        fields.contains(&"lifecycle_peer_param"),
         "machine should receive the parsed lifecycle peer parameter candidate"
     );
     assert!(
-        !fields.iter().any(|name| *name == "lifecycle_peer"),
+        !fields.contains(&"lifecycle_peer"),
         "preselected lifecycle subjects must not cross the machine signal seam"
     );
 }
@@ -201,6 +201,23 @@ fn meerkat_deferred_tool_witness_named_type_is_structural_authority() {
             ],
         },
         "deferred-tool authority must be bound to the typed witness projection and field-presence domain, not String"
+    );
+
+    let provenance_type = NamedTypeId::parse("ToolProvenance").expect("named type");
+    let provenance_binding = schema
+        .named_type_binding(&provenance_type)
+        .expect("ToolProvenance binding");
+
+    assert_eq!(
+        provenance_binding.rust,
+        RustTypeAtom::TypePathStruct {
+            path: "crate::catalog::dsl::meerkat_machine::ToolProvenance".to_string(),
+            fields: vec![
+                TypePathStructField::named("kind", "ToolSourceKind"),
+                TypePathStructField::string("source_id"),
+            ],
+        },
+        "nested provenance authority must be a typed structural binding, not a String fallback"
     );
 }
 

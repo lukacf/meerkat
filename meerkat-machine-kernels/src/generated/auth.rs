@@ -97,8 +97,14 @@ pub struct State {
     pub refresh_attempt: u64,
     pub credential_present: bool,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
+    pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
+    pub oauth_browser_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
     pub oauth_device_flow_ids: std::collections::BTreeSet<String>,
+    pub oauth_device_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_device_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
+    pub oauth_outstanding_flow_count: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -135,14 +141,24 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthBrowserFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub expires_at_millis: u64,
+        pub max_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthBrowserFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConsumeOAuthBrowserFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExpireOAuthBrowserFlow {
@@ -151,14 +167,21 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthDeviceFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub expires_at_millis: u64,
+        pub max_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthDeviceFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginOAuthDevicePoll {
         pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FinishOAuthDevicePoll {
@@ -167,6 +190,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConsumeOAuthDeviceFlow {
         pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExpireOAuthDeviceFlow {
@@ -398,7 +423,13 @@ pub fn initial_state() -> State {
         refresh_attempt: 0,
         credential_present: false,
         oauth_browser_flow_ids: Default::default(),
+        oauth_browser_flow_providers: Default::default(),
+        oauth_browser_flow_redirect_uris: Default::default(),
+        oauth_browser_flow_expires_at_millis: Default::default(),
         oauth_device_flow_ids: Default::default(),
+        oauth_device_flow_providers: Default::default(),
+        oauth_device_flow_expires_at_millis: Default::default(),
         oauth_device_poll_ids: Default::default(),
+        oauth_outstanding_flow_count: 0,
     }
 }

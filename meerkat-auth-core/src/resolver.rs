@@ -207,22 +207,21 @@ fn oauth_lifecycle_marker_relation(
     ) {
         return relation;
     }
-    let publication_times_tie = publication.credential_published_at_millis.is_some()
-        && publication.credential_published_at_millis == snapshot.credential_published_at_millis;
-
     let generation_matches = publication
         .generation
         .is_some_and(|generation| generation == snapshot.generation);
+    let same_credential_after_flow_generation_advance = publication
+        .generation
+        .is_some_and(|generation| generation < snapshot.generation)
+        && publication.credential_published_at_millis.is_some()
+        && publication.credential_published_at_millis == snapshot.credential_published_at_millis;
 
     let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
     match token_expires_at.cmp(&snapshot_expires_at) {
         std::cmp::Ordering::Greater => return OAuthLifecycleMarkerRelation::TokenNewer,
         std::cmp::Ordering::Less => return OAuthLifecycleMarkerRelation::TokenStale,
         std::cmp::Ordering::Equal => {
-            if generation_matches {
-                return OAuthLifecycleMarkerRelation::Matches;
-            }
-            if publication_times_tie {
+            if generation_matches || same_credential_after_flow_generation_advance {
                 return OAuthLifecycleMarkerRelation::Matches;
             }
         }
@@ -606,6 +605,18 @@ pub fn mark_managed_store_oauth_refresh_failed(
                 "AuthMachine lifecycle refresh_failed failed: {e}"
             ))
         })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn managed_store_oauth_refresh_failure_is_permanent(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("missing refresh_token")
+        || message.contains("invalid_grant")
+        || message.contains("invalid refresh")
+        || message.contains("refresh token revoked")
+        || message.contains("status=400")
+        || message.contains("status=401")
+        || message.contains("status=403")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2130,19 +2141,20 @@ mod tests {
             OAuthLifecycleMarkerRelation::TokenStale
         );
 
-        let mut same_time_same_expiry = chatgpt_oauth_tokens("same-time-same-expiry-access");
-        same_time_same_expiry.expires_at = Some(snapshot_expires_at);
-        let same_time_same_expiry_different_generation =
+        let mut same_time_same_expiry_future_generation =
+            chatgpt_oauth_tokens("same-time-same-expiry-future-generation-access");
+        same_time_same_expiry_future_generation.expires_at = Some(snapshot_expires_at);
+        let same_time_same_expiry_future_generation =
             meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &same_time_same_expiry,
+                &same_time_same_expiry_future_generation,
                 AuthLeaseTransition {
-                    generation: 1,
+                    generation: 3,
                     credential_published_at_millis: Some(2_000),
                 },
             );
         assert_eq!(
-            oauth_lifecycle_marker_relation(&same_time_same_expiry_different_generation, &snapshot),
-            OAuthLifecycleMarkerRelation::Matches
+            oauth_lifecycle_marker_relation(&same_time_same_expiry_future_generation, &snapshot),
+            OAuthLifecycleMarkerRelation::Invalid
         );
     }
 
@@ -2166,6 +2178,29 @@ mod tests {
             OAuthLifecycleMarkerRelation::Invalid,
             "equal finite expiry alone must not let an older marker match a newer AuthMachine snapshot"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn managed_store_oauth_refresh_failure_classifies_permanent_credentials() {
+        assert!(managed_store_oauth_refresh_failure_is_permanent(
+            "missing refresh_token"
+        ));
+        assert!(managed_store_oauth_refresh_failure_is_permanent(
+            "token endpoint error: status=400 body={\"error\":\"invalid_grant\"}"
+        ));
+        assert!(managed_store_oauth_refresh_failure_is_permanent(
+            "token endpoint error: status=401 body=unauthorized"
+        ));
+        assert!(managed_store_oauth_refresh_failure_is_permanent(
+            "token endpoint error: status=403 body=forbidden"
+        ));
+        assert!(!managed_store_oauth_refresh_failure_is_permanent(
+            "token endpoint error: status=500 body=try later"
+        ));
+        assert!(!managed_store_oauth_refresh_failure_is_permanent(
+            "network error: connection reset"
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

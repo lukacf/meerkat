@@ -14,8 +14,9 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
-    load_managed_store_tokens_with_lifecycle, mark_managed_store_oauth_refresh_failed,
-    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
+    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_is_permanent,
+    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
+    refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
@@ -36,6 +37,21 @@ use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 pub use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn openai_oauth_refresh_failure_is_permanent(error: &oauth::OpenAiOAuthError) -> bool {
+    match error {
+        oauth::OpenAiOAuthError::InteractiveLoginRequired
+        | oauth::OpenAiOAuthError::MissingRefreshToken => true,
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(message)) => {
+            managed_store_oauth_refresh_failure_is_permanent(message)
+        }
+        oauth::OpenAiOAuthError::OAuth(error) => {
+            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+        }
+        _ => false,
+    }
+}
 
 /// Allowed (backend, auth) combinations for OpenAI. Phase 2 parses all
 /// variants but only resolves ApiKey / StaticBearer / ExternalAuthorizer;
@@ -218,11 +234,13 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     }))
                                     .await
                                     .map_err(|e| {
+                                        let permanent =
+                                            openai_oauth_refresh_failure_is_permanent(&e);
                                         let failure = mark_managed_store_oauth_refresh_failed(
                                             env,
                                             binding,
                                             refresh_started,
-                                            false,
+                                            permanent,
                                         )
                                         .err()
                                         .map(|err| format!("; {err}"))

@@ -312,13 +312,19 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         let state = OAuthFlowRegistry::new_state()?;
         let expires_at = expires_at_millis(self.registry.ttl())?;
         self.admit_browser(&target, &state, provider, &redirect_uri, expires_at)?;
-        let pruned = self.registry.insert_browser_flow_with_pruned(
+        let pruned = match self.registry.insert_browser_flow_with_pruned(
             state.clone(),
-            target,
+            target.clone(),
             provider,
             redirect_uri,
             pkce_verifier,
-        );
+        ) {
+            Ok(pruned) => pruned,
+            Err(err) => {
+                let _ = self.expire_browser(&target, &state);
+                return Err(err);
+            }
+        };
         self.expire_collected_flows(pruned);
         Ok(state)
     }
@@ -392,28 +398,35 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.expire_pruned_flows();
         let machine_expires_at = expires_at_millis(expires_in)?;
         if let Err(err) = self.admit_device(&target, &device_code, provider, machine_expires_at) {
-            if self
-                .lifecycle
-                .expire_device_flow(&target, &device_code)
-                .is_ok()
-                && self
-                    .admit_device(&target, &device_code, provider, machine_expires_at)
-                    .is_ok()
+            match self
+                .registry
+                .verify_device_code(&device_code, &target, provider)
             {
-                // Recovered stale AuthMachine membership left behind after
-                // registry-only cleanup; continue with payload insertion.
-            } else {
-                return Err(err);
+                Err(OAuthFlowError::Missing) => {
+                    if self
+                        .lifecycle
+                        .expire_device_flow(&target, &device_code)
+                        .is_ok()
+                        && self
+                            .admit_device(&target, &device_code, provider, machine_expires_at)
+                            .is_ok()
+                    {
+                        // Recovered stale AuthMachine membership left behind after
+                        // registry-only cleanup; continue with payload insertion.
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Ok(_) => return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted),
+                Err(_) => return Err(err),
             }
         }
-        match self
-            .registry
-            .admit_device_code_with_pruned_without_capacity(
-                target.clone(),
-                provider,
-                device_code.clone(),
-                expires_in,
-            ) {
+        match self.registry.admit_device_code_with_pruned(
+            target.clone(),
+            provider,
+            device_code.clone(),
+            expires_in,
+        ) {
             Ok(pruned) => self.expire_collected_flows(pruned),
             Err(err) => {
                 let _ = self.lifecycle.expire_device_flow(&target, &device_code);
@@ -678,6 +691,71 @@ mod tests {
             .expect("stale lifecycle membership is expired before readmit");
 
         assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
+    }
+
+    #[test]
+    fn duplicate_device_admit_preserves_active_lifecycle_membership() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "provider-device-code";
+
+        authority
+            .admit_device_code(
+                target.clone(),
+                provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+        let duplicate = authority.admit_device_code(
+            target.clone(),
+            provider,
+            device_code.to_string(),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(duplicate, Err(OAuthFlowError::DeviceCodeAlreadyAdmitted));
+        assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
+        authority
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("duplicate admit must not orphan active lifecycle membership");
+    }
+
+    #[test]
+    fn registry_capacity_still_bounds_payloads_after_lifecycle_release() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = RuntimeOAuthFlowHandle::new_with_capacity_and_auth_lease(
+            Duration::from_secs(60),
+            1,
+            lifecycle.clone(),
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+
+        authority
+            .start(
+                target.clone(),
+                provider,
+                "http://127.0.0.1/callback".to_string(),
+                "verifier-1".to_string(),
+            )
+            .expect("first browser flow admitted");
+        lifecycle
+            .release_lease(&LeaseKey::from_connection_ref(&target))
+            .expect("credential lifecycle release succeeds");
+
+        assert_eq!(
+            authority.start(
+                alternate_target(),
+                provider,
+                "http://127.0.0.1/other-callback".to_string(),
+                "verifier-2".to_string(),
+            ),
+            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
+        );
     }
 
     #[test]

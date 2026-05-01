@@ -12,8 +12,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `refresh_attempt`: `u64`
 - `credential_present`: `Bool`
 - `oauth_browser_flow_ids`: `Set<String>`
+- `oauth_browser_flow_providers`: `Map<String, String>`
+- `oauth_browser_flow_redirect_uris`: `Map<String, String>`
+- `oauth_browser_flow_expires_at_millis`: `Map<String, u64>`
 - `oauth_device_flow_ids`: `Set<String>`
+- `oauth_device_flow_providers`: `Map<String, String>`
+- `oauth_device_flow_expires_at_millis`: `Map<String, u64>`
 - `oauth_device_poll_ids`: `Set<String>`
+- `oauth_outstanding_flow_count`: `u64`
 
 ## Inputs
 - `Acquire`(expires_at_ts: Option<u64>)
@@ -25,15 +31,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `Release`
-- `AdmitOAuthBrowserFlow`(flow_id: String)
-- `VerifyOAuthBrowserFlow`(flow_id: String)
-- `ConsumeOAuthBrowserFlow`(flow_id: String)
+- `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64)
+- `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
+- `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ExpireOAuthBrowserFlow`(flow_id: String)
-- `AdmitOAuthDeviceFlow`(flow_id: String)
-- `VerifyOAuthDeviceFlow`(flow_id: String)
-- `BeginOAuthDevicePoll`(flow_id: String)
+- `AdmitOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64)
+- `VerifyOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
+- `BeginOAuthDevicePoll`(flow_id: String, provider: String, now_millis: u64)
 - `FinishOAuthDevicePoll`(flow_id: String)
-- `ConsumeOAuthDeviceFlow`(flow_id: String)
+- `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
 
 ## Signals
@@ -119,97 +125,125 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitOAuthBrowserFlowValid`
 - From: `Valid`
-- On: `AdmitOAuthBrowserFlow`(flow_id)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `AdmitOAuthBrowserFlowExpiring`
 - From: `Expiring`
-- On: `AdmitOAuthBrowserFlow`(flow_id)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `AdmitOAuthBrowserFlowRefreshing`
 - From: `Refreshing`
-- On: `AdmitOAuthBrowserFlow`(flow_id)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `AdmitOAuthBrowserFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `AdmitOAuthBrowserFlow`(flow_id)
+- On: `AdmitOAuthBrowserFlow`(flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `browser_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
 ### `VerifyOAuthBrowserFlowValid`
 - From: `Valid`
-- On: `VerifyOAuthBrowserFlow`(flow_id)
+- On: `VerifyOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `VerifyOAuthBrowserFlowExpiring`
 - From: `Expiring`
-- On: `VerifyOAuthBrowserFlow`(flow_id)
+- On: `VerifyOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `VerifyOAuthBrowserFlowRefreshing`
 - From: `Refreshing`
-- On: `VerifyOAuthBrowserFlow`(flow_id)
+- On: `VerifyOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `VerifyOAuthBrowserFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `VerifyOAuthBrowserFlow`(flow_id)
+- On: `VerifyOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
 ### `ConsumeOAuthBrowserFlowValid`
 - From: `Valid`
-- On: `ConsumeOAuthBrowserFlow`(flow_id)
+- On: `ConsumeOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `ConsumeOAuthBrowserFlowExpiring`
 - From: `Expiring`
-- On: `ConsumeOAuthBrowserFlow`(flow_id)
+- On: `ConsumeOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `ConsumeOAuthBrowserFlowRefreshing`
 - From: `Refreshing`
-- On: `ConsumeOAuthBrowserFlow`(flow_id)
+- On: `ConsumeOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `ConsumeOAuthBrowserFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `ConsumeOAuthBrowserFlow`(flow_id)
+- On: `ConsumeOAuthBrowserFlow`(flow_id, provider, redirect_uri, now_millis)
 - Guards:
   - `browser_flow_present`
+  - `browser_flow_provider_matches`
+  - `browser_flow_redirect_uri_matches`
+  - `browser_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
@@ -247,100 +281,120 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdmitOAuthDeviceFlowValid`
 - From: `Valid`
-- On: `AdmitOAuthDeviceFlow`(flow_id)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `device_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `AdmitOAuthDeviceFlowExpiring`
 - From: `Expiring`
-- On: `AdmitOAuthDeviceFlow`(flow_id)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `device_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `AdmitOAuthDeviceFlowRefreshing`
 - From: `Refreshing`
-- On: `AdmitOAuthDeviceFlow`(flow_id)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `device_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `AdmitOAuthDeviceFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `AdmitOAuthDeviceFlow`(flow_id)
+- On: `AdmitOAuthDeviceFlow`(flow_id, provider, expires_at_millis, max_outstanding_flows)
 - Guards:
   - `device_flow_absent`
+  - `oauth_capacity_available`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
 ### `VerifyOAuthDeviceFlowValid`
 - From: `Valid`
-- On: `VerifyOAuthDeviceFlow`(flow_id)
+- On: `VerifyOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `VerifyOAuthDeviceFlowExpiring`
 - From: `Expiring`
-- On: `VerifyOAuthDeviceFlow`(flow_id)
+- On: `VerifyOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `VerifyOAuthDeviceFlowRefreshing`
 - From: `Refreshing`
-- On: `VerifyOAuthDeviceFlow`(flow_id)
+- On: `VerifyOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `VerifyOAuthDeviceFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `VerifyOAuthDeviceFlow`(flow_id)
+- On: `VerifyOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 
 ### `BeginOAuthDevicePollValid`
 - From: `Valid`
-- On: `BeginOAuthDevicePoll`(flow_id)
+- On: `BeginOAuthDevicePoll`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
   - `device_poll_absent`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `BeginOAuthDevicePollExpiring`
 - From: `Expiring`
-- On: `BeginOAuthDevicePoll`(flow_id)
+- On: `BeginOAuthDevicePoll`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
   - `device_poll_absent`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `BeginOAuthDevicePollRefreshing`
 - From: `Refreshing`
-- On: `BeginOAuthDevicePoll`(flow_id)
+- On: `BeginOAuthDevicePoll`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
   - `device_poll_absent`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `BeginOAuthDevicePollReauthRequired`
 - From: `ReauthRequired`
-- On: `BeginOAuthDevicePoll`(flow_id)
+- On: `BeginOAuthDevicePoll`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
   - `device_poll_absent`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
@@ -379,33 +433,41 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ConsumeOAuthDeviceFlowValid`
 - From: `Valid`
-- On: `ConsumeOAuthDeviceFlow`(flow_id)
+- On: `ConsumeOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
 ### `ConsumeOAuthDeviceFlowExpiring`
 - From: `Expiring`
-- On: `ConsumeOAuthDeviceFlow`(flow_id)
+- On: `ConsumeOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `ConsumeOAuthDeviceFlowRefreshing`
 - From: `Refreshing`
-- On: `ConsumeOAuthDeviceFlow`(flow_id)
+- On: `ConsumeOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `Refreshing`
 
 ### `ConsumeOAuthDeviceFlowReauthRequired`
 - From: `ReauthRequired`
-- On: `ConsumeOAuthDeviceFlow`(flow_id)
+- On: `ConsumeOAuthDeviceFlow`(flow_id, provider, now_millis)
 - Guards:
   - `device_flow_present`
+  - `device_flow_provider_matches`
+  - `device_flow_not_expired`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

@@ -841,7 +841,7 @@ impl OAuthFlowRegistry {
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
-    ) -> OAuthPrunedFlows {
+    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
         let record = OAuthFlowRecord {
             target,
             provider,
@@ -853,8 +853,16 @@ impl OAuthFlowRegistry {
         let mut device_flows = self.device_flows.lock();
         let expired_browser = take_expired_locked(&mut flows, self.ttl);
         let expired_device = take_expired_device_locked(&mut device_flows);
+        if flows.len() + device_flows.len() >= self.max_outstanding {
+            return Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: self.max_outstanding,
+            });
+        }
         flows.insert(state, record);
-        OAuthPrunedFlows::from_expired(expired_browser, expired_device)
+        Ok(OAuthPrunedFlows::from_expired(
+            expired_browser,
+            expired_device,
+        ))
     }
 
     pub fn admit_device_code_with_pruned(

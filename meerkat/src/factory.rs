@@ -2276,11 +2276,20 @@ impl AgentFactory {
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) {
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
-        let expires_at = connection
-            .auth_lease
-            .expires_at()
-            .map(|ts| ts.timestamp().max(0) as u64)
-            .unwrap_or(u64::MAX);
+        if handle.snapshot(&lease_key).phase.is_some() {
+            return;
+        }
+        if matches!(
+            connection.auth_lease.kind(),
+            meerkat_core::ResolvedAuthKind::DynamicAuthorizer(_)
+        ) {
+            return;
+        }
+        let Some(expires_at) = connection.auth_lease.expires_at() else {
+            let _ = handle.acquire_lease(&lease_key, u64::MAX);
+            return;
+        };
+        let expires_at = expires_at.timestamp().max(0) as u64;
         let _ = handle.acquire_lease(&lease_key, expires_at);
     }
 
@@ -2691,18 +2700,11 @@ impl AgentFactory {
                             &build_config.runtime_build_mode
                             && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
                         {
-                            let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(
+                            Self::publish_auth_lease(
+                                &bindings.auth_lease,
                                 lease_connection_ref,
+                                &connection,
                             );
-                            let expires_at = connection
-                                .auth_lease
-                                .expires_at()
-                                .map(|ts| ts.timestamp().max(0) as u64)
-                                .unwrap_or(u64::MAX);
-                            // Ignore result: the DSL may reject if an earlier
-                            // hot-swap already transitioned this binding; the
-                            // lease state is orthogonal to error semantics.
-                            let _ = bindings.auth_lease.acquire_lease(&lease_key, expires_at);
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
@@ -4882,6 +4884,126 @@ mod tests {
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
             "self-hosted runtime resolution must publish the resolved lease to AuthMachine"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[test]
+    fn publish_auth_lease_does_not_overwrite_existing_reauth_required_truth() {
+        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        handle.acquire_lease(&lease_key, 1_800_000_000).unwrap();
+        handle.mark_reauth_required(&lease_key).unwrap();
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: meerkat_llm_core::provider_runtime::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "openai_backend".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                    "cached-token".to_string(),
+                    meerkat_core::AuthMetadata::default(),
+                    Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                    "test",
+                ),
+            ),
+        };
+
+        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+
+        let snapshot = handle.snapshot(&lease_key);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+            "factory publication must not reacquire over AuthMachine reauth-required truth"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn publish_auth_lease_skips_unobserved_dynamic_authorizer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct UnobservedAuthorizer {
+            expires_at_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::HttpAuthorizer for UnobservedAuthorizer {
+            async fn authorize(
+                &self,
+                _req: &mut meerkat_core::auth::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), meerkat_core::AuthError> {
+                Ok(())
+            }
+
+            fn label(&self) -> &str {
+                "unobserved-authorizer"
+            }
+
+            fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+                self.expires_at_calls.fetch_add(1, Ordering::SeqCst);
+                Some(chrono::Utc::now() + chrono::Duration::hours(1))
+            }
+        }
+
+        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let expires_at_calls = Arc::new(AtomicUsize::new(0));
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: meerkat_llm_core::provider_runtime::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "openai_backend".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    Arc::new(UnobservedAuthorizer {
+                        expires_at_calls: expires_at_calls.clone(),
+                    }),
+                    meerkat_core::AuthMetadata::default(),
+                    "dynamic:test",
+                ),
+            ),
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+
+        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+
+        let snapshot = handle.snapshot(&lease_key);
+        assert_eq!(
+            snapshot.phase, None,
+            "lazy dynamic authorizers must publish lease truth only after observing token freshness"
+        );
+        assert_eq!(
+            expires_at_calls.load(Ordering::SeqCst),
+            0,
+            "factory must not probe lazy dynamic authorizer expiry before publication"
         );
     }
 

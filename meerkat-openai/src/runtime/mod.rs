@@ -12,7 +12,10 @@ use meerkat_core::AuthError;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::refresh_allowed;
+use meerkat_auth_core::resolver::{
+    ManagedOauthAccess, complete_managed_oauth_refresh, fail_managed_oauth_refresh,
+    oauth_refresh_error_text_is_permanent, resolve_managed_oauth_access,
+};
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
@@ -49,6 +52,28 @@ pub const ALLOWED_BINDINGS: &[(OpenAiBackendKind, OpenAiAuthMethod)] = &[
         OpenAiAuthMethod::ExternalChatGptTokens,
     ),
 ];
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn openai_oauth_refresh_error_is_permanent(error: &oauth::OpenAiOAuthError) -> bool {
+    match error {
+        oauth::OpenAiOAuthError::InteractiveLoginRequired
+        | oauth::OpenAiOAuthError::MissingRefreshToken => true,
+        other => oauth_refresh_error_text_is_permanent(&other.to_string()),
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn openai_oauth_refresh_error_to_provider(
+    error: oauth::OpenAiOAuthError,
+    binding: &ValidatedBinding,
+) -> ProviderAuthError {
+    let error_text = error.to_string();
+    if matches!(error, oauth::OpenAiOAuthError::InteractiveLoginRequired) {
+        interactive_login_error(binding)
+    } else {
+        ProviderAuthError::SourceResolutionFailed(error_text)
+    }
+}
 
 pub struct OpenAiProviderRuntime;
 
@@ -159,44 +184,47 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         chatgpt_plan_type = lifted.plan_type;
                     }
 
-                    let access = match auth_method {
+                    let (access, lease_expires_at) = match auth_method {
                         OpenAiAuthMethod::ExternalChatGptTokens => persisted
                             .primary_secret
                             .clone()
-                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?,
+                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))
+                            .map(|access| (access, persisted.expires_at))?,
                         OpenAiAuthMethod::ManagedChatGptOauth => {
-                            use chrono::{Duration, Utc};
-                            let fresh = persisted
-                                .expires_at
-                                .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
-                            {
-                                access
-                            } else {
-                                if !refresh_allowed(binding) {
-                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                            match resolve_managed_oauth_access(env, binding, &persisted)? {
+                                ManagedOauthAccess::Cached { access, expires_at } => {
+                                    (access, expires_at)
                                 }
-                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                    Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                                });
-                                let endpoints =
-                                    oauth::chatgpt_endpoints("http://127.0.0.1:0/callback");
-                                let runtime = oauth::OpenAiOAuthRuntime::new(
-                                    store.clone(),
-                                    coord,
-                                    endpoints,
-                                    key,
-                                );
-                                runtime.get_or_refresh_access_token().await.map_err(
-                                    |e| match e {
-                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                            interactive_login_error(binding)
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            other.to_string(),
-                                        ),
-                                    },
-                                )?
+                                ManagedOauthAccess::Refresh { lifecycle } => {
+                                    let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                        Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
+                                    });
+                                    let endpoints =
+                                        oauth::chatgpt_endpoints("http://127.0.0.1:0/callback");
+                                    let runtime = oauth::OpenAiOAuthRuntime::new(
+                                        store.clone(),
+                                        coord,
+                                        endpoints,
+                                        key,
+                                    );
+                                    let refreshed =
+                                        runtime.refresh_access_token().await.map_err(|e| {
+                                            let permanent =
+                                                openai_oauth_refresh_error_is_permanent(&e);
+                                            let _ = fail_managed_oauth_refresh(
+                                                env, binding, lifecycle, permanent,
+                                            );
+                                            openai_oauth_refresh_error_to_provider(e, binding)
+                                        })?;
+                                    let access = refreshed
+                                        .primary_secret
+                                        .clone()
+                                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                                    let expires_at = complete_managed_oauth_refresh(
+                                        env, binding, lifecycle, &refreshed,
+                                    )?;
+                                    (access, expires_at)
+                                }
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
@@ -223,7 +251,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     Arc::new(StaticLease::inline_secret(
                         access,
                         metadata,
-                        persisted.expires_at,
+                        lease_expires_at,
                         source_label.clone(),
                     ))
                 }

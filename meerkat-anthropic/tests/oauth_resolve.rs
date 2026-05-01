@@ -27,11 +27,78 @@ use meerkat_auth_core::auth_oauth::OAuthEndpoints;
 use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
+use meerkat_core::handles::{
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
+};
 use meerkat_core::{
     AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
+
+struct FixedAuthLeaseHandle {
+    snapshot: AuthLeaseSnapshot,
+}
+
+impl FixedAuthLeaseHandle {
+    fn reauth_required() -> Self {
+        Self {
+            snapshot: AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::ReauthRequired),
+                expires_at: Some((Utc::now() + ChronoDuration::hours(1)).timestamp() as u64),
+                generation: 7,
+            },
+        }
+    }
+}
+
+impl AuthLeaseHandle for FixedAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        _lease_key: &LeaseKey,
+        _expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        panic!("managed OAuth must not reacquire over reauth-required lease truth")
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        panic!("managed OAuth must not mark expiring over reauth-required lease truth")
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        panic!("managed OAuth must not refresh over reauth-required lease truth")
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        panic!("managed OAuth must not complete refresh over reauth-required lease truth")
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        panic!("managed OAuth must not report refresh failure over reauth-required lease truth")
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        self.snapshot.clone()
+    }
+}
 
 fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
@@ -126,6 +193,55 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     assert_eq!(
         connection.resolved_secret(),
         Some("fresh-access-xyz".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_reauth_required_does_not_return_cached_token() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ClaudeAiOauth,
+        primary_secret: Some("fresh-access-xyz".into()),
+        refresh_token: Some("refresh-xyz".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: oauth::CLAUDE_AI_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: None,
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &persisted,
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("claude_ai_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(FixedAuthLeaseHandle::reauth_required()));
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("AuthMachine reauth-required truth must block cached TokenStore access");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
     );
 }
 

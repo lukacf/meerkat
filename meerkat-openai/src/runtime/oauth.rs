@@ -194,17 +194,25 @@ impl OpenAiOAuthRuntime {
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
         if let Some(expiry) = persisted.expires_at
             && expiry - Utc::now() > Duration::seconds(60)
-            && let Some(access) = persisted.primary_secret
+            && persisted.primary_secret.is_some()
         {
-            return Ok(access);
+            return Ok(persisted);
         }
+        self.refresh_access_token().await
+    }
+
+    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+        let persisted = self
+            .load()
+            .await?
+            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
         let refresh_token = persisted
             .refresh_token
             .clone()
@@ -234,7 +242,12 @@ impl OpenAiOAuthRuntime {
             )
             .await?;
         self.save(&refreshed).await?;
-        refreshed
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+        self.get_or_refresh_tokens()
+            .await?
             .primary_secret
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)
     }

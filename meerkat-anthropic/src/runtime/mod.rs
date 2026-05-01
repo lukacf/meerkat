@@ -18,7 +18,10 @@ use meerkat_core::HttpAuthorizer;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::refresh_allowed;
+use meerkat_auth_core::resolver::{
+    ManagedOauthAccess, complete_managed_oauth_refresh, fail_managed_oauth_refresh,
+    oauth_refresh_error_text_is_permanent, resolve_managed_oauth_access,
+};
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
@@ -100,6 +103,28 @@ pub const ALLOWED_BINDINGS: &[(AnthropicBackendKind, AnthropicAuthMethod)] = &[
         AnthropicAuthMethod::ExternalAuthorizer,
     ),
 ];
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn anthropic_oauth_refresh_error_is_permanent(error: &oauth::AnthropicOAuthError) -> bool {
+    match error {
+        oauth::AnthropicOAuthError::InteractiveLoginRequired
+        | oauth::AnthropicOAuthError::MissingRefreshToken => true,
+        other => oauth_refresh_error_text_is_permanent(&other.to_string()),
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn anthropic_oauth_refresh_error_to_provider(
+    error: oauth::AnthropicOAuthError,
+    binding: &ValidatedBinding,
+) -> ProviderAuthError {
+    let error_text = error.to_string();
+    if matches!(error, oauth::AnthropicOAuthError::InteractiveLoginRequired) {
+        interactive_login_error(binding)
+    } else {
+        ProviderAuthError::SourceResolutionFailed(error_text)
+    }
+}
 
 pub struct AnthropicProviderRuntime;
 
@@ -346,44 +371,47 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         anthropic_subscription_tier = lifted.subscription_tier;
                     }
 
-                    let secret = match auth_method {
+                    let (secret, lease_expires_at) = match auth_method {
                         AnthropicAuthMethod::OauthToApiKey => persisted
                             .primary_secret
                             .clone()
-                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?,
+                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))
+                            .map(|secret| (secret, persisted.expires_at))?,
                         AnthropicAuthMethod::ClaudeAiOauth => {
-                            use chrono::{Duration, Utc};
-                            let fresh = persisted
-                                .expires_at
-                                .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
-                            {
-                                access
-                            } else {
-                                if !refresh_allowed(binding) {
-                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                            match resolve_managed_oauth_access(env, binding, &persisted)? {
+                                ManagedOauthAccess::Cached { access, expires_at } => {
+                                    (access, expires_at)
                                 }
-                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                    Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                                });
-                                let endpoints =
-                                    oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
-                                let runtime = oauth::AnthropicOAuthRuntime::new(
-                                    store.clone(),
-                                    coord,
-                                    endpoints,
-                                    key,
-                                );
-                                runtime.get_or_refresh_access_token().await.map_err(
-                                    |e| match e {
-                                        oauth::AnthropicOAuthError::InteractiveLoginRequired => {
-                                            interactive_login_error(binding)
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            other.to_string(),
-                                        ),
-                                    },
-                                )?
+                                ManagedOauthAccess::Refresh { lifecycle } => {
+                                    let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                        Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
+                                    });
+                                    let endpoints =
+                                        oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
+                                    let runtime = oauth::AnthropicOAuthRuntime::new(
+                                        store.clone(),
+                                        coord,
+                                        endpoints,
+                                        key,
+                                    );
+                                    let refreshed =
+                                        runtime.refresh_access_token().await.map_err(|e| {
+                                            let permanent =
+                                                anthropic_oauth_refresh_error_is_permanent(&e);
+                                            let _ = fail_managed_oauth_refresh(
+                                                env, binding, lifecycle, permanent,
+                                            );
+                                            anthropic_oauth_refresh_error_to_provider(e, binding)
+                                        })?;
+                                    let access = refreshed
+                                        .primary_secret
+                                        .clone()
+                                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                                    let expires_at = complete_managed_oauth_refresh(
+                                        env, binding, lifecycle, &refreshed,
+                                    )?;
+                                    (access, expires_at)
+                                }
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
@@ -409,7 +437,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     Arc::new(StaticLease::inline_secret(
                         secret,
                         metadata,
-                        persisted.expires_at,
+                        lease_expires_at,
                         source_label.clone(),
                     ))
                 }

@@ -179,6 +179,7 @@ pub enum TurnInstructionKind {
 /// type so the wire path is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct StructuredProviderExtension {
     /// Free-form provider namespace discriminator (e.g. `"anthropic"`).
     pub namespace: String,
@@ -203,7 +204,7 @@ pub struct StructuredProviderExtension {
 /// rather than being silently dropped (persistence-migration.md §3.1,
 /// adversarial review flaw 5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderTag {
     Anthropic(AnthropicProviderTag),
     OpenAi(OpenAiProviderTag),
@@ -313,7 +314,7 @@ impl OpaqueProviderBody {
 
 /// Typed shape of Anthropic's extended-thinking knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnthropicThinkingConfig {
     /// Opus 4.6 adaptive thinking — provider picks the budget.
     Adaptive,
@@ -348,7 +349,7 @@ impl AnthropicEffort {
 
 /// Typed shape of Anthropic's data-residency knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnthropicInferenceGeo {
     Us,
     Global,
@@ -369,7 +370,7 @@ pub enum AnthropicContextWindow {
 
 /// Typed shape of Anthropic's automatic-compaction knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnthropicCompactionConfig {
     /// `"auto"` — provider picks trigger and instructions.
     Auto,
@@ -380,6 +381,7 @@ pub enum AnthropicCompactionConfig {
 
 /// Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AnthropicProviderTag {
     /// Extended-thinking configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +422,7 @@ pub struct AnthropicProviderTag {
 
 /// Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct OpenAiProviderTag {
     /// Reasoning-effort level for o-series and GPT-5 models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -483,6 +486,7 @@ impl GeminiThinkingLevel {
 
 /// Typed shape of Gemini's thinking knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GeminiThinkingConfig {
     /// Whether reasoning output is included in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,6 +501,7 @@ pub struct GeminiThinkingConfig {
 
 /// Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GeminiProviderTag {
     /// Thinking configuration (Gemini 3+ models).
     #[serde(default, skip_serializing_if = "Option::is_none")]

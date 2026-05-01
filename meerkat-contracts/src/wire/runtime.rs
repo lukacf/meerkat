@@ -643,7 +643,7 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireAnthropicThinkingConfig {
     Adaptive,
     Enabled { budget_tokens: u32 },
@@ -713,7 +713,7 @@ impl From<WireAnthropicEffort> for meerkat_core::lifecycle::run_primitive::Anthr
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireAnthropicInferenceGeo {
     Us,
     Global,
@@ -747,7 +747,7 @@ impl From<WireAnthropicInferenceGeo>
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireAnthropicCompactionConfig {
     Auto,
     Custom { edit: serde_json::Value },
@@ -845,6 +845,7 @@ impl From<WireGeminiThinkingLevel> for meerkat_core::lifecycle::run_primitive::G
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireGeminiThinkingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_thoughts: Option<bool>,
@@ -890,7 +891,7 @@ where
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "provider", rename_all = "snake_case")]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireProviderTag {
     Anthropic {
         #[serde(default, skip_serializing_if = "Option::is_none")]

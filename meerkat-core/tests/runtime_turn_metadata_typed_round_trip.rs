@@ -11,8 +11,9 @@ use meerkat_core::connection::ConnectionRef;
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
     OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
-    ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata, TurnInstruction,
-    TurnInstructionKind, TurnMetadataMergeConflict, TurnMetadataOverride,
+    ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata,
+    StructuredProviderExtension, TurnInstruction, TurnInstructionKind, TurnMetadataMergeConflict,
+    TurnMetadataOverride,
 };
 use meerkat_core::provider::Provider;
 use meerkat_core::service::TurnToolOverlay;
@@ -410,6 +411,106 @@ fn nested_runtime_turn_metadata_fields_fail_closed() {
             "unexpected error for {field}: {message}"
         );
     }
+}
+
+#[test]
+fn provider_tag_nested_unknown_fields_fail_closed() {
+    for (value, unknown) in [
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "thinking_budget_tokens": 2048,
+                "thinking_budget": 4096,
+            }),
+            "thinking_budget",
+        ),
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 2048,
+                    "budget": 4096,
+                },
+            }),
+            "budget",
+        ),
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "compaction": {
+                    "kind": "custom",
+                    "edit": "{}",
+                    "edits": "{}",
+                },
+            }),
+            "edits",
+        ),
+        (
+            serde_json::json!({
+                "provider": "open_ai",
+                "reasoning_effort": "high",
+                "effort": "legacy-high",
+            }),
+            "effort",
+        ),
+        (
+            serde_json::json!({
+                "provider": "gemini",
+                "thinking": {
+                    "include_thoughts": true,
+                    "include_thinking": true,
+                },
+            }),
+            "include_thinking",
+        ),
+        (
+            serde_json::json!({
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "legacy",
+                    "key": "knob",
+                    "body": "{}",
+                    "extra": true,
+                },
+            }),
+            "extra",
+        ),
+    ] {
+        let result = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": value,
+                },
+            },
+        }));
+        assert!(
+            result.is_err(),
+            "unknown provider tag field {unknown} must fail closed"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains(unknown) || message.contains("unknown field"),
+            "unexpected provider tag error: {message}"
+        );
+    }
+}
+
+#[test]
+fn structured_provider_extension_unknown_fields_fail_closed() {
+    let err = serde_json::from_value::<StructuredProviderExtension>(serde_json::json!({
+        "namespace": "legacy",
+        "key": "knob",
+        "body": "{}",
+        "extra": true,
+    }))
+    .expect_err("provider extension bag wrapper must fail closed");
+    assert!(
+        err.to_string().contains("extra") || err.to_string().contains("unknown field"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

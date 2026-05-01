@@ -443,9 +443,6 @@ async fn create_materialized_session(runtime: &Arc<SessionRuntime>) -> meerkat_c
             "materialize realtime target".into(),
             event_tx,
             None,
-            None,
-            None,
-            None,
         )
         .await
         .expect("session should materialize");

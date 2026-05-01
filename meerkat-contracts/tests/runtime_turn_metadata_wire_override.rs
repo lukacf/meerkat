@@ -346,9 +346,98 @@ fn wire_metadata_nested_unknown_fields_fail_closed() {
     }
 }
 
+#[test]
+fn wire_provider_tag_nested_unknown_fields_fail_closed() {
+    for (value, unknown) in [
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "thinking_budget_tokens": 2048,
+                "thinking_budget": 4096,
+            }),
+            "thinking_budget",
+        ),
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 2048,
+                    "budget": 4096,
+                },
+            }),
+            "budget",
+        ),
+        (
+            serde_json::json!({
+                "provider": "anthropic",
+                "compaction": {
+                    "kind": "custom",
+                    "edit": { "instructions": "compact" },
+                    "edits": { "instructions": "legacy" },
+                },
+            }),
+            "edits",
+        ),
+        (
+            serde_json::json!({
+                "provider": "open_ai",
+                "reasoning_effort": "high",
+                "effort": "legacy-high",
+            }),
+            "effort",
+        ),
+        (
+            serde_json::json!({
+                "provider": "gemini",
+                "thinking": {
+                    "include_thoughts": true,
+                    "include_thinking": true,
+                },
+            }),
+            "include_thinking",
+        ),
+        (
+            serde_json::json!({
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "legacy",
+                    "key": "knob",
+                    "body": "{}",
+                    "extra": true,
+                },
+            }),
+            "extra",
+        ),
+    ] {
+        let result = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": value,
+                },
+            },
+        }));
+        assert!(
+            result.is_err(),
+            "unknown provider tag field {unknown} must fail closed"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains(unknown) || message.contains("unknown field"),
+            "unexpected provider tag error: {message}"
+        );
+    }
+}
+
 #[cfg(feature = "schema")]
 mod schema_emission {
     use super::*;
+    use meerkat_contracts::wire::runtime::{
+        StructuredProviderExtension, WireAnthropicCompactionConfig, WireAnthropicThinkingConfig,
+        WireGeminiThinkingConfig, WireProviderTag,
+    };
 
     fn schema_json<T: schemars::JsonSchema>() -> serde_json::Value {
         serde_json::to_value(schemars::schema_for!(T)).unwrap()
@@ -360,6 +449,18 @@ mod schema_emission {
             Some(&serde_json::Value::Bool(false)),
             "{name} schema must be closed"
         );
+    }
+
+    fn assert_schema_variants_closed(name: &str, schema: &serde_json::Value) {
+        let variants = schema
+            .pointer("/oneOf")
+            .or_else(|| schema.pointer("/anyOf"))
+            .and_then(serde_json::Value::as_array)
+            .expect("schema should expose variants");
+
+        for variant in variants {
+            assert_schema_closed(name, variant);
+        }
     }
 
     #[test]
@@ -379,23 +480,40 @@ mod schema_emission {
                 "WireRenderMetadata",
                 schema_json::<meerkat_contracts::wire::WireRenderMetadata>(),
             ),
+            (
+                "StructuredProviderExtension",
+                schema_json::<StructuredProviderExtension>(),
+            ),
+            (
+                "WireGeminiThinkingConfig",
+                schema_json::<WireGeminiThinkingConfig>(),
+            ),
         ] {
             assert_schema_closed(name, &schema);
         }
     }
 
     #[test]
+    fn provider_tag_schemas_reject_additional_properties() {
+        for (name, schema) in [
+            ("WireProviderTag", schema_json::<WireProviderTag>()),
+            (
+                "WireAnthropicThinkingConfig",
+                schema_json::<WireAnthropicThinkingConfig>(),
+            ),
+            (
+                "WireAnthropicCompactionConfig",
+                schema_json::<WireAnthropicCompactionConfig>(),
+            ),
+        ] {
+            assert_schema_variants_closed(name, &schema);
+        }
+    }
+
+    #[test]
     fn turn_metadata_override_schema_variants_reject_additional_properties() {
         let schema = schema_json::<WireTurnMetadataOverride<WireProviderParamsOverride>>();
-        let variants = schema
-            .pointer("/oneOf")
-            .or_else(|| schema.pointer("/anyOf"))
-            .and_then(serde_json::Value::as_array)
-            .expect("override schema should expose variants");
-
-        for variant in variants {
-            assert_schema_closed("WireTurnMetadataOverride variant", variant);
-        }
+        assert_schema_variants_closed("WireTurnMetadataOverride variant", &schema);
     }
 }
 

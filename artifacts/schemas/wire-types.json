@@ -2479,6 +2479,7 @@
         "type": "string"
       },
       "StructuredProviderExtension": {
+        "additionalProperties": false,
         "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
         "properties": {
           "body": {
@@ -2504,6 +2505,7 @@
       "WireAnthropicCompactionConfig": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "auto",
@@ -2516,6 +2518,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "edit": true,
               "kind": {
@@ -2550,6 +2553,7 @@
       "WireAnthropicInferenceGeo": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "us",
@@ -2562,6 +2566,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "global",
@@ -2574,6 +2579,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "other",
@@ -2594,6 +2600,7 @@
       "WireAnthropicThinkingConfig": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "type": {
                 "const": "adaptive",
@@ -2606,6 +2613,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "budget_tokens": {
                 "format": "uint32",
@@ -2764,6 +2772,7 @@
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
       "WireGeminiThinkingConfig": {
+        "additionalProperties": false,
         "properties": {
           "include_thoughts": {
             "type": [
@@ -2876,6 +2885,7 @@
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "compaction": {
                 "anyOf": [
@@ -2971,6 +2981,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "chat_template_kwargs": true,
               "frequency_penalty": {
@@ -3040,6 +3051,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "candidate_count": {
                 "format": "uint32",
@@ -3114,6 +3126,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
             "properties": {
               "bag": {

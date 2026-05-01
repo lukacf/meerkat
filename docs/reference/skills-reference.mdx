@@ -50,7 +50,7 @@ Shadowing is keyed by the full `SkillKey`, not by `skill_name` alone. Two source
 ## Activation paths
 
 - **First-turn/session creation**: raw RPC/REST requests use `turn_metadata.skill_references: SkillKey[]`.
-- **Per-turn injection**: raw RPC/REST requests use `turn_metadata.skill_references: SkillKey[]`; SDK turn helpers expose `skill_refs: SkillRef[]` convenience options that resolve into that runtime metadata carrier.
+- **Per-turn injection**: raw RPC/REST requests and Python SDK turn helpers use `turn_metadata.skill_references: SkillKey[]`; TypeScript SDK turn helpers use `turnMetadata.skillReferences: SkillKey[]`.
 - **CLI preload convenience**: `rkat run --skill <skill-name>` resolves a runtime-local slug to a builtin-source key.
 
 There is no slash-delimited public wire format. Use typed keys.

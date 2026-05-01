@@ -31,6 +31,7 @@ use meerkat_core::types::SessionId;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+    CONTEXT_ONLY_TURN_METADATA_ERROR,
 };
 #[cfg(feature = "runtime-adapter")]
 #[allow(unused_imports)]
@@ -966,6 +967,35 @@ mod tests {
             "unexpected rejection reason: {error}"
         );
     }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn mob_session_runtime_executor_rejects_context_only_turn_metadata() {
+        let mut executor = test_mob_session_runtime_executor();
+        let primitive = context_only_mob_runtime_primitive(
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                    ..Default::default()
+                },
+            ),
+            None,
+        );
+
+        let error = executor
+            .apply(meerkat_core::lifecycle::RunId::new(), primitive)
+            .await
+            .expect_err(
+                "mob session runtime executor context-only applies must reject unapplied turn metadata",
+            );
+
+        assert!(
+            error
+                .to_string()
+                .contains(meerkat_core::CONTEXT_ONLY_TURN_METADATA_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1088,6 +1118,14 @@ fn reject_context_only_unmaterializable_metadata(
     {
         return Err(CoreExecutorError::apply_failed_primitive_rejected(
             CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+        ));
+    }
+    if primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_context_only_unapplied_turn_fields())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            CONTEXT_ONLY_TURN_METADATA_ERROR,
         ));
     }
     Ok(())

@@ -34,7 +34,7 @@ use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
-use meerkat_runtime::{RuntimeMode, RuntimeStore};
+use meerkat_runtime::{RuntimeMode, RuntimeState, RuntimeStore};
 use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -707,6 +707,45 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(selected)
     }
 
+    async fn load_runtime_state_for_session(
+        runtime_store: &Arc<dyn RuntimeStore>,
+        id: &SessionId,
+    ) -> Result<Option<RuntimeState>, SessionError> {
+        let mut selected = None;
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            let loaded = runtime_store
+                .load_runtime_state(&runtime_id)
+                .await
+                .map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to load runtime state: {err}"
+                    )))
+                });
+            match loaded {
+                Ok(Some(state)) => {
+                    if candidate_index == 0 {
+                        return Ok(Some(state));
+                    }
+                    selected = Some(state);
+                }
+                Ok(None) => {}
+                Err(err) if candidate_index > 0 && selected.is_some() => {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = ?err,
+                        "ignoring legacy runtime state fallback error because canonical authority was already loaded"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(selected)
+    }
+
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
         SessionError::Unsupported(format!(
             "{operation} cannot mutate store-only compatibility projection for session {id}; runtime-backed control mutations require an authoritative runtime snapshot"
@@ -1003,6 +1042,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
         self.runtime_store.clone()
+    }
+
+    pub async fn persisted_runtime_state(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<RuntimeState>, SessionError> {
+        let Some(runtime_store) = self.runtime_store.as_ref() else {
+            return Ok(None);
+        };
+        Self::load_runtime_state_for_session(runtime_store, id).await
     }
 
     pub fn has_event_projection(&self) -> bool {
@@ -5236,6 +5285,35 @@ mod tests {
         assert!(
             authoritative.build_state().is_none(),
             "runtime authority must not backfill build state from the store projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persisted_runtime_state_loads_runtime_store_state() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+        runtime_store
+            .persist_runtime_state(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id),
+                meerkat_runtime::RuntimeState::Retired,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        assert_eq!(
+            service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("runtime state load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Retired)
         );
     }
 

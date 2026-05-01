@@ -251,6 +251,20 @@ EOF
     exit 1
   fi
 
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/examples/999-runtime-backed/src"
+  cat >"$tmpdir/examples/999-runtime-backed/src/main.rs" <<'EOF'
+async fn bad(service: Service, session_id: SessionId) {
+    let _ = service.interrupt(&session_id).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: example interrupt bypass fixture passed" >&2
+    exit 1
+  fi
+
   (cd /tmp && "$self_script" >/dev/null 2>&1) || {
     echo "audit-effect-authority self-test failed: absolute script invocation outside repo failed" >&2
     exit 1
@@ -705,6 +719,29 @@ do
   fi
 done
 report_matches "public surface interrupt paths must route through MeerkatMachine::hard_cancel_current_run" "$public_interrupt_bypasses"
+
+example_interrupt_bypasses=""
+if [[ -d "$root/examples" ]]; then
+  example_files="$(cd "$root" && capture_rg --files examples --glob '!target/**')"
+  while IFS= read -r example_file; do
+    [[ -z "$example_file" ]] && continue
+    [[ "$example_file" == *.rs ]] || continue
+    case "$example_file" in
+      # Standalone demo server: ForceState intentionally uses EphemeralSessionService
+      # and has no runtime-owned MeerkatMachine authority to route through.
+      examples/034-codemob-mcp/src/tools/consult.rs)
+        continue
+        ;;
+    esac
+    stripped_example="$(strip_core_executor_interrupt_impls "$root/$example_file")"
+    stripped_example="$(printf '%s\n' "$stripped_example" | strip_cfg_test_modules)"
+    found="$(filter_rg "$stripped_example" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
+    if [[ -n "$found" ]]; then
+      example_interrupt_bypasses+="$root/$example_file"$'\n'"$found"$'\n'
+    fi
+  done <<<"$example_files"
+fi
+report_matches "examples must not bypass runtime-owned interrupt authority unless explicitly classified as standalone" "$example_interrupt_bypasses"
 
 direct_interrupt_current_run="$(run_rg '\.interrupt_current_run(_with_reason)?\(' \
   --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \

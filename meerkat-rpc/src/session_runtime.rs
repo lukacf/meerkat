@@ -217,6 +217,17 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InterruptNoopTarget {
+    Present,
+    Missing,
+    NotInterruptible(RuntimeState),
+}
+
+fn persisted_runtime_state_blocks_interrupt_noop(state: RuntimeState) -> bool {
+    matches!(state, RuntimeState::Retired | RuntimeState::Stopped)
+}
+
 fn registered_model_provider_mismatch_reason(
     registry: &meerkat_core::ModelRegistry,
     provider: meerkat_core::Provider,
@@ -3546,8 +3557,18 @@ impl SessionRuntime {
                 state: RuntimeState::Destroyed,
             })
             | Err(RuntimeDriverError::Destroyed) => {
-                if self.interrupt_target_exists_for_noop(session_id).await? {
-                    return Ok(());
+                match self.interrupt_noop_target(session_id).await? {
+                    InterruptNoopTarget::Present => return Ok(()),
+                    InterruptNoopTarget::Missing => {}
+                    InterruptNoopTarget::NotInterruptible(state) => {
+                        return Err(RpcError {
+                            code: error::INVALID_REQUEST,
+                            message: format!(
+                                "Session is not interruptible while runtime is {state}"
+                            ),
+                            data: None,
+                        });
+                    }
                 }
                 Err(RpcError {
                     code: error::SESSION_NOT_FOUND,
@@ -3568,28 +3589,43 @@ impl SessionRuntime {
         }
     }
 
-    pub(crate) async fn interrupt_target_exists_for_noop(
+    pub(crate) async fn interrupt_noop_target(
         &self,
         session_id: &SessionId,
-    ) -> Result<bool, RpcError> {
+    ) -> Result<InterruptNoopTarget, RpcError> {
         if self.staged_sessions.contains(session_id).await {
-            return Ok(true);
+            return Ok(InterruptNoopTarget::Present);
         }
+
+        let blocking_runtime_state = self
+            .service
+            .persisted_runtime_state(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+            .filter(|state| persisted_runtime_state_blocks_interrupt_noop(*state));
 
         if let Some(session) = self.load_persisted_session(session_id).await? {
             if session_metadata_marks_archived(&session) {
-                return Ok(false);
+                return Ok(InterruptNoopTarget::Missing);
             }
             if session_metadata_marks_mob_member(&session) {
                 #[cfg(feature = "mob")]
                 if let Some(mob_state) = self.mob_state() {
-                    return Ok(mob_state.owns_live_bridge_session(session_id).await
-                        || mob_state.owns_persisted_bridge_session(session_id).await);
+                    let owns_mob_session = mob_state.owns_live_bridge_session(session_id).await
+                        || mob_state.owns_persisted_bridge_session(session_id).await;
+                    return Ok(if owns_mob_session {
+                        InterruptNoopTarget::Present
+                    } else {
+                        InterruptNoopTarget::Missing
+                    });
                 }
                 #[cfg(not(feature = "mob"))]
-                return Ok(false);
+                return Ok(InterruptNoopTarget::Missing);
             }
-            return Ok(true);
+            return Ok(match blocking_runtime_state {
+                Some(state) => InterruptNoopTarget::NotInterruptible(state),
+                None => InterruptNoopTarget::Present,
+            });
         }
 
         #[cfg(feature = "mob")]
@@ -3598,19 +3634,32 @@ impl SessionRuntime {
                 || mob_state.owns_persisted_bridge_session(session_id).await)
         {
             match mob_state.session_service().read(session_id).await {
-                Ok(_) => return Ok(true),
+                Ok(_) => {
+                    return Ok(match blocking_runtime_state {
+                        Some(state) => InterruptNoopTarget::NotInterruptible(state),
+                        None => InterruptNoopTarget::Present,
+                    });
+                }
                 Err(SessionError::NotFound { .. }) => {}
                 Err(err) => return Err(session_error_to_rpc(err)),
             }
         }
 
         match self.service.read(session_id).await {
-            Ok(_) => return Ok(true),
+            Ok(_) => {
+                return Ok(match blocking_runtime_state {
+                    Some(state) => InterruptNoopTarget::NotInterruptible(state),
+                    None => InterruptNoopTarget::Present,
+                });
+            }
             Err(SessionError::NotFound { .. }) => {}
             Err(err) => return Err(session_error_to_rpc(err)),
         }
 
-        Ok(false)
+        Ok(match blocking_runtime_state {
+            Some(state) => InterruptNoopTarget::NotInterruptible(state),
+            None => InterruptNoopTarget::Missing,
+        })
     }
 
     /// Ask a running turn to break out at the next cooperative boundary.
@@ -7217,6 +7266,49 @@ mod tests {
             .interrupt(&created.session_id)
             .await
             .expect("cold idle session interrupt should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn interrupt_on_cold_persisted_stopped_runtime_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let build_config = mock_build_config();
+
+        let created = runtime
+            .service
+            .create_session(CreateSessionRequest {
+                model: build_config.model.clone(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: build_config.system_prompt.clone(),
+                max_tokens: build_config.max_tokens,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(build_config.to_session_build_options()),
+                labels: None,
+            })
+            .await
+            .expect("service-owned idle session should be created");
+        runtime
+            .service
+            .runtime_store()
+            .expect("runtime-backed test should include runtime store")
+            .persist_runtime_state(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
+                RuntimeState::Stopped,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        let err = runtime
+            .interrupt(&created.session_id)
+            .await
+            .expect_err("persisted stopped runtime must reject cold interrupt no-op");
+
+        assert_eq!(err.code, error::INVALID_REQUEST);
+        assert!(err.message.contains("stopped"));
     }
 
     /// 7. Archiving a session removes it from the runtime.

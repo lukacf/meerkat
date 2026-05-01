@@ -19,7 +19,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::SessionRuntime;
+use crate::session_runtime::{InterruptNoopTarget, SessionRuntime};
 use meerkat::surface::{RequestContext, request_action};
 use meerkat_runtime::{RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt};
 
@@ -322,12 +322,19 @@ pub async fn handle_interrupt(
             state: RuntimeState::Destroyed,
         })
         | Err(RuntimeDriverError::Destroyed) => {
-            match runtime.interrupt_target_exists_for_noop(&session_id).await {
-                Ok(true) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
-                Ok(false) => RpcResponse::error(
+            match runtime.interrupt_noop_target(&session_id).await {
+                Ok(InterruptNoopTarget::Present) => {
+                    RpcResponse::success(id, serde_json::json!({"interrupted": true}))
+                }
+                Ok(InterruptNoopTarget::Missing) => RpcResponse::error(
                     id,
                     error::SESSION_NOT_FOUND,
                     format!("Session not found: {session_id}"),
+                ),
+                Ok(InterruptNoopTarget::NotInterruptible(state)) => RpcResponse::error(
+                    id,
+                    error::INVALID_REQUEST,
+                    format!("Session is not interruptible while runtime is {state}"),
                 ),
                 Err(err) => RpcResponse::error(id, err.code, err.message),
             }

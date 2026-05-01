@@ -7959,6 +7959,19 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            })
+            | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+                reject_persisted_runtime_state_for_interrupt_noop(service.as_ref(), &session_id)
+                    .await?;
+                println!("Interrupted session: {session_id}");
+                println!(
+                    "Session Ref: {}",
+                    format_session_ref(&scope.locator.realm, &session_id)
+                );
+                Ok(())
+            }
             Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(anyhow::anyhow!(
                 "Failed to interrupt session: runtime is not interruptible while {state}"
             )),
@@ -7970,10 +7983,33 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
 fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
     matches!(
         state,
-        meerkat_runtime::RuntimeState::Idle
-            | meerkat_runtime::RuntimeState::Attached
-            | meerkat_runtime::RuntimeState::Destroyed
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
     )
+}
+
+fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+    )
+}
+
+#[cfg(feature = "session-store")]
+async fn reject_persisted_runtime_state_for_interrupt_noop(
+    service: &meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> anyhow::Result<()> {
+    let Some(state) = service
+        .persisted_runtime_state(session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?
+    else {
+        return Ok(());
+    };
+    if persisted_runtime_state_blocks_interrupt_noop(state) {
+        anyhow::bail!("Failed to interrupt session: runtime is not interruptible while {state}");
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "comms", test))]
@@ -10118,14 +10154,14 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_not_ready_noop_rejects_terminal_runtime_states() {
+    fn interrupt_not_ready_noop_is_only_idle_or_attached() {
         assert!(interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Idle
         ));
         assert!(interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Attached
         ));
-        assert!(interrupt_not_ready_is_noop(
+        assert!(!interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Destroyed
         ));
         assert!(!interrupt_not_ready_is_noop(
@@ -10133,6 +10169,15 @@ mod tests {
         ));
         assert!(!interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(!persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Idle
         ));
     }
 
@@ -13929,6 +13974,76 @@ capabilities = ["definitely_missing_capability"]
                 .is_some(),
             "authoritative reads must resolve through the runtime snapshot"
         );
+    }
+
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn test_cli_interrupt_destroyed_noop_rejects_persisted_stopped_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Some(Arc::clone(&runtime_store)),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            auth_lease,
+            None,
+        );
+        let service = Arc::new(service);
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("runtime-backed CLI service should create deferred session");
+        runtime_store
+            .persist_runtime_state(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
+                meerkat_runtime::RuntimeState::Stopped,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        let err = reject_persisted_runtime_state_for_interrupt_noop(
+            service.as_ref(),
+            &created.session_id,
+        )
+        .await
+        .expect_err("persisted stopped runtime must reject cold interrupt no-op");
+
+        assert!(err.to_string().contains("stopped"));
     }
 
     #[tokio::test]

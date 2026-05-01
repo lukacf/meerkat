@@ -38,7 +38,7 @@ use meerkat_providers::auth_store::{
     persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
-    OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_target,
+    OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_binding,
 };
 
 use crate::AppState;
@@ -877,7 +877,9 @@ pub async fn start_login(
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if let Err(e) = validate_oauth_login_target(&target.auth_profile, resolved.identity) {
+    if let Err(e) =
+        validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -969,6 +971,7 @@ pub async fn complete_login(
     };
     let connection_ref = target.connection_ref;
     let binding = target.binding;
+    let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
     if provider != auth_profile.provider {
         return (
@@ -984,7 +987,8 @@ pub async fn complete_login(
         )
             .into_response();
     }
-    if let Err(e) = validate_oauth_login_target(&auth_profile, resolved.identity) {
+    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -1167,7 +1171,9 @@ pub async fn start_device_login(
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if let Err(e) = validate_oauth_login_target(&target.auth_profile, resolved.identity) {
+    if let Err(e) =
+        validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -1283,6 +1289,7 @@ pub async fn complete_device_login(
     };
     let connection_ref = target.connection_ref;
     let binding = target.binding;
+    let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
     if provider != auth_profile.provider {
         return (
@@ -1298,7 +1305,8 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
-    if let Err(e) = validate_oauth_login_target(&auth_profile, resolved.identity) {
+    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -2131,6 +2139,19 @@ mod tests {
         config
     }
 
+    fn config_with_openai_oauth_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_openai_oauth_binding(CredentialSourceSpec::ManagedStore);
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .backend
+            .get_mut("chatgpt_backend")
+            .unwrap()
+            .backend_kind = "openai_api".into();
+        config
+    }
+
     fn config_with_openai_external_authorizer_binding() -> meerkat_core::Config {
         let mut config = meerkat_core::Config::default();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -2202,6 +2223,19 @@ mod tests {
         );
         section.default_binding = Some("default_google".into());
         config.realm.insert("dev".into(), section);
+        config
+    }
+
+    fn config_with_google_oauth_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_google_api_key_binding();
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .auth
+            .get_mut("google_api_key")
+            .unwrap()
+            .auth_method = "google_oauth".into();
         config
     }
 
@@ -2539,6 +2573,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_login_start_rejects_oauth_method_with_wrong_backend_before_state_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .config_runtime
+            .set(config_with_openai_oauth_wrong_backend_binding(), None)
+            .await
+            .unwrap();
+
+        let response = start_login(
+            State(state.clone()),
+            Json(LoginStartBody {
+                provider: "openai".to_string(),
+                redirect_uri: "http://127.0.0.1:0/callback".to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_openai").unwrap(),
+                profile_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("backend_kind 'openai_api'")
+        );
+        let snapshot = state
+            .auth_lease
+            .snapshot(&LeaseKey::from_connection_ref(&openai_connection_ref()));
+        assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
     async fn rest_device_start_rejects_same_provider_non_oauth_target_before_state_admission() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
@@ -2570,6 +2644,45 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("auth_method 'api_key'")
+        );
+        let snapshot = state
+            .auth_lease
+            .snapshot(&LeaseKey::from_connection_ref(&google_connection_ref()));
+        assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
+    async fn rest_device_start_rejects_oauth_method_with_wrong_backend_before_state_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .config_runtime
+            .set(config_with_google_oauth_wrong_backend_binding(), None)
+            .await
+            .unwrap();
+
+        let response = start_device_login(
+            State(state.clone()),
+            Json(DeviceStartBody {
+                provider: "google".to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_google").unwrap(),
+                profile_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("backend_kind 'google_genai'")
         );
         let snapshot = state
             .auth_lease
@@ -2616,6 +2729,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_login_complete_rejects_oauth_method_with_wrong_backend_before_state_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .config_runtime
+            .set(config_with_openai_oauth_wrong_backend_binding(), None)
+            .await
+            .unwrap();
+
+        let response = complete_login(
+            State(state),
+            Json(LoginCompleteBody {
+                provider: "openai".to_string(),
+                code: "provider-code".to_string(),
+                state: "missing-state".to_string(),
+                redirect_uri: "http://127.0.0.1:0/callback".to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_openai").unwrap(),
+                profile_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("backend_kind 'openai_api'")
+        );
+    }
+
+    #[tokio::test]
     async fn rest_device_complete_rejects_same_provider_non_oauth_target_before_state_lookup() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
@@ -2648,6 +2799,42 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("auth_method 'api_key'")
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_device_complete_rejects_oauth_method_with_wrong_backend_before_state_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .config_runtime
+            .set(config_with_google_oauth_wrong_backend_binding(), None)
+            .await
+            .unwrap();
+
+        let response = complete_device_login(
+            State(state),
+            Json(DeviceCompleteBody {
+                provider: "google".to_string(),
+                device_code: "missing-device-code".to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_google").unwrap(),
+                profile_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("backend_kind 'google_genai'")
         );
     }
 

@@ -11,13 +11,14 @@ use async_trait::async_trait;
 use meerkat_core::AuthError;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::{
+    ManagedStoreLifecycle, load_managed_store_tokens_with_lifecycle,
+    publish_managed_store_tokens_lifecycle, refresh_allowed,
+};
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
-};
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::{
-    refresh_allowed, require_credential_lifecycle_authority, require_persisted_auth_mode,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -151,31 +152,28 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         expected_mode,
                     )
                     .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-                    let store = env
-                        .token_store
-                        .as_ref()
-                        .ok_or_else(|| interactive_login_error(binding))?;
-                    let key =
-                        meerkat_core::auth::TokenKey::from_connection_ref(&binding.connection_ref);
-                    require_credential_lifecycle_authority(env, binding)?;
-                    let persisted = store
-                        .load(&key)
-                        .await
-                        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or_else(|| interactive_login_error(binding))?;
-                    require_persisted_auth_mode(
-                        &persisted,
-                        binding.auth_profile.auth_method.as_str(),
-                    )?;
+                    let managed = load_managed_store_tokens_with_lifecycle(env, binding).await?;
+                    let lifecycle = managed.lifecycle;
+                    let store = managed.store;
+                    let key = managed.key;
+                    let persisted = managed.tokens;
 
                     let effective_tokens = match auth_method {
-                        OpenAiAuthMethod::ExternalChatGptTokens => persisted,
+                        OpenAiAuthMethod::ExternalChatGptTokens => {
+                            if lifecycle == ManagedStoreLifecycle::RefreshRequired {
+                                return Err(ProviderAuthError::Auth(AuthError::Expired));
+                            }
+                            persisted
+                        }
                         OpenAiAuthMethod::ManagedChatGptOauth => {
                             use chrono::{Duration, Utc};
                             let fresh = persisted
                                 .expires_at
                                 .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                            if fresh && persisted.primary_secret.is_some() {
+                            if lifecycle == ManagedStoreLifecycle::Authorized
+                                && fresh
+                                && persisted.primary_secret.is_some()
+                            {
                                 persisted
                             } else {
                                 if !refresh_allowed(binding) {
@@ -192,14 +190,17 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     endpoints,
                                     key,
                                 );
-                                runtime.get_or_refresh_tokens().await.map_err(|e| match e {
-                                    oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                        interactive_login_error(binding)
-                                    }
-                                    other => {
-                                        ProviderAuthError::SourceResolutionFailed(other.to_string())
-                                    }
-                                })?
+                                let refreshed =
+                                    runtime.get_or_refresh_tokens().await.map_err(|e| match e {
+                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                            interactive_login_error(binding)
+                                        }
+                                        other => ProviderAuthError::SourceResolutionFailed(
+                                            other.to_string(),
+                                        ),
+                                    })?;
+                                publish_managed_store_tokens_lifecycle(env, binding, &refreshed)?;
+                                refreshed
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),

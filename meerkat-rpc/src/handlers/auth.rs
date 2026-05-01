@@ -32,8 +32,8 @@ use meerkat_providers::auth_store::{
     persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
-    OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_target,
-    validate_oauth_target_for_auth_mode,
+    OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_binding,
+    validate_oauth_target_binding_for_auth_mode,
 };
 
 use super::{RpcResponseExt, parse_params};
@@ -876,7 +876,9 @@ pub async fn handle_auth_login_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    if let Err(e) = validate_oauth_login_target(&target.auth_profile, resolved.identity) {
+    if let Err(e) =
+        validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
+    {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
     let connection_ref = target.connection_ref;
@@ -950,6 +952,7 @@ pub async fn handle_auth_login_complete(
     };
     let connection_ref = target.connection_ref;
     let binding = target.binding;
+    let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
     if provider != auth_profile.provider {
         return RpcResponse::error(
@@ -963,7 +966,8 @@ pub async fn handle_auth_login_complete(
             ),
         );
     }
-    if let Err(e) = validate_oauth_login_target(&auth_profile, resolved.identity) {
+    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
+    {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
 
@@ -1123,7 +1127,9 @@ pub async fn handle_auth_login_device_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    if let Err(e) = validate_oauth_login_target(&target.auth_profile, resolved.identity) {
+    if let Err(e) =
+        validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
+    {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
     let connection_ref = target.connection_ref;
@@ -1213,6 +1219,7 @@ pub async fn handle_auth_login_device_complete(
     };
     let connection_ref = target.connection_ref;
     let binding = target.binding;
+    let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
     if provider != auth_profile.provider {
         return RpcResponse::error(
@@ -1226,7 +1233,8 @@ pub async fn handle_auth_login_device_complete(
             ),
         );
     }
-    if let Err(e) = validate_oauth_login_target(&auth_profile, resolved.identity) {
+    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
+    {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
     let lease_key = LeaseKey::from_connection_ref(&connection_ref);
@@ -1381,11 +1389,14 @@ pub async fn handle_auth_login_provision_api_key(
         Err(r) => return r.with_id(id),
     };
     let connection_ref = target.connection_ref;
+    let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
-    if let Err(e) = validate_oauth_target_for_auth_mode(
+    if let Err(e) = validate_oauth_target_binding_for_auth_mode(
+        &backend_profile,
         &auth_profile,
         Provider::Anthropic,
         PersistedAuthMode::OauthToApiKey,
+        "anthropic_api",
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
@@ -1765,6 +1776,19 @@ mod tests {
         config
     }
 
+    fn config_with_openai_oauth_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_openai_oauth_binding(CredentialSourceSpec::ManagedStore);
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .backend
+            .get_mut("chatgpt_backend")
+            .unwrap()
+            .backend_kind = "openai_api".into();
+        config
+    }
+
     fn config_with_openai_external_authorizer_binding() -> meerkat_core::Config {
         let mut config = meerkat_core::Config::default();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -1839,6 +1863,19 @@ mod tests {
         config
     }
 
+    fn config_with_google_oauth_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_google_api_key_binding();
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .auth
+            .get_mut("google_api_key")
+            .unwrap()
+            .auth_method = "google_oauth".into();
+        config
+    }
+
     fn config_with_anthropic_api_key_binding() -> meerkat_core::Config {
         let mut config = meerkat_core::Config::default();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -1872,6 +1909,22 @@ mod tests {
         );
         section.default_binding = Some("default_anthropic".into());
         config.realm.insert("dev".into(), section);
+        config
+    }
+
+    fn config_with_anthropic_oauth_to_api_key_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_anthropic_api_key_binding();
+        let section = config.realm.get_mut("dev").unwrap();
+        section
+            .backend
+            .get_mut("anthropic_backend")
+            .unwrap()
+            .backend_kind = "bedrock".into();
+        section
+            .auth
+            .get_mut("anthropic_api_key")
+            .unwrap()
+            .auth_method = "oauth_to_api_key".into();
         config
     }
 
@@ -2512,6 +2565,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_start_rejects_oauth_method_with_wrong_backend_before_state_admission() {
+        let runtime = test_runtime_with_config(config_with_openai_oauth_wrong_backend_binding());
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "redirect_uri": "http://127.0.0.1:0/callback",
+            "realm_id": "dev",
+            "binding_id": "default_openai"
+        }));
+
+        let resp =
+            handle_auth_login_start(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert_invalid_params_message(resp, "backend_kind 'openai_api'");
+        let snapshot = runtime
+            .auth_lease_handle()
+            .snapshot(&LeaseKey::from_connection_ref(&openai_connection_ref()));
+        assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
     async fn device_start_rejects_same_provider_non_oauth_target_before_state_admission() {
         let runtime = test_runtime_with_config(config_with_google_api_key_binding());
         let params = raw_params(serde_json::json!({
@@ -2525,6 +2598,26 @@ mod tests {
                 .await;
 
         assert_invalid_params_message(resp, "auth_method 'api_key'");
+        let snapshot = runtime
+            .auth_lease_handle()
+            .snapshot(&LeaseKey::from_connection_ref(&google_connection_ref()));
+        assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
+    async fn device_start_rejects_oauth_method_with_wrong_backend_before_state_admission() {
+        let runtime = test_runtime_with_config(config_with_google_oauth_wrong_backend_binding());
+        let params = raw_params(serde_json::json!({
+            "provider": "google",
+            "realm_id": "dev",
+            "binding_id": "default_google"
+        }));
+
+        let resp =
+            handle_auth_login_device_start(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime)
+                .await;
+
+        assert_invalid_params_message(resp, "backend_kind 'google_genai'");
         let snapshot = runtime
             .auth_lease_handle()
             .snapshot(&LeaseKey::from_connection_ref(&google_connection_ref()));
@@ -2550,6 +2643,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_complete_rejects_oauth_method_with_wrong_backend_before_state_lookup() {
+        let runtime = test_runtime_with_config(config_with_openai_oauth_wrong_backend_binding());
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "code": "provider-code",
+            "state": "missing-state",
+            "redirect_uri": "http://127.0.0.1:0/callback",
+            "realm_id": "dev",
+            "binding_id": "default_openai"
+        }));
+
+        let resp =
+            handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert_invalid_params_message(resp, "backend_kind 'openai_api'");
+    }
+
+    #[tokio::test]
     async fn device_complete_rejects_same_provider_non_oauth_target_before_state_lookup() {
         let runtime = test_runtime_with_config(config_with_google_api_key_binding());
         let params = raw_params(serde_json::json!({
@@ -2564,6 +2675,23 @@ mod tests {
                 .await;
 
         assert_invalid_params_message(resp, "auth_method 'api_key'");
+    }
+
+    #[tokio::test]
+    async fn device_complete_rejects_oauth_method_with_wrong_backend_before_state_lookup() {
+        let runtime = test_runtime_with_config(config_with_google_oauth_wrong_backend_binding());
+        let params = raw_params(serde_json::json!({
+            "provider": "google",
+            "device_code": "missing-device-code",
+            "realm_id": "dev",
+            "binding_id": "default_google"
+        }));
+
+        let resp =
+            handle_auth_login_device_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime)
+                .await;
+
+        assert_invalid_params_message(resp, "backend_kind 'google_genai'");
     }
 
     #[tokio::test]
@@ -2584,6 +2712,27 @@ mod tests {
         .await;
 
         assert_invalid_params_message(resp, "auth_method 'api_key'");
+    }
+
+    #[tokio::test]
+    async fn provision_api_key_rejects_oauth_method_with_wrong_backend_before_token_store() {
+        let runtime = test_runtime_with_config_without_token_store(
+            config_with_anthropic_oauth_to_api_key_wrong_backend_binding(),
+        );
+        let params = raw_params(serde_json::json!({
+            "access_token": "console-access-token",
+            "realm_id": "dev",
+            "binding_id": "default_anthropic"
+        }));
+
+        let resp = handle_auth_login_provision_api_key(
+            Some(RpcId::Num(1)),
+            Some(params.as_ref()),
+            &runtime,
+        )
+        .await;
+
+        assert_invalid_params_message(resp, "backend_kind 'bedrock'");
     }
 
     #[tokio::test]

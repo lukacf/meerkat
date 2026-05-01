@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use meerkat_core::{AuthProfile, ConnectionRef, CredentialSourceSpec, Provider};
+use meerkat_core::{AuthProfile, BackendProfile, ConnectionRef, CredentialSourceSpec, Provider};
 use parking_lot::Mutex;
 
 use crate::auth_oauth::OAuthEndpoints;
@@ -104,6 +104,14 @@ impl OAuthProviderIdentity {
         }
     }
 
+    pub fn backend_kind(self) -> &'static str {
+        match self {
+            Self::AnthropicClaudeAi => "anthropic_api",
+            Self::OpenAiChatGpt => "chatgpt_backend",
+            Self::GoogleCodeAssist => "google_code_assist",
+        }
+    }
+
     pub fn client_secret(self) -> Option<&'static str> {
         match self {
             Self::AnthropicClaudeAi | Self::OpenAiChatGpt => None,
@@ -188,6 +196,19 @@ pub fn resolve_oauth_provider(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OAuthTargetValidationError {
+    #[error("OAuth target backend provider mismatch: expected {expected:?}, got {actual:?}")]
+    BackendProviderMismatch {
+        expected: Provider,
+        actual: Provider,
+    },
+    #[error(
+        "OAuth target backend_kind '{backend_kind}' cannot store credential mode {expected_mode:?}; expected backend_kind '{expected_backend_kind}'"
+    )]
+    BackendKindMismatch {
+        backend_kind: String,
+        expected_backend_kind: &'static str,
+        expected_mode: PersistedAuthMode,
+    },
     #[error("OAuth target provider mismatch: expected {expected:?}, got {actual:?}")]
     ProviderMismatch {
         expected: Provider,
@@ -213,6 +234,20 @@ pub fn validate_oauth_login_target(
     validate_oauth_target_for_auth_mode(auth_profile, identity.provider(), identity.auth_mode())
 }
 
+pub fn validate_oauth_login_binding(
+    backend_profile: &BackendProfile,
+    auth_profile: &AuthProfile,
+    identity: OAuthProviderIdentity,
+) -> Result<(), OAuthTargetValidationError> {
+    validate_oauth_target_binding_for_auth_mode(
+        backend_profile,
+        auth_profile,
+        identity.provider(),
+        identity.auth_mode(),
+        identity.backend_kind(),
+    )
+}
+
 pub fn validate_oauth_target_for_auth_mode(
     auth_profile: &AuthProfile,
     expected_provider: Provider,
@@ -236,6 +271,30 @@ pub fn validate_oauth_target_for_auth_mode(
     if !oauth_source_can_store_flow_credentials(&auth_profile.source) {
         return Err(OAuthTargetValidationError::SourceMismatch {
             source_kind: source_kind_label(&auth_profile.source),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_oauth_target_binding_for_auth_mode(
+    backend_profile: &BackendProfile,
+    auth_profile: &AuthProfile,
+    expected_provider: Provider,
+    expected_mode: PersistedAuthMode,
+    expected_backend_kind: &'static str,
+) -> Result<(), OAuthTargetValidationError> {
+    validate_oauth_target_for_auth_mode(auth_profile, expected_provider, expected_mode)?;
+    if backend_profile.provider != expected_provider {
+        return Err(OAuthTargetValidationError::BackendProviderMismatch {
+            expected: expected_provider,
+            actual: backend_profile.provider,
+        });
+    }
+    if backend_profile.backend_kind != expected_backend_kind {
+        return Err(OAuthTargetValidationError::BackendKindMismatch {
+            backend_kind: backend_profile.backend_kind.clone(),
+            expected_backend_kind,
+            expected_mode,
         });
     }
     Ok(())

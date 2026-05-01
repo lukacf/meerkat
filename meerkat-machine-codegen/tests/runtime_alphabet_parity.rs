@@ -345,6 +345,40 @@ fn assert_command_manifest_body_uses_typed_variants(path: &str, start_marker: &s
     );
 }
 
+fn assert_flow_authority_manifest_body_uses_typed_variants(path: &str, start_marker: &str) {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("read manifest source");
+    let body = function_body(&source, start_marker, "");
+    assert!(
+        !body.contains(".as_str()") && !body.contains("InputVariantId::parse"),
+        "{path} typed flow authority manifest must not project through string names"
+    );
+    assert!(
+        body.contains("flow_projection_kernel_audit()"),
+        "{path} typed flow authority manifest must derive from the typed projection-kernel audit"
+    );
+    assert!(
+        !body.contains('"'),
+        "{path} typed flow authority manifest must not contain string-literal input whitelists"
+    );
+    assert!(
+        body.contains("MobMachineCatalogInput::input_variant"),
+        "{path} typed flow authority manifest must expose typed generated input variants"
+    );
+}
+
+fn assert_flow_authority_record_conversion_uses_typed_manifest(path: &str, start_marker: &str) {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("read manifest source");
+    let body = function_body(&source, start_marker, "");
+    assert!(
+        body.contains("canonical_flow_authority_input_variant_manifest()"),
+        "{path} flow authority input conversion must validate against the typed canonical manifest"
+    );
+    assert!(
+        !body.contains(".as_str()") && !body.contains("InputVariantId::parse"),
+        "{path} flow authority input conversion must not gate through string names"
+    );
+}
+
 #[test]
 fn machine_inputs_equal_runtime_manifest_through_typed_generated_facts() {
     let meerkat_records = canonical_meerkat_machine_command_classifications();
@@ -488,6 +522,18 @@ fn canonical_command_manifests_do_not_project_through_strings() {
     assert_command_manifest_body_uses_typed_variants(
         "meerkat-mob/src/mob_machine.rs",
         "pub fn canonical_mob_machine_command_input_variant_manifest",
+    );
+}
+
+#[test]
+fn flow_authority_manifest_does_not_project_through_strings() {
+    assert_flow_authority_manifest_body_uses_typed_variants(
+        "meerkat-mob/src/run.rs",
+        "pub fn canonical_flow_authority_input_variant_manifest",
+    );
+    assert_flow_authority_record_conversion_uses_typed_manifest(
+        "meerkat-mob/src/run.rs",
+        "pub(crate) fn from_machine_input",
     );
 }
 

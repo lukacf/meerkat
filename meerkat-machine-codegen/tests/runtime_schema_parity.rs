@@ -503,9 +503,21 @@ fn mob_flow_projection_kernels_are_audited_as_non_canonical_support() {
             entry.module
         );
     }
-    let flow_authority_inputs = meerkat_mob::run::canonical_flow_authority_input_manifest()
+    let expected_flow_authority_inputs = std::iter::once(MobMachineCatalogInput::RunFlow)
+        .chain(
+            audit
+                .iter()
+                .flat_map(|entry| entry.owning_inputs.iter().copied()),
+        )
+        .map(MobMachineCatalogInput::input_variant)
+        .collect::<BTreeSet<_>>();
+    let flow_authority_inputs = meerkat_mob::run::canonical_flow_authority_input_variant_manifest()
         .into_iter()
         .collect::<BTreeSet<_>>();
+    assert_eq!(
+        flow_authority_inputs, expected_flow_authority_inputs,
+        "flow authority input manifest must exactly match the audited MobMachine authority alphabet"
+    );
     assert!(
         flow_authority_inputs.is_subset(&mob_inputs),
         "flow authority input manifest must name only canonical MobMachine inputs"
@@ -622,6 +634,20 @@ fn mob_runtime_parity_legacy_manifests_preserve_string_api() {
     assert_eq!(
         runtime_internal_manifest, typed_runtime_internal_manifest,
         "legacy MobMachine runtime-internal manifest must remain a string projection of the typed manifest"
+    );
+
+    let flow_authority_manifest: BTreeSet<&'static str> =
+        meerkat_mob::run::canonical_flow_authority_input_manifest()
+            .into_iter()
+            .collect();
+    let typed_flow_authority_manifest: BTreeSet<&'static str> =
+        meerkat_mob::run::canonical_flow_authority_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        flow_authority_manifest, typed_flow_authority_manifest,
+        "legacy flow authority manifest must remain a string projection of the typed manifest"
     );
 }
 

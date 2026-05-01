@@ -79,22 +79,24 @@ pub fn flow_projection_kernel_audit() -> &'static [FlowProjectionKernelAudit] {
 }
 
 #[must_use]
-pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<MobMachineInputVariant> {
-    [
-        MobMachineCatalogInput::RunFlow,
-        MobMachineCatalogInput::CreateRunSeed,
-        MobMachineCatalogInput::AuthorizeFlowRunReducerCommand,
-        MobMachineCatalogInput::CreateFrameSeed,
-        MobMachineCatalogInput::AuthorizeFlowFrameReducerCommand,
-        MobMachineCatalogInput::CreateLoopSeed,
-        MobMachineCatalogInput::RecordLoopBodyFrameCompleted,
-        MobMachineCatalogInput::RecordLoopUntilConditionMet,
-        MobMachineCatalogInput::RecordLoopUntilConditionFailed,
-        MobMachineCatalogInput::AuthorizeLoopIterationReducerCommand,
-    ]
-    .into_iter()
-    .map(MobMachineCatalogInput::input_variant)
-    .collect()
+pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<&'static str> {
+    canonical_flow_authority_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[must_use]
+pub fn canonical_flow_authority_input_variant_manifest()
+-> indexmap::IndexSet<MobMachineInputVariant> {
+    std::iter::once(MobMachineCatalogInput::RunFlow)
+        .chain(
+            flow_projection_kernel_audit()
+                .iter()
+                .flat_map(|record| record.owning_inputs.iter().copied()),
+        )
+        .map(MobMachineCatalogInput::input_variant)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,7 +927,7 @@ pub enum FlowAuthorityInputRecord {
 
 impl FlowAuthorityInputRecord {
     pub(crate) fn from_machine_input(input: mob_dsl::MobMachineInput) -> Result<Self, MobError> {
-        Ok(match input {
+        let record = match input {
             mob_dsl::MobMachineInput::RunFlow {
                 run_id,
                 step_ids,
@@ -1111,7 +1113,47 @@ impl FlowAuthorityInputRecord {
                     "MobMachine input {other:?} is not a flow authority input"
                 )));
             }
-        })
+        };
+        let input_variant = record.input_variant();
+        if !canonical_flow_authority_input_variant_manifest().contains(&input_variant) {
+            return Err(MobError::Internal(format!(
+                "MobMachine input variant {input_variant:?} is not in the typed flow authority manifest"
+            )));
+        }
+        Ok(record)
+    }
+
+    #[must_use]
+    pub fn input_variant(&self) -> MobMachineInputVariant {
+        self.catalog_input().input_variant()
+    }
+
+    #[must_use]
+    fn catalog_input(&self) -> MobMachineCatalogInput {
+        match self {
+            Self::RunFlow(_) => MobMachineCatalogInput::RunFlow,
+            Self::CreateRunSeed(_) => MobMachineCatalogInput::CreateRunSeed,
+            Self::AuthorizeFlowRunReducerCommand { .. } => {
+                MobMachineCatalogInput::AuthorizeFlowRunReducerCommand
+            }
+            Self::CreateFrameSeed(_) => MobMachineCatalogInput::CreateFrameSeed,
+            Self::AuthorizeFlowFrameReducerCommand { .. } => {
+                MobMachineCatalogInput::AuthorizeFlowFrameReducerCommand
+            }
+            Self::CreateLoopSeed { .. } => MobMachineCatalogInput::CreateLoopSeed,
+            Self::RecordLoopBodyFrameCompleted { .. } => {
+                MobMachineCatalogInput::RecordLoopBodyFrameCompleted
+            }
+            Self::RecordLoopUntilConditionMet { .. } => {
+                MobMachineCatalogInput::RecordLoopUntilConditionMet
+            }
+            Self::RecordLoopUntilConditionFailed { .. } => {
+                MobMachineCatalogInput::RecordLoopUntilConditionFailed
+            }
+            Self::AuthorizeLoopIterationReducerCommand { .. } => {
+                MobMachineCatalogInput::AuthorizeLoopIterationReducerCommand
+            }
+        }
     }
 
     pub(crate) fn to_machine_input(&self) -> mob_dsl::MobMachineInput {

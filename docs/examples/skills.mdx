@@ -425,6 +425,7 @@ Inject skills into a specific turn on an existing session. The skill content is 
     curl -X POST http://localhost:8080/sessions/019467d9-7e3a.../messages \
       -H "Content-Type: application/json" \
       -d '{
+        "session_id": "019467d9-7e3a...",
         "prompt": "Now format the output",
         "turn_metadata": {
           "skill_references": [

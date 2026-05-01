@@ -462,6 +462,8 @@ pub async fn handle_create(
 
     // Start the initial turn — route through runtime for V9 consistency
     let result = if params.keep_alive {
+        let admission_cleanup_context = request_context.clone();
+        let error_cleanup_context = request_context.clone();
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
@@ -469,7 +471,7 @@ pub async fn handle_create(
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
-                .start_turn_via_runtime(
+                .start_turn_via_runtime_with_admission_hook(
                     &sid_for_turn,
                     prompt_for_turn,
                     event_tx_for_turn,
@@ -477,9 +479,19 @@ pub async fn handle_create(
                     None,
                     None,
                     None,
+                    admission_cleanup_context.map(|context| {
+                        Box::new(move || {
+                            context.disarm_unpublished_cleanup();
+                        })
+                            as crate::session_runtime::RuntimeAdmissionCommittedHook
+                    }),
                 )
                 .await
             {
+                disarm_unpublished_cleanup_after_admitted_turn_error(
+                    error_cleanup_context.as_ref(),
+                    &rpc_err,
+                );
                 let rpc_err = rpc_err.as_rpc_error();
                 tracing::error!(
                     session_id = %sid_for_turn,

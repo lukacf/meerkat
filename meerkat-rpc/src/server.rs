@@ -906,6 +906,69 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "comms")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_session_create_keep_alive_finish_after_admission_preserves_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let stream_started = Arc::new(tokio::sync::Notify::new());
+        let (runtime, config_store) = build_test_runtime_with_llm(
+            &temp,
+            Arc::new(HangingLlmClient {
+                stream_started: Arc::clone(&stream_started),
+            }),
+        );
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(35);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "this keep-alive turn admits while create is still unpublished",
+                "keep_alive": true,
+                "comms_name": "keep-alive-admission-cleanup"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked {
+            request_key: tracked_key,
+            task,
+        } = spawned
+        else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        assert_eq!(tracked_key, request_key);
+
+        tokio::time::timeout(Duration::from_secs(10), stream_started.notified())
+            .await
+            .expect("keep-alive LLM stream should start after runtime admission");
+        server
+            .request_executor
+            .finish_unpublished(&tracked_key)
+            .await
+            .expect("create request should still be tracked before response publication");
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "keep-alive create cleanup must be disarmed as soon as runtime admission commits"
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rpc_session_create_finish_during_accept_admission_hook_preserves_admitted_session() {
         let temp = tempfile::tempdir().unwrap();

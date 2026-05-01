@@ -227,8 +227,8 @@ binding — no env-default fallback, no cross-realm credential bleed.
 ## Per-mob-member override
 
 Mob members default to env-default / config-realm fallback credentials.
-Pass `connection_ref` on the host-side mob spawn surface to scope a member to a
-specific binding:
+Pass `turn_metadata.connection_ref` on the host-side mob spawn surface to scope
+a member to a specific binding:
 
 ```json
 {
@@ -237,16 +237,21 @@ specific binding:
     "mob_id": "research",
     "profile": "analyst",
     "agent_identity": "a1",
-    "connection_ref": {"realm": "prod", "binding": "openai"}
+    "turn_metadata": {
+      "connection_ref": {
+        "action": "set",
+        "value": {"realm": "prod", "binding": "openai"}
+      }
+    }
   }
 }
 ```
 
 Members in the same mob can use different providers or tenants
 without cross-contamination. Public wire surfaces accept the structural
-`connection_ref` object only; the colon-joined `realm:binding[:profile]`
-form is a CLI input convenience and is converted before it crosses the
-wire boundary.
+`turn_metadata.connection_ref` override object only; the colon-joined
+`realm:binding[:profile]` form is a CLI input convenience and is converted
+before it crosses the wire boundary.
 
 ## Refresh coordination
 
@@ -300,5 +305,5 @@ Bedrock/Vertex/Foundry.
 
 - [Hooks](/guides/hooks) — observe auth events or gate turns on
   credential state
-- [Mobs](/guides/mobs) — per-member `connection_ref` overrides
+- [Mobs](/guides/mobs) — per-member `turn_metadata.connection_ref` overrides
 - [Meerkat Runtime Dogma](/architecture/meerkat-runtime-dogma) — rationale behind the realm/binding model

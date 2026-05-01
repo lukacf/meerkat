@@ -1475,10 +1475,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
         let phase = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.claim()
-                .map_err(|_| SessionError::Busy { id: id.clone() })?
+            let phase = slot
+                .claim()
+                .map_err(|_| SessionError::Busy { id: id.clone() })?;
+            clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
+            phase
         };
-        clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
         handle
             .state_tx
             .send_replace(map_turn_phase_to_session_state(phase));
@@ -1488,10 +1490,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     fn try_abort_admitted_turn(handle: &SessionHandle) {
         let phase = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.abort_claim().ok()
+            let phase = slot.abort_claim().ok();
+            if phase.is_some() {
+                clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
+            }
+            phase
         };
         if let Some(phase) = phase {
-            clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
             handle
                 .state_tx
                 .send_replace(map_turn_phase_to_session_state(phase));
@@ -2481,10 +2486,13 @@ fn lock_turn_admission(
 fn abort_admitted_turn(control: &SessionTaskControl) {
     let phase = {
         let mut slot = lock_turn_admission(&control.turn_admission);
-        slot.abort_claim().ok()
+        let phase = slot.abort_claim().ok();
+        if phase.is_some() {
+            clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
+        }
+        phase
     };
     if let Some(phase) = phase {
-        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
         control
             .state_tx
             .send_replace(map_turn_phase_to_session_state(phase));
@@ -2894,11 +2902,14 @@ async fn session_task<A: SessionAgent>(
                 };
                 let finalize = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.finalize()
+                    let finalize = slot.finalize();
+                    if finalize.is_ok() {
+                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
+                    }
+                    finalize
                 };
                 let shutting_down = match finalize {
                     Ok(outcome) => {
-                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                         control
                             .state_tx
                             .send_replace(map_turn_phase_to_session_state(outcome.next_phase));
@@ -3053,11 +3064,16 @@ async fn session_task<A: SessionAgent>(
                     if slot.phase() == TurnAdmissionPhase::ShuttingDown {
                         None
                     } else {
-                        slot.request_shutdown().ok()
+                        let next_phase = slot.request_shutdown().ok();
+                        if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
+                            clear_cancel_after_boundary_request(
+                                &control.cancel_after_boundary_handle,
+                            );
+                        }
+                        next_phase
                     }
                 };
                 if let Some(phase) = next_phase {
-                    clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                     control
                         .state_tx
                         .send_replace(map_turn_phase_to_session_state(phase));

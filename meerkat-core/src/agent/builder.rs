@@ -102,6 +102,7 @@ pub struct AgentFactoryPolicyBridgeRegistration {
     package_name: &'static str,
     manifest_dir: &'static str,
     source_file: &'static str,
+    source_fingerprint: u64,
     token_type_id: fn() -> TypeId,
 }
 
@@ -111,12 +112,16 @@ enum AgentFactoryPolicyBridgeRegistrationKind {
     CoreHooksTest,
 }
 
+const FACADE_FACTORY_SOURCE_FINGERPRINT: u64 = 0xa9de_0aae_2b8a_98aa;
+const CORE_HOOKS_TEST_SOURCE_FINGERPRINT: u64 = 0xe115_18ab_4785_57de;
+
 impl AgentFactoryPolicyBridgeRegistration {
     #[doc(hidden)]
     #[track_caller]
     pub const fn __facade_from_compile_env(
         package_name: &'static str,
         manifest_dir: &'static str,
+        source_fingerprint: u64,
         token_type_id: fn() -> TypeId,
     ) -> Self {
         Self {
@@ -124,6 +129,7 @@ impl AgentFactoryPolicyBridgeRegistration {
             package_name,
             manifest_dir,
             source_file: core::panic::Location::caller().file(),
+            source_fingerprint,
             token_type_id,
         }
     }
@@ -133,6 +139,7 @@ impl AgentFactoryPolicyBridgeRegistration {
     pub const fn __core_hooks_test_from_compile_env(
         package_name: &'static str,
         manifest_dir: &'static str,
+        source_fingerprint: u64,
         token_type_id: fn() -> TypeId,
     ) -> Self {
         Self {
@@ -140,6 +147,7 @@ impl AgentFactoryPolicyBridgeRegistration {
             package_name,
             manifest_dir,
             source_file: core::panic::Location::caller().file(),
+            source_fingerprint,
             token_type_id,
         }
     }
@@ -154,6 +162,9 @@ macro_rules! __meerkat_agent_factory_policy_bridge_registration {
         $crate::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_MANIFEST_DIR"),
+            $crate::agent::__meerkat_agent_factory_policy_source_fingerprint(include_bytes!(
+                concat!("factory", ".rs")
+            )),
             $token_type_id,
         )
     };
@@ -166,9 +177,24 @@ macro_rules! __meerkat_core_hooks_test_agent_factory_policy_bridge_registration 
         $crate::agent::AgentFactoryPolicyBridgeRegistration::__core_hooks_test_from_compile_env(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_MANIFEST_DIR"),
+            $crate::agent::__meerkat_agent_factory_policy_source_fingerprint(include_bytes!(
+                concat!("hooks_behavior", ".rs")
+            )),
             $token_type_id,
         )
     };
+}
+
+#[doc(hidden)]
+pub const fn __meerkat_agent_factory_policy_source_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        index += 1;
+    }
+    hash
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -243,6 +269,7 @@ impl AgentFactoryPolicyBridgeRegistration {
                 matches!(self.package_name, "meerkat" | "meerkat_unit_test")
                     && manifest_dir_matches(self.manifest_dir, expected_facade_manifest_dir())
                     && source_file_matches(self.source_file, "meerkat", "src/factory.rs")
+                    && self.source_fingerprint == FACADE_FACTORY_SOURCE_FINGERPRINT
             }
             AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest => {
                 cfg!(debug_assertions)
@@ -250,6 +277,12 @@ impl AgentFactoryPolicyBridgeRegistration {
                         self.manifest_dir,
                         Some(normalized_path(env!("CARGO_MANIFEST_DIR"))),
                     )
+                    && source_file_matches(
+                        self.source_file,
+                        "meerkat-core",
+                        "tests/hooks_behavior.rs",
+                    )
+                    && self.source_fingerprint == CORE_HOOKS_TEST_SOURCE_FINGERPRINT
             }
         }
     }

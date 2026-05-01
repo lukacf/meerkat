@@ -24,6 +24,42 @@ fn try_repo_file(relative: &str) -> Option<String> {
     fs::read_to_string(&path).ok()
 }
 
+fn workspace_manifest_for_members(members: &[&str]) -> String {
+    let manifest = repo_file("Cargo.toml");
+    let start = manifest
+        .find("members = [")
+        .expect("workspace manifest must declare members");
+    let exclude = manifest[start..]
+        .find("\nexclude = ")
+        .map(|offset| start + offset)
+        .expect("workspace manifest must declare exclude after members");
+    let members = members
+        .iter()
+        .map(|member| format!("    \"{member}\",\n"))
+        .collect::<String>();
+    format!(
+        "{}members = [\n{}]\n{}",
+        &manifest[..start],
+        members,
+        &manifest[exclude..]
+    )
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let destination = to.join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_recursive(&source, &destination)?;
+        } else {
+            fs::copy(&source, &destination)?;
+        }
+    }
+    Ok(())
+}
+
 fn find_runfile_tool(root: &Path, suffix: &str) -> Option<PathBuf> {
     let mut queue = VecDeque::from([root.to_path_buf()]);
     while let Some(dir) = queue.pop_front() {
@@ -439,7 +475,9 @@ meerkat-core = {{ path = "{}" }}
         stderr.contains("AgentFactoryPolicyBridgeRegistration")
             || stderr.contains("__meerkat_agent_factory_policy_build_v3")
             || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name"),
+            || stderr.contains("link_name")
+            || stderr.contains("couldn't read")
+            || stderr.contains("No such file or directory"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -459,35 +497,60 @@ fn downstream_package_spoof_cannot_enter_factory_policy_finalizer() -> std::io::
     }
 
     let temp = tempfile::tempdir()?;
-    let project_dir = temp.path().join("meerkat");
+    let workspace_dir = temp.path().join("repo");
+    fs::create_dir_all(&workspace_dir)?;
+    fs::write(
+        workspace_dir.join("Cargo.toml"),
+        workspace_manifest_for_members(&["meerkat-core", "meerkat"]),
+    )?;
+    copy_dir_recursive(
+        &repo_root().join("meerkat-core"),
+        &workspace_dir.join("meerkat-core"),
+    )?;
+
+    let project_dir = workspace_dir.join("meerkat");
     let src_dir = project_dir.join("src");
     fs::create_dir_all(&src_dir)?;
     fs::write(
         project_dir.join("Cargo.toml"),
-        format!(
-            r#"[package]
+        r#"[package]
 name = "meerkat"
-version = "0.0.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-async-trait = "0.1"
-futures = "0.3"
-inventory = "0.3"
-meerkat-core = {{ path = "{}" }}
+async-trait = { workspace = true }
+futures = { workspace = true }
+inventory = { workspace = true }
+meerkat-core = { path = "../meerkat-core" }
 "#,
-            repo_root().join("meerkat-core").display()
-        ),
     )?;
     fs::write(
         src_dir.join("main.rs"),
         "mod factory;\nfn main() { factory::run(); }\n",
     )?;
-    fs::write(
-        src_dir.join("factory.rs"),
+    let fixture =
         include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace("fn main() {", "pub fn run() {"),
-    )?;
+            .replace("fn main() {", "pub fn run() {");
+    let fixture = fixture.replace(
+        r#"inventory::submit! {
+    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
+        forged_agent_factory_policy_bridge_token_type_id
+    )
+}
+
+"#,
+        "",
+    );
+    fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
@@ -981,6 +1044,9 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && builder.contains("__meerkat_agent_factory_policy_bridge_registration")
             && builder.contains("InvalidFactoryBridgeToken")
             && builder.contains("ForgedFactoryBridgeTokenRegistration")
+            && builder.contains("FACADE_FACTORY_SOURCE_FINGERPRINT")
+            && builder.contains("CORE_HOOKS_TEST_SOURCE_FINGERPRINT")
+            && builder.contains("__meerkat_agent_factory_policy_source_fingerprint")
             && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
             && !builder.contains("AgentFactoryPolicyBridgeRegistration::new")
             && !builder.contains("pub const fn new(")

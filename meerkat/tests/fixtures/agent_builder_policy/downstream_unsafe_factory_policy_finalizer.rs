@@ -171,7 +171,8 @@ fn main() {
         Err(error) => {
             let error = error.to_string();
             assert!(
-                error.contains("canonical factory bridge token"),
+                error.contains("canonical factory bridge token")
+                    || error.contains("forged factory bridge token registration"),
                 "unsafe downstream finalizer call failed for the wrong reason: {error}"
             );
             println!("unsafe downstream finalizer rejected forged bridge token: {error}");

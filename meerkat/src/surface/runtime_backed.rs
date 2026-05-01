@@ -10,6 +10,7 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::service::SessionService;
 use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+    CONTEXT_ONLY_TURN_METADATA_ERROR,
 };
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
@@ -311,6 +312,14 @@ impl CoreExecutor for PersistentRuntimeExecutor {
             {
                 return Err(CoreExecutorError::apply_failed_primitive_rejected(
                     CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+                ));
+            }
+            if primitive
+                .turn_metadata()
+                .is_some_and(|metadata| metadata.has_context_only_unapplied_turn_fields())
+            {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    CONTEXT_ONLY_TURN_METADATA_ERROR,
                 ));
             }
             let RunPrimitive::StagedInput(staged) = &primitive else {
@@ -1410,6 +1419,48 @@ mod tests {
         assert!(
             error.to_string().contains("context-only")
                 && error.to_string().contains("materialization"),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_rejects_context_only_turn_metadata() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let mut executor =
+            PersistentRuntimeExecutor::new(service, adapter, meerkat_core::SessionId::new());
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![ConversationContextAppend {
+                key: "ctx-turn-metadata".to_string(),
+                content: CoreRenderable::Text {
+                    text: "context-only runtime context".to_string(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::HandlingMode::Steer),
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+            build_only_overrides: None,
+        });
+
+        let error = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect_err("context-only runtime applies must reject unapplied turn metadata");
+
+        assert!(
+            error.to_string().contains("context-only")
+                && error.to_string().contains("turn metadata"),
             "unexpected rejection reason: {error}"
         );
     }

@@ -46,8 +46,9 @@ use meerkat_core::types::{Message, RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
-    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, RunId,
-    has_build_only_turn_overrides, has_context_only_materialization_metadata,
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+    CONTEXT_ONLY_TURN_METADATA_ERROR, RunId, has_build_only_turn_overrides,
+    has_context_only_materialization_metadata, has_context_only_unapplied_turn_metadata,
 };
 use meerkat_core::{
     Config, ConfigStore, ContentInput, PendingSystemContextAppend, Session, SessionLlmIdentity,
@@ -2565,6 +2566,13 @@ impl SessionRuntime {
                 return Err(RpcError {
                     code: error::INVALID_PARAMS,
                     message: CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR.to_string(),
+                    data: None,
+                });
+            }
+            if has_context_only_unapplied_turn_metadata(&recovery_overrides) {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: CONTEXT_ONLY_TURN_METADATA_ERROR.to_string(),
                     data: None,
                 });
             }
@@ -5601,6 +5609,49 @@ mod tests {
 
         assert!(
             error.message.contains("context-only") && error.message.contains("materialization"),
+            "unexpected rejection reason: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_rejects_turn_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-turn-metadata".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::HandlingMode::Steer),
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let error = runtime
+            .apply_runtime_turn(
+                &SessionId::new(),
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect_err("context-only runtime applies must reject unapplied turn metadata");
+
+        assert!(
+            error.message.contains("context-only") && error.message.contains("turn metadata"),
             "unexpected rejection reason: {error:?}"
         );
     }

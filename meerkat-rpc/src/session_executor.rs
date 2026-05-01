@@ -17,7 +17,8 @@ use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_core::{
-    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, EventEnvelope,
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+    CONTEXT_ONLY_TURN_METADATA_ERROR, EventEnvelope,
 };
 use tokio::sync::mpsc;
 
@@ -199,6 +200,14 @@ fn reject_context_only_unmaterializable_metadata(
     {
         return Err(CoreExecutorError::apply_failed_primitive_rejected(
             CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+        ));
+    }
+    if primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_context_only_unapplied_turn_fields())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            CONTEXT_ONLY_TURN_METADATA_ERROR,
         ));
     }
     Ok(())

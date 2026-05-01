@@ -1499,6 +1499,17 @@ impl RuntimeTurnMetadata {
             || self.connection_ref.is_some()
     }
 
+    /// True when metadata carries public turn fields that require a real turn
+    /// application and cannot be honored by a system-context-only append.
+    pub fn has_context_only_unapplied_turn_fields(&self) -> bool {
+        self.handling_mode.is_some()
+            || self.skill_references.is_some()
+            || self.flow_tool_overlay.is_some()
+            || self.additional_instructions.is_some()
+            || self.keep_alive.is_some()
+            || self.render_metadata.is_some()
+    }
+
     /// True when the metadata carries stamps owned by runtime admission.
     pub fn has_runtime_owned_stamps(&self) -> bool {
         self.execution_kind.is_some() || self.peer_response_terminal_apply_intent.is_some()

@@ -431,12 +431,12 @@ pub enum ScheduledSessionAction {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialize_optional_schedule_runtime_turn_metadata",
-            deserialize_with = "deserialize_optional_schedule_runtime_turn_metadata"
+            serialize_with = "serialize_optional_public_runtime_turn_metadata",
+            deserialize_with = "deserialize_optional_public_runtime_turn_metadata"
         )]
         #[cfg_attr(
             feature = "schema",
-            schemars(with = "Option<ScheduleRuntimeTurnMetadata>")
+            schemars(with = "Option<PublicRuntimeTurnMetadata>")
         )]
         turn_metadata: Option<Box<RuntimeTurnMetadata>>,
     },
@@ -467,7 +467,7 @@ impl ScheduledSessionAction {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct ScheduleRuntimeTurnMetadata {
+struct PublicRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handling_mode: Option<HandlingMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,8 +494,8 @@ struct ScheduleRuntimeTurnMetadata {
     render_metadata: Option<RenderMetadata>,
 }
 
-impl From<ScheduleRuntimeTurnMetadata> for RuntimeTurnMetadata {
-    fn from(value: ScheduleRuntimeTurnMetadata) -> Self {
+impl From<PublicRuntimeTurnMetadata> for RuntimeTurnMetadata {
+    fn from(value: PublicRuntimeTurnMetadata) -> Self {
         Self {
             handling_mode: value.handling_mode,
             skill_references: value.skill_references,
@@ -513,7 +513,7 @@ impl From<ScheduleRuntimeTurnMetadata> for RuntimeTurnMetadata {
     }
 }
 
-impl From<RuntimeTurnMetadata> for ScheduleRuntimeTurnMetadata {
+impl From<RuntimeTurnMetadata> for PublicRuntimeTurnMetadata {
     fn from(value: RuntimeTurnMetadata) -> Self {
         Self {
             handling_mode: value.handling_mode,
@@ -543,39 +543,39 @@ fn validate_public_runtime_turn_metadata(metadata: &RuntimeTurnMetadata) -> Resu
 }
 
 pub fn public_runtime_turn_metadata(metadata: &RuntimeTurnMetadata) -> RuntimeTurnMetadata {
-    ScheduleRuntimeTurnMetadata::from(metadata.clone()).into()
+    PublicRuntimeTurnMetadata::from(metadata.clone()).into()
 }
 
-fn deserialize_schedule_runtime_turn_metadata<'de, D>(
+fn deserialize_public_runtime_turn_metadata<'de, D>(
     deserializer: D,
 ) -> Result<RuntimeTurnMetadata, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    ScheduleRuntimeTurnMetadata::deserialize(deserializer).map(Into::into)
+    PublicRuntimeTurnMetadata::deserialize(deserializer).map(Into::into)
 }
 
-fn serialize_schedule_runtime_turn_metadata<S>(
+fn serialize_public_runtime_turn_metadata<S>(
     metadata: &RuntimeTurnMetadata,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    ScheduleRuntimeTurnMetadata::from(metadata.clone()).serialize(serializer)
+    PublicRuntimeTurnMetadata::from(metadata.clone()).serialize(serializer)
 }
 
-fn deserialize_optional_schedule_runtime_turn_metadata<'de, D>(
+fn deserialize_optional_public_runtime_turn_metadata<'de, D>(
     deserializer: D,
 ) -> Result<Option<Box<RuntimeTurnMetadata>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<ScheduleRuntimeTurnMetadata>::deserialize(deserializer)
+    Option::<PublicRuntimeTurnMetadata>::deserialize(deserializer)
         .map(|metadata| metadata.map(|metadata| Box::new(metadata.into())))
 }
 
-fn serialize_optional_schedule_runtime_turn_metadata<S>(
+fn serialize_optional_public_runtime_turn_metadata<S>(
     metadata: &Option<Box<RuntimeTurnMetadata>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -585,7 +585,7 @@ where
     metadata
         .as_deref()
         .cloned()
-        .map(ScheduleRuntimeTurnMetadata::from)
+        .map(PublicRuntimeTurnMetadata::from)
         .serialize(serializer)
 }
 
@@ -594,10 +594,10 @@ where
 #[serde(deny_unknown_fields)]
 pub struct SessionMaterializationSpec {
     #[serde(
-        serialize_with = "serialize_schedule_runtime_turn_metadata",
-        deserialize_with = "deserialize_schedule_runtime_turn_metadata"
+        serialize_with = "serialize_public_runtime_turn_metadata",
+        deserialize_with = "deserialize_public_runtime_turn_metadata"
     )]
-    #[cfg_attr(feature = "schema", schemars(with = "ScheduleRuntimeTurnMetadata"))]
+    #[cfg_attr(feature = "schema", schemars(with = "PublicRuntimeTurnMetadata"))]
     pub turn_metadata: RuntimeTurnMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,

@@ -21,6 +21,119 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         Ok(())
     }
 
+    fn rewrite_schedule_runtime_turn_metadata_refs(value: &mut Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                let mut rewritten = false;
+                if let Some(Value::String(reference)) = object.get_mut("$ref") {
+                    if reference == "#/$defs/ScheduleRuntimeTurnMetadata" {
+                        *reference = "#/$defs/WireRuntimeTurnMetadata".to_string();
+                        rewritten = true;
+                    } else if reference == "#/components/schemas/ScheduleRuntimeTurnMetadata" {
+                        *reference = "#/components/schemas/WireRuntimeTurnMetadata".to_string();
+                        rewritten = true;
+                    } else if reference == "#/$defs/PublicRuntimeTurnMetadata" {
+                        *reference = "#/$defs/WireRuntimeTurnMetadata".to_string();
+                        rewritten = true;
+                    } else if reference == "#/components/schemas/PublicRuntimeTurnMetadata" {
+                        *reference = "#/components/schemas/WireRuntimeTurnMetadata".to_string();
+                        rewritten = true;
+                    }
+                }
+                if let Some(Value::Object(defs)) = object.get_mut("$defs") {
+                    rewritten |= defs.remove("ScheduleRuntimeTurnMetadata").is_some();
+                    rewritten |= defs.remove("PublicRuntimeTurnMetadata").is_some();
+                }
+                for nested in object.values_mut() {
+                    rewritten |= rewrite_schedule_runtime_turn_metadata_refs(nested);
+                }
+                rewritten
+            }
+            Value::Array(values) => {
+                let mut rewritten = false;
+                for nested in values {
+                    rewritten |= rewrite_schedule_runtime_turn_metadata_refs(nested);
+                }
+                rewritten
+            }
+            _ => false,
+        }
+    }
+
+    fn value_contains_ref(value: &Value, target: &str) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.get("$ref").and_then(Value::as_str) == Some(target)
+                    || object
+                        .values()
+                        .any(|nested| value_contains_ref(nested, target))
+            }
+            Value::Array(values) => values
+                .iter()
+                .any(|nested| value_contains_ref(nested, target)),
+            _ => false,
+        }
+    }
+
+    fn canonical_schema_root_without_defs(schema: &Value) -> Value {
+        let mut root = schema.clone();
+        if let Some(object) = root.as_object_mut() {
+            object.remove("$schema");
+            object.remove("$defs");
+        }
+        root
+    }
+
+    fn install_canonical_runtime_turn_metadata_defs(schema: &mut Value, canonical: &Value) {
+        let Some(object) = schema.as_object_mut() else {
+            return;
+        };
+        let defs = object
+            .entry("$defs".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(defs) = defs.as_object_mut() else {
+            return;
+        };
+        if let Some(canonical_defs) = canonical.get("$defs").and_then(Value::as_object) {
+            for (name, definition) in canonical_defs {
+                defs.entry(name.clone())
+                    .or_insert_with(|| definition.clone());
+            }
+        }
+        defs.insert(
+            "WireRuntimeTurnMetadata".to_string(),
+            canonical_schema_root_without_defs(canonical),
+        );
+    }
+
+    fn canonicalize_schedule_runtime_turn_metadata_schema(
+        schema: &mut Value,
+        canonical_runtime_turn_metadata: &Value,
+    ) {
+        if rewrite_schedule_runtime_turn_metadata_refs(schema)
+            && value_contains_ref(schema, "#/$defs/WireRuntimeTurnMetadata")
+        {
+            install_canonical_runtime_turn_metadata_defs(schema, canonical_runtime_turn_metadata);
+        }
+    }
+
+    fn canonicalize_schedule_runtime_turn_metadata_section(
+        section: &mut Value,
+        canonical_runtime_turn_metadata: &Value,
+    ) {
+        if let Some(schemas) = section.as_object_mut() {
+            for schema in schemas.values_mut() {
+                canonicalize_schedule_runtime_turn_metadata_schema(
+                    schema,
+                    canonical_runtime_turn_metadata,
+                );
+            }
+        }
+    }
+
+    let canonical_runtime_turn_metadata =
+        serde_json::to_value(schema_for!(crate::wire::runtime::WireRuntimeTurnMetadata))?;
+
     // Version
     let version_schema = serde_json::json!({
         "contract_version": crate::version::ContractVersion::CURRENT.to_string(),
@@ -29,7 +142,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
     // Wire types (contracts-owned types only — types embedding core types
     // without JsonSchema use serde for serialization but not for schema generation)
-    let wire_types = serde_json::json!({
+    let mut wire_types = serde_json::json!({
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
@@ -204,10 +317,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
         "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
     });
+    canonicalize_schedule_runtime_turn_metadata_section(
+        &mut wire_types,
+        &canonical_runtime_turn_metadata,
+    );
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 
     // Params (only contracts-owned param types)
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "CoreCreateParams": schema_for!(crate::wire::CoreCreateParams),
         "CommsParams": schema_for!(crate::wire::CommsParams),
         "SkillsParams": schema_for!(crate::wire::SkillsParams),
@@ -274,6 +391,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ScheduleOccurrencesParams": schema_for!(crate::wire::ScheduleOccurrencesParams),
         "UpdateScheduleParams": schema_for!(crate::wire::UpdateScheduleParams),
     });
+    canonicalize_schedule_runtime_turn_metadata_section(
+        &mut params,
+        &canonical_runtime_turn_metadata,
+    );
     write_pretty_json(output_dir.join("params.json"), &params)?;
 
     // Errors
@@ -604,6 +725,13 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 vec![
                     ("session_id", string_schema()),
                     ("prompt", content_input),
+                    ("system_prompt", string_schema()),
+                    ("output_schema", json_value.clone()),
+                    ("structured_output_retries", integer_schema()),
+                    ("max_tokens", integer_schema()),
+                    ("comms_name", string_schema()),
+                    ("peer_meta", json_value.clone()),
+                    ("hooks_override", json_value.clone()),
                     ("verbose", bool_schema()),
                     ("turn_metadata", schema_ref("WireRuntimeTurnMetadata")),
                 ],
@@ -1965,6 +2093,20 @@ mod tests {
             Some(&serde_json::Value::Bool(false)),
             "REST continue schema must reject split or unknown top-level turn metadata fields"
         );
+        for recovery_field in [
+            "system_prompt",
+            "output_schema",
+            "structured_output_retries",
+            "max_tokens",
+            "comms_name",
+            "peer_meta",
+            "hooks_override",
+        ] {
+            assert!(
+                properties.contains_key(recovery_field),
+                "REST continue must document deferred recovery field {recovery_field}"
+            );
+        }
         let turn_metadata = rest
             .pointer("/components/schemas/WireRuntimeTurnMetadata")
             .expect("WireRuntimeTurnMetadata component must be emitted");
@@ -1995,16 +2137,63 @@ mod tests {
             "keep_alive",
             "model",
             "provider",
-            "max_tokens",
-            "system_prompt",
-            "output_schema",
-            "structured_output_retries",
+            "provider_params",
+            "connection_ref",
         ] {
             assert!(
                 !properties.contains_key(split_field),
                 "REST continue must not expose split turn metadata field {split_field}"
             );
         }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_schedule_contracts_use_wire_runtime_turn_metadata() {
+        let output_dir = temp_output_dir("schedule-wire-turn-metadata");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let rest: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rest-openapi.json")).unwrap())
+                .unwrap();
+        let components = rest
+            .pointer("/components/schemas")
+            .and_then(serde_json::Value::as_object)
+            .expect("rest OpenAPI must expose components");
+        assert!(
+            !components.contains_key("ScheduleRuntimeTurnMetadata"),
+            "schedule contracts must not publish a separate schedule-only turn metadata carrier"
+        );
+
+        let scheduled_action = rest
+            .pointer("/components/schemas/ScheduledSessionAction")
+            .expect("ScheduledSessionAction component must be emitted");
+        let prompt_turn_metadata = scheduled_action
+            .pointer("/oneOf/0/properties/turn_metadata/anyOf/0/$ref")
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            prompt_turn_metadata,
+            Some("#/components/schemas/WireRuntimeTurnMetadata"),
+            "scheduled prompt turn_metadata must use the canonical wire metadata component"
+        );
+
+        let materialization_turn_metadata = rest
+            .pointer("/components/schemas/SessionMaterializationSpec/properties/turn_metadata/$ref")
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            materialization_turn_metadata,
+            Some("#/components/schemas/WireRuntimeTurnMetadata"),
+            "scheduled materialization turn_metadata must use the canonical wire metadata component"
+        );
+
+        let params: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("params.json")).unwrap()).unwrap();
+        let params_body = serde_json::to_string(&params).unwrap();
+        assert!(
+            !params_body.contains("ScheduleRuntimeTurnMetadata"),
+            "params schemas must not retain a schedule-only turn metadata definition or ref"
+        );
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

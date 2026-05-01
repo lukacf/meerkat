@@ -8448,6 +8448,22 @@
       "RestContinueSessionRequest": {
         "additionalProperties": false,
         "properties": {
+          "comms_name": {
+            "type": "string"
+          },
+          "hooks_override": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "max_tokens": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_schema": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "peer_meta": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
           "prompt": {
             "oneOf": [
               {
@@ -8459,6 +8475,13 @@
             ]
           },
           "session_id": {
+            "type": "string"
+          },
+          "structured_output_retries": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "system_prompt": {
             "type": "string"
           },
           "turn_metadata": {
@@ -9469,77 +9492,6 @@
         ],
         "type": "string"
       },
-      "ScheduleRuntimeTurnMetadata": {
-        "additionalProperties": false,
-        "properties": {
-          "additional_instructions": {
-            "items": true,
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "connection_ref": true,
-          "flow_tool_overlay": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TurnToolOverlay"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "handling_mode": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/HandlingMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "keep_alive": true,
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provider"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provider_params": true,
-          "render_metadata": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RenderMetadata"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "skill_references": {
-            "items": {
-              "$ref": "#/components/schemas/SkillKey"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
       "ScheduledMobAction": {
         "oneOf": [
           {
@@ -9601,7 +9553,7 @@
               "turn_metadata": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/ScheduleRuntimeTurnMetadata"
+                    "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
                   },
                   {
                     "type": "null"
@@ -9952,7 +9904,7 @@
             ]
           },
           "turn_metadata": {
-            "$ref": "#/components/schemas/ScheduleRuntimeTurnMetadata"
+            "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
           }
         },
         "required": [

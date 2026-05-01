@@ -271,8 +271,8 @@ skill injection through `turn_metadata.skill_references`.
 ## First-turn skill injection
 
 Use `turn_metadata.skill_references` when the skill should be injected for the
-first turn rather than preloaded into the session system prompt. SDKs keep
-`skill_refs` as a convenience option and serialize it into that carrier.
+first turn rather than preloaded into the session system prompt. SDK calls use
+the same metadata carrier (`turn_metadata` in Python, `turnMetadata` in TypeScript).
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -416,7 +416,7 @@ first turn rather than preloaded into the session system prompt. SDKs keep
 
 ## Per-turn skill injection
 
-Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; raw RPC and REST carry per-turn skills inside `turn_metadata.skill_references`, while SDKs expose `skill_refs` convenience options.
+Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; raw RPC, REST, and SDK calls carry per-turn skills inside `turn_metadata.skill_references`.
 
 <Tabs>
   <Tab title="CLI">
@@ -488,24 +488,28 @@ Inject skills into a specific turn on an existing session. The skill content is 
 
     result = await session.turn(
         "Now format the output",
-        skill_refs=[
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="markdown-formatter",
-            )
-        ],
+        turn_metadata={
+            "skill_references": [
+                SkillKey(
+                    source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                    skill_name="markdown-formatter",
+                )
+            ]
+        },
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await session.turn("Now format the output", {
-      skillRefs: [
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "markdown-formatter",
-        },
-      ],
+      turnMetadata: {
+        skillReferences: [
+          {
+            sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+            skillName: "markdown-formatter",
+          },
+        ],
+      },
     });
     ```
   </Tab>

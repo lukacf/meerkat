@@ -264,7 +264,7 @@ Use typed keys for API and tool surfaces.
 
 ### 2. Programmatic per-turn skill injection
 
-Pass `turn_metadata.skill_references` in raw API requests to resolve and inject skills for a specific turn. SDKs expose `skill_refs` convenience options that serialize into this runtime metadata carrier:
+Pass `turn_metadata.skill_references` in raw API requests and Python SDK calls, or `turnMetadata.skillReferences` in TypeScript, to resolve and inject skills for a specific turn:
 
 ```json
 {
@@ -312,7 +312,7 @@ creation:
 }
 ```
 
-See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. Session creation uses `turn_metadata.skill_references` (or `turnMetadata.skillReferences` in TypeScript); per-turn SDK helpers keep `skill_refs` / `skillRefs` convenience options that serialize into the canonical metadata carrier.
+See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. Session creation and per-turn helpers use `turn_metadata.skill_references` (or `turnMetadata.skillReferences` in TypeScript).
 
 ## Skill introspection
 

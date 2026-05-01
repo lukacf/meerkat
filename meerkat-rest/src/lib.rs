@@ -43,12 +43,12 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, RequestAlreadyExists, RequestContext,
-    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor,
-    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides,
-    build_recovered_session, has_build_only_turn_overrides,
-    has_context_only_materialization_metadata, noop_request_action,
-    recovery_overrides_from_runtime_turn, request_action,
+    CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, CONTEXT_ONLY_TURN_METADATA_ERROR,
+    RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
+    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
+    SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
+    has_context_only_materialization_metadata, has_context_only_unapplied_turn_metadata,
+    noop_request_action, recovery_overrides_from_runtime_turn, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -648,6 +648,11 @@ async fn apply_runtime_turn(
         if has_context_only_materialization_metadata(&recovery_overrides) {
             return Err(SessionError::Unsupported(
                 CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR.to_string(),
+            ));
+        }
+        if has_context_only_unapplied_turn_metadata(&recovery_overrides) {
+            return Err(SessionError::Unsupported(
+                CONTEXT_ONLY_TURN_METADATA_ERROR.to_string(),
             ));
         }
         let RunPrimitive::StagedInput(staged) = primitive else {
@@ -5265,6 +5270,50 @@ mod tests {
         assert!(
             error.to_string().contains("context-only")
                 && error.to_string().contains("materialization"),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_context_only_runtime_apply_rejects_turn_metadata() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-turn-metadata".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::HandlingMode::Steer),
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+
+        let error = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &SessionId::new(),
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect_err("context-only runtime applies must reject unapplied turn metadata");
+
+        assert!(
+            error.to_string().contains("context-only")
+                && error.to_string().contains("turn metadata"),
             "unexpected rejection reason: {error}"
         );
     }

@@ -254,9 +254,10 @@ pub use session::{
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
-    RecoveredSessionBuild, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
-    has_context_only_materialization_metadata, has_materialization_overrides,
+    CONTEXT_ONLY_TURN_METADATA_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    has_build_only_turn_overrides, has_context_only_materialization_metadata,
+    has_context_only_unapplied_turn_metadata, has_materialization_overrides,
     recovery_overrides_from_runtime_turn, session_allows_first_turn_build_overrides,
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};

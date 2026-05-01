@@ -344,9 +344,11 @@ Tool visibility can change during a session. Changes are staged and atomically a
     {"name": "meerkat_resume", "arguments": {
       "session_id": "01936f8a-...",
       "prompt": "Continue with restricted tools",
-      "flow_tool_overlay": {
-        "allowed_tools": ["shell", "task_create"],
-        "blocked_tools": []
+      "turn_metadata": {
+        "flow_tool_overlay": {
+          "allowed_tools": ["shell", "task_create"],
+          "blocked_tools": []
+        }
       }
     }}
     ```
@@ -355,9 +357,11 @@ Tool visibility can change during a session. Changes are staged and atomically a
     ```python
     result = await session.turn(
         "Execute the next step",
-        flow_tool_overlay={
-            "allowed_tools": ["shell", "read_file"],
-            "blocked_tools": ["task_create"],
+        turn_metadata={
+            "flow_tool_overlay": {
+                "allowed_tools": ["shell", "read_file"],
+                "blocked_tools": ["task_create"],
+            },
         },
     )
     ```
@@ -365,9 +369,11 @@ Tool visibility can change during a session. Changes are staged and atomically a
   <Tab title="TypeScript">
     ```typescript
     const result = await session.turn("Execute the next step", {
-      flowToolOverlay: {
-        allowedTools: ["shell", "read_file"],
-        blockedTools: ["task_create"],
+      turnMetadata: {
+        flowToolOverlay: {
+          allowedTools: ["shell", "read_file"],
+          blockedTools: ["task_create"],
+        },
       },
     });
     ```

@@ -19,6 +19,7 @@ use crate::{
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
 pub const CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR: &str = "Cannot apply materialization turn metadata (model, provider, provider_params, or connection_ref) on a context-only runtime append";
+pub const CONTEXT_ONLY_TURN_METADATA_ERROR: &str = "Cannot apply runtime turn metadata (handling_mode, skill_references, flow_tool_overlay, additional_instructions, keep_alive, or render_metadata) on a context-only runtime append";
 
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceSessionRecoveryOverrides {
@@ -114,6 +115,15 @@ pub fn has_context_only_materialization_metadata(
         .turn_metadata
         .as_ref()
         .is_some_and(RuntimeTurnMetadata::has_materialization_recovery_fields)
+}
+
+pub fn has_context_only_unapplied_turn_metadata(
+    overrides: &SurfaceSessionRecoveryOverrides,
+) -> bool {
+    overrides
+        .turn_metadata
+        .as_ref()
+        .is_some_and(RuntimeTurnMetadata::has_context_only_unapplied_turn_fields)
 }
 
 pub fn recovery_overrides_from_runtime_turn(

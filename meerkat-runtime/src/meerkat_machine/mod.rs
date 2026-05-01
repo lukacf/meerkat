@@ -212,6 +212,10 @@ struct RuntimeSessionEntry {
     /// Registration phase — explicit type-level distinction between
     /// "registered but inert" and "executor attached."
     phase: RegistrationPhase,
+    /// Temporary live interrupt capability for prepared, session-owned turns
+    /// that run before the runtime loop attachment is published.
+    provisional_interrupt_handle:
+        Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
     /// DSL authority for coarse lifecycle phase transitions.
     /// Sync field — validates transitions, writes back phase.
     ///
@@ -307,6 +311,7 @@ impl RuntimeSessionEntry {
         interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
+        self.provisional_interrupt_handle = None;
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
             effect_tx,
@@ -370,7 +375,16 @@ impl RuntimeSessionEntry {
             {
                 attachment.interrupt_handle.clone()
             }
-            _ => None,
+            _ => self.provisional_interrupt_handle.clone(),
+        }
+    }
+
+    fn install_provisional_interrupt_handle(
+        &mut self,
+        handle: Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>,
+    ) {
+        if !self.attachment_is_live() {
+            self.provisional_interrupt_handle = Some(handle);
         }
     }
 }

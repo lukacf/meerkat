@@ -187,6 +187,7 @@ impl MeerkatMachine {
             current_capability_surface: None,
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
             phase: RegistrationPhase::Queuing,
+            provisional_interrupt_handle: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
         };
@@ -265,6 +266,29 @@ impl MeerkatMachine {
                 },
             )
             .await;
+    }
+
+    /// Install a temporary live interrupt handle for a prepared session before
+    /// its runtime loop executor is attached.
+    ///
+    /// Runtime-backed surfaces use this during eager session materialization:
+    /// the session service owns the first turn until `create_session` returns,
+    /// but explicit user interrupts must still route through
+    /// `MeerkatMachine::hard_cancel_current_run`.
+    pub async fn install_prepared_session_interrupt_handle(
+        &self,
+        session_id: &SessionId,
+        handle: Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        entry.clear_dead_attachment();
+        entry.install_provisional_interrupt_handle(handle);
+        Ok(())
     }
 
     pub(super) async fn ensure_session_with_executor_inner(
@@ -375,6 +399,7 @@ impl MeerkatMachine {
                             capability_surface_status:
                                 SessionLlmCapabilitySurfaceStatus::Unresolved,
                             phase: RegistrationPhase::Queuing,
+                            provisional_interrupt_handle: None,
                             dsl_authority,
                             drain_slot: CommsDrainSlot::new(),
                         },

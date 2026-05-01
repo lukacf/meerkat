@@ -17,7 +17,17 @@ impl MeerkatMachine {
             .await
     }
 
-    pub(crate) async fn hard_cancel_current_run_authorized(
+    pub(super) async fn interrupt_current_run_inner(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+    ) -> Result<(), RuntimeDriverError> {
+        let authority = UserInterruptAuthority::new();
+        self.hard_cancel_current_run_authorized(session_id, reason, authority)
+            .await
+    }
+
+    async fn hard_cancel_current_run_authorized(
         &self,
         session_id: &SessionId,
         reason: String,
@@ -55,10 +65,10 @@ impl MeerkatMachine {
     }
 }
 
-pub(crate) struct UserInterruptAuthority(());
+struct UserInterruptAuthority(());
 
 impl UserInterruptAuthority {
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         Self(())
     }
 }

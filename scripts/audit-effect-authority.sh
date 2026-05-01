@@ -60,6 +60,21 @@ EOF
 
   mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
   cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+async fn bad(machine: &Machine) {
+    let _ = machine.interrupt_current_run_inner(&session_id, "bad".to_string()).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: peer interrupt inner fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
 fn bad(session_id: SessionId, reason: String) {
     let _ = MeerkatMachineCommand::InterruptCurrentRun {
         session_id,
@@ -150,6 +165,24 @@ impl Machine {
 EOF
   if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: public hard-cancel authority fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/user_interrupt.rs" <<'EOF'
+struct UserInterruptAuthority(());
+
+impl UserInterruptAuthority {
+    pub(super) fn new() -> Self {
+        Self(())
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: visible UserInterruptAuthority constructor fixture passed" >&2
     exit 1
   fi
 
@@ -642,7 +675,7 @@ report_matches "$run_control_name references remain" "$(run_rg "\\b${run_control
 report_matches "$core_control_name references remain" "$(run_rg "\\b${core_control_name}\\b")"
 
 peer_matches=""
-hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('
+hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('
 for peer_file in \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_control.rs" \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
@@ -666,7 +699,7 @@ done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
+  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
 
@@ -676,7 +709,7 @@ if [[ -f "$root/meerkat-rpc/src/session_executor.rs" ]]; then
 fi
 
 if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
-  strip_authorized_interrupt_body() {
+  strip_user_interrupt_internal_bodies() {
     "$AWK_BIN" '
       function brace_delta(line, opened, closed, copy) {
         copy = line
@@ -685,7 +718,7 @@ if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
         closed = gsub(/\}/, "}", copy)
         return opened - closed
       }
-      /pub\(crate\)[[:space:]]+async[[:space:]]+fn[[:space:]]+hard_cancel_current_run_authorized[[:space:]]*\(/ {
+      /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?async[[:space:]]+fn[[:space:]]+(hard_cancel_current_run_authorized|interrupt_current_run_inner)[[:space:]]*\(/ {
         in_authorized = 1
         depth = 0
         saw_open = 0
@@ -705,13 +738,16 @@ if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
       { print }
     ' "$1"
   }
-  public_interrupt_bypass="$(strip_authorized_interrupt_body "$root/meerkat-runtime/src/user_interrupt.rs")"
+  public_interrupt_bypass="$(strip_user_interrupt_internal_bodies "$root/meerkat-runtime/src/user_interrupt.rs")"
   public_interrupt_bypass="$(filter_rg "$public_interrupt_bypass" -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)|\.hard_cancel_current_run\(|\binterrupt_handle_for\(')"
   public_interrupt_bypass="$(filter_rg "$public_interrupt_bypass" -v 'fn[[:space:]]+interrupt_handle_for[[:space:]]*\(')"
   report_matches "public user-interrupt API must route through the command/DSL path" "$public_interrupt_bypass"
+
+  authority_visibility="$(capture_rg -n 'pub(\([^)]*\))?[[:space:]]+struct[[:space:]]+UserInterruptAuthority|pub(\([^)]*\))?[[:space:]]+fn[[:space:]]+new[[:space:]]*\(' "$root/meerkat-runtime/src/user_interrupt.rs")"
+  report_matches "UserInterruptAuthority type and constructor must remain private" "$authority_visibility"
 fi
 
-authority_mints="$(run_rg 'UserInterruptAuthority::new\(\)' --glob '!meerkat-runtime/src/meerkat_machine/runtime_control.rs')"
+authority_mints="$(run_rg 'UserInterruptAuthority::new\(\)' --glob '!meerkat-runtime/src/user_interrupt.rs')"
 report_matches "UserInterruptAuthority may only be minted by the command-owned interrupt path" "$authority_mints"
 
 public_interrupt_bypasses=""

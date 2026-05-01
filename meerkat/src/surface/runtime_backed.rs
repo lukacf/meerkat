@@ -77,6 +77,7 @@ where
     let bindings = adapter
         .prepare_bindings(prepared_session_id.clone())
         .await?;
+    install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await?;
 
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
@@ -111,6 +112,22 @@ where
         .await;
 
     Ok(result)
+}
+
+pub async fn install_prepared_runtime_interrupt_handle(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Result<(), RuntimeDriverError> {
+    adapter
+        .install_prepared_session_interrupt_handle(
+            session_id,
+            Arc::new(PersistentRuntimeInterruptHandle {
+                service: Arc::clone(service),
+                session_id: session_id.clone(),
+            }),
+        )
+        .await
 }
 
 #[cfg(feature = "comms")]
@@ -349,6 +366,7 @@ mod tests {
     ))]
     use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[cfg(all(
         feature = "openai",
@@ -356,7 +374,7 @@ mod tests {
         not(target_arch = "wasm32")
     ))]
     use async_trait::async_trait;
-    use meerkat_client::TestClient;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, TestClient};
     use meerkat_core::SessionBuildOptions;
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     #[cfg(all(
@@ -365,6 +383,7 @@ mod tests {
         not(target_arch = "wasm32")
     ))]
     use meerkat_llm_core::LlmError;
+    use meerkat_llm_core::LlmStream;
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",
@@ -399,7 +418,8 @@ mod tests {
         feature = "openai-realtime",
         not(target_arch = "wasm32")
     ))]
-    use tokio::sync::{Mutex, Notify};
+    use tokio::sync::Mutex;
+    use tokio::sync::Notify;
     use tokio::time::Duration;
 
     #[cfg(feature = "comms")]
@@ -513,6 +533,36 @@ mod tests {
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
         let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), runtime_adapter)
+    }
+
+    struct BlockingClient {
+        started: Arc<AtomicBool>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for BlockingClient {
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            Box::pin(futures::stream::once(async move {
+                started.store(true, Ordering::SeqCst);
+                release.notified().await;
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                })
+            }))
+        }
+
+        fn provider(&self) -> &'static str {
+            "blocking-test"
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -698,6 +748,76 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn materialize_session_hard_cancel_reaches_eager_first_turn_before_executor_attach() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let persistence = build_default_persistence(temp.path().join("sessions"))
+            .await
+            .expect("build default persistence");
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(Notify::new());
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(BlockingClient {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = make_request(SessionBuildOptions::default());
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        request.prompt = "blocking initial turn".to_string().into();
+
+        let materialize_task = {
+            let service = Arc::clone(&service);
+            let adapter = Arc::clone(&adapter);
+            let session_id_for_executor = session_id.clone();
+            tokio::spawn(async move {
+                Box::pin(materialize_session(&service, &adapter, session, request, {
+                    let service = Arc::clone(&service);
+                    let adapter = Arc::clone(&adapter);
+                    move |_session_id| {
+                        default_persistent_executor(
+                            Arc::clone(&service),
+                            Arc::clone(&adapter),
+                            session_id_for_executor,
+                        )
+                    }
+                }))
+                .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial service-owned turn should start");
+
+        adapter
+            .hard_cancel_current_run(&session_id, "test eager materialization interrupt")
+            .await
+            .expect("hard cancel must reach the service-owned first turn before executor attach");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), materialize_task)
+            .await
+            .expect("materialization should finish after interrupt")
+            .expect("materialization task should not panic")
+            .expect_err("interrupted eager first turn should fail materialization");
+        assert!(
+            error.to_string().to_lowercase().contains("cancel"),
+            "unexpected materialization error: {error}"
+        );
+
+        release.notify_waiters();
+        let _ = service.discard_live_session(&session_id).await;
+        adapter.unregister_session(&session_id).await;
     }
 
     #[tokio::test]

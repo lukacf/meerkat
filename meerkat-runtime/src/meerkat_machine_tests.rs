@@ -4249,6 +4249,67 @@ async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
 }
 
 #[tokio::test]
+async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_executor_attach() {
+    struct CountingInterruptHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    adapter
+        .install_prepared_session_interrupt_handle(
+            &session_id,
+            Arc::new(CountingInterruptHandle {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .await
+        .expect("install prepared interrupt handle");
+
+    bindings
+        .turn_state
+        .start_conversation_run(
+            RunId::new(),
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+            meerkat_core::turn_execution_authority::ContentShape::Conversation,
+            false,
+            false,
+            0,
+        )
+        .expect("simulate service-owned first turn");
+
+    let running = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("prepared session should exist");
+    assert_eq!(running.control.phase, RuntimeState::Running);
+
+    adapter
+        .hard_cancel_current_run(&session_id, "user interrupt during materialization")
+        .await
+        .expect("prepared session interrupt should reach provisional live handle");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "hard cancel must reach the pre-attachment service-owned turn"
+    );
+}
+
+#[tokio::test]
 async fn interrupt_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,

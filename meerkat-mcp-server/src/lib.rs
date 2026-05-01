@@ -10,7 +10,10 @@ mod schedule_host;
 
 #[cfg(test)]
 use meerkat::SessionStore;
-use meerkat::surface::{RequestContext, prepare_surface_session, request_action};
+use meerkat::surface::{
+    RequestContext, install_prepared_runtime_interrupt_handle, prepare_surface_session,
+    request_action,
+};
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
@@ -2677,6 +2680,13 @@ async fn handle_meerkat_run(
     let session = prepared_session.session;
     let session_id = prepared_session.session_id;
     let bindings = prepared_session.bindings;
+    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!(
+                "failed to install prepared interrupt handle for session {session_id}: {e}"
+            ))
+        })?;
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
         McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
     ));
@@ -2963,6 +2973,13 @@ async fn handle_meerkat_resume(
         .map_err(|e| {
             ToolCallError::internal(format!(
                 "failed to prepare bindings for session {session_id}: {e}"
+            ))
+        })?;
+    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!(
+                "failed to install prepared interrupt handle for session {session_id}: {e}"
             ))
         })?;
 

@@ -1,16 +1,6 @@
 use super::*;
 
 impl MeerkatMachine {
-    pub(super) async fn interrupt_current_run_inner(
-        &self,
-        session_id: &SessionId,
-        reason: String,
-    ) -> Result<(), RuntimeDriverError> {
-        let authority = super::user_interrupt::UserInterruptAuthority::new();
-        self.hard_cancel_current_run_authorized(session_id, reason, authority)
-            .await
-    }
-
     pub(super) async fn cancel_after_boundary_inner(
         &self,
         session_id: &SessionId,

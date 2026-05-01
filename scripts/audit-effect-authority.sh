@@ -61,7 +61,10 @@ EOF
   mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
   cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
 fn bad(session_id: SessionId, reason: String) {
-    let _ = MeerkatMachineCommand::InterruptCurrentRun { session_id, reason };
+    let _ = MeerkatMachineCommand::InterruptCurrentRun {
+        session_id,
+        reason,
+    };
 }
 EOF
   if "$self_script" "$tmpdir" >/dev/null 2>&1; then
@@ -625,13 +628,14 @@ direct_interrupt_current_run="$(run_rg '\.interrupt_current_run(_with_reason)?\(
   --glob '!**/*tests.rs')"
 report_matches "direct interrupt_current_run callsites are forbidden outside runtime tests" "$direct_interrupt_current_run"
 
-direct_interrupt_command="$(run_rg 'MeerkatMachineCommand::InterruptCurrentRun[[:space:]]*\{[[:space:]]*(session_id|reason)' \
+direct_interrupt_command="$(run_rg 'MeerkatMachineCommand::InterruptCurrentRun[[:space:]]*\{' \
   --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
   --glob '!meerkat-runtime/src/meerkat_machine/dispatch_session.rs' \
   --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
   --glob '!meerkat-runtime/tests/**' \
   --glob '!**/tests/**' \
   --glob '!**/*tests.rs')"
+direct_interrupt_command="$(filter_rg "$direct_interrupt_command" -v '\{[[:space:]]*\.\.[[:space:]]*\}')"
 report_matches "direct InterruptCurrentRun command construction is forbidden outside the session command API" "$direct_interrupt_command"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \

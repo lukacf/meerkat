@@ -1972,39 +1972,12 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
-                peer_id,
-                address,
-                bootstrap_token,
                 session_id: None,
                 ..
-            } => {
-                let peer = self.peer_only_spec(member_ref).await?;
-                let peer = self
-                    .ensure_supervisor_authorized(
-                        &peer,
-                        Some((
-                            peer_id.as_str(),
-                            address.as_str(),
-                            bootstrap_token
-                                .as_ref()
-                                .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
-                        )),
-                    )
-                    .await?;
-                let payload = self.bridge_supervisor_payload().await?;
-                let command = super::bridge_protocol::BridgeCommand::HardCancelMember(
-                    super::bridge_protocol::BridgeHardCancelPayload {
-                        supervisor: payload.supervisor,
-                        epoch: payload.epoch,
-                        protocol_version: payload.protocol_version,
-                        reason: reason.to_string(),
-                    },
-                );
-                let _ack: super::bridge_protocol::BridgeAck = self
-                    .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
-                    .await?;
-                Ok(())
-            }
+            } => Err(MobError::Internal(
+                "peer-only external members cannot be hard-cancelled over supervisor bridge; use cooperative interrupt_member"
+                    .to_string(),
+            )),
             _ => self.session.hard_cancel_member(member_ref, reason).await,
         }
     }

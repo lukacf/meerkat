@@ -508,7 +508,7 @@ fn bridge_capabilities() -> BridgeCapabilities {
         deliver_member_input: true,
         observe_member: true,
         interrupt_member: true,
-        hard_cancel_member: true,
+        hard_cancel_member: false,
         retire_member: true,
         destroy_member: true,
         wire_member: true,
@@ -1544,43 +1544,6 @@ async fn try_handle_supervisor_bridge_command(
                         candidate,
                         BridgeRejectionCause::Internal,
                         format!("interrupt member failed: {error}"),
-                    )
-                    .await;
-                }
-            }
-            true
-        }
-        BridgeCommand::HardCancelMember(payload) => {
-            let sup_payload = BridgeSupervisorPayload {
-                supervisor: payload.supervisor.clone(),
-                epoch: payload.epoch,
-                protocol_version: payload.protocol_version,
-            };
-            if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &sup_payload, &current_binding)
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                return true;
-            }
-            match adapter
-                .hard_cancel_current_run(session_id, payload.reason)
-                .await
-            {
-                Ok(()) => {
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Ack(BridgeAck { ok: true }),
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("hard-cancel member failed: {error}"),
                     )
                     .await;
                 }
@@ -3043,6 +3006,10 @@ mod tests {
             capabilities.supported_protocol_versions,
             supervisor_bridge_supported_protocol_versions()
         );
+        assert!(
+            !capabilities.hard_cancel_member,
+            "supervisor bridge must not advertise live hard-cancel authority"
+        );
     }
 
     #[test]
@@ -3932,6 +3899,79 @@ mod tests {
             response.capabilities.supported_protocol_versions,
             supervisor_bridge_supported_protocol_versions()
         );
+        assert!(
+            !response.capabilities.hard_cancel_member,
+            "bind response must not advertise live hard-cancel authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_cancel_member_bridge_command_is_rejected_as_unsupported() {
+        let sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(CapturingRuntime {
+            peer_id: PEER_ID_RECEIVER.to_string(),
+            advertised_address: Some("inproc://receiver".to_string()),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            sent: sent.clone(),
+        });
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let authorized = TrustedPeerDescriptor::test_only_unsigned_typed(
+            "mob/__mob_supervisor__",
+            PeerId::new(),
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid supervisor spec");
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                authorized.name.to_string(),
+                authorized.peer_id.as_str(),
+                authorized.address.to_string(),
+                11,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        let command = BridgeCommand::HardCancelMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeHardCancelPayload {
+                supervisor: BridgePeerSpec::from(authorized.clone()),
+                epoch: 11,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                reason: "must not cross supervisor bridge".to_string(),
+            },
+        );
+        let candidate = bridge_candidate(&authorized.peer_id.as_str(), &command);
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate,)
+                .await,
+            "bridge handler must reject the known but unsupported HardCancelMember command"
+        );
+        let (result, status) = sent
+            .lock()
+            .await
+            .iter()
+            .find_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { result, status, .. } => {
+                    Some((result.clone(), *status))
+                }
+                _ => None,
+            })
+            .expect("handler must send a hard-cancel rejection");
+        assert!(
+            matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
+            "unsupported hard-cancel bridge command must fail at the comms boundary"
+        );
+        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        match reply {
+            BridgeReply::Rejected { cause, .. } => {
+                assert_eq!(cause, BridgeRejectionCause::Unsupported);
+            }
+            other => unreachable!("expected Rejected reply, got {other:?}"),
+        }
     }
 
     #[tokio::test]

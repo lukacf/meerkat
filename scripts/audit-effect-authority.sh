@@ -382,6 +382,27 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/comms_drain.rs" <<'EOF'
+async fn bad(adapter: Adapter, session_id: SessionId, command: BridgeCommand) {
+    match command {
+        BridgeCommand::HardCancelMember(payload) => {
+            let _ = adapter
+                .hard_cancel_current_run(session_id, payload.reason)
+                .await;
+        }
+        _ => {}
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: bridge hard-cancel handler fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/comms_drain.rs" <<'EOF'
 async fn bad(machine: Machine, session_id: SessionId) {
     let _ = machine.hard_cancel_current_run(&session_id, "bad").await;
 }
@@ -890,27 +911,26 @@ done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  strip_hard_cancel_bridge_handler() {
-    "$AWK_BIN" '
-      /BridgeCommand::HardCancelMember/ {
-        in_hard_cancel = 1
-        next
-      }
-      in_hard_cancel && /BridgeCommand::RetireMember/ {
-        in_hard_cancel = 0
-        print
-        next
-      }
-      in_hard_cancel {
-        next
-      }
-      { print }
-    ' "$1"
-  }
-  comms_drain_body="$(strip_hard_cancel_bridge_handler "$root/meerkat-runtime/src/comms_drain.rs")"
+  comms_drain_body="$(cat "$root/meerkat-runtime/src/comms_drain.rs")"
   comms_drain_matches="$(filter_rg "$comms_drain_body" -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner|dispatch_user_interrupt|apply_user_interrupt_live_cancel)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(')"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
+
+bridge_hard_cancel_exposure=""
+for bridge_hard_cancel_file in \
+  "$root/meerkat-runtime/src/comms_drain.rs" \
+  "$root/meerkat-mob/src/runtime/actor.rs" \
+  "$root/meerkat-mob/src/runtime/provisioner.rs"
+do
+  if [[ -f "$bridge_hard_cancel_file" ]]; then
+    stripped_bridge_file="$(strip_cfg_test_modules <"$bridge_hard_cancel_file")"
+    found="$(filter_rg "$stripped_bridge_file" -n 'BridgeCommand::HardCancelMember|BridgeHardCancelPayload|hard_cancel_member:[[:space:]]*true')"
+    if [[ -n "$found" ]]; then
+      bridge_hard_cancel_exposure+="$bridge_hard_cancel_file"$'\n'"$found"$'\n'
+    fi
+  fi
+done
+report_matches "supervisor bridge must not expose hard-cancel member authority" "$bridge_hard_cancel_exposure"
 
 if [[ -f "$root/meerkat-rpc/src/session_executor.rs" ]]; then
   rpc_executor_recursion="$(capture_rg -n '\.runtime\.interrupt\(' "$root/meerkat-rpc/src/session_executor.rs")"

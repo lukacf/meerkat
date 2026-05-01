@@ -2995,6 +2995,7 @@ struct LiveExternalPeerHarness {
     binding: crate::RuntimeBinding,
     runtime: Arc<meerkat_comms::CommsRuntime>,
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
+    interrupt_count: Arc<std::sync::atomic::AtomicUsize>,
     bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
     hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
@@ -3038,6 +3039,10 @@ impl LiveExternalPeerHarness {
 
     fn bind_count(&self) -> usize {
         self.bind_count.load(Ordering::Relaxed)
+    }
+
+    fn interrupt_count(&self) -> usize {
+        self.interrupt_count.load(Ordering::Relaxed)
     }
 
     async fn bind_protocol_versions(&self) -> Vec<super::bridge_protocol::BridgeProtocolVersion> {
@@ -3104,6 +3109,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let responder_bind_count = bind_count.clone();
+    let interrupt_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let responder_interrupt_count = interrupt_count.clone();
     let bind_protocol_versions = Arc::new(RwLock::new(Vec::new()));
     let responder_bind_protocol_versions = bind_protocol_versions.clone();
     let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
@@ -3256,7 +3263,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                                 deliver_member_input: true,
                                                                 observe_member: true,
                                                                 interrupt_member: true,
-                                                                hard_cancel_member: true,
+                                                                hard_cancel_member: false,
                                                                 retire_member: true,
                                                                 destroy_member: true,
                                                                 wire_member: true,
@@ -3367,6 +3374,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     .expect("revoke ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
+                                    responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
                                     })
@@ -3596,6 +3604,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         binding,
         runtime,
         bind_count,
+        interrupt_count,
         bind_protocol_versions,
         delivered_inputs,
         hard_cancel_reasons,
@@ -14367,7 +14376,7 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
 }
 
 #[tokio::test]
-async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
+async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("cancel-target");
     let member_ref = handle
@@ -14384,6 +14393,7 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .bridge_session_id()
         .cloned()
         .expect("session-backed target");
+    let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
 
     handle
@@ -14391,10 +14401,14 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .await
         .expect("force cancel should succeed");
 
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "force-cancel must request cooperative boundary cancel"
+    );
     assert_eq!(
         service.interrupt_call_count(),
-        baseline_interrupts + 1,
-        "force-cancel must route through the runtime adapter interrupt path exactly once"
+        baseline_interrupts,
+        "force-cancel must not use hard session interrupt authority"
     );
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
@@ -14573,7 +14587,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
 
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn test_force_cancel_member_without_adapter_still_uses_hard_interrupt() {
+async fn test_explicit_hard_cancel_member_without_adapter_still_uses_hard_interrupt() {
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
@@ -22610,7 +22624,7 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
 }
 
 #[tokio::test]
-async fn test_force_cancel_peer_only_external_member_sends_hard_cancel_bridge_command() {
+async fn test_force_cancel_peer_only_external_member_uses_cooperative_bridge_interrupt() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
@@ -22634,9 +22648,14 @@ async fn test_force_cancel_peer_only_external_member_sends_hard_cancel_bridge_co
         .expect("force-cancel peer-only external member");
 
     assert_eq!(
+        external.interrupt_count(),
+        1,
+        "peer-only force-cancel must use the cooperative interrupt bridge command"
+    );
+    assert_eq!(
         external.hard_cancel_reasons().await,
-        vec!["mob force-cancel member".to_string()],
-        "peer-only force-cancel must use the explicit hard-cancel bridge command"
+        Vec::<String>::new(),
+        "peer-only force-cancel must not use the hard-cancel bridge command"
     );
 }
 

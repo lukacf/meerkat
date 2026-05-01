@@ -15,7 +15,7 @@ use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthStatusPhase;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
+use meerkat_core::auth::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
     AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
@@ -168,17 +168,13 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .as_ref()
         .ok_or_else(|| interactive_login_error(binding))?
         .clone();
-    let auth_lease = env
-        .auth_lease_handle
-        .as_ref()
-        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let key = TokenKey::from_connection_ref(&binding.connection_ref);
     let tokens = store
         .load(&key)
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
         .ok_or_else(|| interactive_login_error(binding))?;
-    require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
+    let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
 
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
     let now = (env.now)();
@@ -186,30 +182,75 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         now,
         Some(meerkat_core::persisted_token_expires_at_epoch_secs(&tokens)),
     );
-
-    match AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key)) {
-        AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {
-            let lifecycle = if token_phase == AuthStatusPhase::Expired {
-                ManagedStoreLifecycle::RefreshRequired
-            } else {
-                ManagedStoreLifecycle::Authorized
-            };
-            Ok(ManagedStoreTokens {
+    if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
+        return match AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key)) {
+            AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {
+                let lifecycle = if token_phase == AuthStatusPhase::Expired {
+                    ManagedStoreLifecycle::RefreshRequired
+                } else {
+                    ManagedStoreLifecycle::Authorized
+                };
+                Ok(managed_store_tokens(store, key, tokens, lifecycle))
+            }
+            AuthStatusPhase::Expired => Ok(managed_store_tokens(
                 store,
                 key,
                 tokens,
-                lifecycle,
-            })
-        }
-        AuthStatusPhase::Expired => Ok(ManagedStoreTokens {
-            store,
-            key,
-            tokens,
-            lifecycle: ManagedStoreLifecycle::RefreshRequired,
-        }),
-        AuthStatusPhase::ReauthRequired
-        | AuthStatusPhase::RefreshFailed
-        | AuthStatusPhase::Unknown => Err(interactive_login_error(binding)),
+                ManagedStoreLifecycle::RefreshRequired,
+            )),
+            AuthStatusPhase::ReauthRequired
+            | AuthStatusPhase::RefreshFailed
+            | AuthStatusPhase::Unknown => Err(interactive_login_error(binding)),
+        };
+    }
+
+    if crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode) {
+        return Err(interactive_login_error(binding));
+    }
+
+    let lifecycle = if token_phase == AuthStatusPhase::Expired {
+        ManagedStoreLifecycle::RefreshRequired
+    } else {
+        ManagedStoreLifecycle::Authorized
+    };
+    Ok(managed_store_tokens(store, key, tokens, lifecycle))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persisted_auth_mode_for_method(
+    auth_method: &str,
+) -> Result<PersistedAuthMode, ProviderAuthError> {
+    crate::auth_store::persisted_auth_mode_for_auth_method(auth_method).ok_or_else(|| {
+        ProviderAuthError::SourceResolutionFailed(format!(
+            "auth_method '{auth_method}' cannot resolve persisted credentials from TokenStore"
+        ))
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persisted_auth_mode_mismatch(
+    tokens: &PersistedTokens,
+    auth_method: &str,
+    expected: PersistedAuthMode,
+) -> ProviderAuthError {
+    ProviderAuthError::SourceResolutionFailed(format!(
+        "persisted credential mode {:?} does not match binding auth_method '{}' (expected {:?})",
+        tokens.auth_mode, auth_method, expected,
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_tokens(
+    store: Arc<dyn TokenStore>,
+    key: TokenKey,
+    tokens: PersistedTokens,
+    lifecycle: ManagedStoreLifecycle,
+) -> ManagedStoreTokens {
+    ManagedStoreTokens {
+        store,
+        key,
+        tokens,
+        lifecycle,
     }
 }
 
@@ -247,20 +288,12 @@ pub fn publish_managed_store_tokens_lifecycle(
 pub fn require_persisted_auth_mode(
     tokens: &PersistedTokens,
     auth_method: &str,
-) -> Result<(), ProviderAuthError> {
-    let expected =
-        crate::auth_store::persisted_auth_mode_for_auth_method(auth_method).ok_or_else(|| {
-            ProviderAuthError::SourceResolutionFailed(format!(
-                "auth_method '{auth_method}' cannot resolve persisted credentials from TokenStore"
-            ))
-        })?;
+) -> Result<PersistedAuthMode, ProviderAuthError> {
+    let expected = persisted_auth_mode_for_method(auth_method)?;
     if tokens.auth_mode != expected {
-        return Err(ProviderAuthError::SourceResolutionFailed(format!(
-            "persisted credential mode {:?} does not match binding auth_method '{}' (expected {:?})",
-            tokens.auth_mode, auth_method, expected,
-        )));
+        return Err(persisted_auth_mode_mismatch(tokens, auth_method, expected));
     }
-    Ok(())
+    Ok(expected)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -822,12 +855,45 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_source_rejects_token_without_auth_lifecycle() {
+    async fn managed_store_non_oauth_source_reads_token_without_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_connection_ref(&binding.connection_ref);
         store
-            .save(&key, &PersistedTokens::api_key("sk-stale"))
+            .save(&key, &PersistedTokens::api_key("sk-standalone"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing().with_token_store(store);
+
+        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap();
+
+        assert_eq!(secret, "sk-standalone");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_source_rejects_token_without_auth_lifecycle() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(
+                &key,
+                &PersistedTokens {
+                    auth_mode: meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
+                    primary_secret: Some("oauth-access".into()),
+                    refresh_token: Some("oauth-refresh".into()),
+                    id_token: None,
+                    expires_at: None,
+                    last_refresh: None,
+                    scopes: Vec::new(),
+                    account_id: None,
+                    metadata: serde_json::Value::Null,
+                },
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing().with_token_store(store);
@@ -838,7 +904,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
         ));
     }
 

@@ -5890,11 +5890,9 @@ async fn run_agent(
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: parsed_app_context,
-            additional_instructions: if instructions.is_empty() {
-                None
-            } else {
-                Some(instructions)
-            },
+            // Runtime-owned first turns carry these only through
+            // RuntimeTurnMetadata so prompt assembly cannot duplicate them.
+            additional_instructions: None,
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: initial_turn_metadata.clone(),
@@ -10052,6 +10050,32 @@ mod tests {
         let preload_skills: Vec<meerkat_core::skills::SkillKey> = Vec::new();
 
         assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
+
+    #[test]
+    fn runtime_owned_first_run_does_not_duplicate_additional_instructions_carrier() {
+        let source = include_str!("main.rs");
+        let build_start = source
+            .find("let mut build = SessionBuildOptions {\n            provider: Some(provider.as_core()),")
+            .expect("runtime-owned first-run build block should exist");
+        let build_tail = &source[build_start..];
+        let build_end = build_tail
+            .find("        };\n        build.apply_generated_create_only_mob_operator_access")
+            .expect("runtime-owned first-run build block should have a stable end");
+        let build_block = &build_tail[..build_end];
+
+        assert!(
+            build_block.contains("initial_turn_metadata: initial_turn_metadata.clone()"),
+            "runtime-owned CLI first run must stage first-turn metadata through RuntimeTurnMetadata"
+        );
+        assert!(
+            build_block.contains("additional_instructions: None"),
+            "runtime-owned CLI first run must not keep a split build-level instruction carrier"
+        );
+        assert!(
+            !build_block.contains("additional_instructions: if instructions.is_empty()"),
+            "runtime-owned CLI first run must not duplicate instructions into SessionBuildOptions"
+        );
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {

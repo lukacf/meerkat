@@ -120,6 +120,7 @@ impl CommandCredentialRunner {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+            auth_lease: None,
         })
     }
 }

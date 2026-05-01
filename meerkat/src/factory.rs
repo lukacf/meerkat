@@ -2045,7 +2045,7 @@ impl AgentFactory {
                 .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
 
             if let Some(handle) = auth_lease_handle {
-                Self::publish_auth_lease(&handle, &connection_ref, &connection);
+                Self::publish_auth_lease(&handle, &connection_ref, &connection)?;
             }
 
             if connection.resolved_authorizer().is_some() {
@@ -2273,24 +2273,49 @@ impl AgentFactory {
         handle: &Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
         connection_ref: &ConnectionRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
-    ) {
+    ) -> Result<(), FactoryError> {
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
-        let snapshot = handle.snapshot(&lease_key);
-        if snapshot.phase.is_some() {
-            return;
-        }
         if matches!(
             connection.auth_lease.kind(),
             meerkat_core::ResolvedAuthKind::DynamicAuthorizer(_)
         ) {
-            return;
+            return Ok(());
         }
-        let Some(expires_at) = connection.auth_lease.expires_at() else {
-            let _ = handle.acquire_lease_if_snapshot(&lease_key, &snapshot, u64::MAX);
-            return;
-        };
-        let expires_at = expires_at.timestamp().max(0) as u64;
-        let _ = handle.acquire_lease_if_snapshot(&lease_key, &snapshot, expires_at);
+        let expires_at = connection
+            .auth_lease
+            .expires_at()
+            .map(|expires_at| expires_at.timestamp().max(0) as u64)
+            .unwrap_or(u64::MAX);
+        let snapshot = handle.snapshot(&lease_key);
+        if let Some(phase) = snapshot.phase {
+            let expected_expires_at = if expires_at == u64::MAX {
+                None
+            } else {
+                Some(expires_at)
+            };
+            if matches!(
+                phase,
+                meerkat_core::handles::AuthLeasePhase::Valid
+                    | meerkat_core::handles::AuthLeasePhase::Expiring
+            ) && snapshot.expires_at == expected_expires_at
+            {
+                return Ok(());
+            }
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "AuthMachine lease publication refused for {:?}: existing lease truth \
+                 phase={phase:?} expires_at={:?} generation={} does not match resolved credential expiry {:?}",
+                connection_ref, snapshot.expires_at, snapshot.generation, expected_expires_at
+            )));
+        }
+        match handle.acquire_lease_if_snapshot(&lease_key, &snapshot, expires_at) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(FactoryError::ClientCreationFailed(format!(
+                "AuthMachine lease publication lost a race for {connection_ref:?}"
+            ))),
+            Err(err) => Err(FactoryError::ClientCreationFailed(format!(
+                "AuthMachine lease publication failed for {connection_ref:?}: {err}"
+            ))),
+        }
     }
 
     /// Wrap a session store in the shared adapter.
@@ -2704,7 +2729,7 @@ impl AgentFactory {
                                 &bindings.auth_lease,
                                 lease_connection_ref,
                                 &connection,
-                            );
+                            )?;
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
@@ -4922,7 +4947,13 @@ mod tests {
             ),
         };
 
-        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+        let err = AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection)
+            .expect_err("factory publication must fail closed on reauth-required lease truth");
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lease publication refused"),
+            "got {err:?}"
+        );
 
         let snapshot = handle.snapshot(&lease_key);
         assert_eq!(
@@ -5112,7 +5143,13 @@ mod tests {
             ),
         };
 
-        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+        let err = AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection)
+            .expect_err("factory publication must fail closed when conditional acquire loses");
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lease publication lost a race"),
+            "got {err:?}"
+        );
 
         let snapshot =
             meerkat_core::handles::AuthLeaseHandle::snapshot(raw_handle.as_ref(), &lease_key);
@@ -5184,7 +5221,7 @@ mod tests {
         };
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
 
-        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection).unwrap();
 
         let snapshot = handle.snapshot(&lease_key);
         assert_eq!(

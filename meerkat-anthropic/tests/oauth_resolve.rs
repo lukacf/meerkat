@@ -23,7 +23,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use tokio::net::TcpListener;
 
 use meerkat_anthropic::runtime::oauth;
-use meerkat_auth_core::auth_oauth::OAuthEndpoints;
+use meerkat_auth_core::auth_oauth::{OAuthEndpoints, exchange_refresh_token};
 use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
@@ -42,6 +42,16 @@ struct FixedAuthLeaseHandle {
 }
 
 impl FixedAuthLeaseHandle {
+    fn valid(expires_at: chrono::DateTime<Utc>, generation: u64) -> Self {
+        Self {
+            snapshot: AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: Some(expires_at.timestamp().max(0) as u64),
+                generation,
+            },
+        }
+    }
+
     fn reauth_required() -> Self {
         Self {
             snapshot: AuthLeaseSnapshot {
@@ -204,18 +214,23 @@ fn default_connection_ref() -> ConnectionRef {
     }
 }
 
+fn default_token_key() -> TokenKey {
+    TokenKey::from_connection_ref(&default_connection_ref())
+}
+
 // --- Fresh OAuth bundle → inline secret ---------------------
 
 #[tokio::test]
 async fn claude_ai_oauth_fresh_token_returns_access_token() {
     let store = Arc::new(EphemeralTokenStore::new());
     // Persist a fresh token (expires in 1h).
+    let expires_at = Utc::now() + ChronoDuration::hours(1);
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("fresh-access-xyz".into()),
         refresh_token: Some("refresh-xyz".into()),
         id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        expires_at: Some(expires_at),
         last_refresh: Some(Utc::now()),
         scopes: oauth::CLAUDE_AI_SCOPES
             .iter()
@@ -223,17 +238,15 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
             .collect(),
         account_id: None,
         metadata: serde_json::Value::Null,
-    };
-    store
-        .save(
-            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &persisted,
-        )
-        .await
-        .unwrap();
+        auth_lease: None,
+    }
+    .with_auth_lease_binding(default_token_key(), 7);
+    store.save(&default_token_key(), &persisted).await.unwrap();
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store.clone());
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_auth_lease_handle(Arc::new(FixedAuthLeaseHandle::valid(expires_at, 7)));
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -264,6 +277,7 @@ async fn claude_ai_oauth_reauth_required_does_not_return_cached_token() {
             .collect(),
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(
@@ -320,27 +334,6 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ClaudeAiOauth,
-        primary_secret: Some("stale-access".into()),
-        refresh_token: Some("valid-refresh".into()),
-        id_token: None,
-        // Expired 1 minute ago.
-        expires_at: Some(Utc::now() - ChronoDuration::minutes(1)),
-        last_refresh: Some(Utc::now() - ChronoDuration::hours(2)),
-        scopes: vec![],
-        account_id: None,
-        metadata: serde_json::Value::Null,
-    };
-    store
-        .save(
-            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &persisted,
-        )
-        .await
-        .unwrap();
-
     // Point the OAuth runtime at our mock.
     let endpoints = OAuthEndpoints {
         client_id: oauth::CLAUDE_CLIENT_ID.into(),
@@ -358,34 +351,12 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         )],
     };
 
-    // Directly exercise AnthropicOAuthRuntime against the mock endpoint
-    // (since the provider runtime's resolve_binding hardcodes the real
-    // endpoint URLs — url-override support via the registry env is a
-    // Phase 4c wire-config concern, not 4b).
-    let runtime = oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
-        store.clone(),
-        endpoints,
-        TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-    );
-    let access = runtime.get_or_refresh_access_token().await.unwrap();
-    assert_eq!(access, "refreshed-access-NEW");
-
-    // Verify the new bundle was persisted.
-    let updated = store
-        .load(&TokenKey::parse("dev", "default_claude").expect("valid slugs"))
+    let result = exchange_refresh_token(&reqwest::Client::new(), &endpoints, "valid-refresh", None)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(
-        updated.primary_secret.as_deref(),
-        Some("refreshed-access-NEW")
-    );
-    assert_eq!(
-        updated.refresh_token.as_deref(),
-        Some("rotated-refresh"),
-        "refresh_token must rotate when the server returns one"
-    );
-    assert!(updated.expires_at.is_some());
+    assert_eq!(result.access_token, "refreshed-access-NEW");
+    assert_eq!(result.refresh_token.as_deref(), Some("rotated-refresh"));
+    assert_eq!(result.expires_in_secs, Some(3600));
 }
 
 // --- oauth_to_api_key path → persisted api_key ------------------------
@@ -403,6 +374,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         scopes: vec![],
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(

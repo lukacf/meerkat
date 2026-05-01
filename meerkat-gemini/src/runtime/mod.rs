@@ -176,19 +176,23 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::Adc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
                 {
+                    let handle = env.auth_lease_handle.clone().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "google adc requires an AuthMachine lease handle for token freshness"
+                                .into(),
+                        )
+                    })?;
                     let mut authorizer =
                         meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
                             meerkat_auth_core::authorizers::GoogleAuthChain::Default,
                             env.env_lookup.clone(),
                         );
-                    if let Some(handle) = env.auth_lease_handle.clone() {
-                        authorizer = authorizer.with_auth_lease_observer(
-                            handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
-                            ),
-                        );
-                    }
+                    authorizer = authorizer.with_auth_lease_observer(
+                        handle,
+                        meerkat_core::handles::LeaseKey::from_connection_ref(
+                            &binding.connection_ref,
+                        ),
+                    );
                     let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
@@ -219,19 +223,23 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::ComputeAdc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
                 {
+                    let handle = env.auth_lease_handle.clone().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "google compute_adc requires an AuthMachine lease handle for token freshness"
+                                .into(),
+                        )
+                    })?;
                     let mut authorizer =
                         meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
                             meerkat_auth_core::authorizers::GoogleAuthChain::ComputeOnly,
                             env.env_lookup.clone(),
                         );
-                    if let Some(handle) = env.auth_lease_handle.clone() {
-                        authorizer = authorizer.with_auth_lease_observer(
-                            handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
-                            ),
-                        );
-                    }
+                    authorizer = authorizer.with_auth_lease_observer(
+                        handle,
+                        meerkat_core::handles::LeaseKey::from_connection_ref(
+                            &binding.connection_ref,
+                        ),
+                    );
                     let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
@@ -278,7 +286,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             ManagedOauthAccess::Cached { tokens, expires_at } => {
                                 (tokens, expires_at)
                             }
-                            ManagedOauthAccess::Refresh { lifecycle } => {
+                            ManagedOauthAccess::Refresh { lifecycle, tokens } => {
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
@@ -291,20 +299,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                     key.clone(),
                                 );
                                 let refreshed = runtime
-                                    .refresh_access_token_without_save()
+                                    .refresh_access_token_from_persisted_without_save(&tokens)
                                     .await
                                     .map_err(|e| {
-                                    let permanent = google_oauth_refresh_error_is_permanent(&e);
-                                    let _ = fail_managed_oauth_refresh(
-                                        env,
-                                        binding,
-                                        lifecycle.clone(),
-                                        permanent,
-                                    );
-                                    google_oauth_refresh_error_to_provider(e, binding)
-                                })?;
+                                        let permanent = google_oauth_refresh_error_is_permanent(&e);
+                                        let _ = fail_managed_oauth_refresh(
+                                            env,
+                                            binding,
+                                            lifecycle.clone(),
+                                            permanent,
+                                        );
+                                        google_oauth_refresh_error_to_provider(e, binding)
+                                    })?;
                                 let completion = save_and_complete_managed_oauth_refresh(
-                                    env, binding, &key, lifecycle, &refreshed,
+                                    env, binding, &key, lifecycle, &tokens, &refreshed,
                                 )
                                 .await?;
                                 (refreshed, completion.expires_at)
@@ -327,8 +335,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     }
                     let mut metadata = AuthMetadata::default();
                     if google_email.is_some() || google_user_id.is_some() {
-                        metadata.account_id =
-                            google_user_id.clone().or_else(|| google_email.clone());
+                        metadata.account_id = google_user_id.or_else(|| google_email.clone());
                         metadata.provider_metadata =
                             Some(meerkat_core::ProviderAuthMetadata::Google(
                                 meerkat_core::GoogleAuthMetadata {

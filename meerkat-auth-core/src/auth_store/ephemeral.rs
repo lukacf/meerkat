@@ -31,6 +31,34 @@ impl TokenStore for EphemeralTokenStore {
         Ok(())
     }
 
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let mut inner = self.inner.write();
+        if inner.get(key) != Some(expected) {
+            return Ok(false);
+        }
+        inner.insert(key.clone(), replacement.clone());
+        Ok(true)
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let mut inner = self.inner.write();
+        if inner.get(key) != expected {
+            return Ok(false);
+        }
+        inner.insert(key.clone(), replacement.clone());
+        Ok(true)
+    }
+
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         self.inner.write().remove(key);
         Ok(())

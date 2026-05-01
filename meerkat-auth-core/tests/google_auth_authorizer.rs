@@ -496,6 +496,10 @@ async fn service_account_path_signs_jwt_and_gets_token() {
 
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path()) // empty home, no user ADC
+        .with_auth_lease_observer(
+            Arc::new(RecordingAuthLeaseHandle::default()),
+            google_lease_key(),
+        )
         .with_token_url_override(format!("{}/token", mock.base_url));
 
     let mut headers = Vec::new();
@@ -512,8 +516,8 @@ async fn service_account_path_signs_jwt_and_gets_token() {
         .unwrap();
     assert_eq!(auth.1, "Bearer sa-access-token");
     assert!(
-        authorizer.expires_at().is_none(),
-        "unobserved Google authorizer must not expose private token freshness"
+        authorizer.expires_at().is_some(),
+        "observed Google authorizer must expose AuthMachine-owned token freshness"
     );
     assert_eq!(mock.counter.load(Ordering::SeqCst), 1);
     let captured = mock.captured.lock().unwrap();
@@ -540,6 +544,10 @@ async fn user_adc_path_uses_refresh_token_flow() {
 
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(
+            Arc::new(RecordingAuthLeaseHandle::default()),
+            google_lease_key(),
+        )
         .with_token_url_override(format!("{}/token", mock.base_url));
 
     let mut headers = Vec::new();
@@ -577,6 +585,10 @@ async fn compute_only_chain_uses_metadata_server() {
 
     let authorizer =
         GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::ComputeOnly, env_lookup)
+            .with_auth_lease_observer(
+                Arc::new(RecordingAuthLeaseHandle::default()),
+                google_lease_key(),
+            )
             .with_metadata_url_override(format!(
                 "{}/computeMetadata/v1/instance/service-accounts/default/token",
                 mock.base_url
@@ -608,6 +620,10 @@ async fn default_chain_falls_through_to_metadata_when_no_sa_and_no_user_adc() {
 
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(
+            Arc::new(RecordingAuthLeaseHandle::default()),
+            google_lease_key(),
+        )
         .with_metadata_url_override(format!(
             "{}/computeMetadata/v1/instance/service-accounts/default/token",
             mock.base_url
@@ -665,7 +681,7 @@ async fn token_is_cached_between_calls() {
 }
 
 #[tokio::test]
-async fn unobserved_authorizer_does_not_reuse_private_token_cache() {
+async fn unobserved_authorizer_fails_closed_without_token_fetch() {
     let mock = start_mock("unleased-sa-token").await;
     let tempdir = tempfile::tempdir().unwrap();
     let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
@@ -683,20 +699,23 @@ async fn unobserved_authorizer_does_not_reuse_private_token_cache() {
         .with_home_dir(tempdir.path())
         .with_token_url_override(format!("{}/token", mock.base_url));
 
-    for _ in 0..2 {
-        let mut headers = Vec::new();
-        let mut req = HttpAuthorizationRequest {
-            method: "POST",
-            url: "https://x.googleapis.com/",
-            headers: &mut headers,
-        };
-        authorizer.authorize(&mut req).await.unwrap();
-    }
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
 
+    assert!(
+        matches!(err, meerkat_core::AuthError::Other(ref message) if message.contains("AuthMachine lease observer")),
+        "got {err:?}"
+    );
+    assert!(headers.is_empty());
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
-        2,
-        "without AuthMachine lease truth, Google must not reuse a private freshness cache"
+        0,
+        "without AuthMachine lease truth, Google must not fetch private token material"
     );
 }
 
@@ -1123,6 +1142,10 @@ async fn missing_credentials_surface_missing_secret() {
         Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
     let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
         .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(
+            Arc::new(RecordingAuthLeaseHandle::default()),
+            google_lease_key(),
+        )
         .with_metadata_url_override(format!(
             "http://{addr}/computeMetadata/v1/instance/service-accounts/default/token"
         ));

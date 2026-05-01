@@ -93,9 +93,49 @@ impl TokenStore for FileTokenStore {
         self.save_unlocked(key, tokens).await
     }
 
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        if self.load_unlocked(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_unlocked(key, replacement).await?;
+        Ok(true)
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        if self.load_unlocked(key).await?.as_ref() != expected {
+            return Ok(false);
+        }
+        self.save_unlocked(key, replacement).await?;
+        Ok(true)
+    }
+
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         let _guard = super::lock::lock(&self.root, key).await?;
         self.clear_unlocked(key).await
+    }
+
+    async fn clear_if_unreadable(&self, key: &TokenKey) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        match self.load_unlocked(key).await {
+            Ok(_) => Ok(false),
+            Err(TokenStoreError::Serde(_)) => {
+                self.clear_unlocked(key).await?;
+                Ok(true)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn clear_if_current(

@@ -250,6 +250,9 @@ impl GoogleAuthAuthorizer {
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
+        let observer = self.lease_observer.as_ref().ok_or_else(|| {
+            AuthError::Other("google auth authorizer requires an AuthMachine lease observer".into())
+        })?;
         if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
             return Ok(access_token);
         }
@@ -259,52 +262,40 @@ impl GoogleAuthAuthorizer {
             return Ok(access_token);
         }
 
-        let lifecycle = if let Some(observer) = &self.lease_observer {
-            Some(observer.begin_refresh(&self.label).await?)
-        } else {
-            None
-        };
+        let lifecycle = observer.begin_refresh(&self.label).await?;
 
         let token = match self.chain {
             GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
                 Ok(token) => token,
                 Err(err) => {
-                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                        observer.refresh_failed(
-                            &self.label,
-                            lifecycle,
-                            google_refresh_failure_is_permanent(&err),
-                        )?;
-                    }
+                    observer.refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        google_refresh_failure_is_permanent(&err),
+                    )?;
                     return Err(err.into());
                 }
             },
             GoogleAuthChain::Default => match self.fetch_full_chain().await {
                 Ok(token) => token,
                 Err(err) => {
-                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                        observer.refresh_failed(
-                            &self.label,
-                            lifecycle,
-                            google_refresh_failure_is_permanent(&err),
-                        )?;
-                    }
+                    observer.refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        google_refresh_failure_is_permanent(&err),
+                    )?;
                     return Err(err.into());
                 }
             },
         };
         let access = token.access_token.clone();
         let expires_at = token.expires_at;
-        if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            let lease_generation =
-                observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
-            *self.cache.lock() = Some(CachedToken {
-                access_token: access.clone(),
-                lease_generation,
-            });
-        } else {
-            *self.cache.lock() = None;
-        }
+        let lease_generation =
+            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+        *self.cache.lock() = Some(CachedToken {
+            access_token: access.clone(),
+            lease_generation,
+        });
         Ok(access)
     }
 

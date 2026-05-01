@@ -30,8 +30,8 @@ pub use refresh::InMemoryCoordinator;
 
 // Re-exports from meerkat-core (trait + types moved there in B2 split).
 pub use meerkat_core::auth::token_store::{
-    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
-    TokenStore, TokenStoreError,
+    PersistedAuthLeaseBinding, PersistedAuthMode, PersistedTokens, RefreshCoordinator,
+    RefreshError, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };
 
 /// Backend selector for `TokenStore::open()`.
@@ -99,6 +99,7 @@ mod tests {
             scopes: vec!["openid".into(), "email".into()],
             account_id: Some("acct_123".into()),
             metadata: serde_json::json!({"plan_type": "pro"}),
+            auth_lease: None,
         };
         let json = serde_json::to_string(&tokens).unwrap();
         let round: PersistedTokens = serde_json::from_str(&json).unwrap();

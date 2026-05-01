@@ -18,9 +18,10 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use thiserror::Error;
 
+#[cfg(test)]
+use meerkat_auth_core::auth_oauth::exchange_authorization_code;
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
-    exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -132,12 +133,13 @@ impl GoogleIdClaims {
 
 pub struct GoogleCodeAssistOAuthRuntime {
     http: reqwest::Client,
-    token_store: Arc<dyn TokenStore>,
+    _token_store: Arc<dyn TokenStore>,
     refresh_coord: Arc<dyn RefreshCoordinator>,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 impl GoogleCodeAssistOAuthRuntime {
     pub fn new(
         token_store: Arc<dyn TokenStore>,
@@ -147,7 +149,7 @@ impl GoogleCodeAssistOAuthRuntime {
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            token_store,
+            _token_store: token_store,
             refresh_coord,
             endpoints,
             key,
@@ -175,21 +177,24 @@ impl GoogleCodeAssistOAuthRuntime {
         &self.key
     }
 
+    #[cfg(test)]
     async fn load(&self) -> Result<Option<PersistedTokens>, GoogleCodeAssistOAuthError> {
-        self.token_store
+        self._token_store
             .load(&self.key)
             .await
             .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
     }
 
+    #[cfg(test)]
     async fn save(&self, tokens: &PersistedTokens) -> Result<(), GoogleCodeAssistOAuthError> {
-        self.token_store
+        self._token_store
             .save(&self.key, tokens)
             .await
             .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_tokens(
+    #[cfg(test)]
+    pub(crate) async fn get_or_refresh_tokens(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let persisted = self
@@ -205,13 +210,22 @@ impl GoogleCodeAssistOAuthRuntime {
         self.refresh_access_token().await
     }
 
-    pub async fn refresh_access_token_without_save(
+    #[cfg(test)]
+    pub(crate) async fn refresh_access_token_without_save(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
+        self.refresh_access_token_from_persisted_without_save(&persisted)
+            .await
+    }
+
+    pub(crate) async fn refresh_access_token_from_persisted_without_save(
+        &self,
+        persisted: &PersistedTokens,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let refresh_token = persisted
             .refresh_token
             .clone()
@@ -247,7 +261,8 @@ impl GoogleCodeAssistOAuthRuntime {
         Ok(refreshed)
     }
 
-    pub async fn refresh_access_token(
+    #[cfg(test)]
+    pub(crate) async fn refresh_access_token(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let refreshed = self.refresh_access_token_without_save().await?;
@@ -255,14 +270,18 @@ impl GoogleCodeAssistOAuthRuntime {
         Ok(refreshed)
     }
 
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, GoogleCodeAssistOAuthError> {
+    #[cfg(test)]
+    pub(crate) async fn get_or_refresh_access_token(
+        &self,
+    ) -> Result<String, GoogleCodeAssistOAuthError> {
         self.get_or_refresh_tokens()
             .await?
             .primary_secret
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
     }
 
-    pub async fn complete_login(
+    #[cfg(test)]
+    pub(crate) async fn complete_login(
         &self,
         code: &str,
         pkce_verifier: &str,
@@ -304,6 +323,7 @@ fn oauth_result_to_persisted(
         scopes,
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     }
 }
 

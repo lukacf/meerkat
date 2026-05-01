@@ -299,6 +299,32 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         .map(|_| ())
     }
 
+    fn mark_expiring_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        if expected.phase != Some(AuthLeasePhase::Valid) {
+            return Ok(false);
+        }
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(false);
+        }
+        let (_, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::MarkExpiring,
+            "AuthLeaseHandle::mark_expiring_if_snapshot",
+            false,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(true)
+    }
+
     fn begin_refresh(
         &self,
         lease_key: &LeaseKey,
@@ -499,6 +525,31 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
         Ok(())
+    }
+
+    fn release_lease_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(false);
+        }
+        let (_, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::Release,
+            "AuthLeaseHandle::release_lease_if_snapshot",
+            true,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        #[cfg(test)]
+        run_release_after_accept_hook(lease_key);
+        Ok(true)
     }
 
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {

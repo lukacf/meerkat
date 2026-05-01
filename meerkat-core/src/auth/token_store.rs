@@ -154,6 +154,35 @@ pub struct PersistedTokens {
     pub account_id: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub auth_lease: Option<PersistedAuthLeaseBinding>,
+}
+
+/// AuthMachine lease fact that accepted a persisted token bundle as fresh.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersistedAuthLeaseBinding {
+    pub token_key: TokenKey,
+    pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub pending_owner_generation: Option<u64>,
+}
+
+impl PersistedAuthLeaseBinding {
+    pub fn new(token_key: TokenKey, generation: u64) -> Self {
+        Self {
+            token_key,
+            generation,
+            pending_owner_generation: None,
+        }
+    }
+
+    pub fn pending_owner(token_key: TokenKey, generation: u64) -> Self {
+        Self {
+            token_key,
+            generation: 0,
+            pending_owner_generation: Some(generation),
+        }
+    }
 }
 
 impl PersistedTokens {
@@ -168,6 +197,7 @@ impl PersistedTokens {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+            auth_lease: None,
         }
     }
 
@@ -182,7 +212,28 @@ impl PersistedTokens {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+            auth_lease: None,
         }
+    }
+
+    pub fn bind_auth_lease(&mut self, token_key: TokenKey, generation: u64) {
+        self.auth_lease = Some(PersistedAuthLeaseBinding::new(token_key, generation));
+    }
+
+    pub fn with_auth_lease_binding(mut self, token_key: TokenKey, generation: u64) -> Self {
+        self.bind_auth_lease(token_key, generation);
+        self
+    }
+
+    pub fn bind_auth_pending_owner(&mut self, token_key: TokenKey, generation: u64) {
+        self.auth_lease = Some(PersistedAuthLeaseBinding::pending_owner(
+            token_key, generation,
+        ));
+    }
+
+    pub fn with_auth_pending_owner_binding(mut self, token_key: TokenKey, generation: u64) -> Self {
+        self.bind_auth_pending_owner(token_key, generation);
+        self
     }
 }
 
@@ -226,7 +277,34 @@ impl From<serde_json::Error> for TokenStoreError {
 pub trait TokenStore: Send + Sync {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError>;
     async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError>;
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
+    }
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != expected {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
+    }
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError>;
+    async fn clear_if_unreadable(&self, _key: &TokenKey) -> Result<bool, TokenStoreError> {
+        Ok(false)
+    }
     async fn clear_if_current(
         &self,
         key: &TokenKey,

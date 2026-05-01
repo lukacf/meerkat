@@ -1075,6 +1075,24 @@ pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
+    /// Fire `MarkAuthExpiring { lease_key }` only when the current projection
+    /// exactly matches `expected`.
+    ///
+    /// Implementations backed by the AuthMachine owner should compare and
+    /// transition atomically. Returning `Ok(false)` means a newer lease fact
+    /// won the race and no state was changed.
+    fn mark_expiring_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected {
+            return Ok(false);
+        }
+        self.mark_expiring(lease_key)?;
+        Ok(true)
+    }
+
     /// Fire `BeginAuthRefresh { lease_key }` — legal from `valid` or
     /// `expiring`. Returns the generation assigned by the accepted transition.
     ///
@@ -1166,6 +1184,24 @@ pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+
+    /// Fire `ReleaseAuthLease { lease_key }` only when the current projection
+    /// exactly matches `expected`.
+    ///
+    /// Implementations backed by the AuthMachine owner should compare and
+    /// release atomically. The default preserves existing simple handles while
+    /// keeping callers on the conditional API.
+    fn release_lease_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected {
+            return Ok(false);
+        }
+        self.release_lease(lease_key)?;
+        Ok(true)
+    }
 
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;

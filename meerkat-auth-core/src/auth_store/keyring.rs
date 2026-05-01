@@ -91,6 +91,34 @@ impl TokenStore for KeyringTokenStore {
         self.save_unlocked(key, tokens)
     }
 
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        if self.load_unlocked(key)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_unlocked(key, replacement)?;
+        Ok(true)
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        if self.load_unlocked(key)?.as_ref() != expected {
+            return Ok(false);
+        }
+        self.save_unlocked(key, replacement)?;
+        Ok(true)
+    }
+
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         let _guard = super::lock::lock(&self.lock_root, key).await?;
         self.clear_unlocked(key)

@@ -221,6 +221,9 @@ impl AzureAdAuthorizer {
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
+        let observer = self.lease_observer.as_ref().ok_or_else(|| {
+            AuthError::Other("azure ad authorizer requires an AuthMachine lease observer".into())
+        })?;
         // Check cache without taking the refresh path.
         if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
             return Ok(access_token);
@@ -231,38 +234,28 @@ impl AzureAdAuthorizer {
             return Ok(access_token);
         }
 
-        let lifecycle = if let Some(observer) = &self.lease_observer {
-            Some(observer.begin_refresh(&self.label).await?)
-        } else {
-            None
-        };
+        let lifecycle = observer.begin_refresh(&self.label).await?;
 
         // Miss — fetch a fresh token.
         let new_token = match self.fetch_token().await {
             Ok(token) => token,
             Err(err) => {
-                if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        azure_refresh_failure_is_permanent(&err),
-                    )?;
-                }
+                observer.refresh_failed(
+                    &self.label,
+                    lifecycle,
+                    azure_refresh_failure_is_permanent(&err),
+                )?;
                 return Err(err.into());
             }
         };
         let access = new_token.access_token.clone();
         let expires_at = new_token.expires_at;
-        if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            let lease_generation =
-                observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
-            *self.cache.lock() = Some(CachedToken {
-                access_token: access.clone(),
-                lease_generation,
-            });
-        } else {
-            *self.cache.lock() = None;
-        }
+        let lease_generation =
+            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+        *self.cache.lock() = Some(CachedToken {
+            access_token: access.clone(),
+            lease_generation,
+        });
         Ok(access)
     }
 }

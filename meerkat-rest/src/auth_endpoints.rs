@@ -180,49 +180,14 @@ async fn save_tokens_and_publish_lifecycle(
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
-    let key = TokenKey::from_connection_ref(connection_ref);
-    let previous = token_store.load(&key).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("TokenStore load failed: {e}"),
-        )
-    })?;
-    token_store.save(&key, tokens).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("TokenStore save failed: {e}"),
-        )
-    })?;
-    if let Err(e) =
-        meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens)
-    {
-        if let Err(rollback_error) =
-            restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
-        {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                ),
-            ));
-        }
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("AuthMachine lifecycle acquire failed: {e}"),
-        ));
-    }
-    Ok(())
-}
-
-async fn restore_tokens_after_lifecycle_failure(
-    token_store: &dyn TokenStore,
-    key: &TokenKey,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-    match previous {
-        Some(tokens) => token_store.save(key, tokens).await,
-        None => token_store.clear(key).await,
-    }
+    meerkat_core::save_tokens_and_publish_lifecycle_acquired(
+        token_store,
+        auth_lease,
+        connection_ref,
+        tokens,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn clear_tokens_and_publish_lifecycle(
@@ -409,6 +374,7 @@ pub async fn create_auth_profile(
         scopes: Vec::new(),
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     if let Err((status, msg)) = save_tokens_and_publish_lifecycle(
         state.token_store.as_ref(),
@@ -785,6 +751,7 @@ pub async fn complete_login(
             .unwrap_or_default(),
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
 
     if let Err((status, msg)) = save_tokens_and_publish_lifecycle(
@@ -1019,6 +986,7 @@ pub async fn complete_device_login(
                     .unwrap_or_default(),
                 account_id: None,
                 metadata: serde_json::Value::Null,
+                auth_lease: None,
             };
             if let Err((status, msg)) = save_tokens_and_publish_lifecycle(
                 state.token_store.as_ref(),
@@ -1186,6 +1154,7 @@ mod tests {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+            auth_lease: None,
         }
     }
 
@@ -1515,9 +1484,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.load(&key).await.unwrap().is_some());
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(stored.auth_lease.as_ref().map(|b| &b.token_key), Some(&key));
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            stored.auth_lease.as_ref().map(|b| b.generation),
+            Some(snapshot.generation)
+        );
 
         clear_tokens_and_publish_lifecycle(&store, &auth_lease, &connection_ref)
             .await
@@ -1601,6 +1575,7 @@ mod tests {
                     scopes: Vec::new(),
                     account_id: Some("acct-stale".into()),
                     metadata: serde_json::Value::Null,
+                    auth_lease: None,
                 },
             )
             .await

@@ -245,78 +245,15 @@ async fn save_tokens_and_publish_lifecycle(
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
 ) -> Result<(), RpcResponse> {
-    let key = TokenKey::from_connection_ref(connection_ref);
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
-        Err(e) => {
-            return Err(RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("TokenStore load failed: {e}"),
-            ));
-        }
-    };
-    if let Err(e) = store.save(&key, tokens).await {
-        return Err(RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("TokenStore save failed: {e}"),
-        ));
-    }
     let auth_lease = runtime.auth_lease_handle();
-    publish_saved_tokens_and_restore_on_lifecycle_failure(
-        id,
+    meerkat_core::save_tokens_and_publish_lifecycle_acquired(
         store.as_ref(),
         auth_lease.as_ref(),
         connection_ref,
-        &key,
         tokens,
-        previous.as_ref(),
     )
     .await
-}
-
-async fn publish_saved_tokens_and_restore_on_lifecycle_failure(
-    id: Option<RpcId>,
-    store: &dyn TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
-    key: &TokenKey,
-    tokens: &PersistedTokens,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), RpcResponse> {
-    if let Err(e) =
-        meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens)
-    {
-        if let Err(rollback_error) =
-            restore_tokens_after_lifecycle_failure(store, key, previous).await
-        {
-            return Err(RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!(
-                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                ),
-            ));
-        }
-        return Err(RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("AuthMachine lifecycle acquire failed: {e}"),
-        ));
-    }
-    Ok(())
-}
-
-async fn restore_tokens_after_lifecycle_failure(
-    store: &dyn TokenStore,
-    key: &TokenKey,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-    match previous {
-        Some(tokens) => store.save(key, tokens).await,
-        None => store.clear(key).await,
-    }
+    .map_err(|e| RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()))
 }
 
 async fn clear_tokens_and_publish_lifecycle(
@@ -511,6 +448,7 @@ pub async fn handle_auth_profile_create(
         scopes: Vec::new(),
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     if let Err(resp) =
         save_tokens_and_publish_lifecycle(id.clone(), &store, runtime, &connection_ref, &tokens)
@@ -758,6 +696,7 @@ pub async fn handle_auth_login_complete(
             .unwrap_or_default(),
         account_id: None,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     if let Err(resp) =
         save_tokens_and_publish_lifecycle(id.clone(), &store, runtime, &connection_ref, &tokens)
@@ -946,6 +885,7 @@ pub async fn handle_auth_login_device_complete(
                     .unwrap_or_default(),
                 account_id: None,
                 metadata: serde_json::Value::Null,
+                auth_lease: None,
             };
             if let Err(resp) = save_tokens_and_publish_lifecycle(
                 id.clone(),
@@ -1027,37 +967,28 @@ pub async fn handle_auth_login_provision_api_key(
         Err(r) => return r,
     };
     let key = TokenKey::from_connection_ref(&connection_ref);
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("TokenStore load failed: {e}"),
-            );
-        }
-    };
     // Console endpoints drive `scope = org:create_api_key user:profile`.
     // The runtime wrapper's `provision_api_key` POSTs to
-    // API_KEY_CREATE_URL with `Authorization: Bearer <access_token>`
-    // and persists the returned api_key via `save_persisted`.
+    // API_KEY_CREATE_URL with `Authorization: Bearer <access_token>`;
+    // the RPC lifecycle helper persists it only after AuthMachine accepts
+    // the credential lifecycle transition.
     let endpoints = a_oauth::console_endpoints(a_oauth::MANUAL_REDIRECT_URL);
     let oauth_runtime = a_oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
         Arc::clone(&store),
         endpoints,
         key.clone(),
     );
-    match oauth_runtime.provision_api_key(&parsed.access_token).await {
+    match oauth_runtime
+        .provision_api_key_without_save(&parsed.access_token)
+        .await
+    {
         Ok(tokens) => {
-            let auth_lease = runtime.auth_lease_handle();
-            if let Err(resp) = publish_saved_tokens_and_restore_on_lifecycle_failure(
+            if let Err(resp) = save_tokens_and_publish_lifecycle(
                 id.clone(),
-                store.as_ref(),
-                auth_lease.as_ref(),
+                &store,
+                runtime,
                 &connection_ref,
-                &key,
                 &tokens,
-                previous.as_ref(),
             )
             .await
             {
@@ -1691,6 +1622,7 @@ mod tests {
                     scopes: Vec::new(),
                     account_id: Some("acct-stale".into()),
                     metadata: serde_json::Value::Null,
+                    auth_lease: None,
                 },
             )
             .await
@@ -1798,6 +1730,27 @@ mod tests {
         let status =
             handle_auth_status_get(Some(RpcId::Num(2)), Some(params.as_ref()), &runtime).await;
         assert_eq!(auth_status_state(status), "valid");
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let stored = runtime
+            .token_store()
+            .expect("test token store")
+            .load(&key)
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = runtime
+            .auth_lease_handle()
+            .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(stored.auth_lease.as_ref().map(|b| &b.token_key), Some(&key));
+        assert_eq!(
+            stored.auth_lease.as_ref().map(|b| b.generation),
+            Some(snapshot.generation)
+        );
     }
 
     #[tokio::test]
@@ -1890,26 +1843,18 @@ mod tests {
         let previous = PersistedTokens::api_key("sk-old");
         let replacement = PersistedTokens::api_key("sk-new");
         store.save(&key, &previous).await.unwrap();
-        let previous_snapshot = store.load(&key).await.unwrap();
-        store.save(&key, &replacement).await.unwrap();
 
-        let err = publish_saved_tokens_and_restore_on_lifecycle_failure(
-            Some(RpcId::Num(1)),
+        let err = meerkat_core::save_tokens_and_publish_lifecycle_acquired(
             store.as_ref(),
             &auth_lease,
             &connection_ref,
-            &key,
             &replacement,
-            previous_snapshot.as_ref(),
         )
         .await
         .unwrap_err();
 
-        let error = err.error.expect("publish should fail");
-        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
         assert!(
-            error
-                .message
+            err.to_string()
                 .contains("AuthMachine lifecycle acquire failed")
         );
         let stored = store.load(&key).await.unwrap().unwrap();

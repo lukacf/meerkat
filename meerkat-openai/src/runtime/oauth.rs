@@ -16,9 +16,10 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use thiserror::Error;
 
+#[cfg(test)]
+use meerkat_auth_core::auth_oauth::exchange_authorization_code;
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
-    exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -137,12 +138,13 @@ impl ChatGptIdClaims {
 
 pub struct OpenAiOAuthRuntime {
     http: reqwest::Client,
-    token_store: Arc<dyn TokenStore>,
+    _token_store: Arc<dyn TokenStore>,
     refresh_coord: Arc<dyn RefreshCoordinator>,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 impl OpenAiOAuthRuntime {
     pub fn new(
         token_store: Arc<dyn TokenStore>,
@@ -152,7 +154,7 @@ impl OpenAiOAuthRuntime {
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            token_store,
+            _token_store: token_store,
             refresh_coord,
             endpoints,
             key,
@@ -180,21 +182,24 @@ impl OpenAiOAuthRuntime {
         &self.key
     }
 
+    #[cfg(test)]
     async fn load(&self) -> Result<Option<PersistedTokens>, OpenAiOAuthError> {
-        self.token_store
+        self._token_store
             .load(&self.key)
             .await
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
+    #[cfg(test)]
     async fn save(&self, tokens: &PersistedTokens) -> Result<(), OpenAiOAuthError> {
-        self.token_store
+        self._token_store
             .save(&self.key, tokens)
             .await
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+    #[cfg(test)]
+    pub(crate) async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
@@ -208,17 +213,27 @@ impl OpenAiOAuthRuntime {
         self.refresh_access_token().await
     }
 
-    pub async fn refresh_access_token_without_save(
+    #[cfg(test)]
+    pub(crate) async fn refresh_access_token_without_save(
         &self,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
+        self.refresh_access_token_from_persisted_without_save(&persisted)
+            .await
+    }
+
+    pub(crate) async fn refresh_access_token_from_persisted_without_save(
+        &self,
+        persisted: &PersistedTokens,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let refresh_token = persisted
             .refresh_token
             .clone()
             .ok_or(OpenAiOAuthError::MissingRefreshToken)?;
+        let account_id = persisted.account_id.clone();
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
         let refreshed = self
@@ -237,7 +252,7 @@ impl OpenAiOAuthRuntime {
                             result,
                             PersistedAuthMode::ChatgptOauth,
                             Some(refresh_token),
-                            persisted.account_id.clone(),
+                            account_id,
                         ))
                     })
                 }),
@@ -246,20 +261,23 @@ impl OpenAiOAuthRuntime {
         Ok(refreshed)
     }
 
-    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+    #[cfg(test)]
+    pub(crate) async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
         let refreshed = self.refresh_access_token_without_save().await?;
         self.save(&refreshed).await?;
         Ok(refreshed)
     }
 
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+    #[cfg(test)]
+    pub(crate) async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
         self.get_or_refresh_tokens()
             .await?
             .primary_secret
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)
     }
 
-    pub async fn complete_login(
+    #[cfg(test)]
+    pub(crate) async fn complete_login(
         &self,
         code: &str,
         pkce_verifier: &str,
@@ -309,6 +327,7 @@ fn oauth_result_to_persisted(
         scopes,
         account_id,
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     }
 }
 

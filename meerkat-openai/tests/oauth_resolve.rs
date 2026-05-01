@@ -56,6 +56,7 @@ struct FailingRefreshCoordinator {
 struct SequencedLoadTokenStore {
     first: PersistedTokens,
     later: PersistedTokens,
+    first_loads: usize,
     loads: Mutex<usize>,
     on_later_load: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
@@ -110,6 +111,24 @@ impl RecordingAuthLeaseHandle {
             snapshot: Mutex::new(AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: Some(expires_at.timestamp() as u64),
+                generation: 3,
+            }),
+            acquired: Mutex::new(Vec::new()),
+            completed_refreshes: Mutex::new(Vec::new()),
+            refresh_failures: Mutex::new(Vec::new()),
+            begin_refresh_failure_snapshot: None,
+            begin_refresh_pre_transition_snapshot: Mutex::new(None),
+            complete_refresh_failure_snapshot: Mutex::new(None),
+            acquire_if_snapshot_race: Mutex::new(None),
+            mark_reauth_if_snapshot_race: Mutex::new(None),
+        }
+    }
+
+    fn valid_non_expiring() -> Self {
+        Self {
+            snapshot: Mutex::new(AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: None,
                 generation: 3,
             }),
             acquired: Mutex::new(Vec::new()),
@@ -561,9 +580,18 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
 
 impl SequencedLoadTokenStore {
     fn new(first: PersistedTokens, later: PersistedTokens) -> Self {
+        Self::new_after_first_loads(first, later, 1)
+    }
+
+    fn new_after_first_loads(
+        first: PersistedTokens,
+        later: PersistedTokens,
+        first_loads: usize,
+    ) -> Self {
         Self {
             first,
             later,
+            first_loads,
             loads: Mutex::new(0),
             on_later_load: Mutex::new(None),
         }
@@ -577,6 +605,7 @@ impl SequencedLoadTokenStore {
         Self {
             first,
             later,
+            first_loads: 1,
             loads: Mutex::new(0),
             on_later_load: Mutex::new(Some(on_later_load)),
         }
@@ -622,7 +651,7 @@ impl TokenStore for SequencedLoadTokenStore {
     async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         let mut loads = self.loads.lock().unwrap();
         *loads += 1;
-        if *loads == 1 {
+        if *loads <= self.first_loads {
             Ok(Some(self.first.clone()))
         } else {
             drop(loads);
@@ -639,6 +668,15 @@ impl TokenStore for SequencedLoadTokenStore {
         _tokens: &PersistedTokens,
     ) -> Result<(), TokenStoreError> {
         Ok(())
+    }
+
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        _replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        Ok(self.load(key).await?.as_ref() == Some(expected))
     }
 
     async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -880,10 +918,65 @@ fn default_connection_ref() -> ConnectionRef {
     }
 }
 
+fn default_token_key() -> TokenKey {
+    TokenKey::parse("dev", "default_chatgpt").expect("valid slugs")
+}
+
+fn bind_default_auth_lease(mut tokens: PersistedTokens, generation: u64) -> PersistedTokens {
+    tokens.bind_auth_lease(default_token_key(), generation);
+    tokens
+}
+
 // --- OpenAI managed_chatgpt_oauth ------------------------------------
 
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = Utc::now() + ChronoDuration::hours(1);
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("fresh-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
+        .await
+        .unwrap();
+
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(RecordingAuthLeaseHandle::valid(expires_at)));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("fresh ChatGPT tokens should resolve");
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("fresh-chatgpt-access".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_unbound_token_does_not_seed_untracked_lease() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ChatgptOauth,
@@ -898,6 +991,57 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
+    };
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("unbound durable material must not seed AuthMachine truth");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(auth_lease.phase(), None);
+    assert_eq!(
+        auth_lease.acquired(),
+        Vec::<u64>::new(),
+        "unbound material must not be laundered through acquire_lease"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_requires_authmachine_lease_handle() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("fresh-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(
@@ -911,13 +1055,22 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     let env = ResolverEnvironment::testing().with_token_store(store);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let connection = registry
+
+    let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect("fresh ChatGPT tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-chatgpt-access".to_string()),
+        .expect_err("managed OAuth must fail closed without AuthMachine lease truth");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("AuthMachine"),
+        "error should name the missing AuthMachine lease owner, got {err}"
     );
 }
 
@@ -937,6 +1090,7 @@ async fn openai_managed_chatgpt_oauth_reauth_required_does_not_return_cached_tok
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(
@@ -970,14 +1124,19 @@ async fn openai_managed_chatgpt_oauth_reauth_required_does_not_return_cached_tok
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_stale_lease_forces_refresh_and_publishes_new_expiry() {
+async fn openai_managed_chatgpt_oauth_unbound_token_does_not_match_fresh_lease_by_expiry_only() {
     let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() + ChronoDuration::hours(1)).timestamp(),
+        0,
+    )
+    .unwrap();
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
+        primary_secret: Some("fresh-chatgpt-access".into()),
         refresh_token: Some("rt".into()),
         id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        expires_at: Some(expires_at),
         last_refresh: Some(Utc::now()),
         scopes: o_oauth::CHATGPT_SCOPES
             .iter()
@@ -985,7 +1144,142 @@ async fn openai_managed_chatgpt_oauth_stale_lease_forces_refresh_and_publishes_n
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
+        .await
+        .unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
+    let realm = openai_realm_with_constraints(
+        "chatgpt_backend",
+        "managed_chatgpt_oauth",
+        AuthConstraints {
+            allow_interactive_login: true,
+            allow_refresh: false,
+            ..Default::default()
+        },
+    );
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("expiry equality alone must not prove durable OAuth freshness");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "unbound durable token material must force reauth when refresh is disabled"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_unbound_token_does_not_drive_refresh() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() + ChronoDuration::hours(1)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("fresh-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(expires_at),
+        last_refresh: Some(Utc::now()),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+        auth_lease: None,
+    };
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
+    let refresh_coord = Arc::new(FailingRefreshCoordinator {
+        error: RefreshError::Refresh("provider refresh should not run".into()),
+    });
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_refresh_coordinator(refresh_coord)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("unbound durable token material must not enter the refresh path");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "unbound durable token material must force reauth before refresh"
+    );
+    assert_eq!(
+        auth_lease.refresh_failures(),
+        Vec::<bool>::new(),
+        "provider refresh must not run for token material that is not bound to AuthMachine truth"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_stale_lease_forces_refresh_and_publishes_new_expiry() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -1006,9 +1300,7 @@ async fn openai_managed_chatgpt_oauth_stale_lease_forces_refresh_and_publishes_n
         last_refresh: Some(Utc::now()),
         ..persisted.clone()
     };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     let refresh_coord = Arc::new(StaticRefreshCoordinator {
         refreshed: refreshed.clone(),
     });
@@ -1044,23 +1336,30 @@ async fn openai_managed_chatgpt_oauth_stale_lease_forces_refresh_and_publishes_n
 
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_saves_refreshed_tokens_before_publishing_valid_lease() {
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     let observed_lease = Arc::clone(&auth_lease);
     let store = Arc::new(SaveRaceTokenStore::new(
         persisted.clone(),
@@ -1068,7 +1367,7 @@ async fn openai_managed_chatgpt_oauth_saves_refreshed_tokens_before_publishing_v
             assert_eq!(
                 observed_lease.phase(),
                 Some(AuthLeasePhase::Refreshing),
-                "TokenStore save must happen before AuthMachine publishes the refreshed lease as Valid"
+                "TokenStore save must happen before AuthMachine publishes the refreshed Valid lease"
             );
         }),
     ));
@@ -1098,7 +1397,7 @@ async fn openai_managed_chatgpt_oauth_saves_refreshed_tokens_before_publishing_v
     let connection = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect("managed OAuth refresh should save before publishing Valid lease");
+        .expect("managed OAuth refresh should bind saved tokens to the published Valid lease");
 
     assert_eq!(
         connection.resolved_secret(),
@@ -1112,20 +1411,29 @@ async fn openai_managed_chatgpt_oauth_cleans_saved_refresh_when_authmachine_comp
 {
     let store = Arc::new(EphemeralTokenStore::new());
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store.save(&key, &persisted).await.unwrap();
 
     let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
@@ -1140,9 +1448,7 @@ async fn openai_managed_chatgpt_oauth_cleans_saved_refresh_when_authmachine_comp
         last_refresh: Some(Utc::now()),
         ..persisted.clone()
     };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     auth_lease.fail_next_complete_refresh_with(AuthLeaseSnapshot {
         phase: Some(AuthLeasePhase::Released),
         expires_at: None,
@@ -1172,8 +1478,8 @@ async fn openai_managed_chatgpt_oauth_cleans_saved_refresh_when_authmachine_comp
     );
     assert_eq!(
         store.load(&key).await.unwrap(),
-        None,
-        "refreshed token material must be cleaned up when AuthMachine rejects completion"
+        Some(persisted),
+        "rejected AuthMachine completion must not save refreshed token material"
     );
     assert_eq!(
         auth_lease.phase(),
@@ -1185,20 +1491,29 @@ async fn openai_managed_chatgpt_oauth_cleans_saved_refresh_when_authmachine_comp
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_save_failure_fails_owner_refresh_before_valid_publication() {
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     let store = Arc::new(FailingSaveTokenStore::new(persisted.clone()));
 
     let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
@@ -1213,9 +1528,7 @@ async fn openai_managed_chatgpt_oauth_save_failure_fails_owner_refresh_before_va
         last_refresh: Some(Utc::now()),
         ..persisted.clone()
     };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     let refresh_coord = Arc::new(StaticRefreshCoordinator { refreshed });
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
@@ -1240,13 +1553,13 @@ async fn openai_managed_chatgpt_oauth_save_failure_fails_owner_refresh_before_va
     );
     assert_eq!(
         auth_lease.phase(),
-        Some(AuthLeasePhase::Expiring),
-        "AuthMachine must not publish a valid refreshed lease when refreshed tokens cannot be saved"
+        Some(AuthLeasePhase::ReauthRequired),
+        "AuthMachine must not leave a valid refreshed lease when refreshed tokens cannot be saved"
     );
     assert_eq!(
         auth_lease.refresh_failures(),
-        vec![false],
-        "save failure should fail only the owner refresh, as a retryable failure"
+        vec![true],
+        "save failure before completion should fail the owner refresh permanently"
     );
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
@@ -1256,25 +1569,32 @@ async fn openai_managed_chatgpt_oauth_save_failure_fails_owner_refresh_before_va
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_post_save_lease_race_clears_stale_refresh() {
+async fn openai_managed_chatgpt_oauth_prepared_refresh_completion_race_restores_previous_tokens() {
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     let lease_key = LeaseKey::from_connection_ref(&default_connection_ref());
     let race_handle = Arc::clone(&auth_lease);
     let store = Arc::new(SaveRaceTokenStore::new(
@@ -1320,8 +1640,8 @@ async fn openai_managed_chatgpt_oauth_post_save_lease_race_clears_stale_refresh(
     );
     assert_eq!(
         store.load(&key).await.unwrap(),
-        None,
-        "stale refreshed token material must be cleaned up when AuthMachine truth changes during save"
+        Some(persisted),
+        "prepared refreshed token material must be rolled back when AuthMachine truth changes before completion"
     );
     assert_eq!(
         auth_lease.phase(),
@@ -1333,20 +1653,24 @@ async fn openai_managed_chatgpt_oauth_post_save_lease_race_clears_stale_refresh(
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_missing_expiry_remains_authmachine_non_expiring() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("non-expiring-chatgpt-access".into()),
-        refresh_token: None,
-        id_token: None,
-        expires_at: None,
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("non-expiring-chatgpt-access".into()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -1355,7 +1679,7 @@ async fn openai_managed_chatgpt_oauth_missing_expiry_remains_authmachine_non_exp
         .await
         .unwrap();
 
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid_non_expiring());
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
@@ -1381,20 +1705,29 @@ async fn openai_managed_chatgpt_oauth_missing_expiry_remains_authmachine_non_exp
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_missing_cached_access_refreshes_when_lease_is_fresh() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: None,
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() + ChronoDuration::hours(1)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: None,
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -1415,9 +1748,7 @@ async fn openai_managed_chatgpt_oauth_missing_cached_access_refreshes_when_lease
         last_refresh: Some(Utc::now()),
         ..persisted.clone()
     };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() + ChronoDuration::hours(1),
-    ));
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
     let refresh_coord = Arc::new(StaticRefreshCoordinator { refreshed });
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
@@ -1454,20 +1785,24 @@ async fn openai_managed_chatgpt_oauth_fresh_authmachine_reloads_store_before_cac
             .collect(),
         account_id: Some("acct-stale".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
         (Utc::now() + ChronoDuration::hours(2)).timestamp(),
         0,
     )
     .unwrap();
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-refreshed-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        account_id: Some("acct-refreshed".into()),
-        ..stale.clone()
-    };
+    let refreshed = bind_default_auth_lease(
+        PersistedTokens {
+            primary_secret: Some("owner-refreshed-chatgpt-access".into()),
+            refresh_token: Some("rt-rotated".into()),
+            expires_at: Some(refreshed_expires_at),
+            last_refresh: Some(Utc::now()),
+            account_id: Some("acct-refreshed".into()),
+            ..stale.clone()
+        },
+        3,
+    );
     let store = Arc::new(SequencedLoadTokenStore::new(stale, refreshed));
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(refreshed_expires_at));
 
@@ -1535,6 +1870,7 @@ async fn openai_managed_chatgpt_oauth_reauth_race_after_reload_does_not_reacquir
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     let newer = PersistedTokens {
         primary_secret: Some("newer-store-chatgpt-access".into()),
@@ -1590,51 +1926,34 @@ async fn openai_managed_chatgpt_oauth_reauth_race_after_reload_does_not_reacquir
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_none_snapshot_race_does_not_acquire_stale_loaded_token() {
-    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+async fn openai_managed_chatgpt_oauth_bound_token_does_not_seed_untracked_lease() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = chrono::DateTime::<Utc>::from_timestamp(
         (Utc::now() + ChronoDuration::hours(1)).timestamp(),
         0,
     )
     .unwrap();
-    let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
-        (Utc::now() + ChronoDuration::hours(2)).timestamp(),
-        0,
-    )
-    .unwrap();
-    let stale = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(stale_expires_at),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-refreshed-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        ..stale.clone()
-    };
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
-    let lease_for_store = auth_lease.clone();
-    let store = Arc::new(SequencedLoadTokenStore::new_with_later_load_callback(
-        stale,
-        refreshed,
-        Box::new(move || {
-            lease_for_store.replace_snapshot(
-                AuthLeasePhase::Valid,
-                Some(refreshed_expires_at.timestamp() as u64),
-            );
-        }),
-    ));
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("fresh-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        7,
+    );
+    store.save(&default_token_key(), &persisted).await.unwrap();
 
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
@@ -1642,24 +1961,30 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_race_does_not_acquire_stale_
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
-    let connection = registry
+    let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect("resolver should observe the owner lease before acquiring stale material");
+        .expect_err("bound durable material must not seed absent AuthMachine truth");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("owner-refreshed-chatgpt-access".to_string()),
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
     );
+    assert_eq!(auth_lease.phase(), None);
     assert_eq!(
         auth_lease.acquired(),
         Vec::<u64>::new(),
-        "resolver must not acquire a stale lease after another owner publishes truth"
+        "bound material must not be laundered through acquire_lease"
     );
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_none_snapshot_conditional_acquire_race_preserves_reauth() {
+async fn openai_managed_chatgpt_oauth_none_snapshot_does_not_attempt_conditional_acquire() {
     let store = Arc::new(EphemeralTokenStore::new());
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
     let expires_at = chrono::DateTime::<Utc>::from_timestamp(
@@ -1667,20 +1992,24 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_conditional_acquire_race_pre
         0,
     )
     .unwrap();
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("fresh-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(expires_at),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("fresh-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        7,
+    );
     store.save(&key, &persisted).await.unwrap();
 
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
@@ -1699,7 +2028,7 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_conditional_acquire_race_pre
     let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect_err("conditional acquire must not publish Valid over concurrent reauth truth");
+        .expect_err("absent AuthMachine truth must not be reacquired from durable material");
 
     assert!(
         matches!(
@@ -1710,11 +2039,11 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_conditional_acquire_race_pre
         ),
         "got {err:?}"
     );
-    assert_eq!(auth_lease.phase(), Some(AuthLeasePhase::ReauthRequired));
+    assert_eq!(auth_lease.phase(), None);
     assert_eq!(
         auth_lease.acquired(),
         Vec::<u64>::new(),
-        "conditional acquire must leave the concurrent AuthMachine phase intact"
+        "resolver must not invoke conditional acquire when AuthMachine has no lease truth"
     );
 }
 
@@ -1735,6 +2064,7 @@ async fn openai_managed_chatgpt_oauth_joining_refresh_waits_for_owner_and_reload
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store.save(&key, &persisted).await.unwrap();
 
@@ -1743,13 +2073,16 @@ async fn openai_managed_chatgpt_oauth_joining_refresh_waits_for_owner_and_reload
         0,
     )
     .unwrap();
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-refreshed-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        ..persisted.clone()
-    };
+    let refreshed = bind_default_auth_lease(
+        PersistedTokens {
+            primary_secret: Some("owner-refreshed-chatgpt-access".into()),
+            refresh_token: Some("rt-rotated".into()),
+            expires_at: Some(refreshed_expires_at),
+            last_refresh: Some(Utc::now()),
+            ..persisted.clone()
+        },
+        6,
+    );
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::refreshing(
         Utc::now() - ChronoDuration::minutes(5),
     ));
@@ -1759,7 +2092,6 @@ async fn openai_managed_chatgpt_oauth_joining_refresh_waits_for_owner_and_reload
     let owner_lease_key = LeaseKey::from_connection_ref(&default_connection_ref());
     let owner_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        owner_store.save(&owner_key, &refreshed).await.unwrap();
         owner_lease
             .complete_refresh(
                 &owner_lease_key,
@@ -1767,6 +2099,8 @@ async fn openai_managed_chatgpt_oauth_joining_refresh_waits_for_owner_and_reload
                 Utc::now().timestamp() as u64,
             )
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        owner_store.save(&owner_key, &refreshed).await.unwrap();
     });
     let refresh_coord = Arc::new(FailingRefreshCoordinator {
         error: RefreshError::Refresh(
@@ -1817,6 +2151,7 @@ async fn openai_managed_chatgpt_oauth_no_refresh_does_not_join_owner_refresh() {
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store.save(&key, &persisted).await.unwrap();
 
@@ -1841,7 +2176,6 @@ async fn openai_managed_chatgpt_oauth_no_refresh_does_not_join_owner_refresh() {
     let owner_lease_key = LeaseKey::from_connection_ref(&default_connection_ref());
     let owner_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        owner_store.save(&owner_key, &refreshed).await.unwrap();
         owner_lease
             .complete_refresh(
                 &owner_lease_key,
@@ -1849,6 +2183,8 @@ async fn openai_managed_chatgpt_oauth_no_refresh_does_not_join_owner_refresh() {
                 Utc::now().timestamp() as u64,
             )
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        owner_store.save(&owner_key, &refreshed).await.unwrap();
     });
 
     let realm = openai_realm_with_constraints(
@@ -1897,20 +2233,29 @@ async fn openai_managed_chatgpt_oauth_no_refresh_does_not_join_owner_refresh() {
 async fn openai_managed_chatgpt_oauth_begin_refresh_race_waits_for_owner_and_reloads_store() {
     let store = Arc::new(EphemeralTokenStore::new());
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("stale-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store.save(&key, &persisted).await.unwrap();
 
     let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
@@ -1918,15 +2263,18 @@ async fn openai_managed_chatgpt_oauth_begin_refresh_race_waits_for_owner_and_rel
         0,
     )
     .unwrap();
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-race-refreshed-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        ..persisted.clone()
-    };
+    let refreshed = bind_default_auth_lease(
+        PersistedTokens {
+            primary_secret: Some("owner-race-refreshed-chatgpt-access".into()),
+            refresh_token: Some("rt-rotated".into()),
+            expires_at: Some(refreshed_expires_at),
+            last_refresh: Some(Utc::now()),
+            ..persisted.clone()
+        },
+        5,
+    );
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::begin_refresh_race(
-        Utc::now() - ChronoDuration::minutes(5),
+        stale_expires_at,
     ));
     let owner_lease = auth_lease.clone();
     let owner_store = store.clone();
@@ -1988,28 +2336,37 @@ async fn openai_managed_chatgpt_oauth_begin_refresh_race_completed_before_follow
         0,
     )
     .unwrap();
-    let stale = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(stale_expires_at),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-race-refreshed-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        ..stale.clone()
-    };
-    let store = Arc::new(SequencedLoadTokenStore::new(stale, refreshed));
+    let stale = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("stale-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    let refreshed = bind_default_auth_lease(
+        PersistedTokens {
+            primary_secret: Some("owner-race-refreshed-chatgpt-access".into()),
+            refresh_token: Some("rt-rotated".into()),
+            expires_at: Some(refreshed_expires_at),
+            last_refresh: Some(Utc::now()),
+            ..stale.clone()
+        },
+        4,
+    );
+    let store = Arc::new(SequencedLoadTokenStore::new_after_first_loads(
+        stale, refreshed, 2,
+    ));
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::begin_refresh_race_completed(
         stale_expires_at,
         refreshed_expires_at,
@@ -2057,28 +2414,37 @@ async fn openai_managed_chatgpt_oauth_begin_refresh_stale_snapshot_rechecks_befo
         0,
     )
     .unwrap();
-    let stale = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(stale_expires_at),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
-    let refreshed = PersistedTokens {
-        primary_secret: Some("owner-won-before-begin-chatgpt-access".into()),
-        refresh_token: Some("rt-rotated".into()),
-        expires_at: Some(refreshed_expires_at),
-        last_refresh: Some(Utc::now()),
-        ..stale.clone()
-    };
-    let store = Arc::new(SequencedLoadTokenStore::new(stale, refreshed));
+    let stale = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("stale-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    let refreshed = bind_default_auth_lease(
+        PersistedTokens {
+            primary_secret: Some("owner-won-before-begin-chatgpt-access".into()),
+            refresh_token: Some("rt-rotated".into()),
+            expires_at: Some(refreshed_expires_at),
+            last_refresh: Some(Utc::now()),
+            ..stale.clone()
+        },
+        4,
+    );
+    let store = Arc::new(SequencedLoadTokenStore::new_after_first_loads(
+        stale, refreshed, 2,
+    ));
     let auth_lease = Arc::new(
         RecordingAuthLeaseHandle::begin_refresh_stale_snapshot_race_to_valid(
             stale_expires_at,
@@ -2136,6 +2502,7 @@ async fn openai_managed_chatgpt_oauth_no_refresh_missing_reloaded_store_marks_re
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
 
     let store = Arc::new(MissingAfterFirstLoadTokenStore::new(persisted));
@@ -2184,20 +2551,24 @@ async fn openai_managed_chatgpt_oauth_no_refresh_missing_reloaded_store_marks_re
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_no_refresh_missing_access_marks_reauth_required() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: None,
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: None,
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        7,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -2238,8 +2609,8 @@ async fn openai_managed_chatgpt_oauth_no_refresh_missing_access_marks_reauth_req
     );
     assert_eq!(
         auth_lease.phase(),
-        Some(AuthLeasePhase::ReauthRequired),
-        "AuthMachine must not remain valid after resolution proves no credential material is available"
+        None,
+        "resolver must not create AuthMachine reauth truth from an absent lease"
     );
 }
 
@@ -2264,6 +2635,7 @@ async fn openai_managed_chatgpt_oauth_no_refresh_mark_race_does_not_poison_owner
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(
@@ -2346,6 +2718,7 @@ async fn openai_managed_chatgpt_oauth_no_refresh_mismatched_store_marks_reauth_r
             .collect(),
         account_id: Some("acct-1".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(
@@ -2395,20 +2768,24 @@ async fn openai_managed_chatgpt_oauth_no_refresh_mismatched_store_marks_reauth_r
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_no_refresh_stale_access_marks_reauth_required() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("stale-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        7,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -2449,28 +2826,37 @@ async fn openai_managed_chatgpt_oauth_no_refresh_stale_access_marks_reauth_requi
     );
     assert_eq!(
         auth_lease.phase(),
-        Some(AuthLeasePhase::ReauthRequired),
-        "AuthMachine must not remain valid after a stale no-refresh resolution"
+        None,
+        "resolver must not create AuthMachine reauth truth from stale material when no lease exists"
     );
 }
 
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_invalid_grant_marks_reauth_required() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("cached-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
+    let stale_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() - ChronoDuration::minutes(5)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("cached-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(stale_expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
@@ -2479,9 +2865,7 @@ async fn openai_managed_chatgpt_oauth_invalid_grant_marks_reauth_required() {
         .await
         .unwrap();
 
-    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(
-        Utc::now() - ChronoDuration::minutes(5),
-    ));
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(stale_expires_at));
     let refresh_coord = Arc::new(FailingRefreshCoordinator {
         error: RefreshError::Refresh(
             "token endpoint error: status=400 body={\"error\":\"invalid_grant\"}".into(),
@@ -2524,6 +2908,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
         scopes: vec![],
         account_id: Some("acct-ext".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(

@@ -29,6 +29,7 @@ fn sample_oauth() -> PersistedTokens {
         scopes: vec!["openid".into(), "email".into()],
         account_id: Some("acct_123".into()),
         metadata: serde_json::json!({"plan_type": "pro", "fedramp": false}),
+        auth_lease: None,
     }
 }
 
@@ -235,6 +236,31 @@ async fn file_clear_if_current_respects_newer_cross_instance_material() {
         "a stale cleanup from another store instance must not clear newer material"
     );
     assert_eq!(first.load(&key).await.unwrap(), Some(new));
+}
+
+#[tokio::test]
+async fn file_clear_if_unreadable_removes_only_malformed_current_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileTokenStore::new(temp.path().to_path_buf());
+    let key = k("dev", "x");
+    let path = temp.path().join("dev").join("x.json");
+
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{ malformed token json").unwrap();
+
+    assert!(
+        store.clear_if_unreadable(&key).await.unwrap(),
+        "malformed token files should be explicitly clearable"
+    );
+    assert!(!path.exists());
+
+    let tokens = sample_api_key();
+    store.save(&key, &tokens).await.unwrap();
+    assert!(
+        !store.clear_if_unreadable(&key).await.unwrap(),
+        "readable token material must stay on the normal clear_if_current path"
+    );
+    assert_eq!(store.load(&key).await.unwrap(), Some(tokens));
 }
 
 #[tokio::test]

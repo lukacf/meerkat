@@ -204,6 +204,7 @@ async fn google_oauth_reauth_required_does_not_return_cached_token() {
         scopes: vec![],
         account_id: Some("google-user".into()),
         metadata: serde_json::Value::Null,
+        auth_lease: None,
     };
     store
         .save(

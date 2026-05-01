@@ -178,7 +178,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 ManagedOauthAccess::Cached { tokens, expires_at } => {
                                     (tokens, expires_at)
                                 }
-                                ManagedOauthAccess::Refresh { lifecycle } => {
+                                ManagedOauthAccess::Refresh { lifecycle, tokens } => {
                                     let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                         Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                     });
@@ -191,7 +191,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                         key.clone(),
                                     );
                                     let refreshed = runtime
-                                        .refresh_access_token_without_save()
+                                        .refresh_access_token_from_persisted_without_save(&tokens)
                                         .await
                                         .map_err(|e| {
                                             let permanent =
@@ -205,7 +205,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                             openai_oauth_refresh_error_to_provider(e, binding)
                                         })?;
                                     let completion = save_and_complete_managed_oauth_refresh(
-                                        env, binding, &key, lifecycle, &refreshed,
+                                        env, binding, &key, lifecycle, &tokens, &refreshed,
                                     )
                                     .await?;
                                     (refreshed, completion.expires_at)

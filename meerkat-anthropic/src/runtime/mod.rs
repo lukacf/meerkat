@@ -249,19 +249,23 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::VertexGoogleAuth => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "vertex"))]
                 {
+                    let handle = env.auth_lease_handle.clone().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "vertex_google_auth requires an AuthMachine lease handle for token freshness"
+                                .into(),
+                        )
+                    })?;
                     let mut authorizer =
                         meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
                             meerkat_auth_core::authorizers::GoogleAuthChain::Default,
                             env.env_lookup.clone(),
                         );
-                    if let Some(handle) = env.auth_lease_handle.clone() {
-                        authorizer = authorizer.with_auth_lease_observer(
-                            handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
-                            ),
-                        );
-                    }
+                    authorizer = authorizer.with_auth_lease_observer(
+                        handle,
+                        meerkat_core::handles::LeaseKey::from_connection_ref(
+                            &binding.connection_ref,
+                        ),
+                    );
                     let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
@@ -299,6 +303,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::FoundryAzureAd => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "foundry"))]
                 {
+                    let handle = env.auth_lease_handle.clone().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "foundry_azure_ad requires an AuthMachine lease handle for token freshness"
+                                .into(),
+                        )
+                    })?;
                     let lookup = env.env_lookup.clone();
                     let creds = meerkat_auth_core::authorizers::AzureClientCredentials::from_env(
                         move |key| lookup(key),
@@ -308,14 +318,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         "https://cognitiveservices.azure.com/.default",
                         creds,
                     );
-                    if let Some(handle) = env.auth_lease_handle.clone() {
-                        authorizer = authorizer.with_auth_lease_observer(
-                            handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
-                            ),
-                        );
-                    }
+                    authorizer = authorizer.with_auth_lease_observer(
+                        handle,
+                        meerkat_core::handles::LeaseKey::from_connection_ref(
+                            &binding.connection_ref,
+                        ),
+                    );
                     let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
@@ -366,7 +374,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                 ManagedOauthAccess::Cached { tokens, expires_at } => {
                                     (tokens, expires_at)
                                 }
-                                ManagedOauthAccess::Refresh { lifecycle } => {
+                                ManagedOauthAccess::Refresh { lifecycle, tokens } => {
                                     let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                         Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                     });
@@ -379,7 +387,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                         key.clone(),
                                     );
                                     let refreshed = runtime
-                                        .refresh_access_token_without_save()
+                                        .refresh_access_token_from_persisted_without_save(&tokens)
                                         .await
                                         .map_err(|e| {
                                             let permanent =
@@ -393,7 +401,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                             anthropic_oauth_refresh_error_to_provider(e, binding)
                                         })?;
                                     let completion = save_and_complete_managed_oauth_refresh(
-                                        env, binding, &key, lifecycle, &refreshed,
+                                        env, binding, &key, lifecycle, &tokens, &refreshed,
                                     )
                                     .await?;
                                     (refreshed, completion.expires_at)
@@ -424,9 +432,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         || anthropic_user_id.is_some()
                         || anthropic_subscription_tier.is_some()
                     {
-                        metadata.account_id = anthropic_user_id
-                            .clone()
-                            .or_else(|| anthropic_email.clone());
+                        metadata.account_id = anthropic_user_id.or(anthropic_email);
                         metadata.plan = anthropic_subscription_tier.clone();
                         metadata.provider_metadata =
                             Some(meerkat_core::ProviderAuthMetadata::Anthropic(

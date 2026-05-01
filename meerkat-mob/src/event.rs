@@ -95,6 +95,9 @@ pub(crate) enum MemberRef {
         peer_id: String,
         /// Backend-provided address string.
         address: String,
+        /// Ed25519 signing pubkey bytes for the backend peer. This is the
+        /// trust subject for comms admission; `peer_id` must derive from it.
+        pubkey: Option<[u8; 32]>,
         /// Optional bootstrap proof for re-establishing supervisor control.
         /// Not serialized on the wire (intentionally elided from `Serialize`
         /// below); kept in memory as a redacting newtype so it does not leak
@@ -136,14 +139,17 @@ impl Serialize for MemberRef {
             Self::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 session_id,
                 ..
             } => {
-                let mut map =
-                    serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
+                let mut map = serializer.serialize_map(None)?;
                 map.serialize_entry("kind", "backend_peer")?;
                 map.serialize_entry("peer_id", peer_id)?;
                 map.serialize_entry("address", address)?;
+                if let Some(pubkey) = pubkey {
+                    map.serialize_entry("pubkey", pubkey)?;
+                }
                 if let Some(session_id) = session_id {
                     map.serialize_entry("session_id", session_id)?;
                     map.serialize_entry("bridge_session_id", session_id)?;
@@ -173,6 +179,8 @@ enum MemberRefCanonical {
         peer_id: String,
         address: String,
         #[serde(default)]
+        pubkey: Option<[u8; 32]>,
+        #[serde(default)]
         bootstrap_token: Option<BridgeBootstrapToken>,
         #[serde(default)]
         session_id: Option<SessionId>,
@@ -201,12 +209,14 @@ impl<'de> Deserialize<'de> for MemberRef {
             MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 bootstrap_token,
                 session_id,
                 bridge_session_id,
             }) => Self::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 bootstrap_token,
                 session_id: bridge_session_id.or(session_id),
             },
@@ -782,9 +792,12 @@ mod tests {
 
     #[test]
     fn test_external_peer_wired_roundtrip() {
-        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+        let pubkey = [8u8; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let spec = TrustedPeerDescriptor::unsigned_with_pubkey(
             "remote-mob/worker/agent-b",
-            meerkat_core::comms::PeerId::new(),
+            peer_id.to_string(),
+            pubkey,
             "inproc://remote-mob/worker/agent-b",
         )
         .expect("valid external peer");
@@ -872,6 +885,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
+            pubkey: Some([9u8; 32]),
             bootstrap_token: None,
             session_id: Some(SessionId::from_uuid(Uuid::nil())),
         };
@@ -891,6 +905,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
+            pubkey: None,
             bootstrap_token: Some("secret-bootstrap-proof".into()),
             session_id: None,
         };

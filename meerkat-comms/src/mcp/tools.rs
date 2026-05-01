@@ -475,6 +475,13 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
         .filter_map(|p| {
+            if p.pubkey.is_zero() {
+                tracing::warn!(
+                    peer_name = %p.name,
+                    "skipping zero-pubkey trusted peer in MCP peer directory"
+                );
+                return None;
+            }
             let peer_id = p.pubkey.to_peer_id();
             let name = match PeerName::new(p.name.clone()) {
                 Ok(name) => name,

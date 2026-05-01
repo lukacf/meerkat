@@ -26,6 +26,20 @@ pub enum TrustError {
     /// duplicate [`PeerId`] is structurally impossible by design.
     #[error("duplicate peer id: {peer_id}")]
     DuplicatePeerId { peer_id: PeerId },
+    /// A trust entry carried the all-zero public key sentinel instead of real
+    /// Ed25519 key material.
+    #[error("trusted peer pubkey must be non-zero for {name}")]
+    ZeroPubkey { name: String },
+    /// A raw [`TrustEntry`] tried to bind a routing identity that does not
+    /// derive from its signing key.
+    #[error(
+        "trusted peer id {peer_id} does not match pubkey-derived id {derived_peer_id} for {name}"
+    )]
+    PeerIdPubkeyMismatch {
+        name: String,
+        peer_id: PeerId,
+        derived_peer_id: PeerId,
+    },
 }
 
 /// Error resolving a [`PeerName`] to a routing-key [`PeerId`].
@@ -64,6 +78,25 @@ pub struct TrustEntry {
     pub meta: PeerMeta,
 }
 
+impl TrustEntry {
+    fn validate(&self) -> Result<(), TrustError> {
+        if self.pubkey.is_zero() {
+            return Err(TrustError::ZeroPubkey {
+                name: self.name.as_str().to_string(),
+            });
+        }
+        let derived_peer_id = self.pubkey.to_peer_id();
+        if derived_peer_id != self.peer_id {
+            return Err(TrustError::PeerIdPubkeyMismatch {
+                name: self.name.as_str().to_string(),
+                peer_id: self.peer_id,
+                derived_peer_id,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Trust store keyed by canonical [`PeerId`].
 ///
 /// Wave-B V5 dogma: `PeerName` is **not** a routing key. Duplicate `PeerName`
@@ -92,6 +125,7 @@ impl TrustStore {
     /// Use [`upsert`](Self::upsert) if replacing an existing entry is the
     /// intended behaviour.
     pub fn insert(&mut self, entry: TrustEntry) -> Result<(), TrustError> {
+        entry.validate()?;
         if self.entries.contains_key(&entry.peer_id) {
             return Err(TrustError::DuplicatePeerId {
                 peer_id: entry.peer_id,
@@ -105,8 +139,9 @@ impl TrustStore {
     ///
     /// Unlike [`insert`](Self::insert), duplicate `PeerId` is not an error —
     /// the existing entry is returned.
-    pub fn upsert(&mut self, entry: TrustEntry) -> Option<TrustEntry> {
-        self.entries.insert(entry.peer_id, entry)
+    pub fn upsert(&mut self, entry: TrustEntry) -> Result<Option<TrustEntry>, TrustError> {
+        entry.validate()?;
+        Ok(self.entries.insert(entry.peer_id, entry))
     }
 
     /// Number of trusted peers.
@@ -184,6 +219,17 @@ pub struct TrustedPeer {
     pub meta: PeerMeta,
 }
 
+impl TrustedPeer {
+    pub fn validate(&self) -> Result<(), TrustError> {
+        if self.pubkey.is_zero() {
+            return Err(TrustError::ZeroPubkey {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 // Custom serde to serialize pubkey as "ed25519:..." string per spec
 impl Serialize for TrustedPeer {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -219,12 +265,14 @@ impl<'de> Deserialize<'de> for TrustedPeer {
         let helper = TrustedPeerHelper::deserialize(deserializer)?;
         let pubkey =
             PubKey::from_pubkey_string(&helper.pubkey).map_err(serde::de::Error::custom)?;
-        Ok(TrustedPeer {
+        let peer = TrustedPeer {
             name: helper.name,
             pubkey,
             addr: helper.addr,
             meta: helper.meta,
-        })
+        };
+        peer.validate().map_err(serde::de::Error::custom)?;
+        Ok(peer)
     }
 }
 
@@ -263,7 +311,8 @@ impl TrustedPeers {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(path)?;
-        let peers = serde_json::from_str(&content)?;
+        let peers: Self = serde_json::from_str(&content)?;
+        peers.validate()?;
         Ok(peers)
     }
 
@@ -271,13 +320,15 @@ impl TrustedPeers {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn load(path: &Path) -> Result<Self, TrustError> {
         let content = tokio::fs::read_to_string(path).await?;
-        let peers = serde_json::from_str(&content)?;
+        let peers: Self = serde_json::from_str(&content)?;
+        peers.validate()?;
         Ok(peers)
     }
 
     /// Save trusted peers to a JSON file.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&self, path: &Path) -> Result<(), TrustError> {
+        self.validate()?;
         let content = serde_json::to_string_pretty(self)?;
         tokio::fs::write(path, content).await?;
         Ok(())
@@ -285,12 +336,21 @@ impl TrustedPeers {
 
     /// Check if a public key is in the trusted list.
     pub fn is_trusted(&self, pubkey: &PubKey) -> bool {
-        self.peers.iter().any(|p| &p.pubkey == pubkey)
+        !pubkey.is_zero()
+            && self
+                .peers
+                .iter()
+                .any(|p| !p.pubkey.is_zero() && &p.pubkey == pubkey)
     }
 
     /// Get a peer by their public key.
     pub fn get_peer(&self, pubkey: &PubKey) -> Option<&TrustedPeer> {
-        self.peers.iter().find(|p| &p.pubkey == pubkey)
+        if pubkey.is_zero() {
+            return None;
+        }
+        self.peers
+            .iter()
+            .find(|p| !p.pubkey.is_zero() && &p.pubkey == pubkey)
     }
 
     /// Remove a peer by pubkey.
@@ -314,12 +374,21 @@ impl TrustedPeers {
     }
 
     /// Insert or replace a peer, keyed by `pubkey`.
-    pub fn upsert(&mut self, peer: TrustedPeer) {
+    pub fn upsert(&mut self, peer: TrustedPeer) -> Result<(), TrustError> {
+        peer.validate()?;
         if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
             *existing = peer;
         } else {
             self.peers.push(peer);
         }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), TrustError> {
+        for peer in &self.peers {
+            peer.validate()?;
+        }
+        Ok(())
     }
 
     /// Lookup helper used by tests and legacy callers.
@@ -329,7 +398,9 @@ impl TrustedPeers {
     /// [`PeerId`] at the call site. This method is retained only for
     /// display-side callers during the Wave-B cutover.
     pub fn get_by_name(&self, name: &str) -> Option<&TrustedPeer> {
-        self.peers.iter().find(|p| p.name == name)
+        self.peers
+            .iter()
+            .find(|p| !p.pubkey.is_zero() && p.name == name)
     }
 
     /// Canonical routing lookup: find the trusted peer whose derived
@@ -340,9 +411,9 @@ impl TrustedPeers {
     /// unambiguous even when multiple entries share a [`crate::peer_meta::PeerMeta`]
     /// display name.
     pub fn find_by_peer_id(&self, peer_id: &PeerId) -> Option<&TrustedPeer> {
-        self.peers
-            .iter()
-            .find(|p| crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id)
+        self.peers.iter().find(|p| {
+            !p.pubkey.is_zero() && crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id
+        })
     }
 }
 
@@ -594,10 +665,133 @@ mod tests {
             addr: "uds:///tmp/new.sock".to_string(),
             meta: crate::PeerMeta::default(),
         };
-        peers.upsert(peer);
+        peers.upsert(peer).expect("valid peer should upsert");
 
         assert_eq!(peers.peers.len(), 1);
         assert_eq!(peers.peers[0].name, "new-peer");
+    }
+
+    #[test]
+    fn test_upsert_rejects_zero_pubkey_peer() {
+        let mut peers = TrustedPeers::new();
+
+        let result = peers.upsert(TrustedPeer {
+            name: "zero-peer".to_string(),
+            pubkey: PubKey::new([0u8; 32]),
+            addr: "inproc://zero-peer".to_string(),
+            meta: crate::PeerMeta::default(),
+        });
+
+        assert!(matches!(result, Err(TrustError::ZeroPubkey { .. })));
+        assert!(
+            peers.is_empty(),
+            "zero-pubkey peer must not enter the trust list through direct upsert"
+        );
+    }
+
+    #[test]
+    fn test_direct_zero_pubkey_entry_is_not_trusted() {
+        let zero_pubkey = PubKey::new([0u8; 32]);
+        let peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "zero-peer".to_string(),
+                pubkey: zero_pubkey,
+                addr: "inproc://zero-peer".to_string(),
+                meta: crate::PeerMeta::default(),
+            }],
+        };
+
+        assert!(!peers.is_trusted(&zero_pubkey));
+        assert!(peers.get_peer(&zero_pubkey).is_none());
+        assert!(peers.get_by_name("zero-peer").is_none());
+        assert!(peers.find_by_peer_id(&zero_pubkey.to_peer_id()).is_none());
+    }
+
+    #[test]
+    fn test_trust_store_rejects_peer_id_pubkey_mismatch() {
+        let trusted_pubkey = PubKey::new([8u8; 32]);
+        let mismatched_peer_id = PubKey::new([7u8; 32]).to_peer_id();
+        let mut store = TrustStore::new();
+
+        let result = store.insert(TrustEntry {
+            peer_id: mismatched_peer_id,
+            name: PeerName::new("mismatched-peer").unwrap(),
+            pubkey: trusted_pubkey,
+            address: PeerAddress::parse("inproc://mismatched-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(TrustError::PeerIdPubkeyMismatch {
+                    peer_id,
+                    derived_peer_id,
+                    ..
+                }) if peer_id == mismatched_peer_id
+                    && derived_peer_id == trusted_pubkey.to_peer_id()
+            ),
+            "raw TrustEntry authority must reject peer ids that do not derive from the pubkey"
+        );
+        assert!(
+            store.is_empty(),
+            "mismatched raw trust entry must not enter the canonical trust store"
+        );
+
+        let result = store.upsert(TrustEntry {
+            peer_id: mismatched_peer_id,
+            name: PeerName::new("mismatched-peer").unwrap(),
+            pubkey: trusted_pubkey,
+            address: PeerAddress::parse("inproc://mismatched-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(TrustError::PeerIdPubkeyMismatch {
+                    peer_id,
+                    derived_peer_id,
+                    ..
+                }) if peer_id == mismatched_peer_id
+                    && derived_peer_id == trusted_pubkey.to_peer_id()
+            ),
+            "raw TrustEntry upsert must reject peer ids that do not derive from the pubkey"
+        );
+        assert!(
+            store.is_empty(),
+            "mismatched raw trust entry must not enter the canonical trust store through upsert"
+        );
+    }
+
+    #[test]
+    fn test_trust_store_duplicate_peer_id_uses_pubkey_derived_id() {
+        let pubkey = PubKey::new([9u8; 32]);
+        let peer_id = pubkey.to_peer_id();
+        let mut store = TrustStore::new();
+
+        store
+            .insert(TrustEntry {
+                peer_id,
+                name: PeerName::new("first-peer").unwrap(),
+                pubkey,
+                address: PeerAddress::parse("inproc://first-peer").unwrap(),
+                meta: PeerMeta::default(),
+            })
+            .expect("derived peer id should insert");
+
+        let result = store.insert(TrustEntry {
+            peer_id,
+            name: PeerName::new("duplicate-peer").unwrap(),
+            pubkey,
+            address: PeerAddress::parse("inproc://duplicate-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(result, Err(TrustError::DuplicatePeerId { peer_id: id }) if id == peer_id)
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -618,7 +812,7 @@ mod tests {
             addr: "uds:///tmp/updated.sock".to_string(),
             meta: crate::PeerMeta::default(),
         };
-        peers.upsert(updated);
+        peers.upsert(updated).expect("valid peer should upsert");
 
         assert_eq!(peers.peers.len(), 1);
         assert_eq!(peers.peers[0].name, "updated");

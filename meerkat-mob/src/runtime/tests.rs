@@ -97,6 +97,24 @@ fn install_ephemeral_peer_request_response_authority(
     );
 }
 
+fn test_trusted_peer_descriptor(name: &str, address: &str) -> TrustedPeerDescriptor {
+    let mut pubkey = [0u8; 32];
+    for (index, byte) in name.bytes().enumerate() {
+        let slot = index % pubkey.len();
+        pubkey[slot] = pubkey[slot].wrapping_add(byte).wrapping_add(index as u8);
+    }
+    if pubkey == [0u8; 32] {
+        pubkey[0] = 1;
+    }
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        name,
+        PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+        pubkey,
+        address,
+    )
+    .expect("valid non-zero test trusted peer descriptor")
+}
+
 async fn install_machine_peer_request_response_authority(
     adapter: &meerkat_runtime::MeerkatMachine,
     runtime: &Arc<meerkat_comms::CommsRuntime>,
@@ -137,6 +155,7 @@ struct MockCommsBehavior {
 struct MockCommsRuntime {
     default_peer_id: PeerId,
     default_public_key: String,
+    default_public_key_bytes: [u8; 32],
     behavior: std::sync::RwLock<MockCommsBehavior>,
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
@@ -154,10 +173,14 @@ impl MockCommsRuntime {
                 .wrapping_add(byte)
                 .rotate_left((index % 8) as u32);
         }
+        if key_bytes == [0u8; 32] {
+            key_bytes[0] = 1;
+        }
         let public_key = meerkat_comms::PubKey::new(key_bytes);
         Self {
             default_peer_id: public_key.to_peer_id(),
             default_public_key: public_key.to_pubkey_string(),
+            default_public_key_bytes: key_bytes,
             behavior: std::sync::RwLock::new(behavior),
             remove_failures_remaining: std::sync::Mutex::new(usize::from(
                 behavior.fail_remove_trust_once,
@@ -260,6 +283,18 @@ impl CoreCommsRuntime for MockCommsRuntime {
         }
     }
 
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        let behavior = self
+            .behavior
+            .read()
+            .expect("poisoned behavior lock in mock runtime");
+        if behavior.missing_public_key {
+            None
+        } else {
+            Some(self.default_public_key_bytes)
+        }
+    }
+
     async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
         if self
             .behavior
@@ -271,6 +306,8 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 "mock add_trusted_peer failure".to_string(),
             ));
         }
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+            .map_err(SendError::Validation)?;
         let mut peers = self.trusted_peers.write().await;
         peers.insert(peer.peer_id.to_string(), peer);
         Ok(())
@@ -3032,6 +3069,7 @@ struct LiveExternalPeerHarness {
     hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
+    bind_peer_id_override: Arc<RwLock<Option<String>>>,
     fail_next_authorize: Arc<AtomicBool>,
     fail_next_bind: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
@@ -3111,6 +3149,10 @@ impl LiveExternalPeerHarness {
     fn fail_next_bind(&self) {
         self.fail_next_bind.store(true, Ordering::Relaxed);
     }
+
+    async fn override_next_bind_peer_id(&self, peer_id: String) {
+        *self.bind_peer_id_override.write().await = Some(peer_id);
+    }
 }
 
 impl Drop for LiveExternalPeerHarness {
@@ -3154,6 +3196,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_received_intents = received_intents.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
+    let bind_peer_id_override: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    let responder_bind_peer_id_override = bind_peer_id_override.clone();
     let fail_next_authorize = Arc::new(AtomicBool::new(false));
     let responder_fail_next_authorize = fail_next_authorize.clone();
     let fail_next_bind = Arc::new(AtomicBool::new(false));
@@ -3287,7 +3331,16 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 }
                                                 serde_json::to_value(
                                                     super::bridge_protocol::BridgeBindResponse {
-                                                        peer_id: responder_runtime.public_key().to_peer_id().to_string(),
+                                                        peer_id: responder_bind_peer_id_override
+                                                            .write()
+                                                            .await
+                                                            .take()
+                                                            .unwrap_or_else(|| {
+                                                                responder_runtime
+                                                                    .public_key()
+                                                                    .to_peer_id()
+                                                                    .to_string()
+                                                            }),
                                                         address: format!("inproc://{peer_name}"),
                                                         capabilities:
                                                             super::bridge_protocol::BridgeCapabilities {
@@ -3641,6 +3694,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         hard_cancel_reasons,
         received_intents,
         supervisor_state,
+        bind_peer_id_override,
         fail_next_authorize,
         fail_next_bind,
         task,
@@ -5713,6 +5767,48 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
         external.delivered_input_ids().await.len(),
         1,
         "rebound peer should still receive the requested input"
+    );
+}
+
+#[tokio::test]
+async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-bind-peer-id-mismatch",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let mismatched_peer_id = PeerId::from_ed25519_pubkey(&[77u8; 32]).to_string();
+    external
+        .override_next_bind_peer_id(mismatched_peer_id)
+        .await;
+
+    let err = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect_err("bind response peer id must derive from the stored pubkey");
+
+    assert!(
+        err.to_string().contains("pubkey-derived id"),
+        "unexpected error: {err}"
+    );
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberSpawned(spawned)
+                    if spawned.agent_identity == AgentIdentity::from("w-ext")
+            )
+        }),
+        "rejected bind response must not append a member spawn event"
     );
 }
 
@@ -9338,6 +9434,7 @@ async fn test_resume_treats_normalized_external_binding_overlay_as_projection_on
                     address: old_address.clone(),
                     bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9354,6 +9451,7 @@ async fn test_resume_treats_normalized_external_binding_overlay_as_projection_on
                     address: old_address.clone(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9491,6 +9589,7 @@ async fn test_resume_treats_failed_external_binding_overlay_as_projection_only()
                     address: "tcp://test.invalid/w-ext".to_string(),
                     bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9617,6 +9716,7 @@ async fn resume_with_stale_external_binding_overlay(
                     address: "tcp://test.invalid/w-ext".to_string(),
                     bootstrap_token: None,
                     session_id: Some(old_sid),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9657,6 +9757,7 @@ async fn test_resume_ignores_stale_normalized_external_binding_overlay_for_membe
             address: "tcp://test.invalid/w-ext".to_string(),
             bootstrap_token: None,
             session_id: None,
+            pubkey: None,
         }),
     )
     .await;
@@ -9769,6 +9870,7 @@ async fn test_reconcile_spawns_member_despite_stale_overlay_only_record() {
                     address: "tcp://test.invalid/ghost".to_string(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9847,6 +9949,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     address: address.clone(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 })),
             ),
         })
@@ -9863,6 +9966,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     address,
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9940,7 +10044,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         peer_id,
         address,
         bootstrap_token,
-        pubkey: _,
+        pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -9963,6 +10067,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                     address: address.clone(),
                     bootstrap_token: bootstrap_token.clone(),
                     session_id: None,
+                    pubkey,
                 })),
             ),
         })
@@ -9979,6 +10084,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                     address,
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey,
                 }),
                 bootstrap_token: bootstrap_token.clone(),
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -10387,12 +10493,10 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .expect("spawn w-2");
     handle.stop().await.expect("stop");
 
-    let stale = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let stale = test_trusted_peer_descriptor(
         "remote-mob/worker/stale-peer",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/stale-peer",
-    )
-    .expect("valid stale peer");
+    );
     service
         .force_add_trust_from_spec(&sid_1, stale.clone())
         .await;
@@ -10435,12 +10539,10 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
     handle
         .wire(
             AgentIdentity::from("l-1"),
@@ -11545,9 +11647,12 @@ async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_publi
     );
 
     let alias_name = format!("{}/worker/right-alias", handle.mob_id());
-    let alias_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let right_pubkey = meerkat_comms::PubKey::from_pubkey_string(&right_public_key)
+        .expect("right transport public key should decode");
+    let alias_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
         alias_name.clone(),
-        right_peer_id,
+        right_peer_id.to_string(),
+        *right_pubkey.as_bytes(),
         format!("inproc://{alias_name}"),
     )
     .expect("valid alias peer spec");
@@ -11623,12 +11728,10 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -11692,12 +11795,10 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -11754,12 +11855,10 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/machine-agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/machine-agent",
-    )
-    .expect("valid external peer");
+    );
     let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
         crate::machines::mob_machine::AgentIdentity::from("l-machine"),
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
@@ -11822,12 +11921,10 @@ async fn test_unwire_external_removes_trust_and_projection() {
         .bridge_session_id()
         .expect("session-backed")
         .clone();
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -12014,12 +12111,10 @@ async fn test_resume_seeds_mob_machine_topology_from_event_projection() {
         .wire(AgentIdentity::from("l-resume"), MeerkatId::from("w-resume"))
         .await
         .expect("wire local peers");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/resume-agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/resume-agent",
-    )
-    .expect("valid external peer");
+    );
     handle
         .wire(
             AgentIdentity::from("l-resume"),
@@ -26205,12 +26300,10 @@ async fn build_mob_runtime_parity_fixture() -> MobRuntimeParityFixture {
 }
 
 fn mob_runtime_parity_external_peer() -> TrustedPeerDescriptor {
-    TrustedPeerDescriptor::test_only_unsigned_typed(
+    test_trusted_peer_descriptor(
         "mob-runtime-parity/external/agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://mob-runtime-parity/external/agent",
     )
-    .expect("valid runtime parity external peer")
 }
 
 async fn mob_runtime_parity_prepare_probe(

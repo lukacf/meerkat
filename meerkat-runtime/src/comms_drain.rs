@@ -1866,8 +1866,69 @@ mod tests {
     // last hex group so commit diffs stay readable.
     const PEER_ID_RECEIVER: &str = "00000000-0000-0000-0000-00000000aaaa"; // "receiver"
     const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
-    const PEER_ID_CURRENT_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000cccc"; // "current-supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
+
+    fn test_pubkey(seed: u8) -> meerkat_comms::PubKey {
+        assert_ne!(seed, 0, "test pubkey seed must be non-zero");
+        meerkat_comms::PubKey::new([seed; 32])
+    }
+
+    fn bridge_peer_spec_with_seed(name: &str, seed: u8, address: &str) -> BridgePeerSpec {
+        let pubkey = test_pubkey(seed);
+        BridgePeerSpec {
+            name: name.to_string(),
+            peer_id: pubkey.to_peer_id().as_str(),
+            address: address.to_string(),
+            pubkey: *pubkey.as_bytes(),
+        }
+    }
+
+    fn supervisor_bridge_spec() -> BridgePeerSpec {
+        bridge_peer_spec_with_seed(
+            "mob/__mob_supervisor__",
+            0xbb,
+            "inproc://mob/__mob_supervisor__",
+        )
+    }
+
+    fn current_supervisor_bridge_spec() -> BridgePeerSpec {
+        bridge_peer_spec_with_seed(
+            "mob/__mob_supervisor__",
+            0xcc,
+            "inproc://mob/__mob_supervisor__",
+        )
+    }
+
+    fn old_supervisor_bridge_spec() -> BridgePeerSpec {
+        bridge_peer_spec_with_seed(
+            "mob/__mob_supervisor__",
+            0xdd,
+            "inproc://mob/__mob_supervisor__",
+        )
+    }
+
+    fn trusted_supervisor_descriptor(seed: u8) -> TrustedPeerDescriptor {
+        TrustedPeerDescriptor::try_from(bridge_peer_spec_with_seed(
+            "mob/__mob_supervisor__",
+            seed,
+            "inproc://mob/__mob_supervisor__",
+        ))
+        .expect("valid supervisor spec")
+    }
+
+    fn trusted_peer_from_runtime(
+        name: &str,
+        runtime: &meerkat_comms::CommsRuntime,
+    ) -> TrustedPeerDescriptor {
+        let pubkey = runtime.public_key();
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            pubkey.to_peer_id().as_str(),
+            *pubkey.as_bytes(),
+            format!("inproc://{name}"),
+        )
+        .expect("valid non-zero trusted peer descriptor")
+    }
 
     #[derive(Default)]
     struct CountingPeerInteractionHandle {
@@ -2366,16 +2427,8 @@ mod tests {
     fn sender_matches_bridge_peer_rejects_same_display_name_with_different_peer_id() {
         let attacker_peer_id =
             PeerId::parse(PEER_ID_OLD_SUPERVISOR).expect("valid attacker peer id");
-        let peer = bridge_peer_identity(
-            &BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
-            "test",
-        )
-        .expect("valid bridge peer identity");
+        let peer = bridge_peer_identity(&supervisor_bridge_spec(), "test")
+            .expect("valid bridge peer identity");
         let sender = bridge_sender_fact_with_display(attacker_peer_id, peer.name.as_str());
 
         assert!(
@@ -2422,12 +2475,15 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-spoof").expect("runtime"),
         );
-        let spoofed_peer_id = PeerId::new();
+        let spoofed_key = meerkat_comms::Keypair::generate();
+        let spoofed_pubkey = spoofed_key.public_key();
+        let spoofed_peer_id = spoofed_pubkey.to_peer_id();
         runtime
             .add_trusted_peer(
-                TrustedPeerDescriptor::test_only_unsigned_typed(
+                TrustedPeerDescriptor::unsigned_with_pubkey(
                     "spoofed-target",
-                    spoofed_peer_id,
+                    spoofed_peer_id.as_str(),
+                    *spoofed_pubkey.as_bytes(),
                     "inproc://spoofed-target",
                 )
                 .expect("valid spoofed target"),
@@ -2904,12 +2960,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-added").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
-        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
-            "peer-added".to_string(),
-            peer.public_key().to_peer_id().as_str(),
-            "inproc://peer-added".to_string(),
-        )
-        .unwrap();
+        let peer_spec = trusted_peer_from_runtime("peer-added", &peer);
         let candidate = lifecycle_candidate(
             PeerInputClass::PeerLifecycleAdded,
             "mob.peer_added",
@@ -2943,12 +2994,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
-        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
-            "peer-removed".to_string(),
-            peer.public_key().to_peer_id().as_str(),
-            "inproc://peer-removed".to_string(),
-        )
-        .unwrap();
+        let peer_spec = trusted_peer_from_runtime("peer-removed", &peer);
         runtime.add_trusted_peer(peer_spec.clone()).await.unwrap();
 
         let unwired = lifecycle_candidate(
@@ -3019,12 +3065,7 @@ mod tests {
             "inproc://receiver",
             Some("expected-token"),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -3051,12 +3092,7 @@ mod tests {
             "inproc://receiver",
             Some("expected-token"),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -3080,12 +3116,7 @@ mod tests {
             "inproc://receiver",
             Some("expected-token"),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -3151,12 +3182,7 @@ mod tests {
             ),
             Some("expected-token"),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -3179,12 +3205,7 @@ mod tests {
             "inproc://receiver-real",
             Some("expected-token"),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -3291,13 +3312,10 @@ mod tests {
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let mut supervisor = supervisor_bridge_spec();
+        supervisor.name = String::new();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
-            supervisor: BridgePeerSpec {
-                name: "".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
+            supervisor,
             epoch: 0,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: PEER_ID_RECEIVER.to_string(),
@@ -3320,12 +3338,7 @@ mod tests {
 
     fn sample_bind_payload() -> meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
         meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
-            supervisor: BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
+            supervisor: supervisor_bridge_spec(),
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: PEER_ID_RECEIVER.to_string(),
@@ -3456,13 +3469,7 @@ mod tests {
         let current_payload = sample_bind_payload();
         let state = authorized_state_for(&current_payload);
         let mut takeover = sample_bind_payload();
-        let takeover_peer_id = PeerId::new().as_str();
-        takeover.supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: takeover_peer_id,
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        takeover.supervisor = old_supervisor_bridge_spec();
         let (cause, error) = validate_bind_request_against_state(
             &bridge_sender_fact(&takeover.supervisor.peer_id),
             &takeover,
@@ -3597,12 +3604,8 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current_supervisor = TrustedPeerDescriptor::test_only_unsigned(
-            "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id().as_str(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid supervisor spec");
+        let current_supervisor =
+            trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -3613,13 +3616,8 @@ mod tests {
             )
             .await
             .expect("initial bind must succeed");
-        let adversary_peer_id = PeerId::new().as_str();
-        let adversary_supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: adversary_peer_id.clone(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let adversary_supervisor = old_supervisor_bridge_spec();
+        let adversary_peer_id = adversary_supervisor.peer_id.clone();
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
                 supervisor: adversary_supervisor,
@@ -3680,12 +3678,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current = TrustedPeerDescriptor::test_only_unsigned_typed(
-            "mob/__mob_supervisor__",
-            PeerId::new(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid supervisor spec");
+        let current = trusted_supervisor_descriptor(0xbb);
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -3700,13 +3693,8 @@ mod tests {
         // A different supervisor tries to rebind. Under the strict gate this
         // must be rejected with typed `AlreadyBound` — the mob-side bridge
         // fallback logic branches on the typed cause, not on reason text.
-        let adversary_peer_id = PeerId::new().as_str();
-        let adversary = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: adversary_peer_id.clone(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let adversary = old_supervisor_bridge_spec();
+        let adversary_peer_id = adversary.peer_id.clone();
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
                 supervisor: adversary,
@@ -3844,12 +3832,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
                 supervisor: supervisor.clone(),
@@ -3996,12 +3979,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let authorized = TrustedPeerDescriptor::test_only_unsigned_typed(
-            "mob/__mob_supervisor__",
-            PeerId::new(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid supervisor spec");
+        let authorized = trusted_supervisor_descriptor(0xbb);
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -4021,12 +3999,7 @@ mod tests {
                 // Sender/supervisor match stored state so validation returns
                 // IdempotentAck; the invariant then fires because the runtime
                 // cannot produce its own canonical identity.
-                supervisor: BridgePeerSpec {
-                    name: authorized.name.to_string(),
-                    peer_id: authorized.peer_id.as_str(),
-                    address: authorized.address.to_string(),
-                    pubkey: [0u8; 32],
-                },
+                supervisor: BridgePeerSpec::from(authorized.clone()),
                 epoch: 7,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                 expected_peer_id: attacker_peer_id.clone(),
@@ -4101,12 +4074,7 @@ mod tests {
     #[test]
     fn validate_authorize_supervisor_rejects_initial_claim_without_bind() {
         let payload = BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
+            supervisor: supervisor_bridge_spec(),
             epoch: 0,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         };
@@ -4129,12 +4097,7 @@ mod tests {
         let current_payload = sample_bind_payload();
         let state = authorized_state_for(&current_payload);
         let payload = BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_CURRENT_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
+            supervisor: current_supervisor_bridge_spec(),
             epoch: current_payload.epoch + 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         };
@@ -4191,12 +4154,7 @@ mod tests {
             "inproc://receiver",
             Some(""),
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -4219,12 +4177,7 @@ mod tests {
             &format!("inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"),
             None,
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
@@ -4316,19 +4269,8 @@ mod tests {
     async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
         // DOGMA-19 defensive scan: the old supervisor remains authoritative
         // until the new supervisor trust publishes successfully.
-        let old_supervisor = TrustedPeerDescriptor::test_only_unsigned_typed(
-            "mob/__mob_supervisor__",
-            PeerId::new(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid old supervisor");
-        let new_supervisor_peer_id = PeerId::new().as_str();
-        let new_supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: new_supervisor_peer_id,
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let old_supervisor = trusted_supervisor_descriptor(0xbb);
+        let new_supervisor = current_supervisor_bridge_spec();
         let payload = BridgeSupervisorPayload {
             supervisor: new_supervisor.clone(),
             epoch: 2,
@@ -4391,19 +4333,8 @@ mod tests {
     async fn authorize_supervisor_rolls_back_when_old_trust_removal_fails() {
         // DOGMA-19 defensive scan: if the old trust cannot be retired after
         // the DSL rotates, restore the old binding and clean the new trust up.
-        let old_supervisor = TrustedPeerDescriptor::test_only_unsigned_typed(
-            "mob/__mob_supervisor__",
-            PeerId::new(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid old supervisor");
-        let new_supervisor_peer_id = PeerId::new().as_str();
-        let new_supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: new_supervisor_peer_id,
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
+        let old_supervisor = trusted_supervisor_descriptor(0xbb);
+        let new_supervisor = current_supervisor_bridge_spec();
         let payload = BridgeSupervisorPayload {
             supervisor: new_supervisor.clone(),
             epoch: 2,
@@ -4464,6 +4395,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_supervisor_keeps_authority_when_trust_removal_fails() {
+        let supervisor = supervisor_bridge_spec();
         let mut runtime_impl = bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
@@ -4471,17 +4403,11 @@ mod tests {
         );
         runtime_impl
             .remove_trusted_peer_errors
-            .insert(PEER_ID_SUPERVISOR.to_string(), "boom".to_string());
+            .insert(supervisor.peer_id.clone(), "boom".to_string());
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
         let payload = BridgeSupervisorPayload {
             supervisor: supervisor.clone(),
             epoch: 1,
@@ -4777,12 +4703,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = TrustedPeerDescriptor::test_only_unsigned(
-            "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id().as_str(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .unwrap();
+        let supervisor = trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         runtime
             .add_trusted_peer(supervisor.clone())
             .await

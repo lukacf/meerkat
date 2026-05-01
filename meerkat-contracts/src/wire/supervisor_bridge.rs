@@ -592,13 +592,14 @@ impl TryFrom<&BridgePeerSpec> for BridgePeerIdentity {
             PeerName::new(spec.name.clone()).map_err(|e| format!("invalid peer name: {e}"))?;
         let address = parse_peer_address(&spec.address)?;
         let pubkey = BridgePeerPubKey::new(spec.pubkey);
-        if !pubkey.is_zero() {
-            let derived = pubkey.derived_peer_id();
-            if derived != peer_id {
-                return Err(format!(
-                    "peer_id {peer_id} does not match pubkey-derived id {derived}"
-                ));
-            }
+        if pubkey.is_zero() {
+            return Err("peer pubkey must be non-zero".to_string());
+        }
+        let derived = pubkey.derived_peer_id();
+        if derived != peer_id {
+            return Err(format!(
+                "peer_id {peer_id} does not match pubkey-derived id {derived}"
+            ));
         }
         Ok(Self {
             name,
@@ -1048,6 +1049,41 @@ mod tests {
             .expect_err("supervisor bridge peer specs must fail closed on schemeless addresses");
         assert!(
             err.contains("missing transport scheme"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn bridge_peer_spec_rejects_zero_pubkey() {
+        let spec = BridgePeerSpec {
+            name: "member-a".to_string(),
+            peer_id: PeerId::from_ed25519_pubkey(&[1u8; 32]).to_string(),
+            address: "tcp://127.0.0.1:7000".to_string(),
+            pubkey: [0u8; 32],
+        };
+
+        let err = meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+            .expect_err("supervisor bridge peer specs must fail closed on zero pubkeys");
+        assert!(
+            err.contains("pubkey") && err.contains("non-zero"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn bridge_peer_spec_missing_pubkey_defaults_to_zero_and_rejects() {
+        let value = json!({
+            "name": "member-a",
+            "peer_id": PeerId::from_ed25519_pubkey(&[2u8; 32]).to_string(),
+            "address": "tcp://127.0.0.1:7000"
+        });
+        let spec: BridgePeerSpec =
+            serde_json::from_value(value).expect("legacy bridge peer spec should deserialize");
+
+        let err = meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+            .expect_err("missing pubkey must not become trusted zero-key authority");
+        assert!(
+            err.contains("pubkey") && err.contains("non-zero"),
             "unexpected error: {err}",
         );
     }

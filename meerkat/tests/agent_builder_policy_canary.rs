@@ -132,17 +132,14 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
     cfg_window.contains(r#"#[cfg(any(test, feature = "standalone-agent-builder"))]"#)
 }
 
-fn public_factory_policy_finalizer_is_internal_feature_gated(source: &str) -> bool {
+fn public_factory_policy_finalizer_requires_authority_before_builder(source: &str) -> bool {
     let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
         return true;
     };
-    let cfg_window = source[..pos]
-        .lines()
-        .rev()
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("\n");
-    cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
+    let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
+    signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
+        && signature_window.find("authority:").unwrap_or(usize::MAX)
+            < signature_window.find("builder: AgentBuilder").unwrap_or(0)
 }
 
 fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> bool {
@@ -159,19 +156,22 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("link_name")
         && !source.contains("extern \"Rust\"")
         && !source.contains("#[repr(C)]")
-        && !source.contains("#[repr(transparent)]")
         && !source.contains("NonZeroUsize")
-        && !source.contains("pub const fn")
         && !source.contains("pub unsafe fn")
         && !source.contains("pub const unsafe fn")
         && !source.contains("pub fn new")
         && !source.contains("pub fn mint")
+        && !source.contains("CANONICAL_AUTHORITY")
+        && !source.contains("AuthoritySeal")
+        && !source.contains("words: [u64; 4]")
         && source.matches("pub fn ").count() == 1
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
-        && source.contains("seal: private::AuthoritySeal")
+        && source.contains("source_type: TypeId")
+        && source.contains("inventory::collect!(AgentFactoryBuildAuthorityRegistration)")
+        && source.contains("registrations.next().is_some()")
 }
 
-fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
+fn agent_mod_reexport_is_doc_hidden(source: &str) -> bool {
     let Some(pos) = source.find("pub use builder::build_agent_after_factory_policy") else {
         return true;
     };
@@ -181,7 +181,7 @@ fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
         .take(3)
         .collect::<Vec<_>>()
         .join("\n");
-    cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
+    cfg_window.contains("#[doc(hidden)]")
 }
 
 fn bazel_target_block<'a>(source: &'a str, name: &str) -> Option<&'a str> {
@@ -250,7 +250,11 @@ meerkat-core = {{ path = "{}" }}
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("build_agent_after_factory_policy")
-            && (stderr.contains("not found") || stderr.contains("cannot find")),
+            && (stderr.contains("this function takes")
+                || stderr.contains("expected")
+                || stderr.contains("AgentFactoryBuildAuthority")
+                || stderr.contains("not found")
+                || stderr.contains("cannot find")),
         "downstream fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -476,6 +480,7 @@ edition = "2024"
 meerkat = {{ path = "{}", default-features = false }}
 meerkat-agent-build-authority = {{ path = "{}" }}
 meerkat-core = {{ path = "{}" }}
+inventory = "0.3"
 "#,
             repo_root().join("meerkat").display(),
             repo_root().join("meerkat-agent-build-authority").display(),
@@ -531,10 +536,11 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          standalone construction must be test/embedding opt-in"
     );
     assert!(
-        public_factory_policy_finalizer_is_internal_feature_gated(&builder),
-        "meerkat_core must not expose the factory-policy finalizer in its \
-         default public API; the facade factory bridge must be internal \
-         feature-gated"
+        public_factory_policy_finalizer_requires_authority_before_builder(&builder),
+        "the factory-policy finalizer must require typed facade authority before \
+         accepting an AgentBuilder; downstream callers must not be able to enter \
+         the finalizer with only public SessionMetadata, SessionBuildState, and a \
+         public turn-state handle"
     );
     assert!(
         public_factory_policy_finalizer_requires_typed_authority(&builder),
@@ -587,9 +593,9 @@ fn core_factory_authority_token_is_not_reexported() {
     let authority = repo_file("meerkat-agent-build-authority/src/lib.rs");
 
     assert!(
-        agent_mod_reexport_is_internal_feature_gated(&agent_mod),
+        agent_mod_reexport_is_doc_hidden(&agent_mod),
         "meerkat_core::agent must not re-export the factory-policy finalizer \
-         in the default public API"
+         as a normal public construction surface"
     );
     assert!(
         !agent_mod.contains("AgentFactoryBuildToken"),
@@ -698,21 +704,47 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     );
     assert!(
         !public_core.contains("\"internal-agent-factory-build\"")
-            && !public_core.contains("\"standalone-agent-builder\"")
-            && !public_core.contains("meerkat_agent_build_authority"),
-        "public //meerkat-core:meerkat_core must not expose factory-policy \
-         finalizer or standalone build features to Bazel consumers"
+            && !public_core.contains("\"standalone-agent-builder\""),
+        "public //meerkat-core:meerkat_core must not expose standalone build \
+         features or internal feature selectors to Bazel consumers"
     );
 
     let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
         .expect("meerkat-core BUILD.bazel must contain a non-public AgentFactory core variant");
     assert!(
-        internal_core.contains("\"internal-agent-factory-build\"")
-            && internal_core.contains("meerkat_agent_build_authority")
+        internal_core.contains("meerkat_agent_build_authority")
             && !internal_core.contains("//visibility:public"),
         "Bazel AgentFactory core bridge must be a non-public target carrying \
-         the internal factory-build feature and authority dependency"
+         the authority dependency"
     );
+}
+
+#[test]
+fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
+    for (build_file, target) in [
+        ("meerkat-comms/BUILD.bazel", "meerkat_comms"),
+        ("meerkat-rest/BUILD.bazel", "meerkat_rest"),
+        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
+        ("meerkat-runtime/BUILD.bazel", "meerkat_runtime"),
+    ] {
+        let Some(bazel) = try_repo_file(build_file) else {
+            // Cargo-only source layouts may not include generated Bazel files.
+            continue;
+        };
+        let library = bazel_target_block(&bazel, target)
+            .unwrap_or_else(|| panic!("{build_file} must contain {target} rust_library"));
+
+        assert!(
+            library.contains("\"//meerkat-core:meerkat_core\""),
+            "{target} must depend on the public core Bazel target, not the \
+             internal factory-build variant"
+        );
+        assert!(
+            !library.contains("meerkat_core_agent_factory_build"),
+            "{target} must not expose the internal AgentFactory core variant \
+             through an ordinary public production target"
+        );
+    }
 }
 
 #[test]

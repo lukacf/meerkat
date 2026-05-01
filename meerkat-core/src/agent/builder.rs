@@ -86,7 +86,6 @@ pub enum AgentBuildPolicyError {
 /// This is the production construction seam. It refuses to build unless the
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
-#[cfg(feature = "internal-agent-factory-build")]
 #[doc(hidden)]
 pub async fn build_agent_after_factory_policy<C, T, S>(
     authority: meerkat_agent_build_authority::AgentFactoryBuildAuthority,
@@ -276,7 +275,6 @@ impl AgentBuilder {
         self.build_inner(client, tools, store).await
     }
 
-    #[cfg_attr(not(feature = "internal-agent-factory-build"), allow(dead_code))]
     fn validate_factory_policy(&self) -> Result<(), AgentBuildPolicyError> {
         let session = self
             .session
@@ -294,14 +292,6 @@ impl AgentBuilder {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(any(
-            test,
-            feature = "standalone-agent-builder",
-            feature = "internal-agent-factory-build"
-        )),
-        allow(dead_code)
-    )]
     async fn build_inner<C, T, S>(
         self,
         client: Arc<C>,

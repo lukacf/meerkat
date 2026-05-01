@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::sync::Arc;
 
 use meerkat_core::{
@@ -6,15 +7,30 @@ use meerkat_core::{
 };
 
 #[derive(Clone, Copy)]
-#[repr(C)]
-struct AgentFactoryBuildAuthoritySeal {
-    words: [u64; 4],
+struct AgentFactoryBuildAuthorityRepr {
+    source_type: TypeId,
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct AgentFactoryBuildAuthorityRepr {
-    seal: AgentFactoryBuildAuthoritySeal,
+struct ForgedAuthoritySource;
+
+fn forged_authority_source_type() -> TypeId {
+    TypeId::of::<ForgedAuthoritySource>()
+}
+
+#[allow(unsafe_code)]
+const fn forged_authority_registration(
+    source_type: fn() -> TypeId,
+) -> meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration {
+    unsafe {
+        std::mem::transmute::<
+            fn() -> TypeId,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
+        >(source_type)
+    }
+}
+
+inventory::submit! {
+    forged_authority_registration(forged_authority_source_type)
 }
 
 fn fabricated<T>() -> T {
@@ -23,14 +39,7 @@ fn fabricated<T>() -> T {
 
 fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
     let authority = AgentFactoryBuildAuthorityRepr {
-        seal: AgentFactoryBuildAuthoritySeal {
-            words: [
-                0xf4_22_2f_48_41_5f_d0_3b,
-                0x91_7c_40_22_7a_8a_61_d9,
-                0x5c_c6_93_13_d4_89_a2_7e,
-                0xaa_d5_0e_b8_20_64_7f_11,
-            ],
-        },
+        source_type: forged_authority_source_type(),
     };
 
     unsafe {

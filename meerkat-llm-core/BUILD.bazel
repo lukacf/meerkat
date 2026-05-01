@@ -46,7 +46,7 @@ rust_library(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "meerkat-llm-core",
         normal = True,
@@ -92,7 +92,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "meerkat-llm-core",
         normal = True,

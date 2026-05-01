@@ -49,7 +49,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
@@ -99,7 +99,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
@@ -130,7 +130,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",

@@ -120,9 +120,6 @@ function targetRule(target) {
 }
 
 function localDependencyLabel(consumerKey, depPackage) {
-  if (depPackage.name === "meerkat-core") {
-    return coreAgentFactoryBuildLabel;
-  }
   return packageLabel(depPackage);
 }
 
@@ -164,7 +161,8 @@ function publicCoreCrateFeatures(key, pkg) {
 
 function coreAgentFactoryBuildFeatures(key, pkg) {
   const features = new Set(crateFeaturesFor(key, pkg));
-  features.add("internal-agent-factory-build");
+  features.delete("internal-agent-factory-build");
+  features.delete("standalone-agent-builder");
   return [...features].sort();
 }
 
@@ -704,9 +702,6 @@ for (const pkg of localPackages.values()) {
         .concat("//meerkat-schedule:meerkat_schedule_machine_schema_exports")
         .sort();
     }
-    if (isCorePublicLibrary) {
-      targetDeps = targetDeps.filter((dep) => dep !== authorityLabel);
-    }
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
     const externalNormalWithDev = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n    )`;
     const externalProc = `all_crate_deps(\n        package_name = ${q(key)},\n        proc_macro = True,\n    )`;
@@ -835,7 +830,7 @@ for (const pkg of localPackages.values()) {
           env.push(`        "WORKSPACE_ROOT": ".",`);
         }
       }
-      attrs.splice(attrs.length - 1, 0, `    data = ${listExpr(data)},`);
+      attrs.splice(attrs.length - 1, 0, `    data = ${listExpr([...new Set(data)])},`);
       if (env.length) {
         attrs.splice(attrs.length - 1, 0, `    env = {\n${env.join("\n")}\n    },`);
       }
@@ -1035,7 +1030,7 @@ for (const pkg of localPackages.values()) {
         proc_macro = True,
     ),
     deps = [
-        "${coreAgentFactoryBuildLabel}",
+        "${packageLabel(byName.get("meerkat-core"))}",
         "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",

@@ -50,7 +50,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-#[cfg(feature = "internal-agent-factory-build")]
 #[doc(hidden)]
 pub use builder::build_agent_after_factory_policy;
 pub use builder::{AgentBuildPolicyError, AgentBuilder};

@@ -2,6 +2,7 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
+use std::any::TypeId;
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
@@ -18,61 +19,43 @@ use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
+struct AgentFactoryBuildAuthoritySource;
+
+fn agent_factory_build_authority_source_type() -> TypeId {
+    TypeId::of::<AgentFactoryBuildAuthoritySource>()
+}
+
 #[allow(unsafe_code)]
-fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    #[derive(Clone, Copy)]
-    #[allow(dead_code)]
-    struct AgentFactoryBuildAuthoritySeal {
-        words: [u64; 4],
-        guard: u128,
-        checksum: u64,
-    }
-
-    #[derive(Clone, Copy)]
-    #[allow(dead_code)]
-    struct AgentFactoryBuildAuthorityRepr {
-        seal: AgentFactoryBuildAuthoritySeal,
-    }
-
-    const CANONICAL_AUTHORITY_WORDS: [u64; 4] = [
-        0xf4_22_2f_48_41_5f_d0_3b,
-        0x91_7c_40_22_7a_8a_61_d9,
-        0x5c_c6_93_13_d4_89_a2_7e,
-        0xaa_d5_0e_b8_20_64_7f_11,
-    ];
-    const CANONICAL_AUTHORITY_GUARD: u128 = 0x006d_6565_726b_6174_2d61_6765_6e74_2121;
-
-    const fn authority_checksum(words: [u64; 4], guard: u128) -> u64 {
-        let mut checksum = 0x6d6b_7421_fade_beef_u64;
-        let mut index = 0;
-        while index < words.len() {
-            checksum ^= words[index].rotate_left((index as u32 + 1) * 11);
-            checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
-            index += 1;
-        }
-        checksum ^= (guard >> 64) as u64;
-        checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
-        checksum ^ guard as u64
-    }
-
-    let authority = AgentFactoryBuildAuthorityRepr {
-        seal: AgentFactoryBuildAuthoritySeal {
-            words: CANONICAL_AUTHORITY_WORDS,
-            guard: CANONICAL_AUTHORITY_GUARD,
-            checksum: authority_checksum(CANONICAL_AUTHORITY_WORDS, CANONICAL_AUTHORITY_GUARD),
-        },
-    };
-
-    // SAFETY: this is the only production mint site for the private authority
-    // representation. The local mirror is kept in lockstep with
-    // `meerkat-agent-build-authority` and this helper is private to the facade
-    // factory module after `AgentFactory::build_agent` has composed policy
-    // metadata.
+const fn agent_factory_build_authority_registration(
+    source_type: fn() -> TypeId,
+) -> meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration {
+    // SAFETY: registration is a transparent wrapper around a source-type
+    // provider function. The provider returns a marker type private to this
+    // factory module.
     unsafe {
         std::mem::transmute::<
-            AgentFactoryBuildAuthorityRepr,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(authority)
+            fn() -> TypeId,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
+        >(source_type)
+    }
+}
+
+inventory::submit! {
+    agent_factory_build_authority_registration(agent_factory_build_authority_source_type)
+}
+
+#[allow(unsafe_code)]
+fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    let source_type = agent_factory_build_authority_source_type();
+
+    // SAFETY: `AgentFactoryBuildAuthority` is a transparent wrapper over a
+    // `TypeId`. The source type is private to this module and registered once
+    // above, so downstream code cannot mirror the accepted value through public
+    // source constants.
+    unsafe {
+        std::mem::transmute::<TypeId, meerkat_agent_build_authority::AgentFactoryBuildAuthority>(
+            source_type,
+        )
     }
 }
 

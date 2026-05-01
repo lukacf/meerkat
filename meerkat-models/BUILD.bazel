@@ -45,7 +45,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "meerkat-models",
         normal = True,
@@ -90,7 +90,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "meerkat-models",
         normal = True,
@@ -146,7 +146,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
         "//meerkat-models:meerkat_models",
     ] + all_crate_deps(
         package_name = "meerkat-models",

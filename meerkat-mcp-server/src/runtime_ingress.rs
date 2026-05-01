@@ -585,10 +585,11 @@ async fn apply_runtime_turn(
                 .map(|_| ())?;
                 context
                     .service
-                    .apply_runtime_context_appends(
+                    .apply_runtime_context_appends_with_boundary(
                         session_id,
                         run_id,
                         appends,
+                        primitive.apply_boundary(),
                         staged.contributing_input_ids.clone(),
                     )
                     .await
@@ -745,6 +746,7 @@ mod tests {
         RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
     };
     use meerkat_core::lifecycle::{InputId, RunId};
+    use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
     use meerkat_core::{MemoryConfigStore, RealmId};
     use meerkat_store::{JsonlStore, MemoryBlobStore};
 
@@ -782,6 +784,20 @@ mod tests {
             content: CoreRenderable::Text {
                 text: "done".to_string(),
             },
+        }
+    }
+
+    fn deferred_create_request(prompt: &str) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "test".to_string(),
+            prompt: prompt.to_string().into(),
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: None,
+            labels: None,
         }
     }
 
@@ -901,6 +917,57 @@ mod tests {
             error.to_string().contains("context-only")
                 && error.to_string().contains("materialization"),
             "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_context_only_rematerialization_retry_preserves_apply_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let state = Arc::new(McpRuntimeSessionState::default());
+        let session = context
+            .service
+            .create_session(deferred_create_request("seed prompt"))
+            .await
+            .expect("create deferred session");
+        let session_id = session.session_id;
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before context-only apply");
+        context
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let run_id = RunId::new();
+        let contributing_input_id = InputId::new();
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![contributing_input_id.clone()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+            build_only_overrides: None,
+        });
+
+        let output = apply_runtime_turn(&context, &state, &session_id, run_id.clone(), &primitive)
+            .await
+            .expect("context-only rematerialization retry should apply");
+
+        assert_eq!(output.receipt.run_id, run_id);
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(
+            output.receipt.contributing_input_ids,
+            vec![contributing_input_id]
+        );
+        assert!(
+            output.terminal.is_none(),
+            "context-only apply must not synthesize a turn terminal"
         );
     }
 

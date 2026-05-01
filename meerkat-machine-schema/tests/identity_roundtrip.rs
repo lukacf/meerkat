@@ -13,7 +13,7 @@ use meerkat_machine_schema::identity::{
     EntryInputId, EnumTypeId, EnumVariantId, FieldId, IdentityError, IdentityErrorKind,
     InputVariantId, MachineId, MachineInstanceId, NamedTypeBinding, NamedTypeId, PhaseId,
     ProtocolId, RouteId, RustTypeAtom, SignalVariantId, StorePrimitiveId, TransactionPlanId,
-    TransactionTriggerId, TransitionId,
+    TransactionTriggerId, TransitionId, TypePathEnumStructuralVariant,
 };
 
 macro_rules! for_each_identity {
@@ -237,6 +237,9 @@ fn rust_type_atom_type_path_enum_roundtrips() {
     let atom = RustTypeAtom::TypePathEnum {
         path: "crate::domain::MySpecialEnum".into(),
         unit_variants: vec![EnumVariantId::parse("Ready").unwrap()],
+        structural_variants: vec![TypePathEnumStructuralVariant::string_set(
+            "Waiting", "names",
+        )],
     };
     let json = serde_json::to_string(&atom).unwrap();
     let restored: RustTypeAtom = serde_json::from_str(&json).unwrap();

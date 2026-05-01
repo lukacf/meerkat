@@ -4,6 +4,20 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
 
+fn tool_filter_values_line(rendered: &str) -> &str {
+    rendered
+        .lines()
+        .find(|line| line.trim_start().starts_with("ToolFilterValues = "))
+        .map(str::trim)
+        .expect("ToolFilterValues assignment")
+}
+
+fn tool_filter_domain(names: &str) -> String {
+    format!(
+        "ToolFilterValues = {{\"All\", [tag |-> \"Allow\", names |-> {names}], [tag |-> \"Deny\", names |-> {names}]}}"
+    )
+}
+
 #[test]
 fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
     let rendered = render_machine_semantic_model(&meerkat_machine());
@@ -54,9 +68,10 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
         ),
         "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
     );
-    assert!(
-        rendered.contains("ToolFilterValues = {\"All\"}"),
-        "ToolFilterValues must come from the canonical TypePathEnum unit domain:\n{rendered}"
+    assert_eq!(
+        tool_filter_values_line(&rendered),
+        tool_filter_domain(r#"{"alpha"}"#),
+        "ToolFilterValues must cover the canonical unit plus structural Allow/Deny samples"
     );
     assert!(
         !rendered.contains("toolfilter_2"),
@@ -68,9 +83,10 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
 fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
     let rendered = render_machine_ci_cfg(&meerkat_machine(), true);
 
-    assert!(
-        rendered.contains("ToolFilterValues = {\"All\"}"),
-        "deep ToolFilterValues must come from the canonical TypePathEnum unit domain:\n{rendered}"
+    assert_eq!(
+        tool_filter_values_line(&rendered),
+        tool_filter_domain(r#"{"alpha", "beta"}"#),
+        "deep ToolFilterValues must cover the canonical unit plus structural Allow/Deny samples"
     );
     assert!(
         !rendered.contains("toolfilter_2"),

@@ -291,6 +291,7 @@ fn rust_type_atom_type_path_enum_lowers_verbatim_not_to_string() {
         RustTypeAtom::TypePathEnum {
             path: "my::special::MyEnum".into(),
             unit_variants: vec![EnumVariantId::parse("All").expect("variant slug")],
+            structural_variants: Vec::new(),
         },
     );
     schema.validate().expect("schema validates");

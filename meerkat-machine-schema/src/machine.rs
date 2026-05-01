@@ -1185,13 +1185,55 @@ impl Expr {
 fn validate_named_type_binding_payload(
     binding: &NamedTypeBinding,
 ) -> Result<(), MachineSchemaError> {
-    let variants = match &binding.rust {
-        RustTypeAtom::StringEnum { variants } => variants,
-        RustTypeAtom::TypePathEnum { unit_variants, .. } => unit_variants,
-        _ => return Ok(()),
-    };
+    match &binding.rust {
+        RustTypeAtom::StringEnum { variants } => {
+            validate_named_variant_domain(binding.name.as_str(), variants)
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => {
+            let variants = unit_variants
+                .iter()
+                .chain(structural_variants.iter().map(|variant| &variant.variant))
+                .cloned()
+                .collect::<Vec<_>>();
+            validate_named_variant_domain(binding.name.as_str(), &variants)?;
+            validate_type_path_enum_structural_variants(binding.name.as_str(), structural_variants)
+        }
+        _ => Ok(()),
+    }
+}
 
-    validate_named_variant_domain(binding.name.as_str(), variants)
+fn validate_type_path_enum_structural_variants(
+    name: &str,
+    variants: &[crate::TypePathEnumStructuralVariant],
+) -> Result<(), MachineSchemaError> {
+    for variant in variants {
+        if variant.fields.is_empty() {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!(
+                    "structural variant `{}` must define at least one payload field",
+                    variant.variant
+                ),
+            });
+        }
+        let mut fields: IndexSet<&str> = IndexSet::new();
+        for field in &variant.fields {
+            if !fields.insert(field.name.as_str()) {
+                return Err(MachineSchemaError::InvalidStringEnumBinding {
+                    name: name.to_owned(),
+                    reason: format!(
+                        "structural variant `{}` defines duplicate payload field `{}`",
+                        variant.variant, field.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_named_variant_domain(

@@ -41,7 +41,8 @@ use meerkat_machine_schema::{
     CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
     FeedbackInputRef, Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier,
     Route, RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
-    TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema, canonical_machine_schemas,
+    TransitionSchema, TriggerKind, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypeRef,
+    Update, VariantSchema, canonical_machine_schemas,
 };
 
 fn route_target_variant<'a>(
@@ -2616,7 +2617,8 @@ fn render_named_domain_assignment(
         return format!("{{{}}}", samples.join(", "));
     }
 
-    if let Some(samples) = type_path_enum_binding_samples(named_bindings, name) {
+    if let Some(samples) = type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
+    {
         return format!("{{{}}}", samples.join(", "));
     }
 
@@ -2690,7 +2692,9 @@ fn sample_values(
             if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
                 return samples;
             }
-            if let Some(samples) = type_path_enum_binding_samples(named_bindings, name) {
+            if let Some(samples) =
+                type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
+            {
                 return samples;
             }
             if sample_cardinality == 0 {
@@ -2717,6 +2721,11 @@ fn sample_values(
         TypeRef::Enum(name) => {
             let name = name.as_str();
             if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
+                return samples;
+            }
+            if let Some(samples) =
+                type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
+            {
                 return samples;
             }
             if sample_cardinality == 0 {
@@ -2842,18 +2851,47 @@ fn string_enum_binding_samples(
 fn type_path_enum_binding_samples(
     bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     name: &str,
+    sample_cardinality: usize,
 ) -> Option<Vec<String>> {
     use meerkat_machine_schema::RustTypeAtom;
 
     match bindings.get(name) {
-        Some(RustTypeAtom::TypePathEnum { unit_variants, .. }) => Some(
-            unit_variants
+        Some(RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        }) => {
+            let mut samples = unit_variants
                 .iter()
                 .map(|variant| tla_string(variant.as_str()))
-                .collect(),
-        ),
+                .collect::<Vec<_>>();
+            samples.extend(structural_variants.iter().map(|variant| {
+                render_type_path_enum_structural_sample(variant, sample_cardinality)
+            }));
+            Some(samples)
+        }
         _ => None,
     }
+}
+
+fn render_type_path_enum_structural_sample(
+    variant: &TypePathEnumStructuralVariant,
+    sample_cardinality: usize,
+) -> String {
+    let mut fields = vec![format!("tag |-> {}", tla_string(variant.variant.as_str()))];
+    fields.extend(variant.fields.iter().map(|field| {
+        let value = match field.atom {
+            TypePathEnumPayloadAtom::StringSet => {
+                let values = generic_string_samples(sample_cardinality)
+                    .into_iter()
+                    .map(tla_string)
+                    .collect::<Vec<_>>();
+                format!("{{{}}}", values.join(", "))
+            }
+        };
+        format!("{} |-> {value}", field.name)
+    }));
+    format!("[{}]", fields.join(", "))
 }
 
 fn string_enum_wire_label(name: &str, variant: &str) -> String {

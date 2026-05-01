@@ -276,6 +276,49 @@ impl<'de> Deserialize<'de> for StorePrimitiveId {
     }
 }
 
+/// Payload field shapes for structural variants in a [`RustTypeAtom::TypePathEnum`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypePathEnumPayloadAtom {
+    StringSet,
+}
+
+/// One field in a structural enum-variant sample carried by the typed owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathEnumPayloadField {
+    pub name: FieldId,
+    pub atom: TypePathEnumPayloadAtom,
+}
+
+impl TypePathEnumPayloadField {
+    /// Construct a payload field whose value is a finite set of strings.
+    pub fn string_set(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::StringSet,
+        }
+    }
+}
+
+/// Structural enum variants whose sample values are represented as tagged maps.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathEnumStructuralVariant {
+    pub variant: EnumVariantId,
+    pub fields: Vec<TypePathEnumPayloadField>,
+}
+
+impl TypePathEnumStructuralVariant {
+    /// Construct a one-field structural variant with a string-set payload.
+    pub fn string_set(variant: &str, field: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            variant: EnumVariantId::parse(variant).expect("valid enum variant slug"),
+            fields: vec![TypePathEnumPayloadField::string_set(field)],
+        }
+    }
+}
+
 /// Atomic Rust-level representation used by [`NamedTypeBinding`] to anchor a
 /// DSL-declared named type to the concrete Rust type codegen must emit.
 ///
@@ -306,6 +349,8 @@ pub enum RustTypeAtom {
     TypePathEnum {
         path: String,
         unit_variants: Vec<EnumVariantId>,
+        #[serde(default)]
+        structural_variants: Vec<TypePathEnumStructuralVariant>,
     },
 }
 
@@ -402,7 +447,27 @@ impl NamedTypeBinding {
                         EnumVariantId::parse(*variant).expect("valid enum variant slug")
                     })
                     .collect(),
+                structural_variants: Vec::new(),
             },
         }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified
+    /// structural enum type path with unit and payload-carrying variants.
+    pub fn type_path_enum_with_structural_variants(
+        name: &str,
+        rust_path: impl Into<String>,
+        unit_variants: &[&str],
+        structural_variants: Vec<TypePathEnumStructuralVariant>,
+    ) -> Self {
+        let mut binding = Self::type_path_enum(name, rust_path, unit_variants);
+        if let RustTypeAtom::TypePathEnum {
+            structural_variants: variants,
+            ..
+        } = &mut binding.rust
+        {
+            *variants = structural_variants;
+        }
+        binding
     }
 }

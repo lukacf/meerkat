@@ -39,7 +39,7 @@ pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
 
 use crate::identity::InputVariantId;
-use crate::{MachineSchema, NamedTypeBinding, RustBinding};
+use crate::{MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumStructuralVariant};
 
 pub struct MachineSchemaMetadata {
     pub named_types: Vec<NamedTypeBinding>,
@@ -526,10 +526,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("SurfaceId"),
             NamedTypeBinding::string_enum("SurfacePendingOp", &["None", "Add", "Reload"]),
             NamedTypeBinding::string_enum("SurfaceStagedOp", &["None", "Add", "Remove", "Reload"]),
-            NamedTypeBinding::type_path_enum(
+            NamedTypeBinding::type_path_enum_with_structural_variants(
                 "ToolFilter",
                 "crate::catalog::dsl::meerkat_machine::ToolFilter",
                 &["All"],
+                vec![
+                    TypePathEnumStructuralVariant::string_set("Allow", "names"),
+                    TypePathEnumStructuralVariant::string_set("Deny", "names"),
+                ],
             ),
             NamedTypeBinding::string("ToolProvenance"),
             NamedTypeBinding::string_enum(

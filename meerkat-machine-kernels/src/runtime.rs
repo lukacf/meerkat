@@ -6,13 +6,12 @@ use meerkat_machine_schema::identity::{
 };
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, RouteVariantId, TransitionSchema,
-    TriggerMatch, TypeRef, Update,
+    TriggerMatch, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypeRef, Update,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
-const TOOL_FILTER_TYPE: &str = "ToolFilter";
 const TOOL_SOURCE_KIND_TYPE: &str = "ToolSourceKind";
 const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
 
@@ -256,22 +255,6 @@ fn tool_visibility_witness_identity_len(value: &KernelValue) -> Option<usize> {
         len += 1;
     }
     Some(len)
-}
-
-fn tool_filter_payload_matches(fields: &BTreeMap<KernelValue, KernelValue>) -> bool {
-    if fields.len() != 2 {
-        return false;
-    }
-
-    let tag = fields.get(&string_key("tag"));
-    let names = fields.get(&string_key("names"));
-    matches!(
-        tag,
-        Some(KernelValue::String(tag)) if matches!(tag.as_str(), "Allow" | "Deny")
-    ) && matches!(
-        names,
-        Some(KernelValue::Set(values)) if values.iter().all(|value| matches!(value, KernelValue::String(_)))
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1623,15 +1606,54 @@ fn named_type_inner_matches(
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
         )
         | None => matches!(value, KernelValue::String(_)),
-        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        }) => {
             type_path_enum_unit_matches(name, unit_variants, value)
-                || (name.as_str() == TOOL_FILTER_TYPE
-                    && matches!(value, KernelValue::Map(fields) if tool_filter_payload_matches(fields)))
+                || type_path_enum_structural_matches(structural_variants, value)
         }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
         }
     }
+}
+
+fn type_path_enum_structural_matches(
+    structural_variants: &[TypePathEnumStructuralVariant],
+    value: &KernelValue,
+) -> bool {
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+    let Some(KernelValue::String(tag)) = fields.get(&string_key("tag")) else {
+        return false;
+    };
+    let Some(variant) = structural_variants
+        .iter()
+        .find(|variant| variant.variant.as_str() == tag)
+    else {
+        return false;
+    };
+    if fields.len() != variant.fields.len() + 1 {
+        return false;
+    }
+
+    variant.fields.iter().all(|field| {
+        let Some(value) = fields.get(&string_key(field.name.as_str())) else {
+            return false;
+        };
+        match field.atom {
+            TypePathEnumPayloadAtom::StringSet => matches!(
+                value,
+                KernelValue::Set(values)
+                    if values
+                        .iter()
+                        .all(|value| matches!(value, KernelValue::String(_)))
+            ),
+        }
+    })
 }
 
 fn type_path_enum_unit_matches(
@@ -2097,12 +2119,12 @@ mod tests {
             "ToolFilter named variants must be constrained by the typed owner"
         );
 
-        let allow_payload = KernelValue::Named {
+        let tool_filter_payload = |tag: &str| KernelValue::Named {
             type_name: named_type_id("ToolFilter"),
             value: Box::new(KernelValue::Map(BTreeMap::from([
                 (
                     KernelValue::String("tag".into()),
-                    KernelValue::String("Allow".into()),
+                    KernelValue::String(tag.to_owned()),
                 ),
                 (
                     KernelValue::String("names".into()),
@@ -2110,7 +2132,26 @@ mod tests {
                 ),
             ]))),
         };
+        let allow_payload = tool_filter_payload("Allow");
+        let deny_payload = tool_filter_payload("Deny");
         assert!(value_matches_type(&schema, &allow_payload, &tool_filter_ty));
+        assert!(value_matches_type(&schema, &deny_payload, &tool_filter_ty));
+
+        let mut no_structural_schema = schema.clone();
+        no_structural_schema
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "ToolFilter")
+            .expect("ToolFilter binding")
+            .rust = meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            path: "crate::catalog::dsl::meerkat_machine::ToolFilter".to_string(),
+            unit_variants: vec![enum_variant_id("All")],
+            structural_variants: Vec::new(),
+        };
+        assert!(
+            !value_matches_type(&no_structural_schema, &allow_payload, &tool_filter_ty),
+            "structural ToolFilter payloads must be authorized by TypePathEnum metadata"
+        );
 
         let mut alternate_schema = schema.clone();
         alternate_schema
@@ -2121,6 +2162,10 @@ mod tests {
             .rust = meerkat_machine_schema::RustTypeAtom::TypePathEnum {
             path: "crate::catalog::dsl::meerkat_machine::ToolFilter".to_string(),
             unit_variants: vec![enum_variant_id("Only")],
+            structural_variants: vec![
+                meerkat_machine_schema::TypePathEnumStructuralVariant::string_set("Allow", "names"),
+                meerkat_machine_schema::TypePathEnumStructuralVariant::string_set("Deny", "names"),
+            ],
         };
         assert!(
             !value_matches_type(

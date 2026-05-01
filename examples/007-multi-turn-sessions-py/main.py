@@ -30,7 +30,7 @@ async def main():
                 "I'm building a web scraper in Python. "
                 "Suggest three libraries I should consider. Be concise."
             ),
-            model="claude-sonnet-4-6",
+            turn_metadata={"model": "claude-sonnet-4-6"},
             system_prompt="You are a senior Python developer. Give practical, opinionated advice.",
         )
         print(f"Session: {session.id}")

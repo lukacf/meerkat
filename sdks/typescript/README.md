@@ -106,8 +106,6 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | `string \| ContentBlock[]` | **(required)** | The user prompt for the first turn. |
-| `options.model` | `string` | Server default (typically `claude-sonnet-4-5`) | LLM model name (e.g. `"gpt-5.2"`, `"gemini-3-flash-preview"`, `"claude-opus-4-6"`). |
-| `options.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
 | `options.systemPrompt` | `string` | `undefined` | Override the default system prompt. |
 | `options.maxTokens` | `number` | `undefined` | Maximum output tokens for the LLM response. |
 | `options.outputSchema` | `Record<string, unknown>` | `undefined` | JSON Schema for structured output extraction. |
@@ -117,15 +115,17 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.enableShell` | `boolean` | `false` | Enable the shell tool (requires `enableBuiltins`). |
 | `options.enableMemory` | `boolean` | `false` | Enable semantic memory (memory_search tool + compaction indexing). |
 | `options.enableMob` | `boolean` | `false` | Enable mob orchestration helpers. |
-| `options.keepAlive` | `boolean` | `false` | Run in keep-alive mode for inter-agent comms. |
-| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `keepAlive` is `true`). |
+| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `turnMetadata.keepAlive` is `true`). |
 | `options.peerMeta` | `Record<string, unknown>` | `undefined` | Metadata advertised to peer comms surfaces. |
 | `options.budgetLimits` | `Record<string, unknown>` | `undefined` | Runtime budget limits for the session. |
-| `options.providerParams` | `Record<string, unknown>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
-| `options.preloadSkills` | `SkillRef[]` | `undefined` | Structured skill keys to preload before the run. |
-| `options.skillRefs` | `SkillRef[]` | `undefined` | Canonical structured skill references for the first turn. |
+| `options.turnMetadata` | `RuntimeTurnMetadata` | `undefined` | Canonical first-turn runtime metadata carrier. |
+| `options.turnMetadata.model` | `string` | Server default (typically `claude-sonnet-4-5`) | LLM model name (e.g. `"gpt-5.2"`, `"gemini-3-flash-preview"`, `"claude-opus-4-6"`). |
+| `options.turnMetadata.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
+| `options.turnMetadata.providerParams` | `Record<string, unknown>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
+| `options.turnMetadata.skillReferences` | `SkillRef[]` | `undefined` | Canonical structured skill references for the first turn. |
+| `options.turnMetadata.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
+| `options.turnMetadata.keepAlive` | `boolean` | `false` | Run in keep-alive mode for inter-agent comms. |
 | `options.labels` | `Record<string, string>` | `undefined` | Session labels used for filtering and metadata. |
-| `options.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
 | `options.appContext` | `unknown` | `undefined` | Opaque app context passed to custom builders. |
 | `options.shellEnv` | `Record<string, string>` | `undefined` | Per-session shell environment variables. |
 | `options.externalTools` | `Record<string, unknown>[]` | `undefined` | Inline callback tool definitions for this session. |
@@ -450,7 +450,7 @@ await client.connect();
 
 // Create session with first turn.
 const session = await client.createSession("My name is Alice.", {
-  model: "claude-sonnet-4-5",
+  turnMetadata: { model: "claude-sonnet-4-5" },
 });
 
 // Follow-up turns reuse the runtime-backed session handle.

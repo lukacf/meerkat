@@ -322,7 +322,7 @@ class DeferredSession:
 
         deferred = await client.create_deferred_session(
             "Summarise this repo",
-            model="claude-sonnet-4-5",
+            turn_metadata={"model": "claude-sonnet-4-5"},
         )
         result = await deferred.start_turn("Begin analysis")
     """

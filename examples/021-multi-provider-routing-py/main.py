@@ -22,7 +22,10 @@ from meerkat import MeerkatClient
 async def query_provider(client: MeerkatClient, model: str, prompt: str) -> dict:
     """Run a prompt on a specific model and return stats."""
     try:
-        session = await client.create_session(prompt=prompt, model=model)
+        session = await client.create_session(
+            prompt=prompt,
+            turn_metadata={"model": model},
+        )
         return {
             "model": model,
             "text": session.text,
@@ -82,11 +85,13 @@ async def main():
             print("--- Anthropic with extended thinking ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
-                model="claude-sonnet-4-6",
-                provider_params={
-                    "anthropic": {
-                        "thinking": {"budget_tokens": 5000}
-                    }
+                turn_metadata={
+                    "model": "claude-sonnet-4-6",
+                    "provider": "anthropic",
+                    "provider_params": {
+                        "action": "set",
+                        "value": {"thinking_budget_tokens": 5000},
+                    },
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -97,11 +102,22 @@ async def main():
             print("--- OpenAI with reasoning effort ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache?",
-                model="gpt-5.2",
-                provider_params={
-                    "openai": {
-                        "reasoning_effort": "high"
-                    }
+                turn_metadata={
+                    "model": "gpt-5.2",
+                    "provider": "openai",
+                    "provider_params": {
+                        "action": "set",
+                        "value": {
+                            "provider_tag": {
+                                "provider": "unknown",
+                                "bag": {
+                                    "namespace": "openai",
+                                    "key": "provider_params",
+                                    "body": "{\"reasoning_effort\":\"high\"}",
+                                },
+                            },
+                        },
+                    },
                 },
             )
             print(f"  Response: {session.text[:200]}...")

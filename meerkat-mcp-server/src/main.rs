@@ -3,8 +3,8 @@
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
     RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
-    RequestTransitionError, StdioJsonWriter, SurfaceRequestExecutor, noop_request_action,
-    spawn_stdio_json_writer,
+    RequestTransitionError, StdioJsonWriter, SurfaceRequestExecutor, SurfaceRequestKind,
+    noop_request_action, spawn_stdio_json_writer,
 };
 use meerkat_contracts::ErrorCode;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -199,7 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_else(|| json!({}));
 
                         let context =
-                            match begin_mcp_tool_request(&request_executor, request_key.clone()) {
+                            match begin_mcp_tool_request(
+                                &request_executor,
+                                request_key.clone(),
+                                meerkat_mcp_server::mcp_tool_surface_request_kind(&name),
+                            ) {
                                 Ok(context) => context,
                                 Err(BeginMcpToolRequestError::AlreadyExists) => {
                                     if writer.send(duplicate_request_response(request_id)).await.is_err() {
@@ -329,10 +333,9 @@ impl From<RequestTransitionError> for BeginMcpToolRequestError {
 fn begin_mcp_tool_request(
     executor: &SurfaceRequestExecutor,
     request_key: String,
+    kind: SurfaceRequestKind,
 ) -> Result<RequestContext, BeginMcpToolRequestError> {
-    let context = executor.try_begin_request(request_key, noop_request_action())?;
-    context.authorize_cancellable_observation()?;
-    Ok(context)
+    Ok(executor.try_begin_request(request_key, kind, noop_request_action())?)
 }
 
 fn spawn_mcp_tool_completion_with_dispatch<F, Fut>(
@@ -471,8 +474,12 @@ mod tests {
         let executor = SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
         let request_id = json!(1);
         let request_key = request_key(&request_id);
-        let context = begin_mcp_tool_request(&executor, request_key.clone())
-            .expect("first tool request admission should succeed");
+        let context = begin_mcp_tool_request(
+            &executor,
+            request_key.clone(),
+            SurfaceRequestKind::CancellableObservation,
+        )
+        .expect("first tool request admission should succeed");
         let (completion_tx, mut completion_rx) = mpsc::channel(1);
 
         let handle = spawn_mcp_tool_completion_with_dispatch(
@@ -496,19 +503,20 @@ mod tests {
         assert_eq!(completion.request_key, request_key);
         assert!(
             !completion.terminal.is_publish(),
-            "raw meerkat_run tool name must not grant committed publish authority before the typed handler marks the request"
+            "raw meerkat_run tool name must not grant committed publish authority without typed admission"
         );
     }
 
     #[test]
-    fn mcp_request_context_grants_publish_authority_after_handler_marks_it() {
+    fn mcp_request_context_grants_publish_authority_from_typed_admission() {
         let executor = SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
         let context = executor
-            .try_begin_request("mcp-marked", noop_request_action())
+            .try_begin_request(
+                "mcp-marked",
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
 
         assert!(context.classify_success_terminal(()).is_publish());
         assert!(
@@ -531,9 +539,17 @@ mod tests {
     fn mcp_tool_admission_rejects_duplicate_in_flight_request_id() {
         let executor = SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
         let request_key = request_key(&json!(7));
-        let _existing = begin_mcp_tool_request(&executor, request_key.clone())
-            .expect("first tool request admission should succeed");
-        let duplicate = begin_mcp_tool_request(&executor, request_key.clone());
+        let _existing = begin_mcp_tool_request(
+            &executor,
+            request_key.clone(),
+            SurfaceRequestKind::CancellableObservation,
+        )
+        .expect("first tool request admission should succeed");
+        let duplicate = begin_mcp_tool_request(
+            &executor,
+            request_key.clone(),
+            SurfaceRequestKind::CancellableObservation,
+        );
 
         assert!(
             duplicate.is_err(),
@@ -559,11 +575,12 @@ mod tests {
         let request_id = json!(42);
         let request_key = request_key(&request_id);
         let context = request_executor
-            .try_begin_request(request_key.clone(), noop_request_action())
+            .try_begin_request(
+                request_key.clone(),
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
 
         assert_eq!(
             request_executor.cancel_request(&request_key).await,

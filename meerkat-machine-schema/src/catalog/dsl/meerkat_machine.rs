@@ -743,6 +743,28 @@ pub enum SurfaceRequestLifecyclePhase {
     Completed,
 }
 
+/// Typed semantic kind for an admitted RPC/MCP/REST surface request.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestKind {
+    #[default]
+    InlineObservation,
+    CancellableObservation,
+    SessionCreateWithTurn,
+    SessionTurn,
+}
+
 /// Machine-owned terminal policy for a tracked surface request.
 #[derive(
     Debug,
@@ -2143,9 +2165,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             RecordBoundarySeq { input_id: String, seq: u64 },
             // Surface request lifecycle inputs
-            BeginSurfaceRequest { request_id: String },
-            AuthorizeSurfaceRequestPublishOnSuccess { request_id: String },
-            AuthorizeSurfaceRequestCancellableObservation { request_id: String },
+            BeginSurfaceRequest {
+                request_id: String,
+                kind: Enum<SurfaceRequestKind>,
+            },
             ClassifySurfaceRequestTerminal {
                 request_id: String,
                 outcome: Enum<SurfaceRequestTerminalOutcome>,
@@ -7162,41 +7185,23 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition BeginSurfaceRequest {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input BeginSurfaceRequest { request_id }
+            on input BeginSurfaceRequest { request_id, kind }
             guard "not_already_tracked" { !self.surface_request_phases.contains_key(request_id) }
             update {
                 self.surface_request_phases.insert(request_id, SurfaceRequestLifecyclePhase::Pending);
-                self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::InlineObservation);
-            }
-            to Idle
-        }
-
-        transition AuthorizeSurfaceRequestPublishOnSuccess {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input AuthorizeSurfaceRequestPublishOnSuccess { request_id }
-            guard "request_tracked" { self.surface_request_phases.contains_key(request_id) }
-            guard "non_terminal" {
-                self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
-                || self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
-            }
-            update {
-                self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::PublishOnSuccess);
-            }
-            to Idle
-        }
-
-        transition AuthorizeSurfaceRequestCancellableObservation {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input AuthorizeSurfaceRequestCancellableObservation { request_id }
-            guard "request_tracked" { self.surface_request_phases.contains_key(request_id) }
-            guard "non_terminal" {
-                self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
-                || self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
-            }
-            update {
-                if self.surface_request_terminal_policy.get(request_id).get("value") != SurfaceRequestTerminalPolicy::PublishOnSuccess {
-                    self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::CancellableObservation);
-                }
+                self.surface_request_terminal_policy.insert(request_id,
+                    if kind == SurfaceRequestKind::SessionCreateWithTurn
+                        || kind == SurfaceRequestKind::SessionTurn
+                    {
+                        SurfaceRequestTerminalPolicy::PublishOnSuccess
+                    } else {
+                        if kind == SurfaceRequestKind::CancellableObservation {
+                            SurfaceRequestTerminalPolicy::CancellableObservation
+                        } else {
+                            SurfaceRequestTerminalPolicy::InlineObservation
+                        }
+                    }
+                );
             }
             to Idle
         }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{
     CancelActionInstallDecision, CancelOutcome, CancelTransition, CompleteOutcome,
-    CompleteTransition, RequestAlreadyExists, RequestTransitionError,
+    CompleteTransition, RequestAlreadyExists, RequestTransitionError, SurfaceRequestKind,
     SurfaceRequestLifecycleHandle, SurfaceRequestPhase, SurfaceRequestTerminalDisposition,
     SurfaceRequestTerminalOutcome,
 };
@@ -36,8 +36,7 @@ impl RuntimeSurfaceRequestLifecycleHandle {
         Self { dsl }
     }
 
-    #[cfg(test)]
-    fn standalone_for_tests() -> Self {
+    pub(crate) fn standalone() -> Self {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 
@@ -133,35 +132,20 @@ impl RuntimeSurfaceRequestLifecycleHandle {
 }
 
 impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
-    fn try_begin_request(&self, key: String) -> Result<(), RequestAlreadyExists> {
+    fn try_begin_request(
+        &self,
+        key: String,
+        kind: SurfaceRequestKind,
+    ) -> Result<(), RequestAlreadyExists> {
         self.dsl
             .apply_input(
-                mm_dsl::MeerkatMachineInput::BeginSurfaceRequest { request_id: key },
+                mm_dsl::MeerkatMachineInput::BeginSurfaceRequest {
+                    request_id: key,
+                    kind: kind.into(),
+                },
                 "SurfaceRequestLifecycleHandle::try_begin_request",
             )
             .map_err(|_| RequestAlreadyExists)
-    }
-
-    fn authorize_publish_on_success(&self, key: &str) -> Result<(), RequestTransitionError> {
-        self.dsl
-            .apply_input(
-                mm_dsl::MeerkatMachineInput::AuthorizeSurfaceRequestPublishOnSuccess {
-                    request_id: key.to_owned(),
-                },
-                "SurfaceRequestLifecycleHandle::authorize_publish_on_success",
-            )
-            .map_err(|_| self.map_transition_error(key))
-    }
-
-    fn authorize_cancellable_observation(&self, key: &str) -> Result<(), RequestTransitionError> {
-        self.dsl
-            .apply_input(
-                mm_dsl::MeerkatMachineInput::AuthorizeSurfaceRequestCancellableObservation {
-                    request_id: key.to_owned(),
-                },
-                "SurfaceRequestLifecycleHandle::authorize_cancellable_observation",
-            )
-            .map_err(|_| self.map_transition_error(key))
     }
 
     fn classify_terminal(
@@ -285,14 +269,14 @@ mod tests {
 
     #[test]
     fn cancel_action_install_decision_fires_after_cancelled_cancellable_request() {
-        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone_for_tests();
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
 
         handle
-            .try_begin_request("request".to_owned())
+            .try_begin_request(
+                "request".to_owned(),
+                SurfaceRequestKind::CancellableObservation,
+            )
             .expect("request begins");
-        handle
-            .authorize_cancellable_observation("request")
-            .expect("request is cancellable");
 
         let transition = handle.cancel_request("request");
         assert_eq!(transition.outcome, CancelOutcome::Cancelled);
@@ -305,10 +289,10 @@ mod tests {
 
     #[test]
     fn cancel_action_install_decision_does_not_promote_inline_request() {
-        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone_for_tests();
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
 
         handle
-            .try_begin_request("request".to_owned())
+            .try_begin_request("request".to_owned(), SurfaceRequestKind::InlineObservation)
             .expect("request begins");
 
         let transition = handle.cancel_request("request");

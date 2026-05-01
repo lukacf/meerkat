@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 pub use meerkat_core::handles::{
-    CancelOutcome, CompleteOutcome, PublishOutcome, RequestAlreadyExists, RequestTransitionError,
-    SurfaceRequestPhase, SurfaceRequestTerminalOutcome,
+    CancelActionInstallDecision, CancelOutcome, CompleteOutcome, PublishOutcome,
+    RequestAlreadyExists, RequestTransitionError, SurfaceRequestKind, SurfaceRequestPhase,
+    SurfaceRequestTerminalOutcome,
 };
 use meerkat_core::handles::{SurfaceRequestLifecycleHandle, SurfaceRequestTerminalDisposition};
 use meerkat_core::{Session, SessionId, SessionRuntimeBindings};
@@ -126,14 +127,26 @@ pub enum CancelActionInstallOutcome {
 }
 
 struct RequestEntry {
+    kind: SurfaceRequestKind,
+    lifecycle_key: String,
+    lifecycle: Mutex<Option<Arc<dyn SurfaceRequestLifecycleHandle>>>,
+    pending_cancel: AtomicBool,
     cancel_action: Mutex<RequestAsyncAction>,
     unpublished_cleanup: Mutex<Option<RequestAsyncAction>>,
     task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RequestEntry {
-    fn new(initial_cancel: RequestAsyncAction) -> Self {
+    fn new(
+        kind: SurfaceRequestKind,
+        lifecycle_key: String,
+        initial_cancel: RequestAsyncAction,
+    ) -> Self {
         Self {
+            kind,
+            lifecycle_key,
+            lifecycle: Mutex::new(None),
+            pending_cancel: AtomicBool::new(false),
             cancel_action: Mutex::new(initial_cancel),
             unpublished_cleanup: Mutex::new(None),
             task_handle: Mutex::new(None),
@@ -144,9 +157,7 @@ impl RequestEntry {
 #[derive(Clone)]
 pub struct RequestContext {
     key: String,
-    lifecycle_key: String,
     entry: Arc<RequestEntry>,
-    lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
 }
 
 impl RequestContext {
@@ -154,35 +165,69 @@ impl RequestContext {
         &self.key
     }
 
+    fn bound_lifecycle(&self) -> Option<Arc<dyn SurfaceRequestLifecycleHandle>> {
+        lock_or_recover(&self.entry.lifecycle).clone()
+    }
+
+    /// Bind this transport request to the session-owned lifecycle authority
+    /// that canonically owns its semantic request state.
+    pub async fn bind_lifecycle(
+        &self,
+        lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
+    ) -> Result<(), RequestAlreadyExists> {
+        {
+            let mut slot = lock_or_recover(&self.entry.lifecycle);
+            if slot.is_some() {
+                return Ok(());
+            }
+            lifecycle.try_begin_request(self.entry.lifecycle_key.clone(), self.entry.kind)?;
+            *slot = Some(Arc::clone(&lifecycle));
+        }
+
+        if self.entry.pending_cancel.load(Ordering::Acquire) {
+            let _ = self.cancel_bound_lifecycle(lifecycle).await;
+        }
+        Ok(())
+    }
+
+    /// Bind this request to the lifecycle handle for an already-registered
+    /// runtime session.
+    pub async fn bind_runtime_session(
+        &self,
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+    ) -> Result<(), String> {
+        let lifecycle = runtime_adapter
+            .surface_request_lifecycle_handle_for_session(session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        self.bind_lifecycle(lifecycle)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     /// Current lifecycle phase (observation seam; not for decision-making
     /// that should go through typed transitions).
     pub fn phase(&self) -> SurfaceRequestPhase {
-        self.lifecycle
-            .phase(&self.lifecycle_key)
-            .unwrap_or(SurfaceRequestPhase::Completed)
+        if let Some(lifecycle) = self.bound_lifecycle() {
+            lifecycle
+                .phase(&self.entry.lifecycle_key)
+                .unwrap_or(SurfaceRequestPhase::Completed)
+        } else if self.entry.pending_cancel.load(Ordering::Acquire) {
+            SurfaceRequestPhase::Cancelled
+        } else {
+            SurfaceRequestPhase::Pending
+        }
     }
 
     /// Narrow cancellation observation for pre-admission gates. Surfaces
     /// should prefer this over branching on arbitrary lifecycle phases.
     pub fn cancel_already_requested(&self) -> bool {
-        matches!(
-            self.lifecycle.phase(&self.lifecycle_key),
-            Some(SurfaceRequestPhase::Cancelled)
-        )
-    }
-
-    /// Ask the runtime-owned lifecycle authority to allow a successful terminal
-    /// to publish committed work for this request.
-    pub fn authorize_publish_on_success(&self) -> Result<(), RequestTransitionError> {
-        self.lifecycle
-            .authorize_publish_on_success(&self.lifecycle_key)
-    }
-
-    /// Ask the runtime-owned lifecycle authority to make this observational
-    /// request participate in cancellation races.
-    pub fn authorize_cancellable_observation(&self) -> Result<(), RequestTransitionError> {
-        self.lifecycle
-            .authorize_cancellable_observation(&self.lifecycle_key)
+        self.entry.pending_cancel.load(Ordering::Acquire)
+            || self
+                .bound_lifecycle()
+                .and_then(|lifecycle| lifecycle.phase(&self.entry.lifecycle_key))
+                .is_some_and(|phase| matches!(phase, SurfaceRequestPhase::Cancelled))
     }
 
     /// Classify a successful handler terminal through this request's
@@ -194,9 +239,6 @@ impl RequestContext {
     /// Classify a failed handler terminal through this request's runtime-owned
     /// publication authority.
     pub fn classify_failure_terminal<T>(&self, response: T) -> RequestTerminal<T> {
-        let _ = self
-            .lifecycle
-            .authorize_cancellable_observation(&self.lifecycle_key);
         self.classify_terminal(SurfaceRequestTerminalOutcome::Failed, response)
     }
 
@@ -207,10 +249,18 @@ impl RequestContext {
         outcome: SurfaceRequestTerminalOutcome,
         response: T,
     ) -> RequestTerminal<T> {
-        match self
-            .lifecycle
-            .classify_terminal(&self.lifecycle_key, outcome)
-        {
+        let disposition = self.bound_lifecycle().map_or_else(
+            || match outcome {
+                SurfaceRequestTerminalOutcome::Succeeded => {
+                    SurfaceRequestTerminalDisposition::Inline
+                }
+                SurfaceRequestTerminalOutcome::Failed => {
+                    SurfaceRequestTerminalDisposition::RespondWithoutPublish
+                }
+            },
+            |lifecycle| lifecycle.classify_terminal(&self.entry.lifecycle_key, outcome),
+        );
+        match disposition {
             SurfaceRequestTerminalDisposition::Publish => RequestTerminal {
                 kind: RequestTerminalKind::Publish(response),
             },
@@ -223,6 +273,42 @@ impl RequestContext {
         }
     }
 
+    fn cancel_action_install_decision(&self) -> CancelActionInstallDecision {
+        self.bound_lifecycle().map_or_else(
+            || {
+                if self.entry.pending_cancel.load(Ordering::Acquire) {
+                    CancelActionInstallDecision {
+                        phase: Some(SurfaceRequestPhase::Cancelled),
+                        fire_cancel_action: true,
+                    }
+                } else {
+                    CancelActionInstallDecision {
+                        phase: Some(SurfaceRequestPhase::Pending),
+                        fire_cancel_action: false,
+                    }
+                }
+            },
+            |lifecycle| lifecycle.cancel_action_install_decision(&self.entry.lifecycle_key),
+        )
+    }
+
+    async fn cancel_bound_lifecycle(
+        &self,
+        lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
+    ) -> CancelOutcome {
+        let (outcome, maybe_action) = {
+            let slot = lock_or_recover(&self.entry.cancel_action);
+            let decision = lifecycle.cancel_request(&self.entry.lifecycle_key);
+            let action = decision.fire_cancel_action.then(|| Arc::clone(&slot));
+            (decision.outcome, action)
+        };
+
+        if let Some(action) = maybe_action {
+            action().await;
+        }
+        outcome
+    }
+
     /// Install (or replace) the cancel action. If the request is already
     /// [`SurfaceRequestPhase::Cancelled`], the newly-installed action is run
     /// immediately so initialization-time races can't leave the caller with a
@@ -233,9 +319,7 @@ impl RequestContext {
         let (phase, maybe_run) = {
             let mut slot = lock_or_recover(&self.entry.cancel_action);
             *slot = Arc::clone(&action);
-            let decision = self
-                .lifecycle
-                .cancel_action_install_decision(&self.lifecycle_key);
+            let decision = self.cancel_action_install_decision();
             let run = decision.fire_cancel_action.then(|| Arc::clone(&slot));
             (
                 decision.phase.unwrap_or(SurfaceRequestPhase::Completed),
@@ -258,9 +342,7 @@ impl RequestContext {
         let (phase, maybe_run, already_cancelled) = {
             let mut slot = lock_or_recover(&self.entry.cancel_action);
             *slot = Arc::clone(&action);
-            let decision = self
-                .lifecycle
-                .cancel_action_install_decision(&self.lifecycle_key);
+            let decision = self.cancel_action_install_decision();
             let run = decision.fire_cancel_action.then(|| Arc::clone(&slot));
             (
                 decision.phase.unwrap_or(SurfaceRequestPhase::Completed),
@@ -294,21 +376,19 @@ impl RequestContext {
     }
 }
 
-/// Surface-owned request mechanics paired with a runtime-owned lifecycle
-/// authority.
+/// Surface-owned request mechanics. Semantic lifecycle authority is bound per
+/// request once the owning session is known.
 #[derive(Clone)]
 struct SurfaceRequestMechanics {
     namespace: Arc<str>,
     entries: Arc<Mutex<HashMap<String, Arc<RequestEntry>>>>,
-    lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
 }
 
 impl SurfaceRequestMechanics {
-    fn new(lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>) -> Self {
+    fn new() -> Self {
         Self {
             namespace: next_executor_namespace(),
             entries: Arc::new(Mutex::new(HashMap::new())),
-            lifecycle,
         }
     }
 
@@ -319,6 +399,7 @@ impl SurfaceRequestMechanics {
     fn try_begin_request(
         &self,
         key: impl Into<String>,
+        kind: SurfaceRequestKind,
         initial_cancel: RequestAsyncAction,
     ) -> Result<RequestContext, RequestAlreadyExists> {
         let key = key.into();
@@ -327,15 +408,9 @@ impl SurfaceRequestMechanics {
             return Err(RequestAlreadyExists);
         }
         let lifecycle_key = self.lifecycle_key(&key);
-        self.lifecycle.try_begin_request(lifecycle_key.clone())?;
-        let entry = Arc::new(RequestEntry::new(initial_cancel));
+        let entry = Arc::new(RequestEntry::new(kind, lifecycle_key, initial_cancel));
         entries.insert(key.clone(), Arc::clone(&entry));
-        Ok(RequestContext {
-            key,
-            lifecycle_key,
-            entry,
-            lifecycle: Arc::clone(&self.lifecycle),
-        })
+        Ok(RequestContext { key, entry })
     }
 
     fn attach_task(&self, key: &str, handle: JoinHandle<()>) -> bool {
@@ -350,7 +425,18 @@ impl SurfaceRequestMechanics {
     }
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
-        self.lifecycle.phase(&self.lifecycle_key(key))
+        lock_or_recover(&self.entries).get(key).map(|entry| {
+            lock_or_recover(&entry.lifecycle)
+                .clone()
+                .and_then(|lifecycle| lifecycle.phase(&entry.lifecycle_key))
+                .unwrap_or_else(|| {
+                    if entry.pending_cancel.load(Ordering::Acquire) {
+                        SurfaceRequestPhase::Cancelled
+                    } else {
+                        SurfaceRequestPhase::Pending
+                    }
+                })
+        })
     }
 
     async fn cancel_request(&self, key: &str) -> CancelOutcome {
@@ -361,24 +447,32 @@ impl SurfaceRequestMechanics {
         let Some(entry) = entry else {
             return CancelOutcome::NotFound;
         };
-        let (outcome, maybe_action) = {
-            let slot = lock_or_recover(&entry.cancel_action);
-            let decision = self.lifecycle.cancel_request(&self.lifecycle_key(key));
-            let action = decision.fire_cancel_action.then(|| Arc::clone(&slot));
-            (decision.outcome, action)
+        entry.pending_cancel.store(true, Ordering::Release);
+        let lifecycle = lock_or_recover(&entry.lifecycle).clone();
+        let Some(lifecycle) = lifecycle else {
+            return CancelOutcome::Cancelled;
         };
+        let context = RequestContext {
+            key: key.to_owned(),
+            entry,
+        };
+        context.cancel_bound_lifecycle(lifecycle).await
+    }
 
-        if let Some(action) = maybe_action {
-            action().await;
-        }
-        outcome
+    fn bound_lifecycle(
+        &self,
+        key: &str,
+    ) -> Option<(Arc<RequestEntry>, Arc<dyn SurfaceRequestLifecycleHandle>)> {
+        let entry = lock_or_recover(&self.entries).get(key).cloned()?;
+        let lifecycle = lock_or_recover(&entry.lifecycle).clone()?;
+        Some((entry, lifecycle))
     }
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-        match self
-            .lifecycle
-            .publish_and_complete(&self.lifecycle_key(key))
-        {
+        let Some((entry, lifecycle)) = self.bound_lifecycle(key) else {
+            return Err(RequestTransitionError::NotFound);
+        };
+        match lifecycle.publish_and_complete(&entry.lifecycle_key) {
             Ok(()) => {
                 lock_or_recover(&self.entries).remove(key);
                 Ok(())
@@ -388,7 +482,26 @@ impl SurfaceRequestMechanics {
     }
 
     async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
-        let transition = self.lifecycle.finish_unpublished(&self.lifecycle_key(key));
+        let maybe_bound = self.bound_lifecycle(key);
+        let transition = maybe_bound.as_ref().map_or_else(
+            || {
+                let outcome = lock_or_recover(&self.entries).get(key).map_or(
+                    CompleteOutcome::Completed,
+                    |entry| {
+                        if entry.pending_cancel.load(Ordering::Acquire) {
+                            CompleteOutcome::SupersededByCancel
+                        } else {
+                            CompleteOutcome::Completed
+                        }
+                    },
+                );
+                meerkat_core::handles::CompleteTransition {
+                    outcome,
+                    run_unpublished_cleanup: true,
+                }
+            },
+            |(entry, lifecycle)| lifecycle.finish_unpublished(&entry.lifecycle_key),
+        );
         let cleanup = if transition.run_unpublished_cleanup {
             lock_or_recover(&self.entries)
                 .remove(key)
@@ -420,7 +533,9 @@ impl SurfaceRequestMechanics {
     }
 
     fn remove(&self, key: &str) {
-        self.lifecycle.remove(&self.lifecycle_key(key));
+        if let Some((entry, lifecycle)) = self.bound_lifecycle(key) {
+            lifecycle.remove(&entry.lifecycle_key);
+        }
         lock_or_recover(&self.entries).remove(key);
     }
 }
@@ -429,17 +544,15 @@ impl SurfaceRequestMechanics {
 pub struct SurfaceRequestExecutor {
     mechanics: SurfaceRequestMechanics,
     shutdown_grace: Duration,
+    default_lifecycle: Option<Arc<dyn SurfaceRequestLifecycleHandle>>,
 }
 
 impl SurfaceRequestExecutor {
     pub fn new_with_machine(
         shutdown_grace: Duration,
-        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        _runtime_adapter: &meerkat_runtime::MeerkatMachine,
     ) -> Self {
-        Self::from_lifecycle(
-            shutdown_grace,
-            runtime_adapter.surface_request_lifecycle_handle(),
-        )
+        Self::without_default_lifecycle(shutdown_grace)
     }
 
     /// Construct an explicitly standalone executor.
@@ -449,8 +562,18 @@ impl SurfaceRequestExecutor {
     /// is retained for tests and standalone examples that intentionally do not
     /// have a shared runtime.
     pub fn new_standalone(shutdown_grace: Duration) -> Self {
-        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
-        Self::new_with_machine(shutdown_grace, &runtime_adapter)
+        Self::from_lifecycle(
+            shutdown_grace,
+            meerkat_runtime::handles::standalone_surface_request_lifecycle_handle(),
+        )
+    }
+
+    fn without_default_lifecycle(shutdown_grace: Duration) -> Self {
+        Self {
+            mechanics: SurfaceRequestMechanics::new(),
+            shutdown_grace,
+            default_lifecycle: None,
+        }
     }
 
     fn from_lifecycle(
@@ -458,8 +581,9 @@ impl SurfaceRequestExecutor {
         lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
     ) -> Self {
         Self {
-            mechanics: SurfaceRequestMechanics::new(lifecycle),
+            mechanics: SurfaceRequestMechanics::new(),
             shutdown_grace,
+            default_lifecycle: Some(lifecycle),
         }
     }
 
@@ -471,9 +595,17 @@ impl SurfaceRequestExecutor {
     pub fn try_begin_request(
         &self,
         key: impl Into<String>,
+        kind: SurfaceRequestKind,
         initial_cancel: RequestAsyncAction,
     ) -> Result<RequestContext, RequestAlreadyExists> {
-        self.mechanics.try_begin_request(key, initial_cancel)
+        let context = self
+            .mechanics
+            .try_begin_request(key, kind, initial_cancel)?;
+        if let Some(lifecycle) = self.default_lifecycle.as_ref() {
+            lifecycle.try_begin_request(context.entry.lifecycle_key.clone(), kind)?;
+            *lock_or_recover(&context.entry.lifecycle) = Some(Arc::clone(lifecycle));
+        }
+        Ok(context)
     }
 
     /// Attach the task handle for later forced abort during shutdown.
@@ -641,13 +773,27 @@ mod tests {
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
     ) -> RequestContext {
+        begin_test_request_with_kind(
+            executor,
+            key,
+            SurfaceRequestKind::InlineObservation,
+            initial_cancel,
+        )
+    }
+
+    fn begin_test_request_with_kind(
+        executor: &SurfaceRequestExecutor,
+        key: impl Into<String>,
+        kind: SurfaceRequestKind,
+        initial_cancel: RequestAsyncAction,
+    ) -> RequestContext {
         executor
-            .try_begin_request(key, initial_cancel)
+            .try_begin_request(key, kind, initial_cancel)
             .expect("test request key should be unique")
     }
 
     #[test]
-    fn request_context_defaults_to_unpublished_until_machine_marks_publish() {
+    fn request_context_delegates_terminal_classification_to_machine_kind() {
         let source = include_str!("request_execution.rs");
         for forbidden in [
             concat!("for_", "rpc_method"),
@@ -675,16 +821,19 @@ mod tests {
         let terminal = context.classify_success_terminal("raw-success");
         assert!(!terminal.is_publish());
         assert!(!terminal.is_respond_without_publish());
+        let terminal = context.classify_failure_terminal("raw-failure");
+        assert!(!terminal.is_publish());
         assert!(
-            context
-                .classify_failure_terminal("raw-failure")
-                .is_respond_without_publish(),
-            "failed terminals must use the machine-owned unpublished path even before publish authorization"
+            !terminal.is_respond_without_publish(),
+            "inline observations must stay inline because the machine owns the typed request policy"
         );
 
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
+        let context = begin_test_request_with_kind(
+            &executor,
+            "machine-policy-commit",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
         assert!(
             context
                 .classify_success_terminal("committed-success")
@@ -700,10 +849,12 @@ mod tests {
     #[test]
     fn runtime_authority_publishes_only_successful_commits() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
-        let publish_context = begin_test_request(&executor, "publish", noop_request_action());
-        publish_context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
+        let publish_context = begin_test_request_with_kind(
+            &executor,
+            "publish",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
         assert!(
             publish_context
                 .classify_success_terminal("committed")
@@ -715,11 +866,12 @@ mod tests {
                 .is_respond_without_publish()
         );
 
-        let observation_context =
-            begin_test_request(&executor, "observation", noop_request_action());
-        observation_context
-            .authorize_cancellable_observation()
-            .expect("runtime lifecycle authority should accept cancellable observation");
+        let observation_context = begin_test_request_with_kind(
+            &executor,
+            "observation",
+            SurfaceRequestKind::CancellableObservation,
+            noop_request_action(),
+        );
         assert!(
             observation_context
                 .classify_success_terminal("observation")
@@ -730,10 +882,12 @@ mod tests {
     #[test]
     fn machine_terminal_outcome_classifies_failed_payload_as_unpublished() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
-        let context = begin_test_request(&executor, "forged-terminal", noop_request_action());
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
+        let context = begin_test_request_with_kind(
+            &executor,
+            "forged-terminal",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
 
         assert!(
             context
@@ -800,11 +954,12 @@ mod tests {
             let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
 
             let publish_key = format!("{surface}-publish");
-            let publish_context =
-                begin_test_request(&executor, &publish_key, noop_request_action());
-            publish_context
-                .authorize_publish_on_success()
-                .expect("runtime lifecycle authority should accept publish authorization");
+            let publish_context = begin_test_request_with_kind(
+                &executor,
+                &publish_key,
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            );
             assert_eq!(
                 executor
                     .resolve_terminal(
@@ -821,11 +976,12 @@ mod tests {
             );
 
             let cancel_publish_key = format!("{surface}-cancel-publish");
-            let cancel_publish_context =
-                begin_test_request(&executor, &cancel_publish_key, noop_request_action());
-            cancel_publish_context
-                .authorize_publish_on_success()
-                .expect("runtime lifecycle authority should accept publish authorization");
+            let cancel_publish_context = begin_test_request_with_kind(
+                &executor,
+                &cancel_publish_key,
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            );
             assert_eq!(
                 executor.cancel_request(cancel_publish_context.key()).await,
                 CancelOutcome::Cancelled
@@ -843,11 +999,12 @@ mod tests {
             assert_eq!(executor.phase(&cancel_publish_key), None);
 
             let cancel_observation_key = format!("{surface}-cancel-observation");
-            let cancel_observation_context =
-                begin_test_request(&executor, &cancel_observation_key, noop_request_action());
-            cancel_observation_context
-                .authorize_cancellable_observation()
-                .expect("runtime lifecycle authority should accept cancellable observation");
+            let cancel_observation_context = begin_test_request_with_kind(
+                &executor,
+                &cancel_observation_key,
+                SurfaceRequestKind::CancellableObservation,
+                noop_request_action(),
+            );
             assert_eq!(
                 executor
                     .cancel_request(cancel_observation_context.key())
@@ -883,14 +1040,12 @@ mod tests {
     async fn terminal_resolution_runs_cancelled_cleanup_once() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let cleanup_count = Arc::new(AtomicUsize::new(0));
-        let context = begin_test_request(
+        let context = begin_test_request_with_kind(
             &executor,
             "cancelled-terminal-cleanup",
+            SurfaceRequestKind::SessionTurn,
             noop_request_action(),
         );
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
         context.set_unpublished_cleanup(request_action({
             let cleanup_count = Arc::clone(&cleanup_count);
             move || {
@@ -930,14 +1085,12 @@ mod tests {
     async fn disarmed_unpublished_cleanup_does_not_run_on_failed_terminal() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let cleanup_count = Arc::new(AtomicUsize::new(0));
-        let context = begin_test_request(
+        let context = begin_test_request_with_kind(
             &executor,
             "preserved-post-commit-failure",
+            SurfaceRequestKind::SessionTurn,
             noop_request_action(),
         );
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
         context.set_unpublished_cleanup(request_action({
             let cleanup_count = Arc::clone(&cleanup_count);
             move || {
@@ -967,11 +1120,13 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_machine_owns_cancel_publish_complete_transitions() {
-        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
-        let executor =
-            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let _ctx = executor
-            .try_begin_request("machine-owned", noop_request_action())
+            .try_begin_request(
+                "machine-owned",
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("first registration should succeed");
 
         assert_eq!(
@@ -996,11 +1151,8 @@ mod tests {
 
     #[tokio::test]
     async fn shared_machine_lifecycle_is_scoped_per_executor() {
-        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
-        let first =
-            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
-        let second =
-            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let first = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let second = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
 
         let _first_context = begin_test_request(&first, "same-wire-id", noop_request_action());
         let _second_context = begin_test_request(&second, "same-wire-id", noop_request_action());
@@ -1023,18 +1175,11 @@ mod tests {
     }
 
     impl SurfaceRequestLifecycleHandle for ShutdownLifecycleProbe {
-        fn try_begin_request(&self, _key: String) -> Result<(), RequestAlreadyExists> {
-            Ok(())
-        }
-
-        fn authorize_publish_on_success(&self, _key: &str) -> Result<(), RequestTransitionError> {
-            Ok(())
-        }
-
-        fn authorize_cancellable_observation(
+        fn try_begin_request(
             &self,
-            _key: &str,
-        ) -> Result<(), RequestTransitionError> {
+            _key: String,
+            _kind: SurfaceRequestKind,
+        ) -> Result<(), RequestAlreadyExists> {
             Ok(())
         }
 
@@ -1127,9 +1272,8 @@ mod tests {
             }
         }));
 
-        context
-            .lifecycle
-            .publish_and_complete(&context.lifecycle_key)
+        executor
+            .publish_and_complete(context.key())
             .expect("simulated publish winner should remove the lifecycle entry");
 
         assert_eq!(
@@ -1196,9 +1340,10 @@ mod tests {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let initial_count = Arc::new(AtomicUsize::new(0));
         let upgraded_count = Arc::new(AtomicUsize::new(0));
-        let context = begin_test_request(
+        let context = begin_test_request_with_kind(
             &executor,
             "req-3",
+            SurfaceRequestKind::CancellableObservation,
             request_action({
                 let initial_count = Arc::clone(&initial_count);
                 move || {
@@ -1209,10 +1354,6 @@ mod tests {
                 }
             }),
         );
-        context
-            .authorize_cancellable_observation()
-            .expect("runtime lifecycle authority should accept cancellable observation");
-
         context
             .install_cancel_action(request_action({
                 let upgraded_count = Arc::clone(&upgraded_count);
@@ -1237,9 +1378,17 @@ mod tests {
     async fn try_begin_request_rejects_duplicate_key() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let _ctx = executor
-            .try_begin_request("dup-key", noop_request_action())
+            .try_begin_request(
+                "dup-key",
+                SurfaceRequestKind::InlineObservation,
+                noop_request_action(),
+            )
             .expect("first registration should succeed");
-        let result = executor.try_begin_request("dup-key", noop_request_action());
+        let result = executor.try_begin_request(
+            "dup-key",
+            SurfaceRequestKind::InlineObservation,
+            noop_request_action(),
+        );
         assert!(result.is_err(), "duplicate key should be rejected");
     }
 
@@ -1278,10 +1427,18 @@ mod tests {
     async fn try_begin_request_allows_after_removal() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let _ctx = executor
-            .try_begin_request("reuse-key", noop_request_action())
+            .try_begin_request(
+                "reuse-key",
+                SurfaceRequestKind::InlineObservation,
+                noop_request_action(),
+            )
             .expect("first registration should succeed");
         let _ = executor.finish_unpublished("reuse-key").await;
-        let result = executor.try_begin_request("reuse-key", noop_request_action());
+        let result = executor.try_begin_request(
+            "reuse-key",
+            SurfaceRequestKind::InlineObservation,
+            noop_request_action(),
+        );
         assert!(
             result.is_ok(),
             "key should be available after previous request is removed"
@@ -1414,9 +1571,10 @@ mod tests {
     async fn double_cancel_is_idempotent() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let cancel_count = Arc::new(AtomicUsize::new(0));
-        let context = begin_test_request(
+        let _context = begin_test_request_with_kind(
             &executor,
             "double-cancel",
+            SurfaceRequestKind::CancellableObservation,
             request_action({
                 let cancel_count = Arc::clone(&cancel_count);
                 move || {
@@ -1427,10 +1585,6 @@ mod tests {
                 }
             }),
         );
-        context
-            .authorize_cancellable_observation()
-            .expect("runtime lifecycle authority should accept cancellable observation");
-
         let first = executor.cancel_request("double-cancel").await;
         let second = executor.cancel_request("double-cancel").await;
         assert_eq!(first, CancelOutcome::Cancelled);
@@ -1447,9 +1601,10 @@ mod tests {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let noop_count = Arc::new(AtomicUsize::new(0));
         let upgraded_count = Arc::new(AtomicUsize::new(0));
-        let context = begin_test_request(
+        let context = begin_test_request_with_kind(
             &executor,
             "install-after-cancel",
+            SurfaceRequestKind::CancellableObservation,
             request_action({
                 let noop_count = Arc::clone(&noop_count);
                 move || {
@@ -1460,10 +1615,6 @@ mod tests {
                 }
             }),
         );
-        context
-            .authorize_cancellable_observation()
-            .expect("runtime lifecycle authority should accept cancellable observation");
-
         // Cancel before the "real" action was installed; initial noop runs.
         assert_eq!(
             executor.cancel_request("install-after-cancel").await,

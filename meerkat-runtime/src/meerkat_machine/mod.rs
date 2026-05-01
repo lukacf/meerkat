@@ -752,11 +752,6 @@ pub struct MeerkatMachine {
     /// that operate through this runtime adapter.
     #[cfg(not(target_arch = "wasm32"))]
     oauth_flows: StdRwLock<Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>>,
-    /// Runtime-owned surface request lifecycle authority shared by RPC/MCP/REST
-    /// request executors. Surface crates own transport mechanics; this
-    /// MeerkatMachine-scoped authority owns request phase, cancellability, and
-    /// terminal publication semantics.
-    surface_request_lifecycle_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
     /// Canonical owner of "this session id is currently active" — replaces
     /// the deleted process-global `SESSION_IDENTITY_CLAIMS` static in the
     /// comms shell (dogma #2). Comms runtimes acquire a typed
@@ -772,13 +767,6 @@ pub struct MeerkatMachine {
 }
 
 impl MeerkatMachine {
-    fn new_surface_request_lifecycle_authority()
-    -> Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>> {
-        Arc::new(std::sync::Mutex::new(
-            dsl::MeerkatMachineAuthority::from_state(dsl::MeerkatMachineState::default()),
-        ))
-    }
-
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {
         match err {
             RuntimeDriverError::NotReady {
@@ -806,7 +794,6 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
-            surface_request_lifecycle_authority: Self::new_surface_request_lifecycle_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -834,7 +821,6 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
-            surface_request_lifecycle_authority: Self::new_surface_request_lifecycle_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -866,7 +852,6 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
-            surface_request_lifecycle_authority: Self::new_surface_request_lifecycle_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -971,15 +956,21 @@ impl MeerkatMachine {
         )
     }
 
-    /// Shared surface request lifecycle authority used by runtime-backed
-    /// request executors.
-    pub fn surface_request_lifecycle_handle(
+    /// Surface request lifecycle authority for requests owned by a registered
+    /// session.
+    pub async fn surface_request_lifecycle_handle_for_session(
         &self,
-    ) -> Arc<dyn meerkat_core::handles::SurfaceRequestLifecycleHandle> {
-        Arc::new(crate::handles::RuntimeSurfaceRequestLifecycleHandle::new(
-            Arc::new(crate::handles::HandleDslAuthority::from_shared(Arc::clone(
-                &self.surface_request_lifecycle_authority,
-            ))),
+        session_id: &SessionId,
+    ) -> Result<Arc<dyn meerkat_core::handles::SurfaceRequestLifecycleHandle>, RuntimeDriverError>
+    {
+        let authority = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        Ok(Arc::new(
+            crate::handles::RuntimeSurfaceRequestLifecycleHandle::new(Arc::new(
+                crate::handles::HandleDslAuthority::from_shared(authority),
+            )),
         ))
     }
 

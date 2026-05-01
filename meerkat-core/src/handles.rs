@@ -210,6 +210,23 @@ pub enum SurfaceRequestPhase {
     Completed,
 }
 
+/// Typed semantic kind for a tracked surface request.
+///
+/// Surfaces identify the protocol operation they admitted; the machine owns
+/// how that operation maps to terminal publication and cancellation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestKind {
+    /// Ordinary observation. Responses are emitted inline and cancellation does
+    /// not suppress them.
+    InlineObservation,
+    /// Observational work whose response can lose a cancellation race.
+    CancellableObservation,
+    /// Request creates a session and runs a turn whose success commits work.
+    SessionCreateWithTurn,
+    /// Request runs or resumes work for an existing session.
+    SessionTurn,
+}
+
 impl std::fmt::Display for SurfaceRequestPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -321,11 +338,11 @@ pub enum SurfaceRequestTerminalOutcome {
 /// state: phase, cancellability, publish authority, and terminal
 /// classification.
 pub trait SurfaceRequestLifecycleHandle: Send + Sync {
-    fn try_begin_request(&self, key: String) -> Result<(), RequestAlreadyExists>;
-
-    fn authorize_publish_on_success(&self, key: &str) -> Result<(), RequestTransitionError>;
-
-    fn authorize_cancellable_observation(&self, key: &str) -> Result<(), RequestTransitionError>;
+    fn try_begin_request(
+        &self,
+        key: String,
+        kind: SurfaceRequestKind,
+    ) -> Result<(), RequestAlreadyExists>;
 
     fn classify_terminal(
         &self,

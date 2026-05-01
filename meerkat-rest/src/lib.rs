@@ -2834,6 +2834,7 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
 fn extract_request_context(
     headers: &axum::http::HeaderMap,
     executor: &SurfaceRequestExecutor,
+    kind: meerkat::surface::SurfaceRequestKind,
 ) -> Result<Option<RequestContext>, ApiError> {
     let Some(header_value) = headers.get("x-meerkat-request-id") else {
         return Ok(None);
@@ -2847,7 +2848,7 @@ fn extract_request_context(
             "X-Meerkat-Request-Id must not be empty".into(),
         ));
     }
-    match executor.try_begin_request(request_id, noop_request_action()) {
+    match executor.try_begin_request(request_id, kind, noop_request_action()) {
         Ok(ctx) => Ok(Some(ctx)),
         Err(RequestAlreadyExists) => Err(ApiError::DuplicateRequestId {
             request_id: request_id.to_string(),
@@ -2910,7 +2911,11 @@ async fn create_session(
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let req_ctx = extract_request_context(
+        &headers,
+        &state.request_executor,
+        meerkat::surface::SurfaceRequestKind::SessionCreateWithTurn,
+    )?;
     let executor = state.request_executor.clone();
     let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
@@ -2953,17 +2958,6 @@ async fn create_session_inner(
             ApiError::RequestCancelled { details: None },
         );
     }
-    if let Some(ctx) = req_ctx.as_ref()
-        && let Err(err) = ctx.authorize_publish_on_success()
-    {
-        return failed_terminal(
-            req_ctx.as_ref(),
-            ApiError::Internal(format!(
-                "request lifecycle rejected publish authorization: {err}"
-            )),
-        );
-    }
-
     // --- Preclaim: session, runtime registration, MCP adapter ---
 
     // Pre-create a session to claim the session_id (needed for CallbackPending handling
@@ -2981,6 +2975,16 @@ async fn create_session_inner(
             return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
         }
     };
+    if let Some(ctx) = req_ctx.as_ref()
+        && let Err(err) = ctx
+            .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
+            .await
+    {
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+        );
+    }
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -3706,7 +3710,11 @@ async fn continue_session(
     headers: axum::http::HeaderMap,
     Json(req): Json<ContinueSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let req_ctx = extract_request_context(
+        &headers,
+        &state.request_executor,
+        meerkat::surface::SurfaceRequestKind::SessionTurn,
+    )?;
     let executor = state.request_executor.clone();
     let outcome = Box::pin(continue_session_inner(&state, &id, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
@@ -3760,17 +3768,6 @@ async fn continue_session_inner(
             ApiError::RequestCancelled { details: None },
         );
     }
-    if let Some(ctx) = req_ctx.as_ref()
-        && let Err(err) = ctx.authorize_publish_on_success()
-    {
-        return failed_terminal(
-            req_ctx.as_ref(),
-            ApiError::Internal(format!(
-                "request lifecycle rejected publish authorization: {err}"
-            )),
-        );
-    }
-
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forward_task = spawn_event_forwarder(
@@ -3875,6 +3872,18 @@ async fn continue_session_inner(
                 return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
             }
         };
+        if let Some(ctx) = req_ctx.as_ref()
+            && let Err(err) = ctx
+                .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
+                .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+            );
+        }
         let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
             session
                 .session_metadata()
@@ -4097,6 +4106,18 @@ async fn continue_session_inner(
         }
     } else {
         ensure_rest_session_runtime_executor(state, &session_id).await;
+        if let Some(ctx) = req_ctx.as_ref()
+            && let Err(err) = ctx
+                .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
+                .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+            );
+        }
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
@@ -7631,10 +7652,12 @@ mod tests {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
-                .try_begin_request("rest-cancel-before-publish", noop_request_action())
+                .try_begin_request(
+                    "rest-cancel-before-publish",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
                 .expect("test request key should be unique");
-            ctx.authorize_publish_on_success()
-                .expect("runtime lifecycle authority should accept publish authorization");
 
             assert_eq!(
                 executor.cancel_request(ctx.key()).await,
@@ -7661,10 +7684,12 @@ mod tests {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
-                .try_begin_request("rest-error-after-publish-auth", noop_request_action())
+                .try_begin_request(
+                    "rest-error-after-publish-auth",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
                 .expect("test request key should be unique");
-            ctx.authorize_publish_on_success()
-                .expect("runtime lifecycle authority should accept publish authorization");
             let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             ctx.set_unpublished_cleanup(request_action({
                 let cleanup_count = Arc::clone(&cleanup_count);
@@ -7703,7 +7728,11 @@ mod tests {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
-                .try_begin_request("rest-early-error", noop_request_action())
+                .try_begin_request(
+                    "rest-early-error",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
                 .expect("test request key should be unique");
             let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             ctx.set_unpublished_cleanup(request_action({
@@ -7745,13 +7774,12 @@ mod tests {
             State(state): State<RequestLifecycleProbeState>,
             headers: axum::http::HeaderMap,
         ) -> Result<Json<SessionResponse>, ApiError> {
-            let ctx = extract_request_context(&headers, &state.executor)?;
+            let ctx = extract_request_context(
+                &headers,
+                &state.executor,
+                meerkat::surface::SurfaceRequestKind::SessionTurn,
+            )?;
             if let Some(ctx) = ctx.as_ref() {
-                ctx.authorize_publish_on_success().map_err(|err| {
-                    ApiError::Internal(format!(
-                        "request lifecycle rejected publish authorization: {err}"
-                    ))
-                })?;
                 let _ = state.executor.cancel_request(ctx.key()).await;
             }
             let terminal = committed_terminal(

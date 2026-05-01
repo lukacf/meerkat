@@ -3640,6 +3640,64 @@ impl std::fmt::Display for SurfaceRequestCompleteOutcome {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SurfaceRequestKind {
+    #[default]
+    #[serde(rename = "InlineObservation")]
+    InlineObservation,
+    #[serde(rename = "CancellableObservation")]
+    CancellableObservation,
+    #[serde(rename = "SessionCreateWithTurn")]
+    SessionCreateWithTurn,
+    #[serde(rename = "SessionTurn")]
+    SessionTurn,
+}
+impl SurfaceRequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InlineObservation => "InlineObservation",
+            Self::CancellableObservation => "CancellableObservation",
+            Self::SessionCreateWithTurn => "SessionCreateWithTurn",
+            Self::SessionTurn => "SessionTurn",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InlineObservation" => Ok(Self::InlineObservation),
+            "CancellableObservation" => Ok(Self::CancellableObservation),
+            "SessionCreateWithTurn" => Ok(Self::SessionCreateWithTurn),
+            "SessionTurn" => Ok(Self::SessionTurn),
+            other => Err(format!("invalid SurfaceRequestKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SurfaceRequestLifecyclePhase {
     #[default]
     #[serde(rename = "Pending")]
@@ -4886,14 +4944,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginSurfaceRequest {
         pub request_id: String,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AuthorizeSurfaceRequestPublishOnSuccess {
-        pub request_id: String,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AuthorizeSurfaceRequestCancellableObservation {
-        pub request_id: String,
+        pub kind: SurfaceRequestKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifySurfaceRequestTerminal {
@@ -5405,10 +5456,6 @@ pub enum Input {
     AbandonInput(inputs::AbandonInput),
     RecordBoundarySeq(inputs::RecordBoundarySeq),
     BeginSurfaceRequest(inputs::BeginSurfaceRequest),
-    AuthorizeSurfaceRequestPublishOnSuccess(inputs::AuthorizeSurfaceRequestPublishOnSuccess),
-    AuthorizeSurfaceRequestCancellableObservation(
-        inputs::AuthorizeSurfaceRequestCancellableObservation,
-    ),
     ClassifySurfaceRequestTerminal(inputs::ClassifySurfaceRequestTerminal),
     DecideSurfaceRequestCancelActionInstall(inputs::DecideSurfaceRequestCancelActionInstall),
     CancelSurfaceRequest(inputs::CancelSurfaceRequest),
@@ -5612,12 +5659,6 @@ impl Input {
             Self::AbandonInput(_) => InputKind::AbandonInput,
             Self::RecordBoundarySeq(_) => InputKind::RecordBoundarySeq,
             Self::BeginSurfaceRequest(_) => InputKind::BeginSurfaceRequest,
-            Self::AuthorizeSurfaceRequestPublishOnSuccess(_) => {
-                InputKind::AuthorizeSurfaceRequestPublishOnSuccess
-            }
-            Self::AuthorizeSurfaceRequestCancellableObservation(_) => {
-                InputKind::AuthorizeSurfaceRequestCancellableObservation
-            }
             Self::ClassifySurfaceRequestTerminal(_) => InputKind::ClassifySurfaceRequestTerminal,
             Self::DecideSurfaceRequestCancelActionInstall(_) => {
                 InputKind::DecideSurfaceRequestCancelActionInstall
@@ -5830,8 +5871,6 @@ pub enum InputKind {
     AbandonInput,
     RecordBoundarySeq,
     BeginSurfaceRequest,
-    AuthorizeSurfaceRequestPublishOnSuccess,
-    AuthorizeSurfaceRequestCancellableObservation,
     ClassifySurfaceRequestTerminal,
     DecideSurfaceRequestCancelActionInstall,
     CancelSurfaceRequest,
@@ -6880,18 +6919,6 @@ pub enum TransitionId {
     BeginSurfaceRequestRunning,
     BeginSurfaceRequestRetired,
     BeginSurfaceRequestStopped,
-    AuthorizeSurfaceRequestPublishOnSuccessInitializing,
-    AuthorizeSurfaceRequestPublishOnSuccessIdle,
-    AuthorizeSurfaceRequestPublishOnSuccessAttached,
-    AuthorizeSurfaceRequestPublishOnSuccessRunning,
-    AuthorizeSurfaceRequestPublishOnSuccessRetired,
-    AuthorizeSurfaceRequestPublishOnSuccessStopped,
-    AuthorizeSurfaceRequestCancellableObservationInitializing,
-    AuthorizeSurfaceRequestCancellableObservationIdle,
-    AuthorizeSurfaceRequestCancellableObservationAttached,
-    AuthorizeSurfaceRequestCancellableObservationRunning,
-    AuthorizeSurfaceRequestCancellableObservationRetired,
-    AuthorizeSurfaceRequestCancellableObservationStopped,
     ClassifySurfaceRequestTerminalInitializing,
     ClassifySurfaceRequestTerminalIdle,
     ClassifySurfaceRequestTerminalAttached,

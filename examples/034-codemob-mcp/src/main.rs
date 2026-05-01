@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let context = match executor.try_begin_request(
                             request_key.clone(),
+                            meerkat::surface::SurfaceRequestKind::CancellableObservation,
                             noop_request_action(),
                         ) {
                             Ok(context) => context,
@@ -143,12 +144,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                         };
-                        if let Err(err) = context.authorize_cancellable_observation() {
-                            tracing::warn!(
-                                error = %err,
-                                "request lifecycle rejected cancellable observation authorization"
-                            );
-                        }
                         let writer_for_progress = writer.clone();
                         let progress_notifier: tools::ProgressNotifier = Arc::new(move |token, progress, total, message| {
                             let writer = writer_for_progress.clone();

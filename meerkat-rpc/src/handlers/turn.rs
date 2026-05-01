@@ -169,36 +169,6 @@ pub async fn handle_start(
         Err(resp) => return resp,
     };
 
-    if let Some(context) = request_context.as_ref() {
-        if let Err(err) = context.authorize_publish_on_success() {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("request lifecycle rejected publish authorization: {err}"),
-            );
-        }
-        let runtime_adapter = Arc::clone(runtime_adapter);
-        let session_id = session_id.clone();
-        let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = Arc::clone(&runtime_adapter);
-                let session_id = session_id.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
-                        .await;
-                }
-            }))
-            .await;
-        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            return RpcResponse::error(
-                id,
-                error::REQUEST_CANCELLED,
-                "request cancelled before start",
-            );
-        }
-    }
-
     // Set up MCP lifecycle event forwarding. Agent execution events flow
     // through SessionRuntimeExecutor's own channel, not this one.
     let (mcp_event_tx, mut mcp_event_rx) =
@@ -267,6 +237,39 @@ pub async fn handle_start(
             runtime_adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
                 .await;
+        }
+    }
+
+    if let Some(context) = request_context.as_ref() {
+        if let Err(err) = context
+            .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
+            .await
+        {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("request lifecycle rejected session binding: {err}"),
+            );
+        }
+        let runtime_adapter = Arc::clone(runtime_adapter);
+        let session_id = session_id.clone();
+        let install = context
+            .install_cancel_action_or_cancelled(request_action(move || {
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                let session_id = session_id.clone();
+                async move {
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
+                        .await;
+                }
+            }))
+            .await;
+        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
         }
     }
 

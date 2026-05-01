@@ -2512,6 +2512,8 @@ mod tests {
             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
             tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
             turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
+            surface_request_lifecycle:
+                meerkat_runtime::handles::standalone_surface_request_lifecycle_handle(),
             comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
             external_tool_surface: Arc::new(
                 meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),

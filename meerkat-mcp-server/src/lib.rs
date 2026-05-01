@@ -1419,6 +1419,14 @@ pub fn tools_list() -> Vec<Value> {
     tools
 }
 
+pub fn mcp_tool_surface_request_kind(name: &str) -> meerkat::surface::SurfaceRequestKind {
+    match name {
+        "meerkat_run" => meerkat::surface::SurfaceRequestKind::SessionCreateWithTurn,
+        "meerkat_resume" => meerkat::surface::SurfaceRequestKind::SessionTurn,
+        _ => meerkat::surface::SurfaceRequestKind::CancellableObservation,
+    }
+}
+
 /// Handle a tools/call request
 pub async fn handle_tools_call(
     state: &MeerkatMcpState,
@@ -2718,11 +2726,14 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
-        context.authorize_publish_on_success().map_err(|err| {
-            ToolCallError::internal(format!(
-                "request lifecycle rejected publish authorization: {err}"
-            ))
-        })?;
+        context
+            .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
+            .await
+            .map_err(|err| {
+                ToolCallError::internal(format!(
+                    "request lifecycle rejected session binding: {err}"
+                ))
+            })?;
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -2916,30 +2927,6 @@ async fn handle_meerkat_resume(
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
-    if let Some(context) = request_context.as_ref() {
-        context.authorize_publish_on_success().map_err(|err| {
-            ToolCallError::internal(format!(
-                "request lifecycle rejected publish authorization: {err}"
-            ))
-        })?;
-        let runtime_adapter = state.runtime_adapter.clone();
-        let session_id_for_cancel = session_id.clone();
-        let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = runtime_adapter.clone();
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
-                        .await;
-                }
-            }))
-            .await;
-        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            return Err(request_cancelled_tool_error());
-        }
-    }
-
     let mut session = state
         .service
         .load_authoritative_session(&session_id)
@@ -3027,6 +3014,33 @@ async fn handle_meerkat_resume(
                 "failed to install prepared interrupt handle for session {session_id}: {e}"
             ))
         })?;
+
+    if let Some(context) = request_context.as_ref() {
+        context
+            .bind_lifecycle(Arc::clone(&resume_bindings.surface_request_lifecycle))
+            .await
+            .map_err(|err| {
+                ToolCallError::internal(format!(
+                    "request lifecycle rejected session binding: {err}"
+                ))
+            })?;
+        let runtime_adapter = state.runtime_adapter.clone();
+        let session_id_for_cancel = session_id.clone();
+        let install = context
+            .install_cancel_action_or_cancelled(request_action(move || {
+                let runtime_adapter = runtime_adapter.clone();
+                let session_id = session_id_for_cancel.clone();
+                async move {
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
+                        .await;
+                }
+            }))
+            .await;
+        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+            return Err(request_cancelled_tool_error());
+        }
+    }
 
     // Build composed external tools:
     // - callback tools supplied by the MCP client
@@ -3453,7 +3467,11 @@ mod tests {
         use meerkat::surface::CancelOutcome;
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
-            .try_begin_request(key.to_string(), noop_request_action())
+            .try_begin_request(
+                key.to_string(),
+                meerkat::surface::SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
         let outcome = executor.cancel_request(key).await;
         assert_eq!(
@@ -4350,7 +4368,11 @@ mod tests {
 
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
-            .try_begin_request("req-cancel-before-admission", noop_request_action())
+            .try_begin_request(
+                "req-cancel-before-admission",
+                meerkat::surface::SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
         let install = context
             .install_cancel_action_or_cancelled(noop_request_action())

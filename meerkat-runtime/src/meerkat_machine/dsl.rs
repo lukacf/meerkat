@@ -1261,6 +1261,31 @@ impl From<SurfaceRequestLifecyclePhase> for meerkat_core::handles::SurfaceReques
     }
 }
 
+/// Typed semantic kind for an admitted RPC/MCP/REST surface request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestKind {
+    #[default]
+    InlineObservation,
+    CancellableObservation,
+    SessionCreateWithTurn,
+    SessionTurn,
+}
+
+impl From<meerkat_core::handles::SurfaceRequestKind> for SurfaceRequestKind {
+    fn from(kind: meerkat_core::handles::SurfaceRequestKind) -> Self {
+        match kind {
+            meerkat_core::handles::SurfaceRequestKind::InlineObservation => Self::InlineObservation,
+            meerkat_core::handles::SurfaceRequestKind::CancellableObservation => {
+                Self::CancellableObservation
+            }
+            meerkat_core::handles::SurfaceRequestKind::SessionCreateWithTurn => {
+                Self::SessionCreateWithTurn
+            }
+            meerkat_core::handles::SurfaceRequestKind::SessionTurn => Self::SessionTurn,
+        }
+    }
+}
+
 /// Machine-owned terminal policy for a tracked surface request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SurfaceRequestTerminalPolicy {

@@ -250,9 +250,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
 - `RecordBoundarySeq`(input_id: String, seq: u64)
-- `BeginSurfaceRequest`(request_id: String)
-- `AuthorizeSurfaceRequestPublishOnSuccess`(request_id: String)
-- `AuthorizeSurfaceRequestCancellableObservation`(request_id: String)
+- `BeginSurfaceRequest`(request_id: String, kind: SurfaceRequestKind)
 - `ClassifySurfaceRequestTerminal`(request_id: String, outcome: SurfaceRequestTerminalOutcome)
 - `DecideSurfaceRequestCancelActionInstall`(request_id: String)
 - `CancelSurfaceRequest`(request_id: String)
@@ -3508,140 +3506,44 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginSurfaceRequestInitializing`
 - From: `Initializing`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
 - To: `Initializing`
 
 ### `BeginSurfaceRequestIdle`
 - From: `Idle`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
 - To: `Idle`
 
 ### `BeginSurfaceRequestAttached`
 - From: `Attached`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
 - To: `Attached`
 
 ### `BeginSurfaceRequestRunning`
 - From: `Running`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
 - To: `Running`
 
 ### `BeginSurfaceRequestRetired`
 - From: `Retired`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
 - To: `Retired`
 
 ### `BeginSurfaceRequestStopped`
 - From: `Stopped`
-- On: `BeginSurfaceRequest`(request_id)
+- On: `BeginSurfaceRequest`(request_id, kind)
 - Guards:
   - `not_already_tracked`
-- To: `Stopped`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessInitializing`
-- From: `Initializing`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Initializing`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessIdle`
-- From: `Idle`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Idle`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessAttached`
-- From: `Attached`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Attached`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessRunning`
-- From: `Running`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Running`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessRetired`
-- From: `Retired`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Retired`
-
-### `AuthorizeSurfaceRequestPublishOnSuccessStopped`
-- From: `Stopped`
-- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Stopped`
-
-### `AuthorizeSurfaceRequestCancellableObservationInitializing`
-- From: `Initializing`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Initializing`
-
-### `AuthorizeSurfaceRequestCancellableObservationIdle`
-- From: `Idle`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Idle`
-
-### `AuthorizeSurfaceRequestCancellableObservationAttached`
-- From: `Attached`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Attached`
-
-### `AuthorizeSurfaceRequestCancellableObservationRunning`
-- From: `Running`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Running`
-
-### `AuthorizeSurfaceRequestCancellableObservationRetired`
-- From: `Retired`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
-- To: `Retired`
-
-### `AuthorizeSurfaceRequestCancellableObservationStopped`
-- From: `Stopped`
-- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
-- Guards:
-  - `request_tracked`
-  - `non_terminal`
 - To: `Stopped`
 
 ### `ClassifySurfaceRequestTerminalInitializing`

@@ -646,27 +646,36 @@ fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority
     ));
 }
 
-#[test]
-fn surface_request_lifecycle_handle_targets_machine_surface_authority() {
+#[tokio::test]
+async fn session_bindings_surface_request_lifecycle_targets_session_authority() {
     let adapter = MeerkatMachine::ephemeral();
-    let handle = adapter.surface_request_lifecycle_handle();
-    let request_id = "surface-scope-request";
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("session bindings should prepare");
+    let handle = bindings.surface_request_lifecycle;
+    let request_id = "session-scope-request";
 
     handle
-        .try_begin_request(request_id.to_owned())
+        .try_begin_request(
+            request_id.to_owned(),
+            meerkat_core::handles::SurfaceRequestKind::SessionTurn,
+        )
         .expect("surface request should begin");
-    handle
-        .authorize_publish_on_success(request_id)
-        .expect("surface request should accept publish authorization");
 
-    let authority = adapter
-        .surface_request_lifecycle_authority
+    let session_authority = adapter
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority should exist");
+    let authority = session_authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority.state.surface_request_phases.get(request_id),
         Some(&mm_dsl::SurfaceRequestLifecyclePhase::Pending),
-        "surface lifecycle transitions must land in the MeerkatMachine-owned surface authority"
+        "surface lifecycle transitions must land in the owning session's MeerkatMachine authority"
     );
     assert_eq!(
         authority
@@ -674,7 +683,7 @@ fn surface_request_lifecycle_handle_targets_machine_surface_authority() {
             .surface_request_terminal_policy
             .get(request_id),
         Some(&mm_dsl::SurfaceRequestTerminalPolicy::PublishOnSuccess),
-        "publish policy must be owned by the machine surface authority, not a private handle authority"
+        "publish policy must be derived by the session machine from the typed request kind"
     );
 }
 

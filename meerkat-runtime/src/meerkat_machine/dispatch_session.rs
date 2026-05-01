@@ -209,6 +209,11 @@ impl MeerkatMachine {
                         &shared_handle_authority,
                     )),
                 ),
+                surface_request_lifecycle: Arc::new(
+                    crate::handles::RuntimeSurfaceRequestLifecycleHandle::new(Arc::clone(
+                        &shared_handle_authority,
+                    )),
+                ),
             },
         ))
     }

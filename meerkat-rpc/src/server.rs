@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, noop_request_action,
+    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestKind,
+    noop_request_action,
 };
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -369,12 +370,14 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         F: FnOnce(RpcRequest, meerkat::surface::RequestContext) -> Fut + Send + 'static,
         Fut: Future<Output = Option<RpcResponse>> + Send + 'static,
     {
+        let kind = tracked_rpc_request_kind(request)?;
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let context = match self
-            .request_executor
-            .try_begin_request(request_key.clone(), noop_request_action())
-        {
+        let context = match self.request_executor.try_begin_request(
+            request_key.clone(),
+            kind,
+            noop_request_action(),
+        ) {
             Ok(context) => context,
             Err(_) => {
                 let response_tx = self.response_tx.clone();
@@ -484,6 +487,27 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
 fn request_key(id: &RpcId) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| format!("{id:?}"))
+}
+
+fn tracked_rpc_request_kind(request: &RpcRequest) -> Option<SurfaceRequestKind> {
+    match request.method.as_str() {
+        "turn/start" | "mob/turn_start" => Some(SurfaceRequestKind::SessionTurn),
+        "session/create" => {
+            let deferred = request
+                .params
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+                .and_then(|value| {
+                    value
+                        .get("initial_turn")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|initial_turn| initial_turn == "deferred");
+            (!deferred).then_some(SurfaceRequestKind::SessionCreateWithTurn)
+        }
+        _ => None,
+    }
 }
 
 fn request_cancel_target(params: Option<&serde_json::value::RawValue>) -> Option<String> {
@@ -682,19 +706,20 @@ mod tests {
         task.await.expect("synthetic dispatch task should complete");
         assert!(
             !response.terminal.is_publish(),
-            "raw turn/start method name must not grant committed publish authority before the typed handler marks the request"
+            "raw turn/start method name must not grant committed publish authority before session binding"
         );
     }
 
     #[test]
-    fn rpc_request_context_grants_publish_authority_after_handler_marks_it() {
+    fn rpc_request_context_grants_publish_authority_from_typed_admission() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
-            .try_begin_request("rpc-marked", noop_request_action())
+            .try_begin_request(
+                "rpc-marked",
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
-        context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
 
         let response = RpcResponse::success(Some(RpcId::Num(1)), serde_json::json!({"ok": true}));
         assert!(context.classify_success_terminal(response).is_publish());
@@ -728,18 +753,31 @@ mod tests {
         let request_key = request_key(&request_id);
         let _existing = server
             .request_executor
-            .try_begin_request(request_key.clone(), noop_request_action())
+            .try_begin_request(
+                request_key.clone(),
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(request_id.clone()),
-            method: "initialize".to_string(),
-            params: None,
+            method: "turn/start".to_string(),
+            params: Some(
+                serde_json::value::RawValue::from_string(
+                    serde_json::json!({
+                        "session_id": "00000000-0000-0000-0000-000000000001",
+                        "prompt": "hello"
+                    })
+                    .to_string(),
+                )
+                .expect("valid raw params"),
+            ),
         };
 
         let spawned = server
             .spawn_tracked_request(&request)
-            .expect("id-bearing request should produce a tracked task");
+            .expect("tracked request should produce a task");
         let SpawnedTrackedRequest::Untracked { task } = spawned else {
             panic!("duplicate request should produce an untracked response task");
         };
@@ -789,11 +827,16 @@ mod tests {
         let request_key = request_key(&request_id);
         let context = server
             .request_executor
-            .try_begin_request(request_key.clone(), noop_request_action())
+            .try_begin_request(
+                request_key.clone(),
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
         context
-            .authorize_publish_on_success()
-            .expect("runtime lifecycle authority should accept publish authorization");
+            .bind_lifecycle(meerkat_runtime::handles::standalone_surface_request_lifecycle_handle())
+            .await
+            .expect("test lifecycle should bind");
 
         assert_eq!(
             server.request_executor.cancel_request(&request_key).await,

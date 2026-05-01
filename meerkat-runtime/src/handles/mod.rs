@@ -79,6 +79,13 @@ pub use session_context::RuntimeSessionContextHandle;
 pub(crate) use surface_request_lifecycle::RuntimeSurfaceRequestLifecycleHandle;
 pub use turn_state::RuntimeTurnStateHandle;
 
+/// Construct a standalone surface request lifecycle handle for tests and
+/// minimal hosts without a session-owned runtime binding.
+pub fn standalone_surface_request_lifecycle_handle()
+-> Arc<dyn meerkat_core::handles::SurfaceRequestLifecycleHandle> {
+    Arc::new(RuntimeSurfaceRequestLifecycleHandle::standalone())
+}
+
 /// Shared handle over a session's real `MeerkatMachineAuthority`.
 ///
 /// Constructed from the session's

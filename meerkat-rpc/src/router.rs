@@ -3376,7 +3376,11 @@ mod tests {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let key = serde_json::to_string(id).expect("request id should serialize");
         let context = executor
-            .try_begin_request(key.clone(), noop_request_action())
+            .try_begin_request(
+                key.clone(),
+                meerkat::surface::SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
             .expect("test request key should be unique");
         let outcome = executor.cancel_request(&key).await;
         assert_eq!(

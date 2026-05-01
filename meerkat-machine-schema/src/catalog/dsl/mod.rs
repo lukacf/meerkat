@@ -546,6 +546,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Pending", "Published", "Cancelled", "Completed"],
             ),
             NamedTypeBinding::string_enum(
+                "SurfaceRequestKind",
+                &[
+                    "InlineObservation",
+                    "CancellableObservation",
+                    "SessionCreateWithTurn",
+                    "SessionTurn",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "SurfaceRequestTerminalDisposition",
                 &["Inline", "Publish", "RespondWithoutPublish"],
             ),
@@ -681,8 +690,6 @@ runtime_internal_inputs!(
         ApplyMobPeerOverlay,
         AttachMobIngress,
         AttachSessionIngress,
-        AuthorizeSurfaceRequestCancellableObservation,
-        AuthorizeSurfaceRequestPublishOnSuccess,
         AuthorizeSupervisor,
         BeginSurfaceRequest,
         BeginLiveTopologyReconfigure,

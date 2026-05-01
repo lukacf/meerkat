@@ -17,7 +17,7 @@ use crate::handles::{
     AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, InteractionStreamHandle,
     McpServerLifecycleHandle, ModelRoutingHandle, PeerCommsHandle, PeerInteractionHandle,
     RealtimeProductTurnHandle, SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle,
-    TurnStateHandle,
+    SurfaceRequestLifecycleHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -218,6 +218,9 @@ pub struct SessionRuntimeBindings {
     /// session's MeerkatMachine. Shares the same `HandleDslAuthority` as
     /// the other handles.
     pub realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>,
+    /// Surface request lifecycle DSL handle for requests owned by this
+    /// session/runtime binding.
+    pub surface_request_lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -241,6 +244,7 @@ impl Clone for SessionRuntimeBindings {
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: Arc::clone(&self.interaction_stream),
             realtime_product_turn: Arc::clone(&self.realtime_product_turn),
+            surface_request_lifecycle: Arc::clone(&self.surface_request_lifecycle),
         }
     }
 }
@@ -266,6 +270,10 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("session_claim_handle", &"<dyn SessionClaimHandle>")
             .field("interaction_stream", &"<dyn InteractionStreamHandle>")
             .field("realtime_product_turn", &"<dyn RealtimeProductTurnHandle>")
+            .field(
+                "surface_request_lifecycle",
+                &"<dyn SurfaceRequestLifecycleHandle>",
+            )
             .finish()
     }
 }

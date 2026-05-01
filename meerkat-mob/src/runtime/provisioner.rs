@@ -2340,7 +2340,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await?;
                 let authority = self.supervisor_bridge.authority().await;
                 let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
-                let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
+                let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(Box::new(
                     super::bridge_protocol::BridgeDeliveryPayload {
                         supervisor: sup_spec.into(),
                         epoch: authority.epoch,
@@ -2348,13 +2348,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                         input_id: Uuid::now_v7().to_string(),
                         content: req.prompt.clone(),
                         turn_metadata: req.turn_metadata.clone().map(Into::into),
-                        handling_mode: req
-                            .turn_metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.handling_mode)
-                            .unwrap_or_default(),
                     },
-                );
+                ));
                 let response: super::bridge_protocol::BridgeDeliveryResponse = self
                     .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
                     .await?;

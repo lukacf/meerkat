@@ -530,17 +530,9 @@ fn peer_input_from_delivery_payload(
             (body, Some(blocks))
         }
     };
-    let mut turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+    let turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         payload.turn_metadata.map(Into::into).unwrap_or_default();
-    if turn_metadata.handling_mode.is_none()
-        && payload.handling_mode != meerkat_core::types::HandlingMode::Queue
-    {
-        turn_metadata.handling_mode = Some(payload.handling_mode);
-    }
     let turn_metadata = (!turn_metadata.is_empty()).then_some(turn_metadata);
-    let handling_mode = turn_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.handling_mode);
 
     Input::Peer(PeerInput {
         header: InputHeader {
@@ -565,7 +557,7 @@ fn peer_input_from_delivery_payload(
         payload: None,
         blocks,
         turn_metadata,
-        handling_mode,
+        handling_mode: None,
     })
 }
 
@@ -1458,6 +1450,7 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::DeliverMemberInput(payload) => {
+            let payload = *payload;
             let sup_payload = BridgeSupervisorPayload {
                 supervisor: payload.supervisor.clone(),
                 epoch: payload.epoch,
@@ -1914,6 +1907,36 @@ mod tests {
             0xdd,
             "inproc://mob/__mob_supervisor__",
         )
+    }
+
+    #[test]
+    fn bridge_delivery_payload_uses_canonical_turn_metadata_handling_mode() {
+        let input = peer_input_from_delivery_payload(
+            &SessionId::new(),
+            PeerId::new(),
+            InteractionId(Uuid::new_v4()),
+            BridgeDeliveryPayload {
+                supervisor: supervisor_bridge_spec(),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                input_id: "input-1".to_string(),
+                content: meerkat_core::types::ContentInput::Text("hello".to_string()),
+                turn_metadata: Some(meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_contracts::WireHandlingMode::Steer),
+                    ..Default::default()
+                }),
+            },
+        );
+
+        let Input::Peer(peer) = input else {
+            panic!("bridge delivery should project to peer input");
+        };
+        assert_eq!(peer.handling_mode, None);
+        assert_eq!(
+            peer.turn_metadata
+                .and_then(|metadata| metadata.handling_mode),
+            Some(HandlingMode::Steer)
+        );
     }
 
     fn trusted_supervisor_descriptor(seed: u8) -> TrustedPeerDescriptor {

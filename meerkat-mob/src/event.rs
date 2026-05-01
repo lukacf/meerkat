@@ -517,7 +517,7 @@ pub struct MemberSpawnedEvent {
     pub labels: BTreeMap<String, String>,
     /// Internal replay-only first-turn metadata for this member incarnation.
     #[serde(skip, default)]
-    pub(crate) initial_turn_metadata: Option<RuntimeTurnMetadata>,
+    pub(crate) initial_turn_metadata: Option<Box<RuntimeTurnMetadata>>,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -549,7 +549,9 @@ impl MemberSpawnedEvent {
         mut self,
         initial_turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
-        self.initial_turn_metadata = initial_turn_metadata.filter(|metadata| !metadata.is_empty());
+        self.initial_turn_metadata = initial_turn_metadata
+            .filter(|metadata| !metadata.is_empty())
+            .map(Box::new);
         self
     }
 
@@ -655,7 +657,7 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     if let Some(initial_turn_metadata) = initial_turn_metadata
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
-        member_spawned.initial_turn_metadata = Some(initial_turn_metadata);
+        member_spawned.initial_turn_metadata = Some(Box::new(initial_turn_metadata));
     }
     Ok(event)
 }
@@ -1006,8 +1008,8 @@ mod tests {
                     Some(&sid)
                 );
                 assert_eq!(
-                    member_spawned.initial_turn_metadata,
-                    Some(initial_turn_metadata)
+                    member_spawned.initial_turn_metadata.as_deref(),
+                    Some(&initial_turn_metadata)
                 );
             }
             other => panic!("expected MemberSpawned, got {other:?}"),

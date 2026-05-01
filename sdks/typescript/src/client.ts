@@ -268,20 +268,70 @@ function isOptionalJsonValue(value: unknown): boolean {
   return value === undefined || isJsonValue(value);
 }
 
-function isOptionalJsonNumber(value: unknown): boolean {
-  return (
-    value === undefined ||
-    value === null ||
-    (typeof value === "number" && Number.isFinite(value))
-  );
-}
-
 function isOptionalJsonU32(value: unknown): boolean {
   return value === undefined || value === null || isJsonU32(value);
 }
 
 function isOptionalBoolean(value: unknown): boolean {
   return value === undefined || value === null || typeof value === "boolean";
+}
+
+function isOptionalStringEnum(value: unknown, allowed: readonly string[]): boolean {
+  return value === undefined || value === null || (typeof value === "string" && allowed.includes(value));
+}
+
+function isOptionalJsonI64(value: unknown): boolean {
+  return value === undefined || value === null || Number.isSafeInteger(value);
+}
+
+function isOptionalJsonF32(value: unknown): boolean {
+  const maxF32 = 3.4028234663852886e38;
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= maxF32)
+  );
+}
+
+function isOptionalOutputSchema(value: unknown): boolean {
+  return value === undefined || value === null || isRecord(value);
+}
+
+function isOptionalAnthropicThinkingConfig(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "adaptive") return hasOnlyKeys(value, ["type"]);
+  return (
+    value.type === "enabled" &&
+    hasOnlyKeys(value, ["type", "budget_tokens"]) &&
+    isJsonU32(value.budget_tokens)
+  );
+}
+
+function isOptionalAnthropicInferenceGeo(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "us" || value.kind === "global") return hasOnlyKeys(value, ["kind"]);
+  return value.kind === "other" && hasOnlyKeys(value, ["kind", "region"]) && typeof value.region === "string";
+}
+
+function isOptionalAnthropicCompactionConfig(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "auto") return hasOnlyKeys(value, ["kind"]);
+  return value.kind === "custom" && hasOnlyKeys(value, ["kind", "edit"]) && isJsonValue(value.edit);
+}
+
+function isOptionalGeminiThinkingConfig(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (isRecord(value) &&
+      hasOnlyKeys(value, ["include_thoughts", "thinking_level", "thinking_budget"]) &&
+      isOptionalBoolean(value.include_thoughts) &&
+      isOptionalStringEnum(value.thinking_level, ["minimal", "low", "medium", "high"]) &&
+      isOptionalJsonU32(value.thinking_budget))
+  );
 }
 
 function isStructuredProviderExtension(value: unknown): value is {
@@ -318,15 +368,15 @@ function isWireProviderTag(value: unknown): value is WireProviderTag {
         "context",
         "supports_temperature_override",
       ]) &&
-      isOptionalJsonValue(value.thinking) &&
+      isOptionalAnthropicThinkingConfig(value.thinking) &&
       isOptionalJsonU32(value.thinking_budget_tokens) &&
       isOptionalJsonValue(value.web_search) &&
       isOptionalJsonU32(value.top_k) &&
-      isOptionalJsonValue(value.effort) &&
-      isOptionalJsonValue(value.structured_output) &&
-      isOptionalJsonValue(value.inference_geo) &&
-      isOptionalJsonValue(value.compaction) &&
-      isOptionalJsonValue(value.context) &&
+      isOptionalStringEnum(value.effort, ["low", "medium", "high", "max", "xhigh"]) &&
+      isOptionalOutputSchema(value.structured_output) &&
+      isOptionalAnthropicInferenceGeo(value.inference_geo) &&
+      isOptionalAnthropicCompactionConfig(value.compaction) &&
+      isOptionalStringEnum(value.context, ["one_megabyte"]) &&
       isOptionalBoolean(value.supports_temperature_override)
     );
   }
@@ -346,12 +396,12 @@ function isWireProviderTag(value: unknown): value is WireProviderTag {
         "supports_temperature_override",
         "supports_reasoning_override",
       ]) &&
-      isOptionalJsonValue(value.reasoning_effort) &&
-      isOptionalJsonNumber(value.seed) &&
-      isOptionalJsonNumber(value.frequency_penalty) &&
-      isOptionalJsonNumber(value.presence_penalty) &&
+      isOptionalStringEnum(value.reasoning_effort, ["low", "medium", "high"]) &&
+      isOptionalJsonI64(value.seed) &&
+      isOptionalJsonF32(value.frequency_penalty) &&
+      isOptionalJsonF32(value.presence_penalty) &&
       isOptionalJsonValue(value.web_search) &&
-      isOptionalJsonValue(value.structured_output) &&
+      isOptionalOutputSchema(value.structured_output) &&
       isOptionalJsonValue(value.reasoning) &&
       isOptionalJsonValue(value.chat_template_kwargs) &&
       isOptionalJsonValue(value.thinking) &&
@@ -372,12 +422,12 @@ function isWireProviderTag(value: unknown): value is WireProviderTag {
         "google_search",
         "candidate_count",
       ]) &&
-      isOptionalJsonValue(value.thinking) &&
+      isOptionalGeminiThinkingConfig(value.thinking) &&
       isOptionalJsonU32(value.thinking_budget) &&
-      isOptionalJsonValue(value.thinking_level) &&
+      isOptionalStringEnum(value.thinking_level, ["minimal", "low", "medium", "high"]) &&
       isOptionalJsonU32(value.top_k) &&
-      isOptionalJsonNumber(value.top_p) &&
-      isOptionalJsonValue(value.structured_output) &&
+      isOptionalJsonF32(value.top_p) &&
+      isOptionalOutputSchema(value.structured_output) &&
       isOptionalJsonValue(value.google_search) &&
       isOptionalJsonU32(value.candidate_count)
     );
@@ -390,7 +440,7 @@ function isJsonNumber(value: unknown): value is number {
 }
 
 function isJsonU32(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) >= 0;
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffffffff;
 }
 
 function runtimeProviderParamsPayload(

@@ -191,7 +191,7 @@ impl Roster {
                     peer_id: None,
                     transport_public_key: None,
                     labels: member_spawned.labels.clone(),
-                    initial_turn_metadata: member_spawned.initial_turn_metadata.clone(),
+                    initial_turn_metadata: member_spawned.initial_turn_metadata.as_deref().cloned(),
                     effective_profile_override: None,
                 });
             }

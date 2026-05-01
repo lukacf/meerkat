@@ -225,16 +225,88 @@ def _is_optional_json_value(value: Any) -> bool:
     return value is None or _is_json_value(value)
 
 
-def _is_optional_json_number(value: Any) -> bool:
-    return value is None or _is_json_number(value)
-
-
 def _is_optional_json_u32(value: Any) -> bool:
     return value is None or _is_json_u32(value)
 
 
 def _is_optional_bool(value: Any) -> bool:
     return value is None or isinstance(value, bool)
+
+
+def _is_optional_string_enum(value: Any, allowed: set[str]) -> bool:
+    return value is None or (isinstance(value, str) and value in allowed)
+
+
+def _is_optional_json_i64(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and -(2**63) <= value <= 2**63 - 1
+    )
+
+
+def _is_optional_json_f32(value: Any) -> bool:
+    return value is None or (
+        _is_json_number(value) and abs(value) <= 3.4028234663852886e38
+    )
+
+
+def _is_optional_output_schema(value: Any) -> bool:
+    return value is None or isinstance(value, dict)
+
+
+def _is_optional_anthropic_thinking_config(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or not isinstance(value.get("type"), str):
+        return False
+    if value["type"] == "adaptive":
+        return _has_only_keys(value, {"type"})
+    return (
+        value["type"] == "enabled"
+        and _has_only_keys(value, {"type", "budget_tokens"})
+        and _is_json_u32(value.get("budget_tokens"))
+    )
+
+
+def _is_optional_anthropic_inference_geo(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+        return False
+    if value["kind"] in {"us", "global"}:
+        return _has_only_keys(value, {"kind"})
+    return (
+        value["kind"] == "other"
+        and _has_only_keys(value, {"kind", "region"})
+        and isinstance(value.get("region"), str)
+    )
+
+
+def _is_optional_anthropic_compaction_config(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+        return False
+    if value["kind"] == "auto":
+        return _has_only_keys(value, {"kind"})
+    return (
+        value["kind"] == "custom"
+        and _has_only_keys(value, {"kind", "edit"})
+        and _is_json_value(value.get("edit"))
+    )
+
+
+def _is_optional_gemini_thinking_config(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, dict)
+        and _has_only_keys(value, {"include_thoughts", "thinking_level", "thinking_budget"})
+        and _is_optional_bool(value.get("include_thoughts"))
+        and _is_optional_string_enum(
+            value.get("thinking_level"), {"minimal", "low", "medium", "high"}
+        )
+        and _is_optional_json_u32(value.get("thinking_budget"))
+    )
 
 
 def _is_structured_provider_extension(value: Any) -> bool:
@@ -273,15 +345,17 @@ def _is_wire_provider_tag(value: Any) -> bool:
                     "supports_temperature_override",
                 },
             )
-            and _is_optional_json_value(value.get("thinking"))
+            and _is_optional_anthropic_thinking_config(value.get("thinking"))
             and _is_optional_json_u32(value.get("thinking_budget_tokens"))
             and _is_optional_json_value(value.get("web_search"))
             and _is_optional_json_u32(value.get("top_k"))
-            and _is_optional_json_value(value.get("effort"))
-            and _is_optional_json_value(value.get("structured_output"))
-            and _is_optional_json_value(value.get("inference_geo"))
-            and _is_optional_json_value(value.get("compaction"))
-            and _is_optional_json_value(value.get("context"))
+            and _is_optional_string_enum(
+                value.get("effort"), {"low", "medium", "high", "max", "xhigh"}
+            )
+            and _is_optional_output_schema(value.get("structured_output"))
+            and _is_optional_anthropic_inference_geo(value.get("inference_geo"))
+            and _is_optional_anthropic_compaction_config(value.get("compaction"))
+            and _is_optional_string_enum(value.get("context"), {"one_megabyte"})
             and _is_optional_bool(value.get("supports_temperature_override"))
         )
     if provider == "open_ai":
@@ -303,12 +377,12 @@ def _is_wire_provider_tag(value: Any) -> bool:
                     "supports_reasoning_override",
                 },
             )
-            and _is_optional_json_value(value.get("reasoning_effort"))
-            and _is_optional_json_number(value.get("seed"))
-            and _is_optional_json_number(value.get("frequency_penalty"))
-            and _is_optional_json_number(value.get("presence_penalty"))
+            and _is_optional_string_enum(value.get("reasoning_effort"), {"low", "medium", "high"})
+            and _is_optional_json_i64(value.get("seed"))
+            and _is_optional_json_f32(value.get("frequency_penalty"))
+            and _is_optional_json_f32(value.get("presence_penalty"))
             and _is_optional_json_value(value.get("web_search"))
-            and _is_optional_json_value(value.get("structured_output"))
+            and _is_optional_output_schema(value.get("structured_output"))
             and _is_optional_json_value(value.get("reasoning"))
             and _is_optional_json_value(value.get("chat_template_kwargs"))
             and _is_optional_json_value(value.get("thinking"))
@@ -331,12 +405,14 @@ def _is_wire_provider_tag(value: Any) -> bool:
                     "candidate_count",
                 },
             )
-            and _is_optional_json_value(value.get("thinking"))
+            and _is_optional_gemini_thinking_config(value.get("thinking"))
             and _is_optional_json_u32(value.get("thinking_budget"))
-            and _is_optional_json_value(value.get("thinking_level"))
+            and _is_optional_string_enum(
+                value.get("thinking_level"), {"minimal", "low", "medium", "high"}
+            )
             and _is_optional_json_u32(value.get("top_k"))
-            and _is_optional_json_number(value.get("top_p"))
-            and _is_optional_json_value(value.get("structured_output"))
+            and _is_optional_json_f32(value.get("top_p"))
+            and _is_optional_output_schema(value.get("structured_output"))
             and _is_optional_json_value(value.get("google_search"))
             and _is_optional_json_u32(value.get("candidate_count"))
         )
@@ -344,11 +420,11 @@ def _is_wire_provider_tag(value: Any) -> bool:
 
 
 def _is_json_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _is_json_u32(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 0xFFFFFFFF
 
 
 def _is_openai_provider(provider: str | None) -> bool:

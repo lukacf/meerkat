@@ -199,7 +199,7 @@ pub enum BridgeCommand {
     BindMember(BridgeBindPayload),
     AuthorizeSupervisor(BridgeSupervisorPayload),
     RevokeSupervisor(BridgeSupervisorPayload),
-    DeliverMemberInput(BridgeDeliveryPayload),
+    DeliverMemberInput(Box<BridgeDeliveryPayload>),
     ObserveMember(BridgeSupervisorPayload),
     InterruptMember(BridgeSupervisorPayload),
     HardCancelMember(BridgeHardCancelPayload),
@@ -792,6 +792,7 @@ pub struct BridgeAck {
 
 /// Deliver one logical input to a member.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeDeliveryPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -800,7 +801,6 @@ pub struct BridgeDeliveryPayload {
     pub content: meerkat_core::types::ContentInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<WireRuntimeTurnMetadata>,
-    pub handling_mode: meerkat_core::types::HandlingMode,
 }
 
 /// Outcome of a delivery attempt.
@@ -1106,16 +1106,35 @@ mod tests {
 
     #[test]
     fn bridge_command_deliver_member_input_round_trip() {
-        let cmd = BridgeCommand::DeliverMemberInput(BridgeDeliveryPayload {
+        let cmd = BridgeCommand::DeliverMemberInput(Box::new(BridgeDeliveryPayload {
             supervisor: sample_peer_spec(),
             epoch: 2,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             input_id: "input-1".to_string(),
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             turn_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-        });
+        }));
         assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_delivery_rejects_legacy_handling_mode_carrier() {
+        let value = json!({
+            "command": "deliver_member_input",
+            "supervisor": sample_peer_spec(),
+            "epoch": 2,
+            "protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            "input_id": "input-1",
+            "content": "hello",
+            "turn_metadata": { "handling_mode": "queue" },
+            "handling_mode": "steer"
+        });
+        let err = serde_json::from_value::<BridgeCommand>(value)
+            .expect_err("top-level handling_mode must not remain a bridge delivery carrier");
+        assert!(
+            err.to_string().contains("handling_mode"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

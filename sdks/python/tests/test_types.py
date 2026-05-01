@@ -188,6 +188,37 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
         },
     }
 
+    malformed_known_provider_tag_values = _runtime_turn_metadata(
+        {
+            "provider": "openai",
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": {
+                        "provider": "open_ai",
+                        "reasoning_effort": {"bad": True},
+                        "seed": 1.5,
+                    },
+                    "foo": "bar",
+                },
+            },
+        }
+    )
+    assert malformed_known_provider_tag_values is not None
+    assert malformed_known_provider_tag_values["provider_params"] == {
+        "action": "set",
+        "value": {
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "openai",
+                    "key": "provider_params",
+                    "body": "{\"provider_tag\":{\"provider\":\"open_ai\",\"reasoning_effort\":{\"bad\":true},\"seed\":1.5},\"foo\":\"bar\"}",
+                },
+            },
+        },
+    }
+
     nullable_known_provider_tag = _runtime_turn_metadata(
         {
             "provider": "openai",

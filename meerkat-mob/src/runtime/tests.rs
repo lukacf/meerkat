@@ -3518,6 +3518,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                                     payload,
                                 ) => {
+                                    let payload = *payload;
                                     let current = responder_supervisor_state
                                         .read()
                                         .await
@@ -5623,7 +5624,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         .trust_recipient(&peer)
         .await
         .expect("old supervisor bridge should explicitly trust peer for stale-epoch probe");
-    let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
+    let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(Box::new(
         super::bridge_protocol::BridgeDeliveryPayload {
             supervisor: old_bridge
                 .supervisor_spec()
@@ -5635,9 +5636,8 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
             input_id: "stale-epoch-input".to_string(),
             content: ContentInput::from("stale-epoch".to_string()),
             turn_metadata: None,
-            handling_mode: HandlingMode::Queue,
         },
-    );
+    ));
     let stale_reply = old_bridge
         .send_bridge_command(&peer, &stale_command, std::time::Duration::from_secs(1))
         .await

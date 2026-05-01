@@ -613,13 +613,84 @@ pub fn mark_managed_store_oauth_refresh_failed(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn managed_store_oauth_refresh_failure_is_permanent(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("missing refresh_token")
-        || message.contains("invalid_grant")
-        || message.contains("invalid refresh")
-        || message.contains("refresh token revoked")
-        || message.contains("status=400")
+    if let Some((status, body)) = parse_oauth_endpoint_failure(&message) {
+        return managed_store_oauth_endpoint_failure_is_permanent(status, body);
+    }
+
+    managed_store_oauth_body_mentions_permanent_failure(&message)
         || message.contains("status=401")
         || message.contains("status=403")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_oauth_endpoint_failure(message: &str) -> Option<(u16, &str)> {
+    let (_, status_and_rest) = message.split_once("status=")?;
+    let status_len = status_and_rest
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if status_len == 0 {
+        return None;
+    }
+    let status = status_and_rest[..status_len].parse().ok()?;
+    let body = status_and_rest
+        .split_once("body=")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    Some((status, body))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_oauth_endpoint_failure_is_permanent(status: u16, body: &str) -> bool {
+    if managed_store_oauth_endpoint_failure_is_transient(status, body) {
+        return false;
+    }
+    if matches!(status, 401 | 403) {
+        return true;
+    }
+    status == 400 && managed_store_oauth_body_mentions_permanent_failure(body)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_oauth_endpoint_failure_is_transient(status: u16, body: &str) -> bool {
+    matches!(status, 408 | 409 | 425 | 429 | 500..=599)
+        || managed_store_oauth_body_mentions_any(
+            body,
+            &[
+                "temporarily_unavailable",
+                "temporary_unavailable",
+                "server_error",
+                "rate_limit",
+                "rate_limited",
+                "too_many_requests",
+                "timeout",
+                "timed out",
+                "try again",
+            ],
+        )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_oauth_body_mentions_permanent_failure(body: &str) -> bool {
+    managed_store_oauth_body_mentions_any(
+        body,
+        &[
+            "missing refresh_token",
+            "invalid_grant",
+            "invalid refresh",
+            "refresh token revoked",
+            "invalid_client",
+            "unauthorized_client",
+            "invalid_scope",
+            "access_denied",
+            "permission_denied",
+        ],
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_store_oauth_body_mentions_any(body: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| body.contains(needle))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2195,6 +2266,9 @@ mod tests {
         ));
         assert!(managed_store_oauth_refresh_failure_is_permanent(
             "token endpoint error: status=400 body={\"error\":\"invalid_grant\"}"
+        ));
+        assert!(!managed_store_oauth_refresh_failure_is_permanent(
+            "token endpoint error: status=400 body={\"error\":\"temporarily_unavailable\"}"
         ));
         assert!(managed_store_oauth_refresh_failure_is_permanent(
             "token endpoint error: status=401 body=unauthorized"

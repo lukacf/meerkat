@@ -1138,7 +1138,7 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
         .unwrap_err();
     assert!(
         err.to_string()
-            .contains("AuthMachine lifecycle acquire failed"),
+            .contains("AuthMachine lifecycle complete_refresh failed"),
         "got {err}"
     );
     let stored = store.load(&key).await.unwrap().unwrap();

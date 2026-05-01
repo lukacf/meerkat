@@ -245,6 +245,7 @@ test_suite(
         "//meerkat-runtime:regression_comms_runtime_test",
         "//meerkat-runtime:runtime_bindings_contract_test",
         "//meerkat-runtime:runtime_ingress_control_test",
+        "//meerkat-runtime:runtime_input_strictness_test",
         "//meerkat-runtime:session_context_observer_race_test",
         "//meerkat-runtime:trust_reconcile_add_failure_test",
         "//meerkat-runtime:trust_reconcile_concurrency_test",

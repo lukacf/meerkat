@@ -112,7 +112,7 @@ impl Default for InputVisibility {
 
 /// The 6 input variants accepted by the runtime layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "input_type", rename_all = "snake_case")]
+#[serde(tag = "input_type", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum Input {
     /// User/operator prompt.
@@ -331,6 +331,7 @@ impl PromptInput {
 
 /// Peer-originated input from comms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerInput {
     pub header: InputHeader,
     /// The peer convention (message, request, response).
@@ -362,7 +363,11 @@ pub struct PeerInput {
 
 /// Peer communication conventions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "convention_type", rename_all = "snake_case")]
+#[serde(
+    tag = "convention_type",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[non_exhaustive]
 pub enum PeerConvention {
     /// Simple peer-to-peer message.
@@ -463,6 +468,7 @@ pub struct FlowStepInput {
 
 /// External event input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalEventInput {
     pub header: InputHeader,
     /// Event type/name.
@@ -487,6 +493,7 @@ pub struct ExternalEventInput {
 /// ordinary work after a boundary-local event (for example, terminal peer
 /// responses injected into session state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContinuationInput {
     pub header: InputHeader,
     /// Stable reason for the continuation request.
@@ -530,6 +537,7 @@ impl ContinuationInput {
 /// Explicit operation/lifecycle input admitted through runtime instead of
 /// being smuggled through transcript projections or peer-only paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationInput {
     pub header: InputHeader,
     /// Stable operation identifier.

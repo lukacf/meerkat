@@ -65,7 +65,8 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, ModelId, ProviderParamsOverride, RunApplyBoundary,
+    RunPrimitive, RuntimeTurnMetadata, TurnMetadataOverride,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
@@ -908,6 +909,48 @@ fn resolve_turn_additional_instructions(
     })
 }
 
+fn rest_create_turn_metadata(
+    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+    additional_instructions: Option<Vec<String>>,
+    model: Option<String>,
+    provider: Option<Provider>,
+    provider_params: Option<Value>,
+    provider_for_params: Provider,
+    keep_alive: Option<bool>,
+) -> Option<RuntimeTurnMetadata> {
+    let metadata = RuntimeTurnMetadata {
+        skill_references,
+        additional_instructions: resolve_turn_additional_instructions(additional_instructions),
+        model: model.map(ModelId::new),
+        provider,
+        provider_params: provider_params.map(|params| {
+            TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+                provider_for_params.as_str(),
+                &params,
+            ))
+        }),
+        keep_alive: resolve_turn_keep_alive_policy(keep_alive),
+        ..Default::default()
+    };
+    (!metadata.is_empty()).then_some(metadata)
+}
+
+fn runtime_metadata_provider_params_for_build(
+    metadata: Option<&RuntimeTurnMetadata>,
+) -> Option<Value> {
+    match metadata.and_then(|metadata| metadata.provider_params.as_ref()) {
+        Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
+        Some(TurnMetadataOverride::Clear) | None => None,
+    }
+}
+
+fn runtime_metadata_keep_alive_for_create(metadata: Option<&RuntimeTurnMetadata>) -> bool {
+    matches!(
+        metadata.and_then(|metadata| metadata.keep_alive.as_ref()),
+        Some(TurnMetadataOverride::Set(_))
+    )
+}
+
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), ApiError> {
     meerkat::surface::validate_public_peer_meta(peer_meta).map_err(ApiError::BadRequest)
 }
@@ -922,6 +965,7 @@ fn validate_public_surface_metadata(
 
 /// Create session request
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
     pub prompt: ContentInput,
     #[serde(default)]
@@ -2058,7 +2102,7 @@ fn make_runtime_external_event_input(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RestSessionExternalEventEnvelope {
     GenericJson {
         event_type: String,
@@ -2709,13 +2753,29 @@ async fn create_session_inner(
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
-    let model = req.model.unwrap_or_else(|| state.default_model.clone());
+    let model_override = req.model.clone();
+    let model = model_override
+        .clone()
+        .unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
+    let provider_for_params = req
+        .provider
+        .or_else(|| Provider::infer_from_model(model.as_ref()))
+        .unwrap_or(Provider::Other);
+    let initial_turn_metadata = rest_create_turn_metadata(
+        skill_references.clone(),
+        req.additional_instructions.clone(),
+        model_override.as_ref().map(ToString::to_string),
+        req.provider,
+        req.provider_params.clone(),
+        provider_for_params,
+        keep_alive_override,
+    );
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
@@ -2839,7 +2899,7 @@ async fn create_session_inner(
         peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
         budget_limits: req.budget_limits,
-        provider_params: req.provider_params.clone(),
+        provider_params: runtime_metadata_provider_params_for_build(initial_turn_metadata.as_ref()),
         external_tools: mcp_external_tools,
         recoverable_tool_defs: None,
         llm_client_override: state
@@ -2859,14 +2919,15 @@ async fn create_session_inner(
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         connection_ref: None,
-        keep_alive,
+        keep_alive: runtime_metadata_keep_alive_for_create(initial_turn_metadata.as_ref()),
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
         app_context: req.app_context,
-        additional_instructions: req.additional_instructions,
+        additional_instructions: None,
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
+            model: model_override.is_some(),
             provider: req.provider.is_some(),
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),
@@ -2896,7 +2957,7 @@ async fn create_session_inner(
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
 
-        skill_references: skill_references.clone(),
+        skill_references: None,
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -2958,15 +3019,7 @@ async fn create_session_inner(
     // Create input and route through runtime
     let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
         req.prompt,
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
-                skill_references,
-                flow_tool_overlay: None,
-                additional_instructions: None,
-                ..Default::default()
-            },
-        ),
+        initial_turn_metadata.clone(),
     ));
 
     // Final cancel recheck before submitting input — interrupt() is a no-op
@@ -6176,6 +6229,65 @@ mod tests {
     }
 
     #[test]
+    fn test_create_session_request_rejects_stale_turn_metadata_field() {
+        let err = serde_json::from_value::<CreateSessionRequest>(serde_json::json!({
+            "prompt": "Hello",
+            "turn_metadata": {
+                "model": "retired-create-model"
+            }
+        }))
+        .expect_err("REST create must reject stale top-level turn metadata");
+        let message = err.to_string();
+        assert!(
+            message.contains("turn_metadata") || message.contains("unknown field"),
+            "unexpected deserialize error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_rest_create_turn_metadata_carries_split_inputs_once() {
+        use meerkat_core::lifecycle::run_primitive::KeepAliveMode;
+        use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+        let skill = SkillKey::new(
+            SourceUuid::parse("33333333-3333-4333-8333-333333333333").expect("source uuid"),
+            SkillName::parse("demo-skill").expect("skill name"),
+        );
+        let metadata = rest_create_turn_metadata(
+            Some(vec![skill.clone()]),
+            Some(vec!["prefer concise answers".to_string()]),
+            Some("gpt-5.4".to_string()),
+            Some(Provider::OpenAI),
+            Some(serde_json::json!({ "temperature": 0.2 })),
+            Provider::OpenAI,
+            Some(true),
+        )
+        .expect("create metadata should be populated");
+
+        assert_eq!(metadata.skill_references, Some(vec![skill]));
+        assert_eq!(
+            metadata.model.as_ref().map(ToString::to_string),
+            Some("gpt-5.4".to_string())
+        );
+        assert_eq!(metadata.provider, Some(Provider::OpenAI));
+        assert_eq!(
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("prefer concise answers")
+        );
+        assert!(metadata.provider_params.is_some());
+        let TurnMetadataOverride::Set(keep_alive) =
+            metadata.keep_alive.expect("keep-alive metadata")
+        else {
+            panic!("keep-alive true should set a policy");
+        };
+        assert_eq!(keep_alive.policy, KeepAliveMode::Pinned);
+    }
+
+    #[test]
     fn test_continue_session_request_accepts_turn_metadata_carrier() {
         let req_json = serde_json::json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef",
@@ -6224,6 +6336,26 @@ mod tests {
                 || message.contains("additional_instructions")
                 || message.contains("unknown field"),
             "unexpected deserialize error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_external_event_envelope_rejects_stale_metadata_fields() {
+        let err = serde_json::from_value::<RestSessionExternalEventEnvelope>(serde_json::json!({
+            "kind": "generic_json",
+            "event_type": "webhook.created",
+            "payload": {
+                "ok": true
+            },
+            "turn_metadata": {
+                "model": "retired-event-model"
+            }
+        }))
+        .expect_err("REST external-event envelope must reject stale metadata fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("turn_metadata") || message.contains("unknown field"),
+            "unexpected error: {message}"
         );
     }
 

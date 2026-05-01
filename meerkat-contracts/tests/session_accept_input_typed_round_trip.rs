@@ -9,9 +9,9 @@
 //! metadata + idempotency round-trip intact.
 
 use meerkat_contracts::wire::runtime::{
-    RuntimeAcceptParams, SessionAcceptInputParams, WireConversationAppend,
-    WireConversationAppendRole, WireConversationContextAppend, WireRunPrimitive,
-    WireRuntimeTurnMetadata, WireStagedRunInput,
+    RuntimeAcceptParams, SessionAcceptInputParams, SessionExternalEventEnvelope,
+    WireConversationAppend, WireConversationAppendRole, WireConversationContextAppend,
+    WireRunPrimitive, WireRuntimeTurnMetadata, WireStagedRunInput,
 };
 
 #[test]
@@ -99,6 +99,42 @@ fn session_accept_input_rejects_retired_top_level_turn_metadata() {
 }
 
 #[test]
+fn session_accept_input_rejects_retired_metadata_inside_immediate_primitives() {
+    for primitive in [
+        serde_json::json!({
+            "kind": "immediate_append",
+            "role": "user",
+            "blocks": [],
+            "turn_metadata": {
+                "model": "retired-immediate-model"
+            }
+        }),
+        serde_json::json!({
+            "kind": "immediate_context_append",
+            "key": "system-notice-1",
+            "blocks": [],
+            "provider_params": {
+                "effort": "retired"
+            }
+        }),
+    ] {
+        let err = serde_json::from_value::<SessionAcceptInputParams>(serde_json::json!({
+            "session_id": "session-staged",
+            "primitive": primitive
+        }))
+        .expect_err("immediate primitives must reject stale metadata fields");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("turn_metadata")
+                || message.contains("provider_params")
+                || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
 fn runtime_accept_params_rejects_retired_top_level_turn_metadata() {
     let err = serde_json::from_value::<RuntimeAcceptParams>(serde_json::json!({
         "session_id": "session-staged",
@@ -124,6 +160,27 @@ fn runtime_accept_params_rejects_retired_top_level_turn_metadata() {
         }
     }))
     .expect_err("runtime/session_submit must not accept top-level turn_metadata");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("turn_metadata") || message.contains("unknown field"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn session_external_event_envelope_rejects_stale_metadata_fields() {
+    let err = serde_json::from_value::<SessionExternalEventEnvelope>(serde_json::json!({
+        "kind": "generic_json",
+        "event_type": "webhook.created",
+        "payload": {
+            "ok": true
+        },
+        "turn_metadata": {
+            "model": "retired-event-model"
+        }
+    }))
+    .expect_err("external-event envelope must reject stale metadata fields");
 
     let message = err.to_string();
     assert!(

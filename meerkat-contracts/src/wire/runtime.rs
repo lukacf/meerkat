@@ -113,7 +113,7 @@ pub struct SessionPeerResponseTerminalParams {
 /// Allow-listed per `dogma-blind-spots` §7.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionExternalEventEnvelope {
     /// Generic external JSON event admitted as `Input::ExternalEvent`.
     GenericJson {
@@ -401,6 +401,7 @@ pub enum WireConversationAppendRole {
 /// structurally typed end-to-end.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireConversationAppend {
     pub role: WireConversationAppendRole,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -410,6 +411,7 @@ pub struct WireConversationAppend {
 /// Typed wire projection of a context-only append.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireConversationContextAppend {
     pub key: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -437,7 +439,7 @@ pub struct WireStagedRunInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireRunPrimitive {
     StagedInput(WireStagedRunInput),
     ImmediateAppend(WireConversationAppend),

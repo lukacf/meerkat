@@ -95,6 +95,7 @@ pub struct State {
     pub expires_at: Option<u64>,
     pub last_refresh: Option<u64>,
     pub refresh_attempt: u64,
+    pub credential_present: bool,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
     pub oauth_device_flow_ids: std::collections::BTreeSet<String>,
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
@@ -127,6 +128,8 @@ pub mod inputs {
     pub struct RefreshFailedPermanent {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkReauthRequired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearCredentialLifecycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Release {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -180,6 +183,7 @@ pub enum Input {
     RefreshFailedTransient(inputs::RefreshFailedTransient),
     RefreshFailedPermanent(inputs::RefreshFailedPermanent),
     MarkReauthRequired(inputs::MarkReauthRequired),
+    ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
     Release(inputs::Release),
     AdmitOAuthBrowserFlow(inputs::AdmitOAuthBrowserFlow),
     VerifyOAuthBrowserFlow(inputs::VerifyOAuthBrowserFlow),
@@ -202,6 +206,7 @@ impl Input {
             Self::RefreshFailedTransient(_) => InputKind::RefreshFailedTransient,
             Self::RefreshFailedPermanent(_) => InputKind::RefreshFailedPermanent,
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
+            Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
             Self::AdmitOAuthBrowserFlow(_) => InputKind::AdmitOAuthBrowserFlow,
             Self::VerifyOAuthBrowserFlow(_) => InputKind::VerifyOAuthBrowserFlow,
@@ -225,6 +230,7 @@ pub enum InputKind {
     RefreshFailedTransient,
     RefreshFailedPermanent,
     MarkReauthRequired,
+    ClearCredentialLifecycle,
     Release,
     AdmitOAuthBrowserFlow,
     VerifyOAuthBrowserFlow,
@@ -273,6 +279,7 @@ pub enum TransitionId {
     MarkReauthRequiredFromValid,
     MarkReauthRequiredFromExpiring,
     MarkReauthRequiredFromRefreshing,
+    ClearCredentialLifecycle,
     Release,
     AdmitOAuthBrowserFlowValid,
     AdmitOAuthBrowserFlowExpiring,
@@ -389,6 +396,7 @@ pub fn initial_state() -> State {
         expires_at: None,
         last_refresh: None,
         refresh_attempt: 0,
+        credential_present: false,
         oauth_browser_flow_ids: Default::default(),
         oauth_device_flow_ids: Default::default(),
         oauth_device_poll_ids: Default::default(),

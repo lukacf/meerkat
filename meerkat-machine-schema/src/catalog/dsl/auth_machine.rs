@@ -35,6 +35,7 @@ macro_rules! auth_catalog_machine_dsl {
                 expires_at: Option<u64>,
                 last_refresh: Option<u64>,
                 refresh_attempt: u64,
+                credential_present: bool,
                 oauth_browser_flow_ids: Set<String>,
                 oauth_device_flow_ids: Set<String>,
                 oauth_device_poll_ids: Set<String>,
@@ -44,6 +45,7 @@ macro_rules! auth_catalog_machine_dsl {
                 expires_at = None,
                 last_refresh = None,
                 refresh_attempt = 0,
+                credential_present = false,
                 oauth_browser_flow_ids = EmptySet,
                 oauth_device_flow_ids = EmptySet,
                 oauth_device_poll_ids = EmptySet,
@@ -67,6 +69,7 @@ macro_rules! auth_catalog_machine_dsl {
                 RefreshFailedTransient,
                 RefreshFailedPermanent,
                 MarkReauthRequired,
+                ClearCredentialLifecycle,
                 Release,
                 AdmitOAuthBrowserFlow { flow_id: String },
                 VerifyOAuthBrowserFlow { flow_id: String },
@@ -95,6 +98,7 @@ macro_rules! auth_catalog_machine_dsl {
                 update {
                     self.expires_at = expires_at_ts;
                     self.refresh_attempt = 0;
+                    self.credential_present = true;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -176,9 +180,22 @@ macro_rules! auth_catalog_machine_dsl {
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
             }
 
+            transition ClearCredentialLifecycle {
+                on input ClearCredentialLifecycle
+                update {
+                    self.expires_at = None;
+                    self.last_refresh = None;
+                    self.refresh_attempt = 0;
+                    self.credential_present = false;
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
             transition Release {
                 on input Release
                 update {
+                    self.credential_present = false;
                     self.oauth_browser_flow_ids = EmptySet;
                     self.oauth_device_flow_ids = EmptySet;
                     self.oauth_device_poll_ids = EmptySet;

@@ -1016,11 +1016,14 @@ impl std::fmt::Display for LeaseKey {
 /// at all, `phase` is `None` and `expires_at` is `None`. `generation`
 /// advances whenever the lease lifecycle accepts a transition, so consumers
 /// can distinguish a stale projection from a freshly reacquired lease even
-/// when the expiry timestamp is unchanged.
+/// when the expiry timestamp is unchanged. `credential_present` distinguishes
+/// credential lifecycle authority from OAuth login-flow membership that may
+/// keep an AuthMachine instance alive after credential rollback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
+    pub credential_present: bool,
     pub generation: u64,
 }
 
@@ -1096,6 +1099,16 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+
+    /// Clear credential lifecycle authority without treating persisted token
+    /// bytes as a new lease source.
+    ///
+    /// Handles that co-locate short-lived OAuth flow membership with credential
+    /// lifecycle state should preserve those flow memberships when clearing
+    /// only the credential side after a failed login commit.
+    fn release_credential_lifecycle(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        self.release_lease(lease_key)
+    }
 
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;

@@ -218,10 +218,10 @@ impl AnthropicOAuthRuntime {
             .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
     }
 
-    /// Return a valid access token, refreshing if the persisted token is
+    /// Return a valid token bundle, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
     /// tokens are persisted yet.
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
         let persisted = self
             .load_persisted()
             .await?
@@ -230,9 +230,9 @@ impl AnthropicOAuthRuntime {
         // Fresh enough? Use cached.
         if let Some(expiry) = persisted.expires_at
             && expiry - Utc::now() > Duration::seconds(60)
-            && let Some(access) = persisted.primary_secret
+            && persisted.primary_secret.is_some()
         {
-            return Ok(access);
+            return Ok(persisted);
         }
 
         // Need to refresh. Must have a refresh_token.
@@ -266,6 +266,14 @@ impl AnthropicOAuthRuntime {
             .await?;
 
         self.save_persisted(&refreshed).await?;
+        Ok(refreshed)
+    }
+
+    /// Return a valid access token, refreshing if the persisted token is
+    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
+    /// tokens are persisted yet.
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
+        let refreshed = self.get_or_refresh_tokens().await?;
         refreshed
             .primary_secret
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)

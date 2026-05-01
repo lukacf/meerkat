@@ -160,14 +160,17 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
 ///
 /// Callers that need to compensate a token write after a later step fails can
 /// use this with the token snapshot captured before the write. If the previous
-/// snapshot had no credential-backed active phase, callers should release the
-/// current lease instead.
+/// snapshot had no credential-backed active phase, this helper is a no-op; it
+/// must not recreate credential authority from token bytes alone.
 pub fn restore_token_lifecycle_snapshot(
     handle: &dyn AuthLeaseHandle,
     lease_key: &LeaseKey,
     snapshot: &AuthLeaseSnapshot,
     previous: Option<&PersistedTokens>,
 ) -> Result<(), DslTransitionError> {
+    if !snapshot.credential_present {
+        return Ok(());
+    }
     let Some(phase) = snapshot.phase else {
         return Ok(());
     };
@@ -313,6 +316,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: None,
+                credential_present: true,
                 generation: 1,
             }
         }
@@ -560,6 +564,7 @@ mod tests {
         let snapshot = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now + chrono::Duration::hours(1)).timestamp() as u64),
+            credential_present: true,
             generation: 1,
         };
 

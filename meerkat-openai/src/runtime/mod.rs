@@ -11,12 +11,12 @@ use async_trait::async_trait;
 use meerkat_core::AuthError;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::refresh_allowed;
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::{refresh_allowed, require_credential_lifecycle_authority};
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -138,40 +138,22 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         .ok_or_else(|| interactive_login_error(binding))?;
                     let key =
                         meerkat_core::auth::TokenKey::from_connection_ref(&binding.connection_ref);
+                    require_credential_lifecycle_authority(env, binding)?;
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
 
-                    let mut chatgpt_account_id = persisted.account_id.clone();
-                    let mut chatgpt_is_fedramp: Option<bool> = None;
-                    let mut chatgpt_plan_type: Option<String> = None;
-                    if let Some(id_token) = persisted.id_token.as_deref()
-                        && let Ok(claims) =
-                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
-                    {
-                        let lifted = oauth::ChatGptIdClaims::lift_from_claims(&claims.raw);
-                        if chatgpt_account_id.is_none() {
-                            chatgpt_account_id = lifted.account_id;
-                        }
-                        chatgpt_is_fedramp = lifted.is_fedramp;
-                        chatgpt_plan_type = lifted.plan_type;
-                    }
-
-                    let access = match auth_method {
-                        OpenAiAuthMethod::ExternalChatGptTokens => persisted
-                            .primary_secret
-                            .clone()
-                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?,
+                    let effective_tokens = match auth_method {
+                        OpenAiAuthMethod::ExternalChatGptTokens => persisted,
                         OpenAiAuthMethod::ManagedChatGptOauth => {
                             use chrono::{Duration, Utc};
                             let fresh = persisted
                                 .expires_at
                                 .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
-                            {
-                                access
+                            if fresh && persisted.primary_secret.is_some() {
+                                persisted
                             } else {
                                 if !refresh_allowed(binding) {
                                     return Err(ProviderAuthError::Auth(AuthError::Expired));
@@ -187,20 +169,37 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     endpoints,
                                     key,
                                 );
-                                runtime.get_or_refresh_access_token().await.map_err(
-                                    |e| match e {
-                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                            interactive_login_error(binding)
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            other.to_string(),
-                                        ),
-                                    },
-                                )?
+                                runtime.get_or_refresh_tokens().await.map_err(|e| match e {
+                                    oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                        interactive_login_error(binding)
+                                    }
+                                    other => {
+                                        ProviderAuthError::SourceResolutionFailed(other.to_string())
+                                    }
+                                })?
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
                     };
+
+                    let access = effective_tokens
+                        .primary_secret
+                        .clone()
+                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                    let mut chatgpt_account_id = effective_tokens.account_id.clone();
+                    let mut chatgpt_is_fedramp: Option<bool> = None;
+                    let mut chatgpt_plan_type: Option<String> = None;
+                    if let Some(id_token) = effective_tokens.id_token.as_deref()
+                        && let Ok(claims) =
+                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
+                    {
+                        let lifted = oauth::ChatGptIdClaims::lift_from_claims(&claims.raw);
+                        if chatgpt_account_id.is_none() {
+                            chatgpt_account_id = lifted.account_id;
+                        }
+                        chatgpt_is_fedramp = lifted.is_fedramp;
+                        chatgpt_plan_type = lifted.plan_type;
+                    }
                     let mut metadata = AuthMetadata::default();
                     if chatgpt_account_id.is_some()
                         || chatgpt_is_fedramp.is_some()
@@ -223,7 +222,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     Arc::new(StaticLease::inline_secret(
                         access,
                         metadata,
-                        persisted.expires_at,
+                        effective_tokens.expires_at,
                         source_label.clone(),
                     ))
                 }

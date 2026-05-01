@@ -194,21 +194,22 @@ impl OpenAiOAuthRuntime {
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
         if let Some(expiry) = persisted.expires_at
             && expiry - Utc::now() > Duration::seconds(60)
-            && let Some(access) = persisted.primary_secret
+            && persisted.primary_secret.is_some()
         {
-            return Ok(access);
+            return Ok(persisted);
         }
         let refresh_token = persisted
             .refresh_token
             .clone()
             .ok_or(OpenAiOAuthError::MissingRefreshToken)?;
+        let account_id = persisted.account_id.clone();
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
         let refreshed = self
@@ -227,13 +228,18 @@ impl OpenAiOAuthRuntime {
                             result,
                             PersistedAuthMode::ChatgptOauth,
                             Some(refresh_token),
-                            persisted.account_id.clone(),
+                            account_id,
                         ))
                     })
                 }),
             )
             .await?;
         self.save(&refreshed).await?;
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+        let refreshed = self.get_or_refresh_tokens().await?;
         refreshed
             .primary_secret
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)

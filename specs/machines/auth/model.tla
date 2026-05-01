@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for AuthMachine.
 
-CONSTANTS NatValues, SetOfStringValues, StringValues
+CONSTANTS BooleanValues, NatValues, SetOfStringValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -22,9 +22,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids
+VARIABLES phase, model_step_count, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids
 
-vars == << phase, model_step_count, expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+vars == << phase, model_step_count, expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 Init ==
     /\ phase = "Valid"
@@ -32,6 +32,7 @@ Init ==
     /\ expires_at = None
     /\ last_refresh = None
     /\ refresh_attempt = 0
+    /\ credential_present = FALSE
     /\ oauth_browser_flow_ids = {}
     /\ oauth_device_flow_ids = {}
     /\ oauth_device_poll_ids = {}
@@ -46,6 +47,7 @@ Acquire(expires_at_ts) ==
     /\ model_step_count' = model_step_count + 1
     /\ expires_at' = expires_at_ts
     /\ refresh_attempt' = 0
+    /\ credential_present' = TRUE
     /\ UNCHANGED << last_refresh, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
@@ -53,21 +55,21 @@ MarkExpiring ==
     /\ phase = "Valid"
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 BeginRefreshFromValid ==
     /\ phase = "Valid"
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 BeginRefreshFromExpiring ==
     /\ phase = "Expiring"
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 CompleteRefresh(new_expires_at, now_ts) ==
@@ -77,7 +79,7 @@ CompleteRefresh(new_expires_at, now_ts) ==
     /\ expires_at' = new_expires_at
     /\ last_refresh' = Some(now_ts)
     /\ refresh_attempt' = 0
-    /\ UNCHANGED << oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 RefreshFailedTransient ==
@@ -85,7 +87,7 @@ RefreshFailedTransient ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
-    /\ UNCHANGED << expires_at, last_refresh, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 RefreshFailedPermanent ==
@@ -93,34 +95,46 @@ RefreshFailedPermanent ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
-    /\ UNCHANGED << expires_at, last_refresh, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 MarkReauthRequiredFromValid ==
     /\ phase = "Valid"
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 MarkReauthRequiredFromExpiring ==
     /\ phase = "Expiring"
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 MarkReauthRequiredFromRefreshing ==
     /\ phase = "Refreshing"
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+
+
+ClearCredentialLifecycle ==
+    /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ expires_at' = None
+    /\ last_refresh' = None
+    /\ refresh_attempt' = 0
+    /\ credential_present' = FALSE
+    /\ UNCHANGED << oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 Release ==
     /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
     /\ phase' = "Released"
     /\ model_step_count' = model_step_count + 1
+    /\ credential_present' = FALSE
     /\ oauth_browser_flow_ids' = {}
     /\ oauth_device_flow_ids' = {}
     /\ oauth_device_poll_ids' = {}
@@ -133,7 +147,7 @@ AdmitOAuthBrowserFlowValid(flow_id) ==
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 AdmitOAuthBrowserFlowExpiring(flow_id) ==
@@ -142,7 +156,7 @@ AdmitOAuthBrowserFlowExpiring(flow_id) ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 AdmitOAuthBrowserFlowRefreshing(flow_id) ==
@@ -151,7 +165,7 @@ AdmitOAuthBrowserFlowRefreshing(flow_id) ==
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 AdmitOAuthBrowserFlowReauthRequired(flow_id) ==
@@ -160,7 +174,7 @@ AdmitOAuthBrowserFlowReauthRequired(flow_id) ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthBrowserFlowValid(flow_id) ==
@@ -168,7 +182,7 @@ VerifyOAuthBrowserFlowValid(flow_id) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthBrowserFlowExpiring(flow_id) ==
@@ -176,7 +190,7 @@ VerifyOAuthBrowserFlowExpiring(flow_id) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthBrowserFlowRefreshing(flow_id) ==
@@ -184,7 +198,7 @@ VerifyOAuthBrowserFlowRefreshing(flow_id) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthBrowserFlowReauthRequired(flow_id) ==
@@ -192,7 +206,7 @@ VerifyOAuthBrowserFlowReauthRequired(flow_id) ==
     /\ (flow_id \in oauth_browser_flow_ids)
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ConsumeOAuthBrowserFlowValid(flow_id) ==
@@ -201,7 +215,7 @@ ConsumeOAuthBrowserFlowValid(flow_id) ==
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ConsumeOAuthBrowserFlowExpiring(flow_id) ==
@@ -210,7 +224,7 @@ ConsumeOAuthBrowserFlowExpiring(flow_id) ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ConsumeOAuthBrowserFlowRefreshing(flow_id) ==
@@ -219,7 +233,7 @@ ConsumeOAuthBrowserFlowRefreshing(flow_id) ==
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ConsumeOAuthBrowserFlowReauthRequired(flow_id) ==
@@ -228,7 +242,7 @@ ConsumeOAuthBrowserFlowReauthRequired(flow_id) ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ExpireOAuthBrowserFlowValid(flow_id) ==
@@ -237,7 +251,7 @@ ExpireOAuthBrowserFlowValid(flow_id) ==
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ExpireOAuthBrowserFlowExpiring(flow_id) ==
@@ -246,7 +260,7 @@ ExpireOAuthBrowserFlowExpiring(flow_id) ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ExpireOAuthBrowserFlowRefreshing(flow_id) ==
@@ -255,7 +269,7 @@ ExpireOAuthBrowserFlowRefreshing(flow_id) ==
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 ExpireOAuthBrowserFlowReauthRequired(flow_id) ==
@@ -264,7 +278,7 @@ ExpireOAuthBrowserFlowReauthRequired(flow_id) ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_browser_flow_ids' = (oauth_browser_flow_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 AdmitOAuthDeviceFlowValid(flow_id) ==
@@ -274,7 +288,7 @@ AdmitOAuthDeviceFlowValid(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \cup {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 AdmitOAuthDeviceFlowExpiring(flow_id) ==
@@ -284,7 +298,7 @@ AdmitOAuthDeviceFlowExpiring(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \cup {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 AdmitOAuthDeviceFlowRefreshing(flow_id) ==
@@ -294,7 +308,7 @@ AdmitOAuthDeviceFlowRefreshing(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \cup {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 AdmitOAuthDeviceFlowReauthRequired(flow_id) ==
@@ -304,7 +318,7 @@ AdmitOAuthDeviceFlowReauthRequired(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \cup {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 VerifyOAuthDeviceFlowValid(flow_id) ==
@@ -312,7 +326,7 @@ VerifyOAuthDeviceFlowValid(flow_id) ==
     /\ (flow_id \in oauth_device_flow_ids)
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthDeviceFlowExpiring(flow_id) ==
@@ -320,7 +334,7 @@ VerifyOAuthDeviceFlowExpiring(flow_id) ==
     /\ (flow_id \in oauth_device_flow_ids)
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthDeviceFlowRefreshing(flow_id) ==
@@ -328,7 +342,7 @@ VerifyOAuthDeviceFlowRefreshing(flow_id) ==
     /\ (flow_id \in oauth_device_flow_ids)
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 VerifyOAuthDeviceFlowReauthRequired(flow_id) ==
@@ -336,7 +350,7 @@ VerifyOAuthDeviceFlowReauthRequired(flow_id) ==
     /\ (flow_id \in oauth_device_flow_ids)
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids >>
 
 
 BeginOAuthDevicePollValid(flow_id) ==
@@ -346,7 +360,7 @@ BeginOAuthDevicePollValid(flow_id) ==
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 BeginOAuthDevicePollExpiring(flow_id) ==
@@ -356,7 +370,7 @@ BeginOAuthDevicePollExpiring(flow_id) ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 BeginOAuthDevicePollRefreshing(flow_id) ==
@@ -366,7 +380,7 @@ BeginOAuthDevicePollRefreshing(flow_id) ==
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 BeginOAuthDevicePollReauthRequired(flow_id) ==
@@ -376,7 +390,7 @@ BeginOAuthDevicePollReauthRequired(flow_id) ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \cup {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 FinishOAuthDevicePollValid(flow_id) ==
@@ -385,7 +399,7 @@ FinishOAuthDevicePollValid(flow_id) ==
     /\ phase' = "Valid"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 FinishOAuthDevicePollExpiring(flow_id) ==
@@ -394,7 +408,7 @@ FinishOAuthDevicePollExpiring(flow_id) ==
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 FinishOAuthDevicePollRefreshing(flow_id) ==
@@ -403,7 +417,7 @@ FinishOAuthDevicePollRefreshing(flow_id) ==
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 FinishOAuthDevicePollReauthRequired(flow_id) ==
@@ -412,7 +426,7 @@ FinishOAuthDevicePollReauthRequired(flow_id) ==
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids, oauth_device_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids, oauth_device_flow_ids >>
 
 
 ConsumeOAuthDeviceFlowValid(flow_id) ==
@@ -422,7 +436,7 @@ ConsumeOAuthDeviceFlowValid(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ConsumeOAuthDeviceFlowExpiring(flow_id) ==
@@ -432,7 +446,7 @@ ConsumeOAuthDeviceFlowExpiring(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ConsumeOAuthDeviceFlowRefreshing(flow_id) ==
@@ -442,7 +456,7 @@ ConsumeOAuthDeviceFlowRefreshing(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ConsumeOAuthDeviceFlowReauthRequired(flow_id) ==
@@ -452,7 +466,7 @@ ConsumeOAuthDeviceFlowReauthRequired(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ExpireOAuthDeviceFlowValid(flow_id) ==
@@ -462,7 +476,7 @@ ExpireOAuthDeviceFlowValid(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ExpireOAuthDeviceFlowExpiring(flow_id) ==
@@ -472,7 +486,7 @@ ExpireOAuthDeviceFlowExpiring(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ExpireOAuthDeviceFlowRefreshing(flow_id) ==
@@ -482,7 +496,7 @@ ExpireOAuthDeviceFlowRefreshing(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 ExpireOAuthDeviceFlowReauthRequired(flow_id) ==
@@ -492,7 +506,7 @@ ExpireOAuthDeviceFlowReauthRequired(flow_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ oauth_device_flow_ids' = (oauth_device_flow_ids \ {flow_id})
     /\ oauth_device_poll_ids' = (oauth_device_poll_ids \ {flow_id})
-    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, oauth_browser_flow_ids >>
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, oauth_browser_flow_ids >>
 
 
 Next ==
@@ -506,6 +520,7 @@ Next ==
     \/ MarkReauthRequiredFromValid
     \/ MarkReauthRequiredFromExpiring
     \/ MarkReauthRequiredFromRefreshing
+    \/ ClearCredentialLifecycle
     \/ Release
     \/ \E flow_id \in StringValues : AdmitOAuthBrowserFlowValid(flow_id)
     \/ \E flow_id \in StringValues : AdmitOAuthBrowserFlowExpiring(flow_id)

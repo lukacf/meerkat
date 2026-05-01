@@ -10,6 +10,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `expires_at`: `Option<u64>`
 - `last_refresh`: `Option<u64>`
 - `refresh_attempt`: `u64`
+- `credential_present`: `Bool`
 - `oauth_browser_flow_ids`: `Set<String>`
 - `oauth_device_flow_ids`: `Set<String>`
 - `oauth_device_poll_ids`: `Set<String>`
@@ -22,6 +23,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RefreshFailedTransient`
 - `RefreshFailedPermanent`
 - `MarkReauthRequired`
+- `ClearCredentialLifecycle`
 - `Release`
 - `AdmitOAuthBrowserFlow`(flow_id: String)
 - `VerifyOAuthBrowserFlow`(flow_id: String)
@@ -100,6 +102,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `MarkReauthRequiredFromRefreshing`
 - From: `Refreshing`
 - On: `MarkReauthRequired`()
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `ClearCredentialLifecycle`
+- From: `Valid`, `Expiring`, `Refreshing`, `ReauthRequired`, `Released`
+- On: `ClearCredentialLifecycle`()
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

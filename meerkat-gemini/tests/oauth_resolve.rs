@@ -1,12 +1,4 @@
-//! Phase 4b — OpenAI ChatGPT + Google Code Assist OAuth resolution
-//! through the provider runtime.
-//!
-//! Covers the same choke-point as the Anthropic test: persisted tokens
-//! → resolve returns an inline secret. Also verifies
-//! the external_chatgpt_tokens path and the Google api_key_express path
-//! (which routes through the simple-secret resolver).
-
-#![cfg(all(not(target_arch = "wasm32"), feature = "oauth",))]
+#![cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -31,26 +23,26 @@ use meerkat_core::{
     AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
+use meerkat_gemini::runtime::oauth;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
-use meerkat_openai::runtime::oauth as o_oauth;
 
-fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
+fn code_assist_realm() -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
     backend.insert(
-        backend_kind.into(),
+        "code_assist".into(),
         BackendProfileConfig {
-            provider: "openai".into(),
-            backend_kind: backend_kind.into(),
+            provider: "gemini".into(),
+            backend_kind: "google_code_assist".into(),
             base_url: None,
             options: serde_json::json!({"realm_id": "dev"}),
         },
     );
     let mut auth = BTreeMap::new();
     auth.insert(
-        "chatgpt_auth".into(),
+        "google_oauth".into(),
         AuthProfileConfig {
-            provider: "openai".into(),
-            auth_method: auth_method.into(),
+            provider: "gemini".into(),
+            auth_method: "google_oauth".into(),
             source: CredentialSourceSpec::PlatformDefault,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
@@ -61,10 +53,10 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
     );
     let mut binding = BTreeMap::new();
     binding.insert(
-        "default_chatgpt".into(),
+        "default_code_assist".into(),
         ProviderBindingConfig {
-            backend_profile: backend_kind.into(),
-            auth_profile: "chatgpt_auth".into(),
+            backend_profile: "code_assist".into(),
+            auth_profile: "google_oauth".into(),
             default_model: None,
             policy: Default::default(),
         },
@@ -75,7 +67,7 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
             backend,
             auth,
             binding,
-            default_binding: Some("default_chatgpt".into()),
+            default_binding: Some("default_code_assist".into()),
         },
     )
     .unwrap()
@@ -84,7 +76,7 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
 fn default_connection_ref() -> ConnectionRef {
     ConnectionRef {
         realm: RealmId::parse("dev").expect("valid realm"),
-        binding: BindingId::parse("default_chatgpt").expect("valid binding"),
+        binding: BindingId::parse("default_code_assist").expect("valid binding"),
         profile: None,
     }
 }
@@ -149,82 +141,69 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     }
 }
 
-// --- OpenAI managed_chatgpt_oauth ------------------------------------
-
-#[tokio::test]
-async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
-    let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("fresh-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
+fn persisted_google_oauth(secret: &str) -> PersistedTokens {
+    PersistedTokens {
+        auth_mode: PersistedAuthMode::GoogleOauth,
+        primary_secret: Some(secret.into()),
+        refresh_token: Some("refresh-google".into()),
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: oauth::CODE_ASSIST_SCOPES
             .iter()
-            .map(|s| (*s).into())
+            .map(|scope| (*scope).into())
             .collect(),
-        account_id: Some("acct-1".into()),
+        account_id: None,
         metadata: serde_json::Value::Null,
-    };
+    }
+}
+
+#[tokio::test]
+async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
+    let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
-            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &persisted,
+            &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
+            &persisted_google_oauth("fresh-google-access"),
         )
         .await
         .unwrap();
 
-    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
         .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
     let registry = ProviderRuntimeRegistry::empty()
-        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
         .await
-        .expect("fresh ChatGPT tokens should resolve");
+        .expect("fresh Google OAuth tokens should resolve");
+
     assert_eq!(
         connection.resolved_secret(),
-        Some("fresh-chatgpt-access".to_string()),
+        Some("fresh-google-access".to_string())
     );
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
+async fn google_oauth_rejects_token_without_auth_lifecycle() {
     let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ChatgptOauth,
-        primary_secret: Some("stale-chatgpt-access".into()),
-        refresh_token: Some("rt".into()),
-        id_token: None,
-        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-        last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
-        account_id: Some("acct-1".into()),
-        metadata: serde_json::Value::Null,
-    };
     store
         .save(
-            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &persisted,
+            &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
+            &persisted_google_oauth("stale-google-access"),
         )
         .await
         .unwrap();
 
-    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing().with_token_store(store);
     let registry = ProviderRuntimeRegistry::empty()
-        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
         .await
         .unwrap_err();
+
     assert!(
         matches!(
             err,
@@ -237,16 +216,16 @@ async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
 }
 
 #[tokio::test]
-async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publication() {
+async fn google_oauth_refresh_returns_refreshed_expiry_for_lease_publication() {
     let app = Router::new().route(
-        "/oauth/token",
+        "/token",
         post(|Form(_form): Form<serde_json::Value>| async {
             Json(serde_json::json!({
-                "access_token": "refreshed-chatgpt-access",
-                "refresh_token": "rotated-chatgpt-refresh",
+                "access_token": "refreshed-google-access",
+                "refresh_token": "rotated-google-refresh",
                 "expires_in": 3600,
                 "token_type": "Bearer",
-                "scope": "openid profile email offline_access",
+                "scope": "https://www.googleapis.com/auth/cloud-platform",
             }))
         }),
     );
@@ -256,21 +235,21 @@ async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publica
         axum::serve(listener, app).await.unwrap();
     });
 
-    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
     let store = Arc::new(EphemeralTokenStore::new());
     let old_expiry = Utc::now() - ChronoDuration::minutes(5);
     store
         .save(
             &key,
             &PersistedTokens {
-                auth_mode: PersistedAuthMode::ChatgptOauth,
-                primary_secret: Some("expired-chatgpt-access".into()),
-                refresh_token: Some("refresh-chatgpt".into()),
+                auth_mode: PersistedAuthMode::GoogleOauth,
+                primary_secret: Some("expired-google-access".into()),
+                refresh_token: Some("refresh-google".into()),
                 id_token: None,
                 expires_at: Some(old_expiry),
                 last_refresh: Some(Utc::now() - ChronoDuration::hours(2)),
                 scopes: vec![],
-                account_id: Some("acct-1".into()),
+                account_id: None,
                 metadata: serde_json::Value::Null,
             },
         )
@@ -278,29 +257,32 @@ async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publica
         .unwrap();
 
     let endpoints = OAuthEndpoints {
-        client_id: o_oauth::CHATGPT_CLIENT_ID.into(),
-        authorize_url: o_oauth::CHATGPT_AUTHORIZE_URL.into(),
-        token_url: format!("http://{addr}/oauth/token"),
+        client_id: oauth::CODE_ASSIST_CLIENT_ID.into(),
+        authorize_url: oauth::GOOGLE_AUTHORIZE_URL.into(),
+        token_url: format!("http://{addr}/token"),
         device_code_url: None,
         redirect_uri: "http://127.0.0.1:0/callback".into(),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: oauth::CODE_ASSIST_SCOPES
             .iter()
             .map(|scope| (*scope).into())
             .collect(),
         extra_headers: vec![],
     };
-    let runtime =
-        o_oauth::OpenAiOAuthRuntime::new_with_default_coordinator(store.clone(), endpoints, key);
+    let runtime = oauth::GoogleCodeAssistOAuthRuntime::new_with_default_coordinator(
+        store.clone(),
+        endpoints,
+        key,
+    );
     let before_refresh = Utc::now();
     let refreshed = runtime.get_or_refresh_tokens().await.unwrap();
 
     assert_eq!(
         refreshed.primary_secret.as_deref(),
-        Some("refreshed-chatgpt-access")
+        Some("refreshed-google-access")
     );
     assert_eq!(
         refreshed.refresh_token.as_deref(),
-        Some("rotated-chatgpt-refresh")
+        Some("rotated-google-refresh")
     );
     assert!(
         refreshed.expires_at.expect("refreshed expiry")
@@ -309,64 +291,4 @@ async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publica
     );
     let stored = store.load(runtime.key()).await.unwrap().unwrap();
     assert_eq!(stored.expires_at, refreshed.expires_at);
-}
-
-#[tokio::test]
-async fn openai_external_chatgpt_tokens_returns_persisted_access() {
-    let store = Arc::new(EphemeralTokenStore::new());
-    let persisted = PersistedTokens {
-        auth_mode: PersistedAuthMode::ExternalTokens,
-        primary_secret: Some("externally-managed-access".into()),
-        refresh_token: None,
-        id_token: None,
-        expires_at: None,
-        last_refresh: Some(Utc::now()),
-        scopes: vec![],
-        account_id: Some("acct-ext".into()),
-        metadata: serde_json::Value::Null,
-    };
-    store
-        .save(
-            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &persisted,
-        )
-        .await
-        .unwrap();
-
-    let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
-    let env = ResolverEnvironment::testing()
-        .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
-    let registry = ProviderRuntimeRegistry::empty()
-        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
-        .await
-        .expect("external tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("externally-managed-access".to_string()),
-    );
-}
-
-#[tokio::test]
-async fn openai_chatgpt_oauth_missing_tokens_surfaces_interactive_login_required() {
-    let store = Arc::new(EphemeralTokenStore::new());
-    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
-    let registry = ProviderRuntimeRegistry::empty()
-        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
-            )
-        ),
-        "got {err:?}"
-    );
 }

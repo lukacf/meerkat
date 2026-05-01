@@ -17,12 +17,12 @@ use meerkat_core::AuthError;
 use meerkat_core::HttpAuthorizer;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::refresh_allowed;
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::{refresh_allowed, require_credential_lifecycle_authority};
 use meerkat_llm_core::LlmClient;
 #[cfg(any(
     all(not(target_arch = "wasm32"), feature = "bedrock"),
@@ -327,38 +327,21 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .ok_or_else(|| interactive_login_error(binding))?;
                     let key =
                         meerkat_core::auth::TokenKey::from_connection_ref(&binding.connection_ref);
+                    require_credential_lifecycle_authority(env, binding)?;
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
-                    let mut anthropic_email: Option<String> = None;
-                    let mut anthropic_user_id: Option<String> = None;
-                    let mut anthropic_subscription_tier: Option<String> = None;
-                    // Plan §4b.12: lift id_token claims.
-                    if let Some(id_token) = persisted.id_token.as_deref()
-                        && let Ok(claims) =
-                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
-                    {
-                        let lifted = oauth::AnthropicIdClaims::lift_from_claims(&claims.raw);
-                        anthropic_email = lifted.email;
-                        anthropic_user_id = lifted.user_id;
-                        anthropic_subscription_tier = lifted.subscription_tier;
-                    }
-
-                    let secret = match auth_method {
-                        AnthropicAuthMethod::OauthToApiKey => persisted
-                            .primary_secret
-                            .clone()
-                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?,
+                    let effective_tokens = match auth_method {
+                        AnthropicAuthMethod::OauthToApiKey => persisted,
                         AnthropicAuthMethod::ClaudeAiOauth => {
                             use chrono::{Duration, Utc};
                             let fresh = persisted
                                 .expires_at
                                 .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
-                            {
-                                access
+                            if fresh && persisted.primary_secret.is_some() {
+                                persisted
                             } else {
                                 if !refresh_allowed(binding) {
                                     return Err(ProviderAuthError::Auth(AuthError::Expired));
@@ -374,20 +357,35 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                     endpoints,
                                     key,
                                 );
-                                runtime.get_or_refresh_access_token().await.map_err(
-                                    |e| match e {
-                                        oauth::AnthropicOAuthError::InteractiveLoginRequired => {
-                                            interactive_login_error(binding)
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            other.to_string(),
-                                        ),
-                                    },
-                                )?
+                                runtime.get_or_refresh_tokens().await.map_err(|e| match e {
+                                    oauth::AnthropicOAuthError::InteractiveLoginRequired => {
+                                        interactive_login_error(binding)
+                                    }
+                                    other => {
+                                        ProviderAuthError::SourceResolutionFailed(other.to_string())
+                                    }
+                                })?
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
                     };
+                    let secret = effective_tokens
+                        .primary_secret
+                        .clone()
+                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                    let mut anthropic_email: Option<String> = None;
+                    let mut anthropic_user_id: Option<String> = None;
+                    let mut anthropic_subscription_tier: Option<String> = None;
+                    // Plan §4b.12: lift id_token claims.
+                    if let Some(id_token) = effective_tokens.id_token.as_deref()
+                        && let Ok(claims) =
+                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
+                    {
+                        let lifted = oauth::AnthropicIdClaims::lift_from_claims(&claims.raw);
+                        anthropic_email = lifted.email;
+                        anthropic_user_id = lifted.user_id;
+                        anthropic_subscription_tier = lifted.subscription_tier;
+                    }
                     let mut metadata = AuthMetadata::default();
                     if anthropic_email.is_some()
                         || anthropic_user_id.is_some()
@@ -409,7 +407,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     Arc::new(StaticLease::inline_secret(
                         secret,
                         metadata,
-                        persisted.expires_at,
+                        effective_tokens.expires_at,
                         source_label.clone(),
                     ))
                 }

@@ -285,6 +285,7 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RefreshFailedTransient => "refresh_failed_transient",
             auth_dsl::AuthMachineInput::RefreshFailedPermanent => "refresh_failed_permanent",
             auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
+            auth_dsl::AuthMachineInput::ClearCredentialLifecycle => "clear_credential_lifecycle",
             auth_dsl::AuthMachineInput::Release => "release_lease",
             auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow { .. } => "admit_oauth_browser_flow",
             auth_dsl::AuthMachineInput::VerifyOAuthBrowserFlow { .. } => {
@@ -430,6 +431,51 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         Ok(())
     }
 
+    fn release_credential_lifecycle(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        let context = "AuthLeaseHandle::release_credential_lifecycle";
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (input, remove_after_accept, from_phase, to_phase) = {
+            let entry =
+                guard
+                    .authorities
+                    .entry(lease_key.clone())
+                    .or_insert_with(|| {
+                        auth_dsl::AuthMachineAuthority::from_state(
+                            auth_dsl::AuthMachineState::default(),
+                        )
+                    });
+            let has_oauth_membership = !entry.state.oauth_browser_flow_ids.is_empty()
+                || !entry.state.oauth_device_flow_ids.is_empty()
+                || !entry.state.oauth_device_poll_ids.is_empty();
+            let input = if has_oauth_membership {
+                auth_dsl::AuthMachineInput::ClearCredentialLifecycle
+            } else {
+                auth_dsl::AuthMachineInput::Release
+            };
+            let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
+            let from_phase = map_phase(entry.state.lifecycle_phase);
+            auth_dsl::AuthMachineMutator::apply(entry, input.clone())
+                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+            let to_phase = map_phase(entry.state.lifecycle_phase);
+            (input, remove_after_accept, from_phase, to_phase)
+        };
+        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
+        *generation = generation.saturating_add(1);
+        if remove_after_accept {
+            guard.authorities.remove(lease_key);
+        }
+        emit_audit(
+            lease_key,
+            Self::audit_action_for(&input),
+            from_phase,
+            to_phase,
+        );
+        Ok(())
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -440,6 +486,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             return AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                credential_present: false,
                 generation,
             };
         }
@@ -447,11 +494,13 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             Some(machine) => AuthLeaseSnapshot {
                 phase: Some(map_phase(machine.state.lifecycle_phase)),
                 expires_at: machine.state.expires_at,
+                credential_present: machine.state.credential_present,
                 generation,
             },
             None => AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                credential_present: false,
                 generation,
             },
         }

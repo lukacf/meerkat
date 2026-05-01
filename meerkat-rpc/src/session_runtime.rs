@@ -269,6 +269,7 @@ fn profile_to_capability_surface(
 struct SessionRuntimeLlmReconfigureHost {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     factory: AgentFactory,
+    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
 }
@@ -309,7 +310,11 @@ impl SessionRuntimeLlmReconfigureHost {
         } else {
             let config = self.load_config_for_hot_swap().await?;
             self.factory
-                .build_llm_client_for_identity(&config, identity)
+                .build_llm_client_for_identity_with_auth_lease(
+                    &config,
+                    identity,
+                    Some(Arc::clone(&self.auth_lease)),
+                )
                 .await
                 .map_err(|e| {
                     RuntimeDriverError::Internal(format!(
@@ -977,10 +982,13 @@ impl SessionRuntime {
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
+        let reconfigure_auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            auth_lease.clone();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
                 factory: factory_clone.clone(),
+                auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
             },
@@ -1053,10 +1061,13 @@ impl SessionRuntime {
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
+        let reconfigure_auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            auth_lease.clone();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
                 factory: factory_clone.clone(),
+                auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
             },
@@ -1640,6 +1651,7 @@ impl SessionRuntime {
         SessionRuntimeLlmReconfigureHost {
             service: Arc::clone(&self.service),
             factory: self.factory.clone(),
+            auth_lease: self.runtime_adapter.auth_lease_handle(),
             default_llm_client: Arc::clone(&self.default_llm_client),
             config_runtime: Arc::clone(&self.config_runtime),
         }
@@ -4842,6 +4854,7 @@ mod tests {
     use meerkat_core::skills_config::{
         SkillRepoTransport, SkillRepositoryConfig, SkillsConfig, SkillsIdentityConfig,
     };
+    use meerkat_providers::auth_store::TokenStore;
     #[cfg(feature = "mcp")]
     use std::path::PathBuf;
     use std::pin::Pin;
@@ -5046,6 +5059,42 @@ mod tests {
                 .expect("valid binding fixture"),
             profile: None,
         }
+    }
+
+    fn config_with_openai_managed_store_binding() -> meerkat_core::Config {
+        let mut config = meerkat_core::Config::default();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "openai_backend".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".into(),
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_managed".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".into(),
+                auth_method: "api_key".into(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "default_openai".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_backend".into(),
+                auth_profile: "openai_managed".into(),
+                default_model: None,
+                policy: Default::default(),
+            },
+        );
+        section.default_binding = Some("default_openai".into());
+        config.realm.insert("dev".into(), section);
+        config
     }
 
     fn slow_build_config(delay_ms: u64) -> AgentBuildConfig {
@@ -6454,6 +6503,49 @@ mod tests {
             err.to_string().contains("anthropic") && err.to_string().contains("gpt-5.4"),
             "error should identify the rejected provider/model pair: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_build_threads_auth_lease_for_managed_store_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
+        let factory = temp_factory(&temp).with_token_store(token_store.clone());
+        let mut runtime = make_runtime(factory, 10);
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                config_with_openai_managed_store_binding(),
+            )),
+            temp.path().join("config_state.json"),
+        )));
+        let connection_ref = test_connection_ref("dev", "default_openai");
+        let tokens = meerkat_providers::auth_store::PersistedTokens::api_key("sk-hot-swap");
+        token_store
+            .save(
+                &meerkat_providers::auth_store::TokenKey::from_connection_ref(&connection_ref),
+                &tokens,
+            )
+            .await
+            .unwrap();
+        let auth_lease = runtime.auth_lease_handle();
+        meerkat_core::publish_token_lifecycle_acquired(
+            auth_lease.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .expect("test credential lifecycle should be acquired");
+
+        let host = runtime.llm_reconfigure_host();
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(connection_ref),
+        };
+
+        host.build_adapter_for_llm_identity(&identity)
+            .await
+            .expect("hot-swap managed-store resolution should receive AuthMachine authority");
     }
 
     #[tokio::test]

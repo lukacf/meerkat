@@ -48,6 +48,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MarkReauthRequiredFromRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
+- `ClearCredentialLifecycle`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`

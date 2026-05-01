@@ -189,16 +189,18 @@ impl GoogleCodeAssistOAuthRuntime {
             .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, GoogleCodeAssistOAuthError> {
+    pub async fn get_or_refresh_tokens(
+        &self,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
         if let Some(expiry) = persisted.expires_at
             && expiry - Utc::now() > Duration::seconds(60)
-            && let Some(access) = persisted.primary_secret
+            && persisted.primary_secret.is_some()
         {
-            return Ok(access);
+            return Ok(persisted);
         }
         let refresh_token = persisted
             .refresh_token
@@ -233,6 +235,11 @@ impl GoogleCodeAssistOAuthRuntime {
             )
             .await?;
         self.save(&refreshed).await?;
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, GoogleCodeAssistOAuthError> {
+        let refreshed = self.get_or_refresh_tokens().await?;
         refreshed
             .primary_secret
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)

@@ -149,6 +149,7 @@ impl Default for RecordingAuthLeaseHandle {
             snapshot: Mutex::new(AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                credential_present: false,
                 generation: 0,
             }),
             generation: Mutex::new(0),
@@ -211,6 +212,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(expires_at),
+            credential_present: true,
             generation,
         };
         Ok(AuthLeaseTransition { generation })
@@ -258,6 +260,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(new_expires_at),
+            credential_present: true,
             generation,
         };
         Ok(AuthLeaseTransition { generation })
@@ -304,6 +307,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: None,
             expires_at: None,
+            credential_present: false,
             generation: self.next_generation(),
         };
         Ok(())

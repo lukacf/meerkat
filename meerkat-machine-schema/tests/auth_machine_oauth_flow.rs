@@ -26,6 +26,10 @@ fn auth_machine_declares_oauth_flow_lifecycle_state() {
 #[test]
 fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
     let schema = dsl_auth_machine();
+    schema
+        .inputs
+        .variant_named("ClearCredentialLifecycle")
+        .expect("AuthMachine must declare credential-only lifecycle clear input");
     for input in [
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",

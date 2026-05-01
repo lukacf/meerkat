@@ -108,9 +108,62 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "oauth_resolve_test",
+    aliases = aliases(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "oauth_resolve",
+    crate_root = "tests/oauth_resolve.rs",
+    crate_features = [
+        "adc",
+        "oauth",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/oauth_resolve.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "oauth_resolve",
+        "CARGO_MANIFEST_DIR": "./meerkat-gemini",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-gemini:meerkat_gemini",
+        "//meerkat-llm-core:meerkat_llm_core",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
         ":meerkat_gemini_unit_test",
+        ":oauth_resolve_test",
     ],
 )

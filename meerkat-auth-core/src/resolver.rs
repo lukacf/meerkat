@@ -14,10 +14,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{PersistedAuthMode, TokenKey};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::handles::AuthLeasePhase;
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
-    AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
-    HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata, ResolvedAuthEnvelope,
+    AuthRouteHints, AuthStatusPhase, CredentialSourceSpec, GoogleAuthMetadata,
+    HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata,
+    ResolvedAuthEnvelope,
 };
 
 use meerkat_llm_core::provider_runtime::binding::{DynamicLease, StaticLease, ValidatedBinding};
@@ -125,6 +128,24 @@ async fn resolve_managed_store_secret(
             .as_ref()
             .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
         let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let auth_lease = env
+            .auth_lease_handle
+            .as_ref()
+            .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+        let lease_key =
+            meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+        let snapshot = auth_lease.snapshot(&lease_key);
+        match AuthStatusPhase::from_lease_snapshot((env.now)(), &snapshot) {
+            AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {}
+            AuthStatusPhase::Expired => {
+                return Err(ProviderAuthError::Auth(AuthError::Expired));
+            }
+            AuthStatusPhase::ReauthRequired
+            | AuthStatusPhase::RefreshFailed
+            | AuthStatusPhase::Unknown => {
+                return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+            }
+        }
         let tokens = store
             .load(&key)
             .await
@@ -151,6 +172,30 @@ async fn resolve_managed_store_secret(
              not available on the wasm32 target"
                 .into(),
         ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn require_credential_lifecycle_authority(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+) -> Result<(), ProviderAuthError> {
+    let auth_lease = env
+        .auth_lease_handle
+        .as_ref()
+        .ok_or_else(|| interactive_login_error(binding))?;
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let snapshot = auth_lease.snapshot(&lease_key);
+    if !snapshot.credential_present {
+        return Err(interactive_login_error(binding));
+    }
+    match snapshot.phase {
+        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => {
+            Ok(())
+        }
+        Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
+            Err(interactive_login_error(binding))
+        }
     }
 }
 
@@ -443,6 +488,11 @@ mod tests {
     use crate::EphemeralTokenStore;
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
+    #[cfg(not(target_arch = "wasm32"))]
+    use meerkat_core::handles::{
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
+        DslTransitionError, LeaseKey,
+    };
     use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
     use meerkat_llm_core::provider_runtime::binding::{
         NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
@@ -581,6 +631,77 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    struct StaticAuthLeaseHandle {
+        snapshot: AuthLeaseSnapshot,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl StaticAuthLeaseHandle {
+        fn valid() -> Arc<Self> {
+            Arc::new(Self {
+                snapshot: AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::Valid),
+                    expires_at: None,
+                    credential_present: true,
+                    generation: 1,
+                },
+            })
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl AuthLeaseHandle for StaticAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            _lease_key: &LeaseKey,
+            _expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition {
+                generation: self.snapshot.generation,
+            })
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition {
+                generation: self.snapshot.generation,
+            })
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.clone()
+        }
+    }
+
     #[tokio::test]
     async fn simple_secret_external_static_headers_fails_closed() {
         let binding = simple_secret_binding(
@@ -617,13 +738,37 @@ mod tests {
             .save(&key, &PersistedTokens::api_key("sk-managed"))
             .await
             .unwrap();
-        let env = ResolverEnvironment::testing().with_token_store(store);
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
 
         let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
             .await
             .unwrap();
 
         assert_eq!(secret, "sk-managed");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_source_rejects_token_without_auth_lifecycle() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(&key, &PersistedTokens::api_key("sk-stale"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing().with_token_store(store);
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -636,7 +781,9 @@ mod tests {
             .save(&key, &PersistedTokens::static_bearer("bearer"))
             .await
             .unwrap();
-        let env = ResolverEnvironment::testing().with_token_store(store);
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
 
         let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
             .await

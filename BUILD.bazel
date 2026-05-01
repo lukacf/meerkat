@@ -184,6 +184,7 @@ test_suite(
         "//meerkat-core:source_identity_resolve_enforces_lifecycle_test",
         "//meerkat-core:tool_notice_projection_test",
         "//meerkat-gemini:meerkat_gemini_unit_test",
+        "//meerkat-gemini:oauth_resolve_test",
         "//meerkat-hooks:meerkat_hooks_unit_test",
         "//meerkat-llm-core:meerkat_llm_core_unit_test",
         "//meerkat-machine-codegen:artifacts_semantic_model_test",

@@ -13,12 +13,12 @@ use meerkat_core::AuthError;
 use meerkat_core::HttpAuthorizer;
 use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::refresh_allowed;
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::resolver::{refresh_allowed, require_credential_lifecycle_authority};
 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
@@ -240,30 +240,18 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         .ok_or_else(|| interactive_login_error(binding))?;
                     let key =
                         meerkat_core::auth::TokenKey::from_connection_ref(&binding.connection_ref);
+                    require_credential_lifecycle_authority(env, binding)?;
                     let persisted = store
                         .load(&key)
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
-                    let mut google_email: Option<String> = None;
-                    let mut google_user_id: Option<String> = None;
-                    // Plan §4b.12: lift OIDC claims into AuthMetadata.
-                    if let Some(id_token) = persisted.id_token.as_deref()
-                        && let Ok(claims) =
-                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
-                    {
-                        let lifted = oauth::GoogleIdClaims::lift_from_claims(&claims.raw);
-                        google_email = lifted.email;
-                        google_user_id = lifted.user_id;
-                    }
                     use chrono::{Duration, Utc};
                     let fresh = persisted
                         .expires_at
                         .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
-                    let access = if let (true, Some(access)) =
-                        (fresh, persisted.primary_secret.clone())
-                    {
-                        access
+                    let effective_tokens = if fresh && persisted.primary_secret.is_some() {
+                        persisted
                     } else {
                         if !refresh_allowed(binding) {
                             return Err(ProviderAuthError::Auth(AuthError::Expired));
@@ -278,18 +266,28 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             endpoints,
                             key,
                         );
-                        runtime
-                            .get_or_refresh_access_token()
-                            .await
-                            .map_err(|e| match e {
-                                oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired => {
-                                    interactive_login_error(binding)
-                                }
-                                other => {
-                                    ProviderAuthError::SourceResolutionFailed(other.to_string())
-                                }
-                            })?
+                        runtime.get_or_refresh_tokens().await.map_err(|e| match e {
+                            oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired => {
+                                interactive_login_error(binding)
+                            }
+                            other => ProviderAuthError::SourceResolutionFailed(other.to_string()),
+                        })?
                     };
+                    let access = effective_tokens
+                        .primary_secret
+                        .clone()
+                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                    let mut google_email: Option<String> = None;
+                    let mut google_user_id: Option<String> = None;
+                    // Plan §4b.12: lift OIDC claims into AuthMetadata.
+                    if let Some(id_token) = effective_tokens.id_token.as_deref()
+                        && let Ok(claims) =
+                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
+                    {
+                        let lifted = oauth::GoogleIdClaims::lift_from_claims(&claims.raw);
+                        google_email = lifted.email;
+                        google_user_id = lifted.user_id;
+                    }
                     let mut metadata = AuthMetadata::default();
                     if google_email.is_some() || google_user_id.is_some() {
                         metadata.account_id =
@@ -308,7 +306,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     Arc::new(StaticLease::inline_secret(
                         access,
                         metadata,
-                        persisted.expires_at,
+                        effective_tokens.expires_at,
                         source_label.clone(),
                     ))
                 }

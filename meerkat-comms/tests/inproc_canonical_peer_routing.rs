@@ -378,6 +378,136 @@ async fn router_rejects_duplicate_trusted_canonical_peer_identity() {
 }
 
 #[tokio::test]
+async fn router_auth_disabled_fallback_rejects_duplicate_trusted_canonical_peer_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let target_name = format!("auth-disabled-duplicate-target-{suffix}");
+    let stale_name = format!("auth-disabled-duplicate-stale-{suffix}");
+    let (mut target_inbox, target_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "",
+        &target_name,
+        target_pubkey,
+        target_sender,
+        PeerMeta::default(),
+    );
+
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        Keypair::generate(),
+        TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: stale_name.clone(),
+                    pubkey: target_pubkey,
+                    addr: format!("inproc://{stale_name}"),
+                    meta: PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: target_name.clone(),
+                    pubkey: target_pubkey,
+                    addr: format!("inproc://{target_name}"),
+                    meta: PeerMeta::default(),
+                },
+            ],
+        },
+        CommsConfig::default(),
+        router_inbox_sender,
+        false,
+    );
+
+    let dest = target_pubkey.to_peer_id();
+    let result = router
+        .send(
+            dest,
+            message("auth-disabled duplicate canonical trust must not fallback"),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "auth-disabled duplicate trusted canonical identity must fail closed before fallback: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "auth-disabled fallback must not deliver to an ambiguous trusted canonical identity"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_auth_disabled_fallback_rejects_late_shared_duplicate_trust() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let target_name = format!("late-auth-disabled-duplicate-target-{suffix}");
+    let stale_name = format!("late-auth-disabled-duplicate-stale-{suffix}");
+    let (mut target_inbox, target_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "",
+        &target_name,
+        target_pubkey,
+        target_sender,
+        PeerMeta::default(),
+    );
+
+    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::with_shared_peers(
+        Keypair::generate(),
+        trusted_peers.clone(),
+        CommsConfig::default(),
+        router_inbox_sender,
+        false,
+    );
+    trusted_peers.write().peers.extend([
+        TrustedPeer {
+            name: stale_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{stale_name}"),
+            meta: PeerMeta::default(),
+        },
+        TrustedPeer {
+            name: target_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{target_name}"),
+            meta: PeerMeta::default(),
+        },
+    ]);
+
+    let dest = target_pubkey.to_peer_id();
+    let result = router
+        .send(
+            dest,
+            message("late shared duplicate canonical trust must not fallback"),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "late shared duplicate trusted canonical identity must fail closed before fallback: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "auth-disabled fallback must not deliver after late shared duplicate trust mutation"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
 async fn router_remove_trusted_peer_removes_all_duplicate_canonical_matches() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();
@@ -482,6 +612,73 @@ async fn runtime_peer_directory_skips_duplicate_trusted_canonical_peer_identity(
         peers.iter().all(|peer| peer.peer_id != peer_id),
         "duplicate trusted canonical identities must not be advertised: {peers:?}"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let runtime_name = format!("auth-disabled-duplicate-directory-runtime-{suffix}");
+    let target_name = format!("auth-disabled-duplicate-directory-target-{suffix}");
+    let stale_name = format!("auth-disabled-duplicate-directory-stale-{suffix}");
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let runtime = CommsRuntime::new(meerkat_comms::ResolvedCommsConfig {
+        enabled: true,
+        name: runtime_name,
+        inproc_namespace: None,
+        identity_dir: tmp.path().join("identity"),
+        trusted_peers_path: tmp.path().join("trusted_peers.json"),
+        listen_uds: None,
+        listen_tcp: None,
+        event_listen_tcp: None,
+        #[cfg(unix)]
+        event_listen_uds: None,
+        comms_config: CommsConfig::default(),
+        auth: meerkat_core::CommsAuthMode::Open,
+        require_peer_auth: false,
+        allow_external_unauthenticated: false,
+    })
+    .await
+    .expect("auth-disabled runtime");
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let peer_id = target_pubkey.to_peer_id();
+    let (_target_inbox, target_sender) = Inbox::new();
+
+    runtime.trusted_peers_shared().write().peers.extend([
+        TrustedPeer {
+            name: stale_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{stale_name}"),
+            meta: PeerMeta::default(),
+        },
+        TrustedPeer {
+            name: target_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{target_name}"),
+            meta: PeerMeta::default(),
+        },
+    ]);
+    registry.register_with_meta_in_namespace(
+        "",
+        &target_name,
+        target_pubkey,
+        target_sender,
+        PeerMeta::default(),
+    );
+
+    let peers = CoreCommsRuntime::peers(&runtime).await;
+
+    assert!(
+        peers.iter().all(|peer| peer.peer_id != peer_id),
+        "auth-disabled peer directory must not re-advertise ambiguous trusted identities as inproc: {peers:?}"
+    );
+
+    registry.clear();
 }
 
 #[tokio::test]

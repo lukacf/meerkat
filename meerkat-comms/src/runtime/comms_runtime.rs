@@ -2155,6 +2155,8 @@ impl CommsRuntime {
                     continue;
                 }
                 let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                trusted_names.insert(peer.name.clone());
+                trusted_pubkeys.insert(peer.pubkey);
                 if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
                     tracing::warn!(
                         peer_name = %peer.name,
@@ -2163,8 +2165,6 @@ impl CommsRuntime {
                     );
                     continue;
                 }
-                trusted_names.insert(peer.name.clone());
-                trusted_pubkeys.insert(peer.pubkey);
                 if private_peer_ids.contains(&peer_id) {
                     continue;
                 }

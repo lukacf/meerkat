@@ -309,18 +309,11 @@ impl TrustedPeers {
     }
 
     pub(crate) fn retain_raw_sendable_identities(&mut self) {
-        let mut peer_id_counts: BTreeMap<PeerId, usize> = BTreeMap::new();
-        for peer in self.peers.iter().filter(|peer| peer.validate().is_ok()) {
-            *peer_id_counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
-        }
-        self.peers.retain(|peer| {
-            peer.validate().is_ok()
-                && peer_id_counts
-                    .get(&peer.pubkey.to_peer_id())
-                    .copied()
-                    .unwrap_or(0)
-                    == 1
-        });
+        // Keep duplicate non-zero identities visible to the canonical router
+        // resolver so it can fail closed as ambiguous. Dropping them here would
+        // make ambiguous trust indistinguishable from missing trust and can
+        // enable auth-disabled discovery fallback.
+        self.peers.retain(|peer| peer.validate().is_ok());
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.

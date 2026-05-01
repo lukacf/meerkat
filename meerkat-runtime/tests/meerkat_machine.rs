@@ -1894,7 +1894,10 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            match adapter.interrupt_current_run(&sid).await {
+            match adapter
+                .hard_cancel_current_run(&sid, "stale attachment repair probe")
+                .await
+            {
                 Err(RuntimeDriverError::NotReady {
                     state: RuntimeState::Attached,
                 }) => break,
@@ -1941,7 +1944,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
 #[tokio::test]
 async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     use meerkat_core::lifecycle::core_executor::{
-        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
     };
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -1950,10 +1953,29 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     struct BlockingStopExecutor {
         stop_entered: Arc<Notify>,
         release_stop: Arc<Notify>,
+        interrupt_calls: Arc<AtomicUsize>,
+    }
+
+    struct BlockingStopInterruptHandle {
+        interrupt_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for BlockingStopInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingStopExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(BlockingStopInterruptHandle {
+                interrupt_calls: Arc::clone(&self.interrupt_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -1994,6 +2016,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     let sid = SessionId::new();
     let stop_entered = Arc::new(Notify::new());
     let release_stop = Arc::new(Notify::new());
+    let interrupt_calls = Arc::new(AtomicUsize::new(0));
 
     adapter
         .register_session_with_executor(
@@ -2001,6 +2024,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
             Box::new(BlockingStopExecutor {
                 stop_entered: Arc::clone(&stop_entered),
                 release_stop: Arc::clone(&release_stop),
+                interrupt_calls: Arc::clone(&interrupt_calls),
             }),
         )
         .await;
@@ -2018,9 +2042,10 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     stop_task.await.unwrap();
 
     adapter
-        .interrupt_current_run(&sid)
+        .hard_cancel_current_run(&sid, "blocking stop attachment probe")
         .await
         .expect("attachment should remain published while stop is still in progress");
+    assert_eq!(interrupt_calls.load(Ordering::SeqCst), 1);
 
     release_stop.notify_one();
 
@@ -2036,7 +2061,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     .expect("runtime should reach Stopped after the blocking stop control is released");
 
     let err = adapter
-        .interrupt_current_run(&sid)
+        .hard_cancel_current_run(&sid, "stopped runtime interrupt probe")
         .await
         .expect_err("stopped runtime should no longer expose a live attachment");
     assert!(matches!(

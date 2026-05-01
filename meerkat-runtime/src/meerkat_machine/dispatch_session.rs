@@ -31,6 +31,55 @@ fn visibility_authorities_for_names(
 }
 
 impl MeerkatMachine {
+    async fn dispatch_user_interrupt(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+    ) -> Result<(), RuntimeDriverError> {
+        // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+        if matches!(
+            self.existing_session_runtime_state(session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return Err(RuntimeDriverError::Destroyed);
+        }
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let previous_dsl_state = match self
+            .stage_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::InterruptCurrentRun,
+                "InterruptCurrentRun",
+            )
+            .await
+        {
+            Ok(state) => state,
+            Err(_) => {
+                let state = self
+                    .existing_session_runtime_state(session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
+                return Err(RuntimeDriverError::NotReady { state });
+            }
+        };
+
+        if let Err(err) = self
+            .apply_user_interrupt_live_cancel(session_id, reason)
+            .await
+        {
+            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                .await;
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
     async fn prepare_session_runtime_bindings(
         &self,
         session_id: SessionId,
@@ -253,45 +302,6 @@ impl MeerkatMachine {
                 }
                 // set_session_silent_intents_inner is infallible — no rollback needed.
                 let _ = previous_dsl_state;
-                Ok(MeerkatMachineCommandResult::Unit)
-            }
-            MeerkatMachineCommand::InterruptCurrentRun { session_id, reason } => {
-                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-
-                let previous_dsl_state = match self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::InterruptCurrentRun,
-                        "InterruptCurrentRun",
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeDriverError::NotReady { state });
-                    }
-                };
-                if let Err(err) = self.interrupt_current_run_inner(&session_id, reason).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::CancelAfterBoundary { session_id } => {

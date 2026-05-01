@@ -352,10 +352,6 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         intents: Vec<String>,
     },
-    InterruptCurrentRun {
-        session_id: SessionId,
-        reason: String,
-    },
     CancelAfterBoundary {
         session_id: SessionId,
     },
@@ -868,11 +864,6 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::SetSilentIntents => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::SetSilentIntents,
-            )
-        }
-        MeerkatMachineCommandVariant::InterruptCurrentRun => {
-            MeerkatMachineCommandClassification::CatalogInput(
-                MeerkatMachineCatalogInput::InterruptCurrentRun,
             )
         }
         MeerkatMachineCommandVariant::CancelAfterBoundary => {

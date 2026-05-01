@@ -705,32 +705,6 @@ impl MeerkatMachine {
         }
     }
 
-    /// Cancel the currently-running turn for a registered session.
-    pub async fn interrupt_current_run(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.interrupt_current_run_with_reason(session_id, "session interrupt".to_string())
-            .await
-    }
-
-    pub(crate) async fn interrupt_current_run_with_reason(
-        &self,
-        session_id: &SessionId,
-        reason: String,
-    ) -> Result<(), RuntimeDriverError> {
-        self.execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::InterruptCurrentRun {
-                session_id: session_id.clone(),
-                reason,
-            },
-        )
-        .await
-        .map_err(MeerkatMachine::driver_error_from_command_error)
-        .map(|_| ())
-    }
-
     /// Request cancellation at the next safe boundary for the currently-running turn.
     pub async fn cancel_after_boundary(
         &self,

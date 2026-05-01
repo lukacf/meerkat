@@ -995,7 +995,6 @@ impl MeerkatMachine {
                 MeerkatMachineCommand::RegisterSession { .. }
                 | MeerkatMachineCommand::UnregisterSession { .. }
                 | MeerkatMachineCommand::SetSilentIntents { .. }
-                | MeerkatMachineCommand::InterruptCurrentRun { .. }
                 | MeerkatMachineCommand::CancelAfterBoundary { .. }
                 | MeerkatMachineCommand::StopRuntimeExecutor { .. }
                 | MeerkatMachineCommand::ContainsSession { .. }

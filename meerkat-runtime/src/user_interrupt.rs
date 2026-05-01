@@ -13,14 +13,14 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: impl Into<String>,
     ) -> Result<(), RuntimeDriverError> {
-        self.interrupt_current_run_with_reason(session_id, reason.into())
+        self.dispatch_user_interrupt(session_id, reason.into())
             .await
     }
 
     // `user_interrupt` is mounted as a private child of `dispatch_session`, so
-    // this live-authority helper is visible only to the admitted interrupt
-    // command arm and not to peer-admission siblings.
-    pub(super) async fn interrupt_current_run_inner(
+    // this live-authority helper is visible only to the private admitted
+    // interrupt path and not to peer-admission siblings.
+    pub(super) async fn apply_user_interrupt_live_cancel(
         &self,
         session_id: &SessionId,
         reason: String,

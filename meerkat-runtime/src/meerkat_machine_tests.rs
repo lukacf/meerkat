@@ -4211,14 +4211,14 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
 }
 
 #[tokio::test]
-async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
+async fn hard_cancel_current_run_returns_not_ready_without_attached_loop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "idle hard-cancel probe")
         .await
         .expect_err("interrupt should reject when no attached loop exists");
     match err {
@@ -4310,7 +4310,7 @@ async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_e
 }
 
 #[tokio::test]
-async fn interrupt_current_run_on_attached_runtime_uses_live_handle_during_apply() {
+async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
@@ -4452,7 +4452,7 @@ async fn interrupt_current_run_on_attached_runtime_uses_live_handle_during_apply
     );
 
     adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "attached live hard-cancel probe")
         .await
         .expect("interrupt should use the attached live interrupt handle");
 
@@ -12065,7 +12065,7 @@ async fn unregister_session_rejects_unknown_session() {
 }
 
 #[tokio::test]
-async fn interrupt_current_run_rejects_destroyed_session() {
+async fn hard_cancel_current_run_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -12077,7 +12077,7 @@ async fn interrupt_current_run_rejects_destroyed_session() {
         .expect("destroy should succeed");
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "destroyed hard-cancel probe")
         .await
         .expect_err("interrupt should reject a destroyed session");
     assert!(
@@ -17550,10 +17550,7 @@ fn runtime_parity_probe_command(
             reason: DrainExitReason::Dismissed,
         },
         RuntimeParityProbeInput::InterruptCurrentRun => {
-            MeerkatMachineCommand::InterruptCurrentRun {
-                session_id: fixture.session_id.clone(),
-                reason: "runtime parity probe interrupt".to_string(),
-            }
+            unreachable!("user interrupt probes use MeerkatMachine::hard_cancel_current_run")
         }
         RuntimeParityProbeInput::CancelAfterBoundary => {
             MeerkatMachineCommand::CancelAfterBoundary {
@@ -17827,6 +17824,13 @@ async fn execute_runtime_parity_probe(
         .await
         .map(MeerkatMachineCommandResult::LlmReconfigured)
         .map_err(MeerkatMachineCommandError::from)
+    } else if matches!(probe, RuntimeParityProbeInput::InterruptCurrentRun) {
+        fixture
+            .adapter
+            .hard_cancel_current_run(&fixture.session_id, "runtime parity probe interrupt")
+            .await
+            .map(|()| MeerkatMachineCommandResult::Unit)
+            .map_err(MeerkatMachineCommandError::from)
     } else {
         fixture
             .adapter

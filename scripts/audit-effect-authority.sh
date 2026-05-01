@@ -74,6 +74,36 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
 
   mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+async fn bad(machine: &Machine) {
+    let _ = machine.dispatch_user_interrupt(&session_id, "bad".to_string()).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: peer dispatch_user_interrupt fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+async fn bad(machine: &Machine) {
+    let _ = machine.apply_user_interrupt_live_cancel(&session_id, "bad".to_string()).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: peer apply_user_interrupt_live_cancel fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
   cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/mod.rs" <<'EOF'
 #[path = "../user_interrupt.rs"]
 pub(crate) mod user_interrupt;
@@ -694,7 +724,7 @@ if [[ -f "$root/meerkat-runtime/src/meerkat_machine/mod.rs" ]]; then
 fi
 
 peer_matches=""
-hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('
+hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner|dispatch_user_interrupt|apply_user_interrupt_live_cancel)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('
 for peer_file in \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_control.rs" \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
@@ -718,7 +748,7 @@ done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
+  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner|dispatch_user_interrupt|apply_user_interrupt_live_cancel)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
 
@@ -737,7 +767,7 @@ if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
         closed = gsub(/\}/, "}", copy)
         return opened - closed
       }
-      /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?async[[:space:]]+fn[[:space:]]+(hard_cancel_current_run_authorized|interrupt_current_run_inner)[[:space:]]*\(/ {
+      /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?async[[:space:]]+fn[[:space:]]+(hard_cancel_current_run_authorized|interrupt_current_run_inner|apply_user_interrupt_live_cancel)[[:space:]]*\(/ {
         in_authorized = 1
         depth = 0
         saw_open = 0

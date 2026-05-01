@@ -275,6 +275,9 @@ impl InprocRegistry {
         namespace: &str,
         pubkey: &PubKey,
     ) -> Option<InboxSender> {
+        if pubkey.is_zero() {
+            return None;
+        }
         self.state
             .read()
             .namespace(namespace)?
@@ -289,6 +292,9 @@ impl InprocRegistry {
     /// canonical identity is live in more than one namespace, fail closed
     /// rather than choosing whichever namespace the map happens to yield first.
     pub(crate) fn get_by_pubkey_any_namespace(&self, pubkey: &PubKey) -> Option<InboxSender> {
+        if pubkey.is_zero() {
+            return None;
+        }
         let state = self.state.read();
         let mut found = None;
         for namespace_state in state.namespaces.values() {
@@ -313,6 +319,9 @@ impl InprocRegistry {
         namespace: &str,
         pubkey: &PubKey,
     ) -> Option<String> {
+        if pubkey.is_zero() {
+            return None;
+        }
         self.state
             .read()
             .namespace(namespace)?
@@ -496,6 +505,9 @@ impl InprocRegistry {
         let (to_pubkey, sender) = self
             .get_by_name_in_namespace(namespace, to_name)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
+        if to_pubkey.is_zero() {
+            return Err(InprocSendError::PeerNotFound(to_name.to_string()));
+        }
 
         Self::deliver_to_sender(
             from_keypair,
@@ -1312,8 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn test_send_cross_namespace_with_id_rejects_duplicate_pubkey_with_different_names_across_namespaces()
-    {
+    fn test_send_cross_namespace_with_id_rejects_duplicate_pubkey_different_names() {
         let registry = InprocRegistry::new();
         let sender_kp = make_keypair();
         let target_key = make_keypair();

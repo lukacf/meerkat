@@ -228,6 +228,10 @@ impl TrustedPeer {
         }
         Ok(())
     }
+
+    pub(crate) fn has_raw_sendable_identity(&self) -> bool {
+        self.validate().is_ok()
+    }
 }
 
 // Custom serde to serialize pubkey as "ed25519:..." string per spec
@@ -273,10 +277,6 @@ impl<'de> Deserialize<'de> for TrustedPeer {
         };
         peer.validate().map_err(serde::de::Error::custom)?;
         Ok(peer)
-    }
-
-    pub(crate) fn has_raw_sendable_identity(&self) -> bool {
-        self.validate().is_ok()
     }
 }
 
@@ -579,6 +579,28 @@ mod tests {
 
         let unknown = PubKey::new([99u8; 32]);
         assert!(peers.get_peer(&unknown).is_none());
+    }
+
+    #[test]
+    fn test_zero_pubkey_is_never_trusted_or_resolved() {
+        let zero = PubKey::new([0u8; 32]);
+        let peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "zero".to_string(),
+                pubkey: zero,
+                addr: "inproc://zero".to_string(),
+                meta: crate::PeerMeta::default(),
+            }],
+        };
+
+        assert!(
+            !peers.is_trusted(&zero),
+            "zero pubkey must not be trusted even if a raw peer is present"
+        );
+        assert!(
+            peers.get_peer(&zero).is_none(),
+            "zero pubkey must not resolve through raw trust lookup"
+        );
     }
 
     #[test]

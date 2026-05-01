@@ -1,9 +1,11 @@
 use std::sync::{Arc, LazyLock};
 
 use meerkat_comms::{
-    CommsConfig, Inbox, InboxItem, InprocRegistry, Keypair, MessageKind, PeerMeta, Router,
-    PubKey, SendError, TrustedPeer, TrustedPeers,
+    AdmissionOutcome, CommsConfig, CommsRuntime, DropReason, Envelope, Inbox, InboxItem,
+    InprocRegistry, Keypair, MessageKind, PeerMeta, PubKey, Router, SendError, Signature,
+    TrustedPeer, TrustedPeers,
 };
+use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 
 static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -183,6 +185,134 @@ async fn router_add_trusted_peer_raw_zero_pubkey_trust_is_not_sendable() {
     );
 
     registry.clear();
+}
+
+#[tokio::test]
+async fn router_auth_disabled_inproc_fallback_rejects_zero_pubkey_registry_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_name = format!("auth-disabled-zero-fallback-{suffix}");
+    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        Keypair::generate(),
+        TrustedPeers::new(),
+        CommsConfig::default(),
+        router_inbox_sender,
+        false,
+    );
+
+    let dest = zero_pubkey().to_peer_id();
+    let result = router
+        .send(
+            dest,
+            message("auth-disabled fallback must not trust zero pubkeys"),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "auth-disabled inproc fallback must not synthesize a zero-pubkey sendable peer: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "zero-pubkey registry target must not receive through auth-disabled fallback"
+    );
+
+    registry.clear();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn runtime_auth_disabled_directory_skips_zero_pubkey_inproc_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let runtime_name = format!("auth-disabled-directory-sender-{suffix}");
+    let zero_name = format!("auth-disabled-directory-zero-{suffix}");
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let runtime = CommsRuntime::new(meerkat_comms::ResolvedCommsConfig {
+        enabled: true,
+        name: runtime_name,
+        inproc_namespace: None,
+        identity_dir: tmp.path().join("identity"),
+        trusted_peers_path: tmp.path().join("trusted_peers.json"),
+        listen_uds: None,
+        listen_tcp: None,
+        event_listen_tcp: None,
+        #[cfg(unix)]
+        event_listen_uds: None,
+        comms_config: CommsConfig::default(),
+        auth: meerkat_core::CommsAuthMode::Open,
+        require_peer_auth: false,
+        allow_external_unauthenticated: false,
+    })
+    .await
+    .expect("auth-disabled runtime");
+
+    let (_zero_inbox, zero_sender) = Inbox::new();
+    registry.register_with_meta_in_namespace(
+        "",
+        &zero_name,
+        zero_pubkey(),
+        zero_sender,
+        PeerMeta::default(),
+    );
+
+    let peers = CoreCommsRuntime::peers(&runtime).await;
+    assert!(
+        peers
+            .iter()
+            .all(|peer| peer.peer_id != zero_pubkey().to_peer_id()),
+        "auth-disabled peer directory must not advertise zero-pubkey inproc identities: {peers:?}"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn ingress_rejects_late_shared_zero_pubkey_trust_mutation() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let receiver =
+        CommsRuntime::inproc_only(&format!("zero-ingress-receiver-{suffix}")).expect("runtime");
+    let trusted_peers = receiver.router_arc().shared_trusted_peers();
+    trusted_peers
+        .write()
+        .peers
+        .push(raw_zero_trusted_peer(&format!(
+            "zero-ingress-sender-{suffix}"
+        )));
+
+    let envelope = Envelope {
+        id: uuid::Uuid::new_v4(),
+        from: zero_pubkey(),
+        to: receiver.public_key(),
+        kind: message("zero pubkey ingress must not admit"),
+        sig: Signature::new([0u8; 64]),
+    };
+
+    let outcome = receiver
+        .router_arc()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true, &trusted_peers);
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::Dropped {
+            reason: DropReason::UntrustedSender
+        },
+        "late shared zero-pubkey trust mutation must not admit ingress"
+    );
+
+    let drained = CoreCommsRuntime::drain_messages(&receiver).await;
+    assert!(
+        drained.is_empty(),
+        "zero-pubkey ingress must not reach runtime messages: {drained:?}"
+    );
 }
 
 #[tokio::test]

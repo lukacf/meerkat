@@ -2134,7 +2134,7 @@ impl CommsRuntime {
         {
             let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
-                if peer.pubkey.is_zero() {
+                if !peer.has_raw_sendable_identity() {
                     tracing::warn!(
                         peer_name = %peer.name,
                         "skipping zero-pubkey trusted peer in peer directory"
@@ -2198,6 +2198,9 @@ impl CommsRuntime {
         }
 
         for inproc in &inproc_peers {
+            if inproc.pubkey.is_zero() {
+                continue;
+            }
             if private_peer_ids.contains(&peer_id_from_pubkey(&inproc.pubkey)) {
                 continue;
             }

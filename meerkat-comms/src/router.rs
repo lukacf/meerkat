@@ -365,7 +365,7 @@ impl Router {
                     InprocRegistry::global()
                         .peers_in_namespace(inproc_namespace)
                         .into_iter()
-                        .find(|p| peer_id_from_pubkey(&p.pubkey) == dest)
+                        .find(|p| !p.pubkey.is_zero() && peer_id_from_pubkey(&p.pubkey) == dest)
                         .map(|p| TrustedPeer {
                             name: p.name.clone(),
                             pubkey: p.pubkey,

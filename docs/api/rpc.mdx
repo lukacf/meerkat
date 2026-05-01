@@ -839,8 +839,10 @@ To make a session realtime, set its model to `gpt-realtime-1.5` at
   "method": "session/create",
   "params": {
     "prompt": "Let's talk.",
-    "model": "gpt-realtime-1.5",
-    "provider": "openai"
+    "turn_metadata": {
+      "model": "gpt-realtime-1.5",
+      "provider": "openai"
+    }
   }
 }
 ```

@@ -1144,7 +1144,7 @@ create it with a realtime-capable model (for example `gpt-realtime-1.5`):
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Ready for realtime interaction.","model":"gpt-realtime-1.5","provider":"openai"}'
+  -d '{"prompt":"Ready for realtime interaction.","turn_metadata":{"model":"gpt-realtime-1.5","provider":"openai"}}'
 ```
 
 The runtime attaches the OpenAI Realtime transport automatically and
@@ -1200,9 +1200,9 @@ All errors are returned as JSON with an HTTP status code:
 ## Notes
 
 <Note>
-Keep-alive mode requires `keep_alive: true` and a `comms_name`. If `keep_alive` is
-requested but the binary was not compiled with comms support, the server
-returns a `BAD_REQUEST` error.
+Keep-alive mode requires `turn_metadata.keep_alive` with `action: "set"` and a
+`comms_name`. If keep-alive is requested but the binary was not compiled with
+comms support, the server returns a `BAD_REQUEST` error.
 </Note>
 
 <Note>

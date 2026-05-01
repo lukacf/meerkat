@@ -2,7 +2,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
+use crate::lifecycle::run_primitive::{
+    RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
+};
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -154,6 +156,45 @@ pub fn resolve_resume_llm_binding(
     }
 }
 
+fn recovery_initial_turn_metadata(
+    turn_metadata: Option<RuntimeTurnMetadata>,
+    preload_skills: Option<Vec<SkillKey>>,
+    additional_instructions: Option<Vec<String>>,
+    runtime_owned_recovery: bool,
+) -> Option<RuntimeTurnMetadata> {
+    if !runtime_owned_recovery {
+        return turn_metadata;
+    }
+
+    let mut metadata = turn_metadata.unwrap_or_default();
+    if let Some(preload_skills) = preload_skills {
+        metadata
+            .skill_references
+            .get_or_insert_with(Vec::new)
+            .extend(preload_skills);
+    }
+    if let Some(additional_instructions) = additional_instructions {
+        let instructions = additional_instructions
+            .into_iter()
+            .filter_map(|body| {
+                let body = body.trim();
+                (!body.is_empty()).then(|| TurnInstruction {
+                    kind: TurnInstructionKind::Host,
+                    body: body.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            metadata
+                .additional_instructions
+                .get_or_insert_with(Vec::new)
+                .extend(instructions);
+        }
+    }
+
+    (!metadata.is_empty()).then_some(metadata)
+}
+
 pub fn build_recovered_session(
     session: Session,
     overrides: &SurfaceSessionRecoveryOverrides,
@@ -193,6 +234,10 @@ pub fn build_recovered_session(
             "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
         ));
     }
+    let runtime_owned_recovery = matches!(
+        context.runtime_build_mode.as_ref(),
+        Some(RuntimeBuildMode::SessionOwned(_))
+    );
 
     let build_state = session.build_state().unwrap_or_default();
     let llm_binding = resolve_resume_llm_binding(
@@ -237,6 +282,17 @@ pub fn build_recovered_session(
         .recoverable_tool_defs
         .clone()
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
+    let recovered_preload_skills = overrides
+        .preload_skills
+        .clone()
+        .or_else(|| metadata.tooling.active_skills.clone());
+    let recovered_additional_instructions = build_state.additional_instructions.clone();
+    let initial_turn_metadata = recovery_initial_turn_metadata(
+        overrides.turn_metadata.clone(),
+        recovered_preload_skills.clone(),
+        recovered_additional_instructions.clone(),
+        runtime_owned_recovery,
+    );
 
     let mut build = SessionBuildOptions {
         provider: None,
@@ -288,10 +344,9 @@ pub fn build_recovered_session(
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.mob),
         schedule_tools: None,
-        preload_skills: overrides
-            .preload_skills
-            .clone()
-            .or_else(|| metadata.tooling.active_skills.clone()),
+        preload_skills: (!runtime_owned_recovery)
+            .then(|| recovered_preload_skills.clone())
+            .flatten(),
         realm_id: metadata.realm_id.clone().or(context.realm_id),
         instance_id: metadata.instance_id.clone().or(context.instance_id),
         backend: metadata.backend.clone().or(context.backend),
@@ -305,7 +360,9 @@ pub fn build_recovered_session(
             .app_context
             .clone()
             .or_else(|| build_state.app_context.clone()),
-        additional_instructions: build_state.additional_instructions.clone(),
+        additional_instructions: (!runtime_owned_recovery)
+            .then(|| recovered_additional_instructions.clone())
+            .flatten(),
         shell_env: overrides
             .shell_env
             .clone()
@@ -317,7 +374,7 @@ pub fn build_recovered_session(
         runtime_build_mode: context
             .runtime_build_mode
             .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
-        initial_turn_metadata: overrides.turn_metadata.clone(),
+        initial_turn_metadata,
     };
     build.apply_persisted_mob_operator_access(
         overrides
@@ -830,6 +887,50 @@ mod tests {
         assert!(recovered.build.resume_override_mask.provider_params);
         assert!(recovered.build.resume_override_mask.connection_ref);
         assert!(recovered.build.resume_override_mask.keep_alive);
+    }
+
+    #[test]
+    fn runtime_owned_recovery_folds_skills_and_instructions_into_turn_metadata() {
+        let skill = skill_key("recovered-skill");
+        let metadata = recovery_initial_turn_metadata(
+            Some(RuntimeTurnMetadata {
+                skill_references: Some(vec![skill_key("metadata-skill")]),
+                additional_instructions: Some(vec![
+                    crate::lifecycle::run_primitive::TurnInstruction {
+                        kind: crate::lifecycle::run_primitive::TurnInstructionKind::User,
+                        body: "metadata instruction".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            }),
+            Some(vec![skill.clone()]),
+            Some(vec!["persisted instruction".to_string(), " ".to_string()]),
+            true,
+        )
+        .expect("runtime-owned recovery metadata");
+
+        assert_eq!(
+            metadata.skill_references,
+            Some(vec![skill_key("metadata-skill"), skill])
+        );
+        let instructions = metadata
+            .additional_instructions
+            .expect("instructions should be folded into metadata");
+        assert_eq!(instructions.len(), 2);
+        assert_eq!(instructions[0].body, "metadata instruction");
+        assert_eq!(instructions[1].kind, TurnInstructionKind::Host);
+        assert_eq!(instructions[1].body, "persisted instruction");
+
+        assert!(
+            recovery_initial_turn_metadata(
+                None,
+                Some(vec![skill_key("standalone-skill")]),
+                Some(vec!["standalone instruction".to_string()]),
+                false,
+            )
+            .is_none(),
+            "standalone recovery should keep split build fields local"
+        );
     }
 
     #[test]

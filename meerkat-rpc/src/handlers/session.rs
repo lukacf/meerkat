@@ -9,7 +9,6 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::service::SessionQuery;
-use meerkat_core::skills::SkillKey;
 use meerkat_core::{
     BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, ToolCategoryOverride,
 };
@@ -98,9 +97,6 @@ pub struct CreateSessionParams {
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
-    /// Structured skill keys to preload into the system prompt.
-    #[serde(default)]
-    pub preload_skills: Option<Vec<SkillKey>>,
     /// Key-value labels attached to the session for filtering and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -325,7 +321,6 @@ pub async fn handle_create(
         .flatten();
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
-    build_config.preload_skills = params.preload_skills;
 
     // Wire callback tools backed by the live registered_tools list.
     // Tools added later via tools/register are picked up dynamically at each
@@ -717,6 +712,7 @@ mod tests {
             "keep_alive",
             "skill_refs",
             "skill_references",
+            "preload_skills",
             "additional_instructions",
         ] {
             let mut value = serde_json::json!({ "prompt": "hello" });

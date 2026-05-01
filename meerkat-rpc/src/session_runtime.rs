@@ -2900,6 +2900,7 @@ impl SessionRuntime {
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
     ) -> Result<SessionId, RpcError> {
+        build_config.apply_initial_turn_metadata_authority();
         let effective_llm_identity = self.llm_identity_from_pending_build(&build_config).await?;
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         if let Some(prompt) = deferred_prompt.as_ref() {

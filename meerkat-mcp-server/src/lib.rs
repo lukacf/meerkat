@@ -154,10 +154,6 @@ pub struct MeerkatRunInput {
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt — typed `SkillKey`s
-    /// (source_uuid + skill_name).
-    #[serde(default)]
-    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Key-value labels attached at session creation (e.g. workflow tagging).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -195,7 +191,6 @@ fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
         || input.enable_memory.is_some()
         || input.enable_mob.is_some()
         || input.budget_limits.is_some()
-        || input.preload_skills.is_some()
         || input.comms_name.is_some()
         || input.peer_meta.is_some()
 }
@@ -848,10 +843,6 @@ pub struct MeerkatResumeInput {
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
-    /// Skills to preload into the system prompt — typed `SkillKey`s
-    /// (source_uuid + skill_name).
-    #[serde(default)]
-    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2626,17 +2617,8 @@ async fn handle_meerkat_run(
         .as_ref()
         .and_then(|metadata| metadata.model.clone());
     let model = metadata_model.unwrap_or_else(|| config.agent.model.clone());
-    let mut initial_turn_metadata =
+    let initial_turn_metadata =
         normalize_mcp_turn_metadata(input.turn_metadata.clone(), Some(&model));
-    if let Some(preload_skills) = input.preload_skills.clone() {
-        let metadata = initial_turn_metadata.get_or_insert_with(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::default,
-        );
-        match metadata.skill_references.as_mut() {
-            Some(skill_references) => skill_references.extend(preload_skills),
-            None => metadata.skill_references = Some(preload_skills),
-        }
-    }
     let keep_alive_override = turn_metadata_keep_alive_override(initial_turn_metadata.as_ref())
         .map_err(ToolCallError::invalid_params)?;
     // Create: no persisted session to inherit from, so None -> false.
@@ -2982,8 +2964,6 @@ async fn handle_meerkat_resume(
     } else {
         input.prompt
     };
-    let preload_skills = input.preload_skills.clone();
-
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
     let event_task = event_rx.map(|rx| {
@@ -3013,7 +2993,6 @@ async fn handle_meerkat_resume(
         override_shell: enable_shell_override,
         override_memory: input.enable_memory,
         override_mob: input.enable_mob,
-        preload_skills,
         recoverable_tool_defs: (!input.tools.is_empty())
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         ..Default::default()
@@ -3547,6 +3526,7 @@ mod tests {
             "keep_alive",
             "skill_refs",
             "skill_references",
+            "preload_skills",
             "additional_instructions",
         ] {
             let mut value = serde_json::json!({ "prompt": "hello" });
@@ -3592,6 +3572,7 @@ mod tests {
             "keep_alive",
             "skill_refs",
             "skill_references",
+            "preload_skills",
             "flow_tool_overlay",
             "additional_instructions",
         ] {
@@ -4453,7 +4434,6 @@ mod tests {
                 enable_memory: None,
                 enable_mob: None,
                 budget_limits: None,
-                preload_skills: None,
                 labels: None,
                 app_context: None,
                 shell_env: None,
@@ -4500,7 +4480,6 @@ mod tests {
                 enable_memory: None,
                 enable_mob: None,
                 budget_limits: None,
-                preload_skills: None,
                 labels: None,
                 app_context: None,
                 shell_env: None,
@@ -4544,7 +4523,6 @@ mod tests {
                 enable_memory: None,
                 enable_mob: None,
                 budget_limits: None,
-                preload_skills: None,
             },
             None,
             Some(context),

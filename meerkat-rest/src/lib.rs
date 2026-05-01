@@ -924,9 +924,6 @@ pub struct CreateSessionRequest {
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
-    /// Skills to preload into the system prompt.
-    #[serde(default)]
-    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Optional key-value labels attached at session creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -2653,15 +2650,7 @@ async fn create_session_inner(
         .and_then(|metadata| metadata.model.clone());
     let model = metadata_model.unwrap_or_else(|| state.default_model.to_string());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let mut initial_turn_metadata =
-        normalize_create_turn_metadata(req.turn_metadata.clone(), &model);
-    if let Some(preload_skills) = req.preload_skills.clone() {
-        let metadata = initial_turn_metadata.get_or_insert_with(RuntimeTurnMetadata::default);
-        match metadata.skill_references.as_mut() {
-            Some(skill_references) => skill_references.extend(preload_skills),
-            None => metadata.skill_references = Some(preload_skills),
-        }
-    }
+    let initial_turn_metadata = normalize_create_turn_metadata(req.turn_metadata.clone(), &model);
     let keep_alive_override = match rest_turn_keep_alive_override(initial_turn_metadata.as_ref()) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -6162,6 +6151,7 @@ mod tests {
             "provider_params",
             "keep_alive",
             "skill_refs",
+            "preload_skills",
             "additional_instructions",
         ] {
             let mut value = serde_json::json!({ "prompt": "Hello" });

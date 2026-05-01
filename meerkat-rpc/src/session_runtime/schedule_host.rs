@@ -202,24 +202,17 @@ impl SessionRuntime {
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
         let mut build_config = AgentBuildConfig::new(create.model.clone());
-        build_config.provider = create.provider;
+        build_config.initial_turn_metadata = create.initial_turn_metadata();
         build_config.max_tokens = create.max_tokens;
         build_config.system_prompt = prompt_system_prompt
             .map(str::to_owned)
             .or_else(|| create.system_prompt.clone());
         build_config.output_schema = create.output_schema.clone();
         build_config.structured_output_retries = create.structured_output_retries;
-        build_config.provider_params = create.provider_params.clone();
         build_config.comms_name = create.comms_name.clone();
         build_config.peer_meta = create.peer_meta.clone();
-        // Post-wave-a dogma: typed `SkillKey` path only; legacy string
-        // `preload_skills: Vec<String>` from schedule types is not auto-parsed.
-        // When the schedule surface needs to carry preload skills it must do
-        // so via the typed `SkillKey` seam.
-        let _ = &create.preload_skills;
         build_config.preload_skills = None;
-        build_config.additional_instructions = (!create.additional_instructions.is_empty())
-            .then(|| create.additional_instructions.clone());
+        build_config.additional_instructions = None;
         build_config.realm_id = create
             .realm_id
             .clone()
@@ -229,7 +222,7 @@ impl SessionRuntime {
             .clone()
             .or_else(|| self.instance_id.clone());
         build_config.backend = create.backend.clone().or_else(|| self.backend.clone());
-        build_config.keep_alive = create.keep_alive;
+        build_config.keep_alive = false;
         build_config.app_context = create.app_context.clone();
         build_config.config_generation = if let Some(runtime) = self.config_runtime() {
             runtime.get().await.ok().map(|snapshot| snapshot.generation)
@@ -416,5 +409,36 @@ fn rpc_schedule_mob_host(runtime: &Arc<SessionRuntime>) -> Arc<dyn SurfaceSchedu
         Arc::new(NoopScheduleMobHost::new(
             "scheduled mob targets require the mob feature on the RPC host",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rpc_scheduled_materialization_uses_initial_turn_metadata_not_split_build_fields() {
+        let source = include_str!("schedule_host.rs");
+        let start = source
+            .find("pub(super) async fn materialize_scheduled_session")
+            .expect("scheduled materialization should exist");
+        let end = source
+            .find("    async fn deliver_scheduled_prompt")
+            .expect("scheduled materialization end sentinel should exist");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("build_config.initial_turn_metadata = create.initial_turn_metadata()"),
+            "RPC scheduled materialization must stage first-turn metadata through RuntimeTurnMetadata"
+        );
+        for split in [
+            "build_config.provider = create.provider",
+            "build_config.provider_params = create.provider_params.clone()",
+            "build_config.additional_instructions = (!create.additional_instructions.is_empty())",
+            "build_config.keep_alive = create.keep_alive",
+        ] {
+            assert!(
+                !body.contains(split),
+                "RPC scheduled materialization must not write split carrier `{split}`"
+            );
+        }
     }
 }

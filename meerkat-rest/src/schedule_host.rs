@@ -11,7 +11,6 @@ use meerkat::{
     AgentBuildConfig, DeliveryDispatch, Occurrence, ScheduleDomainError,
     SessionMaterializationSpec, SessionService, SessionTargetBinding, TargetProbeOutcome,
 };
-use meerkat_contracts::SkillsParams;
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy,
 };
@@ -28,12 +27,6 @@ use crate::{
     AppState, RestRuntimeExecutorContext, RestSessionRuntimeExecutor,
     session_metadata_marks_archived,
 };
-
-fn materialized_preload_skills(
-    preload_skills: &[meerkat_core::skills::SkillKey],
-) -> Option<Vec<meerkat_core::skills::SkillKey>> {
-    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
-}
 
 #[derive(Default)]
 pub struct ScheduleHostState {
@@ -111,19 +104,17 @@ impl RestScheduleContext {
         let runtime_bindings = prepared.bindings;
 
         let mut build_config = AgentBuildConfig::new(create.model.clone());
-        build_config.provider = create.provider;
+        build_config.initial_turn_metadata = create.initial_turn_metadata();
         build_config.max_tokens = create.max_tokens;
         build_config.system_prompt = prompt_system_prompt
             .map(str::to_owned)
             .or_else(|| create.system_prompt.clone());
         build_config.output_schema = create.output_schema.clone();
         build_config.structured_output_retries = create.structured_output_retries;
-        build_config.provider_params = create.provider_params.clone();
         build_config.comms_name = create.comms_name.clone();
         build_config.peer_meta = create.peer_meta.clone();
-        build_config.preload_skills = materialized_preload_skills(&create.preload_skills);
-        build_config.additional_instructions = (!create.additional_instructions.is_empty())
-            .then(|| create.additional_instructions.clone());
+        build_config.preload_skills = None;
+        build_config.additional_instructions = None;
         build_config.realm_id = create
             .realm_id
             .clone()
@@ -136,7 +127,7 @@ impl RestScheduleContext {
             .backend
             .clone()
             .or_else(|| Some(self.runtime.backend.clone()));
-        build_config.keep_alive = create.keep_alive;
+        build_config.keep_alive = false;
         build_config.app_context = create.app_context.clone();
         build_config.resume_session = Some(pre_session);
         build_config.runtime_build_mode =
@@ -184,12 +175,6 @@ impl RestScheduleTargetAdapter {
     fn new(context: RestScheduleContext) -> Self {
         Self { context }
     }
-}
-
-fn scheduled_materialization_preload_skills(
-    create: &SessionMaterializationSpec,
-) -> Option<Vec<meerkat_core::skills::SkillKey>> {
-    (!create.preload_skills.is_empty()).then(|| create.preload_skills.clone())
 }
 
 #[async_trait]
@@ -351,28 +336,31 @@ async fn update_peer_ingress_context(_context: &RestScheduleContext, _session_id
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
-
-    fn fixture_skill_key(name: &str) -> SkillKey {
-        let skill_name = SkillName::parse(name).expect("fixture skill name should be valid");
-        SkillKey::new(SourceUuid::builtin(), skill_name)
-    }
-
     #[test]
-    fn materialized_preload_skills_preserves_typed_skill_keys() {
-        let key = fixture_skill_key("email");
+    fn rest_scheduled_materialization_uses_initial_turn_metadata_not_split_build_fields() {
+        let source = include_str!("schedule_host.rs");
+        let start = source
+            .find("    async fn materialize_scheduled_session")
+            .expect("scheduled materialization should exist");
+        let end = source
+            .find("struct RestScheduleTargetAdapter")
+            .expect("scheduled materialization end sentinel should exist");
+        let body = &source[start..end];
 
-        assert_eq!(
-            materialized_preload_skills(std::slice::from_ref(&key)),
-            Some(vec![key])
+        assert!(
+            body.contains("build_config.initial_turn_metadata = create.initial_turn_metadata()"),
+            "REST scheduled materialization must stage first-turn metadata through RuntimeTurnMetadata"
         );
-    }
-
-    #[test]
-    fn materialized_preload_skills_leaves_empty_preload_unset() {
-        let preload_skills: Vec<SkillKey> = Vec::new();
-
-        assert_eq!(materialized_preload_skills(&preload_skills), None);
+        for split in [
+            "build_config.provider = create.provider",
+            "build_config.provider_params = create.provider_params.clone()",
+            "build_config.additional_instructions = (!create.additional_instructions.is_empty())",
+            "build_config.keep_alive = create.keep_alive",
+        ] {
+            assert!(
+                !body.contains(split),
+                "REST scheduled materialization must not write split carrier `{split}`"
+            );
+        }
     }
 }

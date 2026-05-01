@@ -20,7 +20,7 @@ use meerkat_auth_core::auth_oauth::{
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    TokenKey, TokenStore,
+    RefreshFn, TokenKey, TokenStore,
 };
 
 pub type TokenCommitFn = Box<
@@ -249,62 +249,65 @@ impl AnthropicOAuthRuntime {
         let token_store = Arc::clone(&self.token_store);
         let key = self.key.clone();
         let commit_slot_for_refresh = Arc::clone(&commit_slot);
-        let refreshed =
-            self.refresh_coord
-                .with_refresh(
-                    self.key.clone(),
-                    Box::new(move || {
-                        let http = http.clone();
-                        let endpoints = endpoints.clone();
-                        let token_store = Arc::clone(&token_store);
-                        let key = key.clone();
-                        let commit_slot = Arc::clone(&commit_slot_for_refresh);
-                        Box::pin(async move {
-                            let current = token_store
-                                .load(&key)
-                                .await
-                                .map_err(|e| RefreshError::Refresh(e.to_string()))?
-                                .ok_or_else(|| {
-                                    RefreshError::Refresh(
-                                        "persisted tokens disappeared before OAuth refresh".into(),
-                                    )
-                                })?;
-                            if AnthropicOAuthRuntime::token_is_fresh(&current) && !force_refresh {
-                                let commit = commit_slot
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .take();
-                                return match commit {
-                                    Some(commit) => commit(current).await,
-                                    None => Ok(current),
-                                };
-                            }
-                            // Need to refresh. Must have a refresh_token.
-                            let refresh_token = current.refresh_token.clone().ok_or_else(|| {
-                                RefreshError::Refresh("missing refresh_token".into())
-                            })?;
-                            let result =
-                                exchange_refresh_token(&http, &endpoints, &refresh_token, None)
-                                    .await
-                                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                            let refreshed = oauth_result_to_persisted(
-                                result,
-                                PersistedAuthMode::ClaudeAiOauth,
-                                Some(refresh_token),
-                            )
-                            .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                            let commit = commit_slot
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .take();
-                            match commit {
-                                Some(commit) => commit(refreshed).await,
-                                None => Ok(refreshed),
-                            }
-                        })
-                    }),
+        let refresh_fn: RefreshFn = Box::new(move || {
+            let http = http.clone();
+            let endpoints = endpoints.clone();
+            let token_store = Arc::clone(&token_store);
+            let key = key.clone();
+            let commit_slot = Arc::clone(&commit_slot_for_refresh);
+            Box::pin(async move {
+                let current = token_store
+                    .load(&key)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?
+                    .ok_or_else(|| {
+                        RefreshError::Refresh(
+                            "persisted tokens disappeared before OAuth refresh".into(),
+                        )
+                    })?;
+                if AnthropicOAuthRuntime::token_is_fresh(&current) && !force_refresh {
+                    let commit = commit_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    return match commit {
+                        Some(commit) => commit(current).await,
+                        None => Ok(current),
+                    };
+                }
+                // Need to refresh. Must have a refresh_token.
+                let refresh_token = current
+                    .refresh_token
+                    .clone()
+                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let result = exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                let refreshed = oauth_result_to_persisted(
+                    result,
+                    PersistedAuthMode::ClaudeAiOauth,
+                    Some(refresh_token),
                 )
-                .await?;
+                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                let commit = commit_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match commit {
+                    Some(commit) => commit(refreshed).await,
+                    None => Ok(refreshed),
+                }
+            })
+        });
+        let refreshed = if force_refresh {
+            self.refresh_coord
+                .with_forced_refresh(self.key.clone(), refresh_fn)
+                .await?
+        } else {
+            self.refresh_coord
+                .with_refresh(self.key.clone(), refresh_fn)
+                .await?
+        };
 
         let commit = commit_slot
             .lock()

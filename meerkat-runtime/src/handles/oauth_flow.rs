@@ -6,7 +6,8 @@
 //! membership and terminal transitions are routed through generated
 //! AuthMachine inputs keyed by the target binding.
 
-use std::sync::{Arc, Weak};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use meerkat_auth_core::oauth_flow::{
@@ -15,13 +16,17 @@ use meerkat_auth_core::oauth_flow::{
     OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
 };
 use meerkat_core::ConnectionRef;
-use meerkat_core::handles::{DslTransitionError, LeaseKey};
+use meerkat_core::handles::DslTransitionError;
+#[cfg(test)]
+use meerkat_core::handles::LeaseKey;
 
 use crate::auth_machine::dsl as auth_dsl;
 use crate::store::RuntimeStore;
 
 use super::RuntimeAuthLeaseHandle;
-use super::auth_lease::AuthLeaseReleaseObserver;
+use super::auth_lease::{AuthLeaseReleaseObserver, ReleasedOAuthFlows};
+
+type StoreSlot = Arc<Mutex<Option<Weak<dyn RuntimeStore>>>>;
 
 fn current_time_millis() -> u64 {
     SystemTime::now()
@@ -42,38 +47,48 @@ fn expires_at_millis(duration: Duration) -> Result<u64, OAuthFlowError> {
 pub struct RuntimeOAuthFlowHandle {
     registry: Arc<OAuthFlowRegistry>,
     lifecycle: Arc<RuntimeAuthLeaseHandle>,
-    store: Option<Weak<dyn RuntimeStore>>,
+    store: StoreSlot,
     _release_observer: Option<Arc<OAuthPayloadReleaseObserver>>,
 }
 
 #[derive(Debug)]
 struct OAuthPayloadReleaseObserver {
     registry: Arc<OAuthFlowRegistry>,
-    store: Option<Weak<dyn RuntimeStore>>,
+    store: StoreSlot,
 }
 
 impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
-    fn auth_lease_released(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+    fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError> {
         let target = ConnectionRef {
-            realm: lease_key.realm.clone(),
-            binding: lease_key.binding.clone(),
-            profile: lease_key.profile.clone(),
+            realm: released.lease_key.realm.clone(),
+            binding: released.lease_key.binding.clone(),
+            profile: released.lease_key.profile.clone(),
         };
+        let browser_flow_ids = released
+            .browser_flow_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let device_flow_ids = released
+            .device_flow_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         self.registry.retain_flows_with_lifecycle(
-            |record_target, _| record_target != &target,
-            |record_target, _| record_target != &target,
+            |record_target, flow_id| {
+                !(record_target == &target && browser_flow_ids.contains(flow_id))
+            },
+            |record_target, device_code| {
+                !(record_target == &target && device_flow_ids.contains(device_code))
+            },
         );
-        persist_registry_payloads(
-            &self.registry,
-            self.store.as_ref(),
-            "release_oauth_flow_payloads",
-        )
-        .map_err(|err| {
-            DslTransitionError::new(
-                "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
-                err.to_string(),
-            )
-        })
+        persist_registry_payloads(&self.registry, &self.store, "release_oauth_flow_payloads")
+            .map_err(|err| {
+                DslTransitionError::new(
+                    "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
+                    err.to_string(),
+                )
+            })
     }
 }
 
@@ -122,9 +137,10 @@ impl RuntimeOAuthFlowHandle {
         store: Option<Weak<dyn RuntimeStore>>,
     ) -> Self {
         let registry = Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding));
+        let store = Arc::new(Mutex::new(store));
         let release_observer = Arc::new(OAuthPayloadReleaseObserver {
             registry: Arc::clone(&registry),
-            store: store.clone(),
+            store: Arc::clone(&store),
         });
         let release_observer_dyn: Arc<dyn AuthLeaseReleaseObserver> = release_observer.clone();
         lifecycle.add_release_observer(Arc::downgrade(&release_observer_dyn));
@@ -136,6 +152,13 @@ impl RuntimeOAuthFlowHandle {
         };
         handle.rehydrate_persisted_payloads();
         handle
+    }
+
+    pub(crate) fn bind_persistent_store(&self, store: &Arc<dyn RuntimeStore>) {
+        *self
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(store));
     }
 
     fn apply(
@@ -306,11 +329,15 @@ impl RuntimeOAuthFlowHandle {
     }
 
     fn store(&self) -> Option<Arc<dyn RuntimeStore>> {
-        self.store.as_ref().and_then(Weak::upgrade)
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     fn persist_registry_payloads(&self, operation: &'static str) -> Result<(), OAuthFlowError> {
-        persist_registry_payloads(&self.registry, self.store.as_ref(), operation)
+        persist_registry_payloads(&self.registry, &self.store, operation)
     }
 
     fn rehydrate_persisted_payloads(&self) {
@@ -425,9 +452,13 @@ impl RuntimeOAuthFlowHandle {
 
 fn persist_registry_payloads(
     registry: &OAuthFlowRegistry,
-    store: Option<&Weak<dyn RuntimeStore>>,
+    store: &StoreSlot,
     operation: &'static str,
 ) -> Result<(), OAuthFlowError> {
+    let store = store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let Some(store) = store else {
         return Ok(());
     };
@@ -453,7 +484,7 @@ fn persist_registry_payloads(
 struct RuntimeOAuthDevicePollLifecycle {
     lifecycle: Arc<RuntimeAuthLeaseHandle>,
     registry: Arc<OAuthFlowRegistry>,
-    store: Option<Weak<dyn RuntimeStore>>,
+    store: StoreSlot,
 }
 
 impl Default for RuntimeOAuthFlowHandle {
@@ -554,7 +585,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
     fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
         persist_registry_payloads(
             &self.registry,
-            self.store.as_ref(),
+            &self.store,
             "persist_oauth_device_flow_payloads",
         )
     }
@@ -785,7 +816,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             Arc::new(RuntimeOAuthDevicePollLifecycle {
                 lifecycle: Arc::clone(&self.lifecycle),
                 registry: Arc::clone(&self.registry),
-                store: self.store.clone(),
+                store: Arc::clone(&self.store),
             });
         Ok(poll.with_lifecycle(lifecycle))
     }
@@ -1080,6 +1111,69 @@ mod tests {
                 "verifier-2".to_string(),
             )
             .expect("AuthMachine release must clear stale registry payload capacity");
+    }
+
+    #[test]
+    fn release_observer_does_not_prune_flow_admitted_after_release_acceptance() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+        ));
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let old_state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "old-verifier".to_string(),
+            )
+            .expect("old browser flow admitted");
+        let new_state = Arc::new(std::sync::Mutex::new(None));
+        let new_state_for_hook = Arc::clone(&new_state);
+        let authority_for_hook = Arc::clone(&authority);
+        let target_for_hook = target.clone();
+        let lease_key_for_hook = lease_key.clone();
+        crate::handles::auth_lease::set_release_after_accept_hook_for_test(Some(Arc::new(
+            move |released_key| {
+                if released_key != &lease_key_for_hook {
+                    return;
+                }
+                let admitted = authority_for_hook
+                    .start(
+                        target_for_hook.clone(),
+                        provider,
+                        redirect_uri.to_string(),
+                        "new-verifier".to_string(),
+                    )
+                    .expect("new browser flow admitted after release acceptance");
+                *new_state_for_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admitted);
+            },
+        )));
+
+        lifecycle
+            .release_lease(&lease_key)
+            .expect("credential lifecycle release succeeds");
+        crate::handles::auth_lease::set_release_after_accept_hook_for_test(None);
+
+        let new_state = new_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("hook admitted replacement flow");
+        let flow = authority
+            .consume(&new_state, &target, provider, redirect_uri)
+            .expect("release observer must not prune newly admitted flow");
+        assert_eq!(flow.pkce_verifier, "new-verifier");
+        assert!(matches!(
+            authority.consume(&old_state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::Missing)
+        ));
     }
 
     #[test]

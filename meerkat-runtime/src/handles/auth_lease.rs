@@ -16,7 +16,9 @@
 //! evolution from core-runtime evolution.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Weak;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,11 +76,21 @@ fn emit_audit(
 #[derive(Clone)]
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
+    #[cfg(not(target_arch = "wasm32"))]
     release_observers: Arc<Mutex<Vec<Weak<dyn AuthLeaseReleaseObserver>>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub(crate) struct ReleasedOAuthFlows {
+    pub lease_key: LeaseKey,
+    pub browser_flow_ids: Vec<String>,
+    pub device_flow_ids: Vec<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
-    fn auth_lease_released(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+    fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError>;
 }
 
 #[cfg(test)]
@@ -89,7 +101,7 @@ static RELEASE_AFTER_ACCEPT_HOOK: std::sync::OnceLock<Mutex<Option<ReleaseAfterA
     std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn set_release_after_accept_hook(hook: Option<ReleaseAfterAcceptHook>) {
+pub(crate) fn set_release_after_accept_hook_for_test(hook: Option<ReleaseAfterAcceptHook>) {
     *RELEASE_AFTER_ACCEPT_HOOK
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -134,6 +146,7 @@ impl RuntimeAuthLeaseHandle {
     pub fn new() -> Self {
         Self {
             machines: Arc::new(Mutex::new(AuthLeaseRegistry::default())),
+            #[cfg(not(target_arch = "wasm32"))]
             release_observers: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -147,6 +160,7 @@ impl RuntimeAuthLeaseHandle {
         Self::new()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn add_release_observer(&self, observer: Weak<dyn AuthLeaseReleaseObserver>) {
         self.release_observers
             .lock()
@@ -154,7 +168,11 @@ impl RuntimeAuthLeaseHandle {
             .push(observer);
     }
 
-    fn notify_release_observers(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn notify_release_observers(
+        &self,
+        released: &ReleasedOAuthFlows,
+    ) -> Result<(), DslTransitionError> {
         let observers = {
             let mut guard = self
                 .release_observers
@@ -171,7 +189,7 @@ impl RuntimeAuthLeaseHandle {
             observers
         };
         for observer in observers {
-            observer.auth_lease_released(lease_key)?;
+            observer.auth_lease_released(released)?;
         }
         Ok(())
     }
@@ -521,19 +539,49 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        // Drive the DSL transition and drop the machine from the registry
-        // under the same lock. A released lease has no observable state, but
-        // removal must not race with a concurrent reacquire that already
-        // accepted a newer generation.
-        self.apply(
-            lease_key,
-            auth_dsl::AuthMachineInput::Release,
-            "AuthLeaseHandle::release_lease",
-            true,
-        )?;
-        self.notify_release_observers(lease_key)?;
+        let context = "AuthLeaseHandle::release_lease";
+        // Capture OAuth membership while the released machine is still the
+        // canonical AuthMachine state. Observers later prune only those exact
+        // payloads, so a same-target flow admitted after this transition is
+        // not removed by stale target-wide cleanup.
+        #[cfg(not(target_arch = "wasm32"))]
+        let released;
+        let (from_phase, to_phase) = {
+            let mut guard = self
+                .machines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry =
+                guard
+                    .authorities
+                    .entry(lease_key.clone())
+                    .or_insert_with(|| {
+                        auth_dsl::AuthMachineAuthority::from_state(
+                            auth_dsl::AuthMachineState::default(),
+                        )
+                    });
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                released = ReleasedOAuthFlows {
+                    lease_key: lease_key.clone(),
+                    browser_flow_ids: entry.state.oauth_browser_flow_ids.iter().cloned().collect(),
+                    device_flow_ids: entry.state.oauth_device_flow_ids.iter().cloned().collect(),
+                };
+            }
+            let from_phase = map_phase(entry.state.lifecycle_phase);
+            auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
+                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+            let to_phase = map_phase(entry.state.lifecycle_phase);
+            guard.generations.entry(lease_key.clone()).or_insert(0);
+            guard.authorities.remove(lease_key);
+            guard.credential_published_at_millis.remove(lease_key);
+            (from_phase, to_phase)
+        };
+        emit_audit(lease_key, "release_lease", from_phase, to_phase);
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notify_release_observers(&released)?;
         Ok(())
     }
 
@@ -860,15 +908,12 @@ mod tests {
         let key = lease("dev", "shared");
         h.acquire_lease(&key, 1_800_000_000).unwrap();
 
-        let acquire_handle = RuntimeAuthLeaseHandle {
-            machines: Arc::clone(&h.machines),
-            release_observers: Arc::clone(&h.release_observers),
-        };
+        let acquire_handle = h.clone();
         let acquire_key = key.clone();
         let hook_key = key.clone();
         let acquired_generation = Arc::new(Mutex::new(None));
         let hook_generation = Arc::clone(&acquired_generation);
-        set_release_after_accept_hook(Some(Arc::new(move |released_key| {
+        set_release_after_accept_hook_for_test(Some(Arc::new(move |released_key| {
             if released_key != &hook_key {
                 return;
             }
@@ -880,7 +925,7 @@ mod tests {
         })));
 
         h.release_lease(&key).unwrap();
-        set_release_after_accept_hook(None);
+        set_release_after_accept_hook_for_test(None);
 
         let acquired_generation = acquired_generation
             .lock()

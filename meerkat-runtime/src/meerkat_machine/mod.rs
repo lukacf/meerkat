@@ -83,7 +83,7 @@ impl UnavailableBlobStore {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct PersistentAuthAuthorityBundle {
-    store: Weak<dyn RuntimeStore>,
+    store: StdMutex<Weak<dyn RuntimeStore>>,
     auth_lease: Arc<crate::handles::RuntimeAuthLeaseHandle>,
     oauth_flows: Arc<crate::handles::RuntimeOAuthFlowHandle>,
 }
@@ -119,10 +119,21 @@ fn persistent_auth_authorities(
     let mut authorities = authorities
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(existing) = authorities.get(&key)
-        && existing.store.upgrade().is_some()
-    {
-        return Arc::clone(existing);
+    if let Some(existing) = authorities.get(&key) {
+        let stored_store_alive = existing
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade()
+            .is_some();
+        if matches!(key, PersistentAuthAuthorityKey::Durable(_)) || stored_store_alive {
+            existing.oauth_flows.bind_persistent_store(store);
+            *existing
+                .store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(store);
+            return Arc::clone(existing);
+        }
     }
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(
@@ -133,7 +144,7 @@ fn persistent_auth_authorities(
         ),
     );
     let bundle = Arc::new(PersistentAuthAuthorityBundle {
-        store: Arc::downgrade(store),
+        store: StdMutex::new(Arc::downgrade(store)),
         auth_lease,
         oauth_flows,
     });

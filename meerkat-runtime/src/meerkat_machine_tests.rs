@@ -387,6 +387,60 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
 #[test]
+fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let original_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&original_store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    drop(first);
+
+    let reopened_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
+    drop(original_store);
+
+    reopened
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect("cached durable authority should persist through the reopened store");
+    drop(reopened);
+    drop(reopened_store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let final_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens again"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
+    let err = final_machine
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect_err("consumed browser payload must not rehydrate after overlapping-store consume");
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
 fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
     let _guard = persistent_auth_authority_test_guard();
     crate::meerkat_machine::clear_persistent_auth_authorities_for_test();

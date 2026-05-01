@@ -228,6 +228,19 @@ fn persisted_runtime_state_blocks_interrupt_noop(state: RuntimeState) -> bool {
     matches!(state, RuntimeState::Retired | RuntimeState::Stopped)
 }
 
+fn interrupt_noop_target_for_presence(
+    present: bool,
+    blocking_runtime_state: Option<RuntimeState>,
+) -> InterruptNoopTarget {
+    if !present {
+        return InterruptNoopTarget::Missing;
+    }
+    match blocking_runtime_state {
+        Some(state) => InterruptNoopTarget::NotInterruptible(state),
+        None => InterruptNoopTarget::Present,
+    }
+}
+
 fn registered_model_provider_mismatch_reason(
     registry: &meerkat_core::ModelRegistry,
     provider: meerkat_core::Provider,
@@ -3613,19 +3626,18 @@ impl SessionRuntime {
                 if let Some(mob_state) = self.mob_state() {
                     let owns_mob_session = mob_state.owns_live_bridge_session(session_id).await
                         || mob_state.owns_persisted_bridge_session(session_id).await;
-                    return Ok(if owns_mob_session {
-                        InterruptNoopTarget::Present
-                    } else {
-                        InterruptNoopTarget::Missing
-                    });
+                    return Ok(interrupt_noop_target_for_presence(
+                        owns_mob_session,
+                        blocking_runtime_state,
+                    ));
                 }
                 #[cfg(not(feature = "mob"))]
                 return Ok(InterruptNoopTarget::Missing);
             }
-            return Ok(match blocking_runtime_state {
-                Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                None => InterruptNoopTarget::Present,
-            });
+            return Ok(interrupt_noop_target_for_presence(
+                true,
+                blocking_runtime_state,
+            ));
         }
 
         #[cfg(feature = "mob")]
@@ -3635,10 +3647,10 @@ impl SessionRuntime {
         {
             match mob_state.session_service().read(session_id).await {
                 Ok(_) => {
-                    return Ok(match blocking_runtime_state {
-                        Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                        None => InterruptNoopTarget::Present,
-                    });
+                    return Ok(interrupt_noop_target_for_presence(
+                        true,
+                        blocking_runtime_state,
+                    ));
                 }
                 Err(SessionError::NotFound { .. }) => {}
                 Err(err) => return Err(session_error_to_rpc(err)),
@@ -3647,19 +3659,19 @@ impl SessionRuntime {
 
         match self.service.read(session_id).await {
             Ok(_) => {
-                return Ok(match blocking_runtime_state {
-                    Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                    None => InterruptNoopTarget::Present,
-                });
+                return Ok(interrupt_noop_target_for_presence(
+                    true,
+                    blocking_runtime_state,
+                ));
             }
             Err(SessionError::NotFound { .. }) => {}
             Err(err) => return Err(session_error_to_rpc(err)),
         }
 
-        Ok(match blocking_runtime_state {
-            Some(state) => InterruptNoopTarget::NotInterruptible(state),
-            None => InterruptNoopTarget::Missing,
-        })
+        Ok(interrupt_noop_target_for_presence(
+            false,
+            blocking_runtime_state,
+        ))
     }
 
     /// Ask a running turn to break out at the next cooperative boundary.
@@ -7266,6 +7278,22 @@ mod tests {
             .interrupt(&created.session_id)
             .await
             .expect("cold idle session interrupt should be a no-op");
+    }
+
+    #[test]
+    fn interrupt_noop_target_for_presence_rejects_terminal_runtime_state() {
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, Some(RuntimeState::Stopped)),
+            InterruptNoopTarget::NotInterruptible(RuntimeState::Stopped)
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, None),
+            InterruptNoopTarget::Present
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(false, Some(RuntimeState::Stopped)),
+            InterruptNoopTarget::Missing
+        );
     }
 
     #[tokio::test]

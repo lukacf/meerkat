@@ -240,6 +240,22 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-rest/src"
+  cat >"$tmpdir/meerkat-rest/src/lib.rs" <<'EOF'
+async fn public_interrupt(service: Service, session_id: SessionId) {
+    let _ = service
+        .interrupt(&session_id)
+        .await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: multiline public surface interrupt fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-rpc/src"
   cat >"$tmpdir/meerkat-rpc/src/realtime_ws.rs" <<'EOF'
 async fn public_interrupt(adapter: Adapter, session_id: SessionId) {
@@ -257,7 +273,9 @@ EOF
   mkdir -p "$tmpdir/examples/999-runtime-backed/src"
   cat >"$tmpdir/examples/999-runtime-backed/src/main.rs" <<'EOF'
 async fn bad(service: Service, session_id: SessionId) {
-    let _ = service.interrupt(&session_id).await;
+    let _ = service
+        .interrupt(&session_id)
+        .await;
 }
 EOF
   if "$self_script" "$tmpdir" >/dev/null 2>&1; then
@@ -712,7 +730,7 @@ do
   if [[ -f "$surface_file" ]]; then
     stripped_surface="$(strip_core_executor_interrupt_impls "$surface_file")"
     stripped_surface="$(printf '%s\n' "$stripped_surface" | strip_cfg_test_modules)"
-    found="$(filter_rg "$stripped_surface" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
+    found="$(filter_rg "$stripped_surface" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|^[[:space:]]*\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
     if [[ -n "$found" ]]; then
       public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
     fi
@@ -735,7 +753,7 @@ if [[ -d "$root/examples" ]]; then
     esac
     stripped_example="$(strip_core_executor_interrupt_impls "$root/$example_file")"
     stripped_example="$(printf '%s\n' "$stripped_example" | strip_cfg_test_modules)"
-    found="$(filter_rg "$stripped_example" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
+    found="$(filter_rg "$stripped_example" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|^[[:space:]]*\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
     if [[ -n "$found" ]]; then
       example_interrupt_bypasses+="$root/$example_file"$'\n'"$found"$'\n'
     fi

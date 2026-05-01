@@ -2677,6 +2677,19 @@ fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::Runtime
     )
 }
 
+fn interrupt_noop_target_for_presence(
+    present: bool,
+    blocking_runtime_state: Option<meerkat_runtime::RuntimeState>,
+) -> InterruptNoopTarget {
+    if !present {
+        return InterruptNoopTarget::Missing;
+    }
+    match blocking_runtime_state {
+        Some(state) => InterruptNoopTarget::NotInterruptible(state),
+        None => InterruptNoopTarget::Present,
+    }
+}
+
 async fn interrupt_noop_target(
     state: &AppState,
     session_id: &SessionId,
@@ -2708,20 +2721,19 @@ async fn interrupt_noop_target(
                         .mob_state
                         .owns_persisted_bridge_session(session_id)
                         .await;
-                return Ok(if owns_mob_session {
-                    InterruptNoopTarget::Present
-                } else {
-                    InterruptNoopTarget::Missing
-                });
+                return Ok(interrupt_noop_target_for_presence(
+                    owns_mob_session,
+                    blocking_runtime_state,
+                ));
             }
             #[cfg(not(feature = "mob"))]
             return Ok(InterruptNoopTarget::Missing);
         }
         Ok(Some(_)) => {
-            return Ok(match blocking_runtime_state {
-                Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                None => InterruptNoopTarget::Present,
-            });
+            return Ok(interrupt_noop_target_for_presence(
+                true,
+                blocking_runtime_state,
+            ));
         }
         Ok(_) => {}
         Err(SessionError::NotFound { .. }) => {}
@@ -2741,10 +2753,10 @@ async fn interrupt_noop_target(
     {
         match state.mob_state.session_service().read(session_id).await {
             Ok(_) => {
-                return Ok(match blocking_runtime_state {
-                    Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                    None => InterruptNoopTarget::Present,
-                });
+                return Ok(interrupt_noop_target_for_presence(
+                    true,
+                    blocking_runtime_state,
+                ));
             }
             Err(SessionError::NotFound { .. }) => {}
             Err(err) => {
@@ -2757,10 +2769,10 @@ async fn interrupt_noop_target(
 
     match state.session_service.read(session_id).await {
         Ok(_) => {
-            return Ok(match blocking_runtime_state {
-                Some(state) => InterruptNoopTarget::NotInterruptible(state),
-                None => InterruptNoopTarget::Present,
-            });
+            return Ok(interrupt_noop_target_for_presence(
+                true,
+                blocking_runtime_state,
+            ));
         }
         Err(SessionError::NotFound { .. }) => {}
         Err(err) => {
@@ -2770,10 +2782,10 @@ async fn interrupt_noop_target(
         }
     }
 
-    Ok(match blocking_runtime_state {
-        Some(state) => InterruptNoopTarget::NotInterruptible(state),
-        None => InterruptNoopTarget::Missing,
-    })
+    Ok(interrupt_noop_target_for_presence(
+        false,
+        blocking_runtime_state,
+    ))
 }
 
 fn resolve_schedule_id(input: &str) -> Result<meerkat::ScheduleId, ApiError> {
@@ -4726,6 +4738,22 @@ mod tests {
             meerkat_contracts::PeerResponseTerminalStatusWire::Completed
         );
         assert_eq!(body.result["ok"], true);
+    }
+
+    #[test]
+    fn interrupt_noop_target_for_presence_rejects_terminal_runtime_state() {
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, Some(meerkat_runtime::RuntimeState::Stopped)),
+            InterruptNoopTarget::NotInterruptible(meerkat_runtime::RuntimeState::Stopped)
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, None),
+            InterruptNoopTarget::Present
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(false, Some(meerkat_runtime::RuntimeState::Stopped)),
+            InterruptNoopTarget::Missing
+        );
     }
 
     #[test]

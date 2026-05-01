@@ -89,6 +89,12 @@ function turnMetadataToWasm(
   return {
     model: metadata.model,
     provider: metadata.provider,
+    flow_tool_overlay: metadata.flowToolOverlay
+      ? {
+          allowed_tools: metadata.flowToolOverlay.allowedTools,
+          blocked_tools: metadata.flowToolOverlay.blockedTools,
+        }
+      : undefined,
     provider_params: metadataOverrideToWasm(metadata.providerParams),
     connection_ref: metadataOverrideToWasm(metadata.connectionRef),
     keep_alive: metadataOverrideToWasm(metadata.keepAlive, (value) => ({

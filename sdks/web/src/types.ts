@@ -61,10 +61,17 @@ export interface TurnInstruction {
   body: string;
 }
 
+/** Runtime tool overlay for a single turn. */
+export interface TurnToolOverlay {
+  allowedTools?: string[];
+  blockedTools?: string[];
+}
+
 /** Canonical first-turn runtime metadata carrier for direct sessions. */
 export interface RuntimeTurnMetadata {
   model?: string;
   provider?: string;
+  flowToolOverlay?: TurnToolOverlay;
   providerParams?: TurnMetadataOverride<Record<string, unknown>>;
   connectionRef?: TurnMetadataOverride<ConnectionRef>;
   keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;

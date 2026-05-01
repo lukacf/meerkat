@@ -654,6 +654,8 @@ pub struct HelperOptions {
     pub model_override: Option<String>,
     /// Provider params override resolved from scheduled helper tooling.
     pub provider_params_override: Option<serde_json::Value>,
+    /// Additional instruction sections appended to the helper system prompt.
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -3819,6 +3821,7 @@ impl MobHandle {
         spec.override_profile = options.override_profile;
         spec.model_override = options.model_override;
         spec.provider_params_override = options.provider_params_override;
+        spec.additional_instructions = options.additional_instructions;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3869,6 +3872,7 @@ impl MobHandle {
         spec.override_profile = options.override_profile;
         spec.model_override = options.model_override;
         spec.provider_params_override = options.provider_params_override;
+        spec.additional_instructions = options.additional_instructions;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,

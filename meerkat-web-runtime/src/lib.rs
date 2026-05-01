@@ -1873,13 +1873,6 @@ fn apply_helper_turn_metadata(
             "mob helper turn_metadata.render_metadata is not supported",
         ));
     }
-    if metadata.additional_instructions.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.additional_instructions is not supported",
-        ));
-    }
-
     if let Some(model) = metadata.model {
         options.model_override = Some(model.to_string());
     }
@@ -1895,6 +1888,16 @@ fn apply_helper_turn_metadata(
                 ));
             }
         };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            options.additional_instructions = Some(instructions);
+        }
     }
     if let Some(connection_ref) = metadata.connection_ref {
         options.connection_ref = match connection_ref {
@@ -3134,6 +3137,29 @@ capabilities = [{capability_values}]
         .expect("helper should accept canonical turn_metadata connection override");
         assert!(options.turn_metadata.is_some());
         assert_eq!(options.role_name.as_deref(), Some("worker"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn helper_turn_metadata_applies_additional_instructions() {
+        let turn_metadata = serde_json::from_value::<
+            meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata,
+        >(json!({
+            "additional_instructions": [
+                { "kind": "user", "body": "stay concise" }
+            ]
+        }))
+        .expect("helper turn metadata should deserialize");
+        let mut options = meerkat_mob::HelperOptions::default();
+
+        super::apply_helper_turn_metadata(&mut options, Some(turn_metadata))
+            .expect("helper additional_instructions must be accepted canonically");
+
+        assert_eq!(
+            options.additional_instructions.as_deref(),
+            Some(["stay concise".to_string()].as_slice())
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

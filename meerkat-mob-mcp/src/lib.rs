@@ -31,6 +31,7 @@ use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::MobDefinitionInput;
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -2112,7 +2113,7 @@ impl MobMcpDispatcher {
                 "mob_spawn_member",
                 &format!("Spawn one or more mob members. Required: mob_id, specs[].profile, specs[].agent_identity. \
                      Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
-                     initial_message, labels (key-value map), context (opaque JSON). {COMMON}"),
+                     initial_message, labels (key-value map), context (opaque JSON), turn_metadata. {COMMON}"),
                 json!({
                     "type":"object",
                     "properties":{
@@ -2129,13 +2130,16 @@ impl MobMcpDispatcher {
                                     "binding": runtime_binding_schema(),
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
-                                    "context":{"type":"object"}
+                                    "context":{"type":"object"},
+                                    "turn_metadata":{"type":"object"}
                                 },
-                                "required":["profile","agent_identity"]
+                                "required":["profile","agent_identity"],
+                                "additionalProperties": false
                             }
                         }
                     },
-                    "required":["mob_id","specs"]
+                    "required":["mob_id","specs"],
+                    "additionalProperties": false
                 }),
             ),
             tool(
@@ -2375,6 +2379,7 @@ struct MobIdArgs {
     mob_id: String,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobSpawnMeerkatArgs {
     profile: String,
     agent_identity: String,
@@ -2391,9 +2396,10 @@ struct MobSpawnMeerkatArgs {
     #[serde(default)]
     context: Option<serde_json::Value>,
     #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnManyMeerkatsArgs {
     mob_id: String,
     specs: Vec<MobSpawnMeerkatArgs>,
@@ -2470,6 +2476,76 @@ fn runtime_binding_from_wire(
             })
         }
     }
+}
+
+fn apply_dispatcher_spawn_turn_metadata(
+    spec: &mut SpawnMemberSpec,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), String> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err("mob spawn turn_metadata.handling_mode is not supported".to_string());
+    }
+    if metadata.skill_references.is_some() {
+        return Err("mob spawn turn_metadata.skill_references is not supported".to_string());
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err("mob spawn turn_metadata.flow_tool_overlay is not supported".to_string());
+    }
+    if metadata.provider.is_some() {
+        return Err("mob spawn turn_metadata.provider is not supported".to_string());
+    }
+    if metadata.keep_alive.is_some() {
+        return Err("mob spawn turn_metadata.keep_alive is not supported".to_string());
+    }
+    if metadata.render_metadata.is_some() {
+        return Err("mob spawn turn_metadata.render_metadata is not supported".to_string());
+    }
+
+    if let Some(model) = metadata.model {
+        spec.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        spec.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob spawn turn_metadata.provider_params clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            spec.additional_instructions = Some(instructions);
+        }
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        spec.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob spawn turn_metadata.connection_ref clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+
+    Ok(())
 }
 
 impl WireActionArgs {
@@ -2733,7 +2809,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                             .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         s.context = spec.context;
                         s.labels = spec.labels;
-                        s.additional_instructions = spec.additional_instructions;
+                        apply_dispatcher_spawn_turn_metadata(&mut s, spec.turn_metadata)
+                            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         Ok(s)
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;
@@ -3158,6 +3235,54 @@ mod tests {
         assert!(
             msg.contains("peer_id") || msg.contains("identity"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn mob_spawn_member_args_use_turn_metadata_for_runtime_carrier_fields() {
+        let args = serde_json::from_value::<SpawnManyMeerkatsArgs>(json!({
+            "mob_id": "mob",
+            "specs": [{
+                "profile": "worker",
+                "agent_identity": "w1",
+                "turn_metadata": {
+                    "additional_instructions": [
+                        { "kind": "user", "body": "stay concise" }
+                    ],
+                    "connection_ref": {
+                        "action": "set",
+                        "value": {
+                            "realm": "dev",
+                            "binding": "default_openai"
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("mob_spawn_member should accept canonical turn_metadata carrier");
+
+        assert!(
+            args.specs
+                .first()
+                .and_then(|spec| spec.turn_metadata.as_ref())
+                .is_some(),
+            "canonical metadata carrier should survive argument parsing"
+        );
+
+        let err = serde_json::from_value::<SpawnManyMeerkatsArgs>(json!({
+            "mob_id": "mob",
+            "specs": [{
+                "profile": "worker",
+                "agent_identity": "w1",
+                "additional_instructions": ["legacy split carrier"]
+            }]
+        }))
+        .expect_err("retired split additional_instructions carrier must fail closed");
+
+        assert!(
+            err.to_string().contains("additional_instructions")
+                || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
         );
     }
 
@@ -4069,6 +4194,26 @@ mod tests {
         assert!(
             !schema_text.contains("\"peer_id\"") && !schema_text.contains("\"pubkey\""),
             "mob_wire schema must not expose raw comms identity atoms: {schema_text}"
+        );
+    }
+
+    #[test]
+    fn test_mob_spawn_member_schema_uses_turn_metadata_carrier() {
+        let tools = tools_list();
+        let schema = tools
+            .iter()
+            .find(|tool| tool["name"] == "mob_spawn_member")
+            .and_then(|tool| tool.get("inputSchema"))
+            .expect("mob_spawn_member schema present");
+        let schema_text = serde_json::to_string(schema).expect("schema should encode");
+
+        assert!(
+            schema_text.contains("\"turn_metadata\""),
+            "mob_spawn_member schema must expose canonical turn_metadata carrier: {schema_text}"
+        );
+        assert!(
+            !schema_text.contains("\"additional_instructions\""),
+            "mob_spawn_member schema must not expose retired split carrier: {schema_text}"
         );
     }
 

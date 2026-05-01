@@ -25,6 +25,10 @@ test('Mob.spawn strips legacy generation from wasm payloads', async () => {
       generation: 7,
       turnMetadata: {
         additionalInstructions: [{ kind: 'user', body: 'use nested metadata' }],
+        flowToolOverlay: {
+          allowedTools: ['read'],
+          blockedTools: ['write'],
+        },
       },
     },
   ]);
@@ -38,6 +42,10 @@ test('Mob.spawn strips legacy generation from wasm payloads', async () => {
           agent_identity: 'worker-1',
           turn_metadata: {
             additional_instructions: [{ kind: 'user', body: 'use nested metadata' }],
+            flow_tool_overlay: {
+              allowed_tools: ['read'],
+              blocked_tools: ['write'],
+            },
           },
         },
       ],

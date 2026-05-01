@@ -65,6 +65,10 @@ const sessionConfig: SessionConfig = {
       value: { realm: 'default', binding: 'anthropic' },
     },
     additionalInstructions: [{ kind: 'host', body: 'Be concise.' }],
+    flowToolOverlay: {
+      allowedTools: ['read'],
+      blockedTools: ['write'],
+    },
   },
   systemPrompt: 'You are helpful.',
   maxTokens: 1024,
@@ -211,6 +215,10 @@ const spawnSpec: SpawnSpec = {
   labels: { role: 'worker' },
   turnMetadata: {
     additionalInstructions: [{ kind: 'user', body: 'canonical member instruction' }],
+    flowToolOverlay: {
+      allowedTools: ['read'],
+      blockedTools: ['write'],
+    },
   },
 };
 

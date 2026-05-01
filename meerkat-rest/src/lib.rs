@@ -1798,12 +1798,6 @@ fn apply_helper_turn_metadata(
     if metadata.render_metadata.is_some() {
         return Err("mob helper turn_metadata.render_metadata is not supported".to_string());
     }
-    if metadata.additional_instructions.is_some() {
-        return Err(
-            "mob helper turn_metadata.additional_instructions is not supported".to_string(),
-        );
-    }
-
     if let Some(model) = metadata.model {
         options.model_override = Some(model.to_string());
     }
@@ -1816,6 +1810,16 @@ fn apply_helper_turn_metadata(
                 );
             }
         };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            options.additional_instructions = Some(instructions);
+        }
     }
     if let Some(connection_ref) = metadata.connection_ref {
         options.connection_ref = match connection_ref {
@@ -7028,6 +7032,26 @@ mod tests {
                 "REST continue must pass turn_metadata as one carrier, not rebuild split field {split_projection}"
             );
         }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_mob_helper_turn_metadata_applies_additional_instructions() {
+        let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            "additional_instructions": [
+                { "kind": "user", "body": "stay concise" }
+            ]
+        }))
+        .expect("helper turn metadata should deserialize");
+        let mut options = meerkat_mob::HelperOptions::default();
+
+        apply_helper_turn_metadata(&mut options, Some(turn_metadata))
+            .expect("helper additional_instructions must be accepted canonically");
+
+        assert_eq!(
+            options.additional_instructions.as_deref(),
+            Some(["stay concise".to_string()].as_slice())
+        );
     }
 
     #[test]

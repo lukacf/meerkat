@@ -8596,6 +8596,7 @@
         "type": "object"
       },
       "RestMobForkHelperRequest": {
+        "additionalProperties": false,
         "properties": {
           "agent_identity": {
             "type": "string"
@@ -8617,6 +8618,9 @@
           },
           "source_member_id": {
             "type": "string"
+          },
+          "turn_metadata": {
+            "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
           }
         },
         "required": [
@@ -8626,6 +8630,7 @@
         "type": "object"
       },
       "RestMobHelperRequest": {
+        "additionalProperties": false,
         "properties": {
           "agent_identity": {
             "type": "string"
@@ -8641,6 +8646,9 @@
           },
           "runtime_mode": {
             "type": "string"
+          },
+          "turn_metadata": {
+            "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
           }
         },
         "required": [

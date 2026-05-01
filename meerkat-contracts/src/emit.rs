@@ -838,11 +838,12 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         );
         components.insert(
             "RestMobHelperRequest".to_string(),
-            object_schema(
+            closed_object_schema(
                 vec![
                     ("prompt", string_schema()),
                     ("agent_identity", string_schema()),
                     ("role_name", string_schema()),
+                    ("turn_metadata", schema_ref("WireRuntimeTurnMetadata")),
                     ("runtime_mode", string_schema()),
                     ("backend", string_schema()),
                 ],
@@ -851,12 +852,13 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         );
         components.insert(
             "RestMobForkHelperRequest".to_string(),
-            object_schema(
+            closed_object_schema(
                 vec![
                     ("source_member_id", string_schema()),
                     ("prompt", string_schema()),
                     ("agent_identity", string_schema()),
                     ("role_name", string_schema()),
+                    ("turn_metadata", schema_ref("WireRuntimeTurnMetadata")),
                     ("fork_context", json_value),
                     ("runtime_mode", string_schema()),
                     ("backend", string_schema()),
@@ -2144,6 +2146,59 @@ mod tests {
                 !properties.contains_key(split_field),
                 "REST continue must not expose split turn metadata field {split_field}"
             );
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_rest_mob_helper_requests_expose_single_turn_metadata_carrier() {
+        let output_dir = temp_output_dir("rest-mob-helper-turn-metadata");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let rest: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rest-openapi.json")).unwrap())
+                .unwrap();
+
+        for schema_name in ["RestMobHelperRequest", "RestMobForkHelperRequest"] {
+            let request = rest
+                .pointer(&format!("/components/schemas/{schema_name}"))
+                .unwrap_or_else(|| panic!("{schema_name} schema must be emitted"));
+            let properties = request
+                .pointer("/properties")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{schema_name} schema must expose properties"));
+            assert!(
+                properties.contains_key("turn_metadata"),
+                "{schema_name} must expose the single turn_metadata carrier"
+            );
+            assert_eq!(
+                properties
+                    .get("turn_metadata")
+                    .and_then(|schema| schema.get("$ref")),
+                Some(&serde_json::Value::String(
+                    "#/components/schemas/WireRuntimeTurnMetadata".to_string()
+                )),
+                "{schema_name} must expose typed runtime turn metadata"
+            );
+            assert_eq!(
+                request.pointer("/additionalProperties"),
+                Some(&serde_json::Value::Bool(false)),
+                "{schema_name} must reject split or unknown top-level turn metadata fields"
+            );
+            for split_field in [
+                "additional_instructions",
+                "connection_ref",
+                "provider_params",
+                "keep_alive",
+                "model",
+                "provider",
+            ] {
+                assert!(
+                    !properties.contains_key(split_field),
+                    "{schema_name} must not expose split turn metadata field {split_field}"
+                );
+            }
         }
 
         fs::remove_dir_all(&output_dir).unwrap();

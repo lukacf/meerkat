@@ -64,9 +64,19 @@ impl InMemoryCoordinator {
             if let Some(existing) = map.get(&in_flight_key) {
                 existing.clone()
             } else {
-                let f: BoxFuture<'static, _> = refresh_fn().boxed();
-                let shared = f.shared();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let shared: SharedRefresh =
+                    async move { rx.await.unwrap_or(Err(RefreshError::Cancelled)) }
+                        .boxed()
+                        .shared();
                 map.insert(in_flight_key.clone(), shared.clone());
+                let in_flight = Arc::clone(&self.in_flight);
+                let cleanup_key = in_flight_key.clone();
+                tokio::spawn(async move {
+                    let result = refresh_fn().await;
+                    let _ = tx.send(result);
+                    in_flight.lock().remove(&cleanup_key);
+                });
                 shared
             }
         };
@@ -140,6 +150,41 @@ mod file_lock {
             self.lock_dir
                 .join(format!("{}--{}.lock", key.realm, key.binding))
         }
+
+        fn with_locking_refresh(&self, key: &TokenKey, refresh_fn: RefreshFn) -> RefreshFn {
+            let lock_dir = self.lock_dir.clone();
+            let lock_path = self.lock_path_for(key);
+            Box::new(move || {
+                Box::pin(async move {
+                    tokio::fs::create_dir_all(&lock_dir)
+                        .await
+                        .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
+
+                    let file = tokio::task::spawn_blocking(move || -> std::io::Result<File> {
+                        let f = OpenOptions::new()
+                            .create(true)
+                            .truncate(true)
+                            .write(true)
+                            .open(&lock_path)?;
+                        f.lock_exclusive()?;
+                        Ok(f)
+                    })
+                    .await
+                    .map_err(|e| RefreshError::LockFailed(format!("spawn_blocking: {e}")))?
+                    .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
+
+                    let result = refresh_fn().await;
+
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = FileExt::unlock(&file);
+                        drop(file);
+                    })
+                    .await;
+
+                    result
+                })
+            })
+        }
     }
 
     #[async_trait]
@@ -149,36 +194,8 @@ mod file_lock {
             key: TokenKey,
             refresh_fn: RefreshFn,
         ) -> Result<PersistedTokens, RefreshError> {
-            tokio::fs::create_dir_all(&self.lock_dir)
-                .await
-                .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
-            let lock_path = self.lock_path_for(&key);
-
-            // Acquire the OS-level exclusive lock off-thread.
-            let file = tokio::task::spawn_blocking(move || -> std::io::Result<File> {
-                let f = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&lock_path)?;
-                f.lock_exclusive()?;
-                Ok(f)
-            })
-            .await
-            .map_err(|e| RefreshError::LockFailed(format!("spawn_blocking: {e}")))?
-            .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
-
-            let result = self.inner.with_refresh(key, refresh_fn).await;
-
-            // Release lock on a blocking thread, file is dropped (and the
-            // kernel releases the lock) at end of this scope.
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = FileExt::unlock(&file);
-                drop(file);
-            })
-            .await;
-
-            result
+            let refresh_fn = self.with_locking_refresh(&key, refresh_fn);
+            self.inner.with_refresh(key, refresh_fn).await
         }
 
         async fn with_forced_refresh(
@@ -186,33 +203,8 @@ mod file_lock {
             key: TokenKey,
             refresh_fn: RefreshFn,
         ) -> Result<PersistedTokens, RefreshError> {
-            tokio::fs::create_dir_all(&self.lock_dir)
-                .await
-                .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
-            let lock_path = self.lock_path_for(&key);
-
-            let file = tokio::task::spawn_blocking(move || -> std::io::Result<File> {
-                let f = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&lock_path)?;
-                f.lock_exclusive()?;
-                Ok(f)
-            })
-            .await
-            .map_err(|e| RefreshError::LockFailed(format!("spawn_blocking: {e}")))?
-            .map_err(|e| RefreshError::LockFailed(e.to_string()))?;
-
-            let result = self.inner.with_forced_refresh(key, refresh_fn).await;
-
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = FileExt::unlock(&file);
-                drop(file);
-            })
-            .await;
-
-            result
+            let refresh_fn = self.with_locking_refresh(&key, refresh_fn);
+            self.inner.with_forced_refresh(key, refresh_fn).await
         }
     }
 }
@@ -222,6 +214,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use meerkat_core::{BindingId, RealmId};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::sync::oneshot;
 
     fn key() -> TokenKey {
@@ -287,5 +283,50 @@ mod tests {
             .expect("normal task joins")
             .expect("normal refresh succeeds");
         assert_eq!(normal.primary_secret.as_deref(), Some("normal"));
+    }
+
+    #[tokio::test]
+    async fn refresh_work_continues_after_origin_waiter_is_cancelled() {
+        let coordinator = InMemoryCoordinator::new();
+        let key = key();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_for_refresh = Arc::clone(&completed);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+
+        let refresh = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .with_refresh(
+                        key,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                let _ = started_tx.send(());
+                                release_rx
+                                    .await
+                                    .map_err(|err| RefreshError::Refresh(err.to_string()))?;
+                                completed_for_refresh.fetch_add(1, Ordering::SeqCst);
+                                Ok(tokens("completed"))
+                            })
+                        }),
+                    )
+                    .await
+            })
+        };
+
+        started_rx.await.expect("refresh closure started");
+        refresh.abort();
+        release_tx
+            .send(())
+            .expect("background refresh closure is still retained");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while completed.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("refresh work should finish after the origin waiter is cancelled");
     }
 }

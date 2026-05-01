@@ -89,6 +89,62 @@ pub(crate) struct ReleasedOAuthFlows {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn merge_oauth_membership(
+    restored: &mut auth_dsl::AuthMachineState,
+    current: &auth_dsl::AuthMachineState,
+) {
+    for flow_id in &current.oauth_browser_flow_ids {
+        restored.oauth_browser_flow_ids.insert(flow_id.clone());
+        if let Some(provider) = current.oauth_browser_flow_providers.get(flow_id).cloned() {
+            restored
+                .oauth_browser_flow_providers
+                .insert(flow_id.clone(), provider);
+        }
+        if let Some(redirect_uri) = current
+            .oauth_browser_flow_redirect_uris
+            .get(flow_id)
+            .cloned()
+        {
+            restored
+                .oauth_browser_flow_redirect_uris
+                .insert(flow_id.clone(), redirect_uri);
+        }
+        if let Some(expires_at_millis) = current
+            .oauth_browser_flow_expires_at_millis
+            .get(flow_id)
+            .copied()
+        {
+            restored
+                .oauth_browser_flow_expires_at_millis
+                .insert(flow_id.clone(), expires_at_millis);
+        }
+    }
+    for flow_id in &current.oauth_device_flow_ids {
+        restored.oauth_device_flow_ids.insert(flow_id.clone());
+        if let Some(provider) = current.oauth_device_flow_providers.get(flow_id).cloned() {
+            restored
+                .oauth_device_flow_providers
+                .insert(flow_id.clone(), provider);
+        }
+        if let Some(expires_at_millis) = current
+            .oauth_device_flow_expires_at_millis
+            .get(flow_id)
+            .copied()
+        {
+            restored
+                .oauth_device_flow_expires_at_millis
+                .insert(flow_id.clone(), expires_at_millis);
+        }
+    }
+    for poll_id in &current.oauth_device_poll_ids {
+        restored.oauth_device_poll_ids.insert(poll_id.clone());
+    }
+    let browser_count = u64::try_from(restored.oauth_browser_flow_ids.len()).unwrap_or(u64::MAX);
+    let device_count = u64::try_from(restored.oauth_device_flow_ids.len()).unwrap_or(u64::MAX);
+    restored.oauth_outstanding_flow_count = browser_count.saturating_add(device_count);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError>;
 }
@@ -391,6 +447,54 @@ impl RuntimeAuthLeaseHandle {
         self.has_oauth_device_flow(target, flow_id)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_released_lease_after_observer_failure(
+        &self,
+        lease_key: &LeaseKey,
+        previous_state: auth_dsl::AuthMachineState,
+        previous_generation: Option<u64>,
+        previous_published_at: Option<u64>,
+    ) {
+        let mut restored_state = previous_state;
+        let to_phase = map_phase(restored_state.lifecycle_phase);
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = guard.authorities.get(lease_key) {
+            merge_oauth_membership(&mut restored_state, &current.state);
+        }
+        guard.authorities.insert(
+            lease_key.clone(),
+            auth_dsl::AuthMachineAuthority::from_state(restored_state),
+        );
+        match previous_generation {
+            Some(generation) => {
+                guard.generations.insert(lease_key.clone(), generation);
+            }
+            None => {
+                guard.generations.remove(lease_key);
+            }
+        }
+        match previous_published_at {
+            Some(published_at) => {
+                guard
+                    .credential_published_at_millis
+                    .insert(lease_key.clone(), published_at);
+            }
+            None => {
+                guard.credential_published_at_millis.remove(lease_key);
+            }
+        }
+        drop(guard);
+        emit_audit(
+            lease_key,
+            "rollback_release_lease",
+            AuthLeasePhase::Released,
+            to_phase,
+        );
+    }
+
     fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
         match input {
             auth_dsl::AuthMachineInput::Acquire { .. } => "acquire_lease",
@@ -546,11 +650,23 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         // not removed by stale target-wide cleanup.
         #[cfg(not(target_arch = "wasm32"))]
         let released;
+        #[cfg(not(target_arch = "wasm32"))]
+        let previous_state;
+        #[cfg(not(target_arch = "wasm32"))]
+        let previous_generation;
+        #[cfg(not(target_arch = "wasm32"))]
+        let previous_published_at;
         let (from_phase, to_phase) = {
             let mut guard = self
                 .machines
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                previous_generation = guard.generations.get(lease_key).copied();
+                previous_published_at =
+                    guard.credential_published_at_millis.get(lease_key).copied();
+            }
             let entry =
                 guard
                     .authorities
@@ -562,6 +678,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                     });
             #[cfg(not(target_arch = "wasm32"))]
             {
+                previous_state = entry.state.clone();
                 released = ReleasedOAuthFlows {
                     lease_key: lease_key.clone(),
                     browser_flow_ids: entry.state.oauth_browser_flow_ids.iter().cloned().collect(),
@@ -581,7 +698,15 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
         #[cfg(not(target_arch = "wasm32"))]
-        self.notify_release_observers(&released)?;
+        if let Err(err) = self.notify_release_observers(&released) {
+            self.restore_released_lease_after_observer_failure(
+                lease_key,
+                previous_state,
+                previous_generation,
+                previous_published_at,
+            );
+            return Err(err);
+        }
         Ok(())
     }
 

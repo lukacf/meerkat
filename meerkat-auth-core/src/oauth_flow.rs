@@ -474,6 +474,10 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
         device_code: &str,
     ) -> Result<(), OAuthFlowError>;
 
+    fn restore_device_flow(&self, _record: &OAuthDeviceFlowRecord) -> Result<(), OAuthFlowError> {
+        Ok(())
+    }
+
     fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
         Ok(())
     }
@@ -607,7 +611,7 @@ impl OAuthDevicePollLease {
         {
             let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
         }
-        verified?;
+        let verified = verified?;
 
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.consume_device_flow(&self.target, &self.device_code, self.provider)?;
@@ -624,17 +628,35 @@ impl OAuthDevicePollLease {
             prune_expired_device_locked(&mut flows);
             result
         };
-        if result.is_ok() {
-            self.active = false;
-            if let Some(lifecycle) = &self.lifecycle {
-                lifecycle.device_flow_payloads_changed()?;
+        match result {
+            Ok(record) => {
+                self.active = false;
+                if let Some(lifecycle) = &self.lifecycle
+                    && let Err(err) = lifecycle.device_flow_payloads_changed()
+                {
+                    let _ = lifecycle.restore_device_flow(&verified);
+                    let mut flows = self.device_flows.lock();
+                    flows.insert(
+                        verified.device_code.clone(),
+                        OAuthDeviceFlowState {
+                            record: verified,
+                            poll_lease: None,
+                        },
+                    );
+                    return Err(err);
+                }
+                Ok(record)
             }
-        } else if matches!(result, Err(OAuthFlowError::Missing))
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+            Err(err) => {
+                if let Some(lifecycle) = &self.lifecycle {
+                    let _ = lifecycle.restore_device_flow(&verified);
+                    if matches!(err, OAuthFlowError::Missing) {
+                        let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+                    }
+                }
+                Err(err)
+            }
         }
-        result
     }
 }
 

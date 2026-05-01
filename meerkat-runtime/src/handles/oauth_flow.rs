@@ -74,6 +74,22 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
+        let now_millis = current_time_millis();
+        let mut snapshot = self.registry.snapshot_for_persistence(now_millis);
+        snapshot.browser.retain(|flow| {
+            !(flow.target == target && browser_flow_ids.contains(flow.state.as_str()))
+        });
+        snapshot.device.retain(|flow| {
+            !(flow.target == target && device_flow_ids.contains(flow.device_code.as_str()))
+        });
+        persist_registry_snapshot(&snapshot, &self.store, "release_oauth_flow_payloads").map_err(
+            |err| {
+                DslTransitionError::new(
+                    "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
+                    err.to_string(),
+                )
+            },
+        )?;
         self.registry.retain_flows_with_lifecycle(
             |record_target, flow_id| {
                 !(record_target == &target && browser_flow_ids.contains(flow_id))
@@ -82,13 +98,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
                 !(record_target == &target && device_flow_ids.contains(device_code))
             },
         );
-        persist_registry_payloads(&self.registry, &self.store, "release_oauth_flow_payloads")
-            .map_err(|err| {
-                DslTransitionError::new(
-                    "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
-                    err.to_string(),
-                )
-            })
+        Ok(())
     }
 }
 
@@ -340,6 +350,41 @@ impl RuntimeOAuthFlowHandle {
         persist_registry_payloads(&self.registry, &self.store, operation)
     }
 
+    fn browser_record_expires_at_millis(
+        &self,
+        record: &OAuthFlowRecord,
+    ) -> Result<u64, OAuthFlowError> {
+        let remaining = self
+            .registry
+            .ttl()
+            .checked_sub(record.created_at.elapsed())
+            .ok_or(OAuthFlowError::Missing)?;
+        expires_at_millis(remaining)
+    }
+
+    fn restore_browser_flow(
+        &self,
+        state: &str,
+        record: &OAuthFlowRecord,
+    ) -> Result<(), OAuthFlowError> {
+        let expires_at_millis = self.browser_record_expires_at_millis(record)?;
+        self.admit_browser(
+            &record.target,
+            state,
+            record.provider,
+            &record.redirect_uri,
+            expires_at_millis,
+        )?;
+        self.registry.insert_restored_browser_flow(
+            state.to_string(),
+            record.target.clone(),
+            record.provider,
+            record.redirect_uri.clone(),
+            record.pkce_verifier.clone(),
+            record.created_at,
+        )
+    }
+
     fn rehydrate_persisted_payloads(&self) {
         let Some(store) = self.store() else {
             return;
@@ -455,6 +500,15 @@ fn persist_registry_payloads(
     store: &StoreSlot,
     operation: &'static str,
 ) -> Result<(), OAuthFlowError> {
+    let snapshot = registry.snapshot_for_persistence(current_time_millis());
+    persist_registry_snapshot(&snapshot, store, operation)
+}
+
+fn persist_registry_snapshot(
+    snapshot: &OAuthFlowRegistrySnapshot,
+    store: &StoreSlot,
+    operation: &'static str,
+) -> Result<(), OAuthFlowError> {
     let store = store
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -468,7 +522,6 @@ fn persist_registry_payloads(
             detail: "runtime store is no longer available".to_string(),
         });
     };
-    let snapshot = registry.snapshot_for_persistence(current_time_millis());
     let bytes = serde_json::to_vec(&snapshot).map_err(|err| OAuthFlowError::PersistenceFailed {
         operation,
         detail: err.to_string(),
@@ -553,6 +606,29 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
             detail: err.to_string(),
         })
     }
+
+    fn restore_device_flow(&self, record: &OAuthDeviceFlowRecord) -> Result<(), OAuthFlowError> {
+        let remaining = record
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .ok_or(OAuthFlowError::Missing)?;
+        let expires_at_millis = expires_at_millis(remaining)?;
+        self.apply_oauth_input(
+            &record.target,
+            auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+                flow_id: record.device_code.clone(),
+                provider: record.provider.canonical_alias().to_string(),
+                expires_at_millis,
+                max_outstanding_flows: u64::MAX,
+            },
+            "restore_oauth_device_flow",
+            true,
+        )
+        .map_err(|err| OAuthFlowError::LifecycleRejected {
+            operation: "restore_oauth_device_flow",
+            detail: err.to_string(),
+        })
+    }
 }
 
 impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
@@ -580,6 +656,30 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
         device_code: &str,
     ) -> Result<(), OAuthFlowError> {
         self.lifecycle.expire_device_flow(target, device_code)
+    }
+
+    fn restore_device_flow(&self, record: &OAuthDeviceFlowRecord) -> Result<(), OAuthFlowError> {
+        let remaining = record
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .ok_or(OAuthFlowError::Missing)?;
+        let expires_at_millis = expires_at_millis(remaining)?;
+        self.lifecycle
+            .apply_oauth_input(
+                &record.target,
+                auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+                    flow_id: record.device_code.clone(),
+                    provider: record.provider.canonical_alias().to_string(),
+                    expires_at_millis,
+                    max_outstanding_flows: self.registry.max_outstanding() as u64,
+                },
+                "restore_oauth_device_flow",
+                true,
+            )
+            .map_err(|err| OAuthFlowError::LifecycleRejected {
+                operation: "restore_oauth_device_flow",
+                detail: err.to_string(),
+            })
     }
 
     fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
@@ -686,9 +786,14 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             }
         };
         self.consume_browser(target, state, provider, redirect_uri)?;
-        self.registry
-            .consume(state, target, provider, redirect_uri)?;
-        self.persist_registry_payloads("consume_oauth_browser_flow")?;
+        if let Err(err) = self.registry.consume(state, target, provider, redirect_uri) {
+            let _ = self.restore_browser_flow(state, &record);
+            return Err(err);
+        }
+        if let Err(err) = self.persist_registry_payloads("consume_oauth_browser_flow") {
+            let _ = self.restore_browser_flow(state, &record);
+            return Err(err);
+        }
         Ok(record)
     }
 
@@ -824,11 +929,21 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+    use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+    use meerkat_core::types::SessionId;
 
     use super::*;
+    use crate::identifiers::LogicalRuntimeId;
+    use crate::input_state::StoredInputState;
+    use crate::runtime_state::RuntimeState;
+    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
 
     fn target() -> ConnectionRef {
         ConnectionRef {
@@ -843,6 +958,163 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("secondary_openai").expect("valid binding"),
             profile: None,
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingOAuthSnapshotStore {
+        snapshot: StdMutex<Option<Vec<u8>>>,
+        fail_oauth_persist: AtomicBool,
+    }
+
+    impl FailingOAuthSnapshotStore {
+        fn fail_oauth_persist(&self) {
+            self.fail_oauth_persist.store(true, Ordering::SeqCst);
+        }
+
+        fn allow_oauth_persist(&self) {
+            self.fail_oauth_persist.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for FailingOAuthSnapshotStore {
+        fn persist_auth_oauth_flow_snapshot(
+            &self,
+            snapshot_json: &[u8],
+        ) -> Result<(), RuntimeStoreError> {
+            if self.fail_oauth_persist.load(Ordering::SeqCst) {
+                return Err(RuntimeStoreError::WriteFailed(
+                    "injected oauth snapshot failure".to_string(),
+                ));
+            }
+            *self
+                .snapshot
+                .lock()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))? =
+                Some(snapshot_json.to_vec());
+            Ok(())
+        }
+
+        fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            self.snapshot
+                .lock()
+                .map(|snapshot| snapshot.clone())
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        }
+
+        async fn commit_session_boundary(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _session_delta: SessionDelta,
+            _run_id: RunId,
+            _boundary: RunApplyBoundary,
+            _contributing_input_ids: Vec<InputId>,
+            _input_updates: Vec<StoredInputState>,
+        ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "commit_session_boundary".to_string(),
+            ))
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _session_delta: SessionDelta,
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "commit_session_snapshot".to_string(),
+            ))
+        }
+
+        async fn atomic_apply(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _session_delta: Option<SessionDelta>,
+            _receipt: RunBoundaryReceipt,
+            _input_updates: Vec<StoredInputState>,
+            _session_store_key: Option<SessionId>,
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported("atomic_apply".to_string()))
+        }
+
+        async fn load_input_states(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "load_input_states".to_string(),
+            ))
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _run_id: &RunId,
+            _sequence: u64,
+        ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "load_boundary_receipt".to_string(),
+            ))
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "load_session_snapshot".to_string(),
+            ))
+        }
+
+        async fn persist_input_state(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _state: &StoredInputState,
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "persist_input_state".to_string(),
+            ))
+        }
+
+        async fn load_input_state(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "load_input_state".to_string(),
+            ))
+        }
+
+        async fn persist_runtime_state(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _state: RuntimeState,
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "persist_runtime_state".to_string(),
+            ))
+        }
+
+        async fn load_runtime_state(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "load_runtime_state".to_string(),
+            ))
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _runtime_state: RuntimeState,
+            _input_states: &[StoredInputState],
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "atomic_lifecycle_commit".to_string(),
+            ))
         }
     }
 
@@ -892,6 +1164,118 @@ mod tests {
             snapshot_phase(&lifecycle, &target),
             Some(AuthLeasePhase::ReauthRequired)
         );
+    }
+
+    #[test]
+    fn browser_consume_persistence_failure_keeps_flow_retryable() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+            &store_dyn,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        store.fail_oauth_persist();
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::PersistenceFailed { .. })
+        ));
+        assert!(lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+
+        store.allow_oauth_persist();
+        authority
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("failed durable consume remains retryable");
+    }
+
+    #[test]
+    fn device_consume_persistence_failure_keeps_flow_retryable() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+            &store_dyn,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "provider-device-code";
+        authority
+            .admit_device_code(
+                target.clone(),
+                provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+        let poll = authority
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("device poll begins");
+
+        store.fail_oauth_persist();
+        assert!(matches!(
+            poll.consume(),
+            Err(OAuthFlowError::PersistenceFailed { .. })
+        ));
+        assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
+
+        store.allow_oauth_persist();
+        let retry = authority
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("failed durable consume keeps device flow retryable");
+        retry
+            .consume()
+            .expect("retry consumes after durable persistence recovers");
+    }
+
+    #[test]
+    fn release_persistence_failure_keeps_released_flows_retryable() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            lifecycle.clone(),
+            &store_dyn,
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        store.fail_oauth_persist();
+        assert!(
+            lifecycle.release_lease(&lease_key).is_err(),
+            "release should fail closed when durable OAuth cleanup cannot persist"
+        );
+        assert!(lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+
+        store.allow_oauth_persist();
+        authority
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("failed durable release leaves browser flow retryable");
     }
 
     #[test]

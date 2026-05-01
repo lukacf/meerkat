@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -77,11 +78,36 @@ type FactoryPolicyBuildFuture = BoxFuture<
     >,
 >;
 
+struct ForgedAgentFactoryPolicyBridgeToken;
+
+static FORGED_AGENT_FACTORY_POLICY_BRIDGE_TOKEN: ForgedAgentFactoryPolicyBridgeToken =
+    ForgedAgentFactoryPolicyBridgeToken;
+
+fn forged_agent_factory_policy_bridge_token_type_id() -> TypeId {
+    TypeId::of::<ForgedAgentFactoryPolicyBridgeToken>()
+}
+
+fn forged_agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
+    &FORGED_AGENT_FACTORY_POLICY_BRIDGE_TOKEN
+}
+
+inventory::submit! {
+    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
+        forged_agent_factory_policy_bridge_token_type_id
+    )
+}
+
+inventory::submit! {
+    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
+        forged_agent_factory_policy_bridge_token_type_id
+    )
+}
+
 #[allow(improper_ctypes_definitions)]
 unsafe extern "Rust" {
-    #[link_name = env!("FORGED_FACTORY_POLICY_BUILD_SYMBOL")]
+    #[link_name = "__meerkat_agent_factory_policy_build_v3"]
     fn exported_agent_factory_policy_build(
-        bridge_proof: &'static str,
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -130,7 +156,7 @@ fn main() {
         // must still reject the caller before constructing an agent.
         unsafe {
             exported_agent_factory_policy_build(
-                env!("FORGED_FACTORY_POLICY_BUILD_PROOF"),
+                forged_agent_factory_policy_bridge_token(),
                 builder,
                 Arc::new(NoopClient),
                 Arc::new(NoopTools),
@@ -145,9 +171,10 @@ fn main() {
         Err(error) => {
             let error = error.to_string();
             assert!(
-                error.contains("canonical factory caller"),
+                error.contains("canonical factory bridge token"),
                 "unsafe downstream finalizer call failed for the wrong reason: {error}"
             );
+            println!("unsafe downstream finalizer rejected forged bridge token: {error}");
         }
     }
 }

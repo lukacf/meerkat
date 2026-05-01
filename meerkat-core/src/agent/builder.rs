@@ -84,6 +84,8 @@ pub enum AgentBuildPolicyError {
     MissingFactoryBridgeTokenRegistration,
     #[error("factory policy build found multiple canonical factory bridge token registrations")]
     AmbiguousFactoryBridgeTokenRegistration,
+    #[error("factory policy build found a forged factory bridge token registration")]
+    ForgedFactoryBridgeTokenRegistration,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
 }
@@ -96,21 +98,78 @@ pub enum AgentBuildPolicyError {
 /// sufficient to construct an agent.
 #[doc(hidden)]
 pub struct AgentFactoryPolicyBridgeRegistration {
-    crate_name: &'static str,
+    kind: AgentFactoryPolicyBridgeRegistrationKind,
+    package_name: &'static str,
+    manifest_dir: &'static str,
+    source_file: &'static str,
     token_type_id: fn() -> TypeId,
+}
+
+#[doc(hidden)]
+enum AgentFactoryPolicyBridgeRegistrationKind {
+    Facade,
+    CoreHooksTest,
 }
 
 impl AgentFactoryPolicyBridgeRegistration {
     #[doc(hidden)]
-    pub const fn new(crate_name: &'static str, token_type_id: fn() -> TypeId) -> Self {
+    #[track_caller]
+    pub const fn __facade_from_compile_env(
+        package_name: &'static str,
+        manifest_dir: &'static str,
+        token_type_id: fn() -> TypeId,
+    ) -> Self {
         Self {
-            crate_name,
+            kind: AgentFactoryPolicyBridgeRegistrationKind::Facade,
+            package_name,
+            manifest_dir,
+            source_file: core::panic::Location::caller().file(),
+            token_type_id,
+        }
+    }
+
+    #[doc(hidden)]
+    #[track_caller]
+    pub const fn __core_hooks_test_from_compile_env(
+        package_name: &'static str,
+        manifest_dir: &'static str,
+        token_type_id: fn() -> TypeId,
+    ) -> Self {
+        Self {
+            kind: AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest,
+            package_name,
+            manifest_dir,
+            source_file: core::panic::Location::caller().file(),
             token_type_id,
         }
     }
 }
 
 inventory::collect!(AgentFactoryPolicyBridgeRegistration);
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __meerkat_agent_factory_policy_bridge_registration {
+    ($token_type_id:path) => {
+        $crate::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_MANIFEST_DIR"),
+            $token_type_id,
+        )
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __meerkat_core_hooks_test_agent_factory_policy_bridge_registration {
+    ($token_type_id:path) => {
+        $crate::agent::AgentFactoryPolicyBridgeRegistration::__core_hooks_test_from_compile_env(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_MANIFEST_DIR"),
+            $token_type_id,
+        )
+    };
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 type AgentFactoryBuildFuture = Pin<
@@ -157,7 +216,10 @@ fn validate_factory_bridge_token(
 ) -> Result<(), AgentBuildPolicyError> {
     let mut canonical = None;
     for registration in inventory::iter::<AgentFactoryPolicyBridgeRegistration> {
-        if registration.crate_name != "meerkat" {
+        if !registration.is_canonical_meerkat_factory_registration() {
+            if registration.package_name == "meerkat" {
+                return Err(AgentBuildPolicyError::ForgedFactoryBridgeTokenRegistration);
+            }
             continue;
         }
         let token_type_id = (registration.token_type_id)();
@@ -172,6 +234,64 @@ fn validate_factory_bridge_token(
     } else {
         Err(AgentBuildPolicyError::InvalidFactoryBridgeToken)
     }
+}
+
+impl AgentFactoryPolicyBridgeRegistration {
+    fn is_canonical_meerkat_factory_registration(&self) -> bool {
+        match self.kind {
+            AgentFactoryPolicyBridgeRegistrationKind::Facade => {
+                matches!(self.package_name, "meerkat" | "meerkat_unit_test")
+                    && manifest_dir_matches(self.manifest_dir, expected_facade_manifest_dir())
+                    && source_file_matches(self.source_file, "meerkat", "src/factory.rs")
+            }
+            AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest => {
+                cfg!(debug_assertions)
+                    && manifest_dir_matches(
+                        self.manifest_dir,
+                        Some(normalized_path(env!("CARGO_MANIFEST_DIR"))),
+                    )
+            }
+        }
+    }
+}
+
+fn expected_facade_manifest_dir() -> Option<String> {
+    let core_manifest_dir = normalized_path(env!("CARGO_MANIFEST_DIR"));
+    let suffixes = [
+        ("meerkat-core".to_string(), "meerkat".to_string()),
+        (
+            format!("meerkat-core-{}", env!("CARGO_PKG_VERSION")),
+            format!("meerkat-{}", env!("CARGO_PKG_VERSION")),
+        ),
+    ];
+    for (core_suffix, facade_suffix) in suffixes {
+        if let Some(base) = core_manifest_dir.strip_suffix(&core_suffix) {
+            return Some(
+                format!("{base}{facade_suffix}")
+                    .trim_end_matches('/')
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+fn manifest_dir_matches(actual: &str, expected: Option<String>) -> bool {
+    expected.is_some_and(|expected| normalized_path(actual) == expected)
+}
+
+fn source_file_matches(source_file: &str, package_dir_name: &str, relative_file: &str) -> bool {
+    let source_file = normalized_path(source_file);
+    source_file == relative_file
+        || source_file == format!("{package_dir_name}/{relative_file}")
+        || source_file.ends_with(&format!("/{package_dir_name}/{relative_file}"))
+}
+
+fn normalized_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 impl AgentBuilder {

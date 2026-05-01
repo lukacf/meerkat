@@ -752,6 +752,17 @@ for (const pkg of localPackages.values()) {
       }
       attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`);
     }
+    if (rule === "rust_library" && (key === "meerkat" || key === "meerkat-core")) {
+      const packageRunfilesDir = relative(root, dir) || ".";
+      const cargoManifestDir = packageRunfilesDir !== "."
+        ? `./${packageRunfilesDir}`
+        : packageRunfilesDir;
+      attrs.splice(
+        attrs.length - 1,
+        0,
+        `    rustc_env = {\n        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},\n    },`,
+      );
+    }
     let rustTestBaseAttrs = null;
     let filteredNativeTests = [];
     if (rule === "rust_test") {

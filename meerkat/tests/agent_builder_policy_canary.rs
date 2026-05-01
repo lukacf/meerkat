@@ -396,44 +396,15 @@ fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Re
 name = "agent-builder-policy-downstream-unsafe-finalizer"
 version = "0.0.0"
 edition = "2024"
-build = "build.rs"
 
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-meerkat-core = {{ path = "{}" }}
-
-[build-dependencies]
+inventory = "0.3"
 meerkat-core = {{ path = "{}" }}
 "#,
-            repo_root().join("meerkat-core").display(),
             repo_root().join("meerkat-core").display()
         ),
-    )?;
-    fs::write(
-        temp.path().join("build.rs"),
-        r#"
-use std::{env, fs, path::PathBuf};
-
-fn main() {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let target_root = out_dir
-        .ancestors()
-        .nth(4)
-        .unwrap_or(out_dir.as_path())
-        .to_path_buf();
-    let config_path = target_root
-        .join(".meerkat")
-        .join("agent_factory_policy_bridge_config_v2");
-    let config = fs::read_to_string(&config_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", config_path.display()));
-    let mut lines = config.lines();
-    let symbol = lines.next().expect("bridge symbol");
-    let proof = lines.next().expect("bridge proof");
-    println!("cargo:rustc-env=FORGED_FACTORY_POLICY_BUILD_SYMBOL={symbol}");
-    println!("cargo:rustc-env=FORGED_FACTORY_POLICY_BUILD_PROOF={proof}");
-}
-"#,
     )?;
     fs::write(
         src_dir.join("main.rs"),
@@ -448,23 +419,98 @@ fn main() {
         .arg(temp.path().join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
         .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+            "downstream unsafe finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
     assert!(
-        !output.status.success(),
-        "downstream unsafe finalizer fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream unsafe finalizer reached the live factory-policy bridge and constructed an agent:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream unsafe finalizer reached the live factory-policy bridge and constructed an agent:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("FORGED_FACTORY_POLICY_BUILD_SYMBOL")
-            || stderr.contains("agent_factory_policy_bridge_config")
+        stderr.contains("AgentFactoryPolicyBridgeRegistration")
+            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_package_spoof_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_package_spoof_cannot_enter_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let project_dir = temp.path().join("meerkat");
+    let src_dir = project_dir.join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        project_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "meerkat"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+inventory = "0.3"
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        "mod factory;\nfn main() { factory::run(); }\n",
+    )?;
+    fs::write(
+        src_dir.join("factory.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
+            .replace("fn main() {", "pub fn run() {"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(project_dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+            "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream package-spoof finalizer reached the live factory-policy bridge and constructed an agent:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
 }
@@ -932,8 +978,14 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
         builder.contains("validate_factory_policy()?")
             && builder.contains("validate_factory_bridge_token(factory_bridge_token)?")
             && builder.contains("AgentFactoryPolicyBridgeRegistration")
+            && builder.contains("__meerkat_agent_factory_policy_bridge_registration")
             && builder.contains("InvalidFactoryBridgeToken")
+            && builder.contains("ForgedFactoryBridgeTokenRegistration")
             && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
+            && !builder.contains("AgentFactoryPolicyBridgeRegistration::new")
+            && !builder.contains("pub const fn new(")
+            && !builder.contains("pub const fn __from_compile_env")
+            && !builder.contains("pub enum AgentFactoryPolicyBridgeRegistrationKind")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")
             && !builder.contains("__meerkat_core_agent_factory_policy_build")

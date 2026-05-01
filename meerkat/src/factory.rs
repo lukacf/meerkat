@@ -185,9 +185,8 @@ fn agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
 }
 
 inventory::submit! {
-    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::new(
-        "meerkat",
-        agent_factory_policy_bridge_token_type_id,
+    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
+        agent_factory_policy_bridge_token_type_id
     )
 }
 

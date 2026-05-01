@@ -420,7 +420,6 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
         r#"{
   "auth_mode": "chatgpt_oauth",
   "primary_secret": "fresh-chatgpt-access",
-  "refresh_token": "refresh-token",
   "expires_at": 1893456000,
   "last_refresh": 1700000000,
   "scopes": ["openid", "email"],
@@ -445,27 +444,26 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth refresh must spawn");
-    if !refresh.status.success() {
-        let stderr = String::from_utf8_lossy(&refresh.stderr);
-        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
-            eprintln!("SKIP: auth provider features unavailable");
-            return;
-        }
-        panic!("refresh must use the binding-scoped token key; stderr={stderr}");
+    let stderr = String::from_utf8_lossy(&refresh.stderr);
+    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+        eprintln!("SKIP: auth provider features unavailable");
+        return;
     }
-
-    let stdout = String::from_utf8_lossy(&refresh.stdout);
     assert!(
-        stdout.contains("profile:       dev:openai_managed"),
-        "refresh should still report the requested auth profile; stdout:\n{stdout}"
+        !refresh.status.success(),
+        "fixture intentionally omits refresh_token so refresh stops at the provider boundary"
     );
     assert!(
-        stdout.contains("refresh:       ok"),
-        "refresh must not skip when credentials exist under the owning binding; stdout:\n{stdout}"
+        stderr.contains("persisted tokens missing refresh_token"),
+        "refresh must reach the lease-bound provider refresh path; stderr={stderr}"
     );
     assert!(
-        !stdout.contains("reason:        no persisted credential"),
-        "refresh must not preflight token storage by auth profile id; stdout:\n{stdout}"
+        !stderr.contains("token endpoint error"),
+        "fixture should fail before any live provider exchange; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("reason:        no persisted credential"),
+        "refresh must not preflight token storage by auth profile id; stderr={stderr}"
     );
 }
 

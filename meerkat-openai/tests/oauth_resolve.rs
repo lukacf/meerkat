@@ -23,8 +23,9 @@ use meerkat_core::handles::{
     LeaseKey,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
-    CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
+    AuthConstraints, AuthProfileConfig, AuthRefreshReason, BackendProfileConfig, BindingId,
+    ConnectionRef, CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection,
+    RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -579,10 +580,6 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
 }
 
 impl SequencedLoadTokenStore {
-    fn new(first: PersistedTokens, later: PersistedTokens) -> Self {
-        Self::new_after_first_loads(first, later, 1)
-    }
-
     fn new_after_first_loads(
         first: PersistedTokens,
         later: PersistedTokens,
@@ -862,9 +859,39 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
     )
 }
 
+fn openai_realm_with_source(
+    backend_kind: &str,
+    auth_method: &str,
+    source: CredentialSourceSpec,
+) -> RealmConnectionSet {
+    openai_realm_with_source_and_constraints(
+        backend_kind,
+        auth_method,
+        source,
+        AuthConstraints {
+            allow_interactive_login: true,
+            ..Default::default()
+        },
+    )
+}
+
 fn openai_realm_with_constraints(
     backend_kind: &str,
     auth_method: &str,
+    constraints: AuthConstraints,
+) -> RealmConnectionSet {
+    openai_realm_with_source_and_constraints(
+        backend_kind,
+        auth_method,
+        CredentialSourceSpec::PlatformDefault,
+        constraints,
+    )
+}
+
+fn openai_realm_with_source_and_constraints(
+    backend_kind: &str,
+    auth_method: &str,
+    source: CredentialSourceSpec,
     constraints: AuthConstraints,
 ) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
@@ -883,7 +910,7 @@ fn openai_realm_with_constraints(
         AuthProfileConfig {
             provider: "openai".into(),
             auth_method: auth_method.into(),
-            source: CredentialSourceSpec::PlatformDefault,
+            source,
             constraints,
             metadata_defaults: Default::default(),
         },
@@ -976,6 +1003,163 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
 }
 
 #[tokio::test]
+async fn openai_managed_chatgpt_oauth_manual_refresh_forces_provider_refresh_when_cached_fresh() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = Utc::now() + ChronoDuration::hours(1);
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("fresh-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let refreshed_expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() + ChronoDuration::hours(2)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let refreshed = PersistedTokens {
+        primary_secret: Some("manual-refreshed-chatgpt-access".into()),
+        refresh_token: Some("rt-rotated".into()),
+        expires_at: Some(refreshed_expires_at),
+        last_refresh: Some(Utc::now()),
+        ..persisted.clone()
+    };
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
+    let refresh_coord = Arc::new(StaticRefreshCoordinator { refreshed });
+
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(refresh_coord)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("fresh ChatGPT tokens should resolve before manual refresh");
+
+    connection
+        .auth_lease
+        .refresh(AuthRefreshReason::Manual)
+        .await
+        .expect("manual refresh must run the provider refresh lifecycle");
+
+    assert_eq!(
+        auth_lease.completed_refreshes(),
+        vec![refreshed_expires_at.timestamp() as u64],
+        "manual refresh must claim and complete AuthMachine refresh ownership"
+    );
+    let stored = store
+        .load(&default_token_key())
+        .await
+        .unwrap()
+        .expect("refreshed token should remain stored");
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("manual-refreshed-chatgpt-access")
+    );
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("manual-refreshed-chatgpt-access".to_string()),
+        "manual refresh must update the resolved lease's in-memory secret"
+    );
+    assert_eq!(
+        stored.auth_lease.as_ref().map(|binding| binding.generation),
+        Some(5),
+        "refreshed material must be rebound to the completed AuthMachine generation"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_manual_refresh_rejects_wrong_refreshed_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = Utc::now() + ChronoDuration::hours(1);
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("fresh-chatgpt-access".into()),
+            refresh_token: Some("rt".into()),
+            id_token: None,
+            expires_at: Some(expires_at),
+            last_refresh: Some(Utc::now()),
+            scopes: o_oauth::CHATGPT_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
+    let refresh_coord = Arc::new(StaticRefreshCoordinator {
+        refreshed: PersistedTokens::api_key("sk-wrong-mode"),
+    });
+
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(refresh_coord)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("fresh ChatGPT tokens should resolve before manual refresh");
+
+    let err = connection
+        .auth_lease
+        .refresh(AuthRefreshReason::Manual)
+        .await
+        .expect_err("wrong-mode refreshed material must fail before publication");
+
+    assert!(
+        err.to_string().contains("unexpected auth_mode"),
+        "got {err:?}"
+    );
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("fresh-chatgpt-access".to_string()),
+        "failed refresh must leave the resolved lease secret unchanged"
+    );
+    assert_eq!(
+        store
+            .load(&default_token_key())
+            .await
+            .unwrap()
+            .expect("original token remains stored")
+            .auth_mode,
+        PersistedAuthMode::ChatgptOauth
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "wrong-mode refreshed material must retire the owner refresh lease"
+    );
+}
+
+#[tokio::test]
 async fn openai_managed_chatgpt_oauth_unbound_token_does_not_seed_untracked_lease() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
@@ -1022,6 +1206,78 @@ async fn openai_managed_chatgpt_oauth_unbound_token_does_not_seed_untracked_leas
         auth_lease.acquired(),
         Vec::<u64>::new(),
         "unbound material must not be laundered through acquire_lease"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_wrong_bound_mode_marks_reauth_required() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = bind_default_auth_lease(PersistedTokens::api_key("sk-not-chatgpt"), 3);
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid_non_expiring());
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("managed OAuth must reject a lease-bound token with the wrong auth mode");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "wrong-mode durable material must retire the live AuthMachine lease"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_missing_token_marks_reauth_required() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = chrono::DateTime::<Utc>::from_timestamp(
+        (Utc::now() + ChronoDuration::hours(1)).timestamp(),
+        0,
+    )
+    .unwrap();
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(expires_at));
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("missing TokenStore material must be resolved by the lease-bound authority");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "AuthMachine lease must be retired when its durable material disappears"
     );
 }
 
@@ -1803,7 +2059,9 @@ async fn openai_managed_chatgpt_oauth_fresh_authmachine_reloads_store_before_cac
         },
         3,
     );
-    let store = Arc::new(SequencedLoadTokenStore::new(stale, refreshed));
+    let store = Arc::new(SequencedLoadTokenStore::new_after_first_loads(
+        stale, refreshed, 0,
+    ));
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid(refreshed_expires_at));
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
@@ -1840,8 +2098,8 @@ async fn openai_managed_chatgpt_oauth_fresh_authmachine_reloads_store_before_cac
     }
     assert_eq!(
         store.loads(),
-        2,
-        "resolver should reload TokenStore under fresh AuthMachine truth"
+        1,
+        "resolver should load TokenStore under fresh AuthMachine truth"
     );
 }
 
@@ -1926,7 +2184,7 @@ async fn openai_managed_chatgpt_oauth_reauth_race_after_reload_does_not_reacquir
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_bound_token_does_not_seed_untracked_lease() {
+async fn openai_managed_chatgpt_oauth_bound_token_bootstraps_untracked_lease_after_restart() {
     let store = Arc::new(EphemeralTokenStore::new());
     let expires_at = chrono::DateTime::<Utc>::from_timestamp(
         (Utc::now() + ChronoDuration::hours(1)).timestamp(),
@@ -1956,35 +2214,40 @@ async fn openai_managed_chatgpt_oauth_bound_token_does_not_seed_untracked_lease(
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::untracked());
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_token_store(store.clone())
         .with_auth_lease_handle(auth_lease.clone());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
-    let err = registry
+    let connection = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect_err("bound durable material must not seed absent AuthMachine truth");
+        .expect("bound durable material should recover AuthMachine lease truth after restart");
 
-    assert!(
-        matches!(
-            err,
-            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::Expired
-            )
-        ),
-        "got {err:?}"
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("fresh-chatgpt-access".to_string())
     );
-    assert_eq!(auth_lease.phase(), None);
+    assert_eq!(auth_lease.phase(), Some(AuthLeasePhase::Valid));
     assert_eq!(
         auth_lease.acquired(),
-        Vec::<u64>::new(),
-        "bound material must not be laundered through acquire_lease"
+        vec![expires_at.timestamp() as u64],
+        "restart bootstrap must acquire a fresh AuthMachine lease before returning material"
+    );
+    let stored = store
+        .load(&default_token_key())
+        .await
+        .unwrap()
+        .expect("token should remain stored");
+    assert_eq!(
+        stored.auth_lease.as_ref().map(|binding| binding.generation),
+        Some(1),
+        "bootstrapped durable material must be rebound to the new AuthMachine generation"
     );
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_none_snapshot_does_not_attempt_conditional_acquire() {
+async fn openai_managed_chatgpt_oauth_restart_bootstrap_acquire_race_fails_closed() {
     let store = Arc::new(EphemeralTokenStore::new());
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
     let expires_at = chrono::DateTime::<Utc>::from_timestamp(
@@ -2028,7 +2291,7 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_does_not_attempt_conditional
     let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect_err("absent AuthMachine truth must not be reacquired from durable material");
+        .expect_err("restart bootstrap must fail closed when AuthMachine acquire loses a race");
 
     assert!(
         matches!(
@@ -2039,11 +2302,47 @@ async fn openai_managed_chatgpt_oauth_none_snapshot_does_not_attempt_conditional
         ),
         "got {err:?}"
     );
-    assert_eq!(auth_lease.phase(), None);
+    assert_eq!(auth_lease.phase(), Some(AuthLeasePhase::ReauthRequired));
     assert_eq!(
         auth_lease.acquired(),
         Vec::<u64>::new(),
-        "resolver must not invoke conditional acquire when AuthMachine has no lease truth"
+        "resolver must not return material when conditional acquire lost the AuthMachine race"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_store_api_key_unbound_token_does_not_resolve_without_lease_truth() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = PersistedTokens::api_key("sk-managed-store-stale");
+    store.save(&default_token_key(), &persisted).await.unwrap();
+
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid_non_expiring());
+    let realm =
+        openai_realm_with_source("openai_api", "api_key", CredentialSourceSpec::ManagedStore);
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("managed_store must not return unbound TokenStore secret material");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        auth_lease.phase(),
+        Some(AuthLeasePhase::ReauthRequired),
+        "managed_store mismatch must retire the stale AuthMachine lease"
     );
 }
 
@@ -2365,7 +2664,7 @@ async fn openai_managed_chatgpt_oauth_begin_refresh_race_completed_before_follow
         4,
     );
     let store = Arc::new(SequencedLoadTokenStore::new_after_first_loads(
-        stale, refreshed, 2,
+        stale, refreshed, 1,
     ));
     let auth_lease = Arc::new(RecordingAuthLeaseHandle::begin_refresh_race_completed(
         stale_expires_at,
@@ -2443,7 +2742,7 @@ async fn openai_managed_chatgpt_oauth_begin_refresh_stale_snapshot_rechecks_befo
         4,
     );
     let store = Arc::new(SequencedLoadTokenStore::new_after_first_loads(
-        stale, refreshed, 2,
+        stale, refreshed, 1,
     ));
     let auth_lease = Arc::new(
         RecordingAuthLeaseHandle::begin_refresh_stale_snapshot_race_to_valid(
@@ -2543,8 +2842,8 @@ async fn openai_managed_chatgpt_oauth_no_refresh_missing_reloaded_store_marks_re
     );
     assert_eq!(
         store.loads(),
-        2,
-        "resolver should reload TokenStore under fresh AuthMachine truth"
+        1,
+        "resolver should load TokenStore under fresh AuthMachine truth"
     );
 }
 
@@ -2609,8 +2908,8 @@ async fn openai_managed_chatgpt_oauth_no_refresh_missing_access_marks_reauth_req
     );
     assert_eq!(
         auth_lease.phase(),
-        None,
-        "resolver must not create AuthMachine reauth truth from an absent lease"
+        Some(AuthLeasePhase::ReauthRequired),
+        "restart bootstrap must retire durable material that cannot supply access without refresh"
     );
 }
 
@@ -2826,8 +3125,8 @@ async fn openai_managed_chatgpt_oauth_no_refresh_stale_access_marks_reauth_requi
     );
     assert_eq!(
         auth_lease.phase(),
-        None,
-        "resolver must not create AuthMachine reauth truth from stale material when no lease exists"
+        Some(AuthLeasePhase::ReauthRequired),
+        "restart bootstrap must retire stale durable material when refresh is disabled"
     );
 }
 
@@ -2898,6 +3197,48 @@ async fn openai_managed_chatgpt_oauth_invalid_grant_marks_reauth_required() {
 #[tokio::test]
 async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = bind_default_auth_lease(
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ExternalTokens,
+            primary_secret: Some("externally-managed-access".into()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: Some(Utc::now()),
+            scopes: vec![],
+            account_id: Some("acct-ext".into()),
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        },
+        3,
+    );
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &persisted,
+        )
+        .await
+        .unwrap();
+
+    let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(RecordingAuthLeaseHandle::valid_non_expiring()));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("external tokens should resolve");
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("externally-managed-access".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn openai_external_chatgpt_tokens_unbound_token_does_not_bypass_lease_truth() {
+    let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ExternalTokens,
         primary_secret: Some("externally-managed-access".into()),
@@ -2918,25 +3259,35 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
         .await
         .unwrap();
 
+    let auth_lease = Arc::new(RecordingAuthLeaseHandle::valid_non_expiring());
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease.clone());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let connection = registry
+
+    let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect("external tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("externally-managed-access".to_string()),
+        .expect_err("external ChatGPT tokens must not resolve outside AuthMachine truth");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
     );
+    assert_eq!(auth_lease.phase(), Some(AuthLeasePhase::ReauthRequired));
 }
 
 #[tokio::test]
-async fn openai_chatgpt_oauth_missing_tokens_surfaces_interactive_login_required() {
-    let store = Arc::new(EphemeralTokenStore::new());
+async fn openai_chatgpt_oauth_missing_token_store_surfaces_interactive_login_required() {
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env = ResolverEnvironment::testing();
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry

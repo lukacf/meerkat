@@ -808,7 +808,9 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
-                            return crate::control_plane::stop_executor_after_boundary_commit_rollback(
+                            return stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
                                 executor,
                                 format!("runtime loop commit failed for run {run_id}: {err}"),
                             )

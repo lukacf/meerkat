@@ -15,12 +15,14 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedOauthAccess, fail_managed_oauth_refresh, oauth_refresh_error_text_is_permanent,
-    resolve_managed_oauth_access, save_and_complete_managed_oauth_refresh,
+    ManagedOauthAccess, RefreshableStoredTokenLease, StoredTokenRefreshFn,
+    StoredTokenRefreshOutcome, begin_managed_oauth_refresh, fail_managed_oauth_refresh,
+    oauth_refresh_error_text_is_permanent, resolve_managed_oauth_access,
+    save_and_complete_managed_oauth_refresh,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
-    resolve_simple_secret,
+    resolve_simple_secret_with_auth_context,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
@@ -92,6 +94,106 @@ fn google_oauth_refresh_error_to_provider(
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn provider_auth_error_to_auth_error(error: ProviderAuthError) -> AuthError {
+    match error {
+        ProviderAuthError::Auth(error) => error,
+        other => AuthError::Other(other.to_string()),
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn google_managed_oauth_refresh_fn(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    store: Arc<dyn meerkat_core::auth::TokenStore>,
+    key: meerkat_core::auth::TokenKey,
+    expected_mode: meerkat_core::auth::PersistedAuthMode,
+) -> Result<StoredTokenRefreshFn, ProviderAuthError> {
+    let auth_lease_handle = env.auth_lease_handle.clone().ok_or_else(|| {
+        ProviderAuthError::SourceResolutionFailed(
+            "managed OAuth refresh requires an AuthMachine lease handle".into(),
+        )
+    })?;
+    let refresh_coord = env
+        .refresh_coord
+        .clone()
+        .unwrap_or_else(|| Arc::new(meerkat_auth_core::InMemoryCoordinator::new()));
+    let refresh_env = ResolverEnvironment {
+        env_lookup: env.env_lookup.clone(),
+        external_resolvers: env.external_resolvers.clone(),
+        now: env.now.clone(),
+        auth_lease_handle: Some(auth_lease_handle),
+        token_store: Some(store.clone()),
+        refresh_coord: Some(refresh_coord.clone()),
+    };
+    let binding = binding.clone();
+    Ok(Arc::new(move |_reason| {
+        let refresh_env = ResolverEnvironment {
+            env_lookup: refresh_env.env_lookup.clone(),
+            external_resolvers: refresh_env.external_resolvers.clone(),
+            now: refresh_env.now.clone(),
+            auth_lease_handle: refresh_env.auth_lease_handle.clone(),
+            token_store: refresh_env.token_store.clone(),
+            refresh_coord: refresh_env.refresh_coord.clone(),
+        };
+        let binding = binding.clone();
+        let store = store.clone();
+        let refresh_coord = refresh_coord.clone();
+        let key = key.clone();
+        Box::pin(async move {
+            let (lifecycle, tokens) =
+                begin_managed_oauth_refresh(&refresh_env, &binding, expected_mode)
+                    .await
+                    .map_err(provider_auth_error_to_auth_error)?;
+            let endpoints = oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
+            let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
+                store,
+                refresh_coord,
+                endpoints,
+                key.clone(),
+            );
+            let refreshed = runtime
+                .refresh_access_token_from_persisted_without_save(&tokens)
+                .await
+                .map_err(|error| {
+                    let permanent = google_oauth_refresh_error_is_permanent(&error);
+                    let _ = fail_managed_oauth_refresh(
+                        &refresh_env,
+                        &binding,
+                        lifecycle.clone(),
+                        permanent,
+                    );
+                    provider_auth_error_to_auth_error(google_oauth_refresh_error_to_provider(
+                        error, &binding,
+                    ))
+                })?;
+            save_and_complete_managed_oauth_refresh(
+                &refresh_env,
+                &binding,
+                &key,
+                lifecycle,
+                &tokens,
+                &refreshed,
+            )
+            .await
+            .and_then(|completion| {
+                let secret = refreshed.primary_secret.clone().ok_or_else(|| {
+                    ProviderAuthError::SourceResolutionFailed(
+                        "managed OAuth refresh returned no primary_secret".into(),
+                    )
+                })?;
+                Ok(StoredTokenRefreshOutcome {
+                    secret,
+                    expires_at: completion.expires_at,
+                    lease_snapshot: Some(completion.lease_snapshot),
+                })
+            })
+            .map_err(provider_auth_error_to_auth_error)
+        })
+    }))
+}
+
 pub struct GoogleProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -160,15 +262,22 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::ApiKey
             | GoogleAuthMethod::BearerApiKey
             | GoogleAuthMethod::ApiKeyExpress => {
-                let secret =
-                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                let resolved = resolve_simple_secret_with_auth_context(
+                    &binding.auth_profile.source,
+                    env,
+                    binding,
+                )
+                .await?;
                 let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
-                Arc::new(StaticLease::inline_secret(
-                    secret,
-                    metadata,
-                    None,
-                    source_label.clone(),
-                ))
+                Arc::new(
+                    StaticLease::inline_secret(
+                        resolved.secret,
+                        metadata,
+                        None,
+                        source_label.clone(),
+                    )
+                    .with_auth_lease_snapshot(resolved.auth_lease_snapshot),
+                )
             }
             GoogleAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
@@ -276,16 +385,19 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         .ok_or_else(|| interactive_login_error(binding))?;
                     let key =
                         meerkat_core::auth::TokenKey::from_connection_ref(&binding.connection_ref);
-                    let persisted = store
-                        .load(&key)
-                        .await
-                        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
-                        .ok_or_else(|| interactive_login_error(binding))?;
-                    let (resolved_tokens, lease_expires_at) =
-                        match resolve_managed_oauth_access(env, binding, &persisted).await? {
-                            ManagedOauthAccess::Cached { tokens, expires_at } => {
-                                (tokens, expires_at)
-                            }
+                    let (resolved_tokens, lease_expires_at, auth_lease_snapshot) =
+                        match resolve_managed_oauth_access(
+                            env,
+                            binding,
+                            meerkat_core::auth::PersistedAuthMode::GoogleOauth,
+                        )
+                        .await?
+                        {
+                            ManagedOauthAccess::Cached {
+                                tokens,
+                                expires_at,
+                                lease_snapshot,
+                            } => (tokens, expires_at, Some(lease_snapshot)),
                             ManagedOauthAccess::Refresh { lifecycle, tokens } => {
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
@@ -315,7 +427,11 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                     env, binding, &key, lifecycle, &tokens, &refreshed,
                                 )
                                 .await?;
-                                (refreshed, completion.expires_at)
+                                (
+                                    refreshed,
+                                    completion.expires_at,
+                                    Some(completion.lease_snapshot),
+                                )
                             }
                         };
                     let access = resolved_tokens
@@ -347,11 +463,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             ));
                     }
                     let metadata = finalize_auth_metadata(binding, metadata)?;
-                    Arc::new(StaticLease::inline_secret(
+                    let refresh = google_managed_oauth_refresh_fn(
+                        env,
+                        binding,
+                        store.clone(),
+                        key.clone(),
+                        meerkat_core::auth::PersistedAuthMode::GoogleOauth,
+                    )?;
+                    Arc::new(RefreshableStoredTokenLease::inline_secret(
                         access,
                         metadata,
                         lease_expires_at,
+                        auth_lease_snapshot,
                         source_label.clone(),
+                        refresh,
                     ))
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]

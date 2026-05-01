@@ -302,8 +302,7 @@ pub use auth::{
     clear_unreadable_tokens_and_publish_lifecycle_released, lease_snapshot_expires_at_datetime,
     persisted_token_acquired_snapshot, persisted_token_expires_at_epoch_secs,
     persisted_tokens_match_lifecycle_snapshot, project_published_auth_status,
-    publish_token_lifecycle_acquired, publish_token_lifecycle_acquired_if_snapshot,
-    publish_token_lifecycle_released, save_tokens_and_publish_lifecycle_acquired,
+    save_tokens_and_publish_lifecycle_acquired,
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,

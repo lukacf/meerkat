@@ -1795,12 +1795,28 @@ impl AgentFactory {
         config: &Config,
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+        self.build_llm_client_for_identity_with_auth_lease(config, identity, None)
+            .await
+    }
+
+    pub async fn build_llm_client_for_identity_with_auth_lease(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+    ) -> Result<Arc<dyn LlmClient>, FactoryError> {
         let registry = config
             .model_registry()
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
-                .build_self_hosted_client_for_identity(config, &registry, identity, None, None)
+                .build_self_hosted_client_for_identity(
+                    config,
+                    &registry,
+                    identity,
+                    auth_lease_handle,
+                    None,
+                )
                 .await
                 .map(|resolved| resolved.client);
         }
@@ -1818,6 +1834,17 @@ impl AgentFactory {
             None,
         )
         .map_err(FactoryError::ClientCreationFailed)?;
+        let lease_connection_ref = if connection_ref.is_env_default()
+            && identity
+                .connection_ref
+                .as_ref()
+                .map(ConnectionRef::is_env_default)
+                .unwrap_or(true)
+        {
+            None
+        } else {
+            Some(connection_ref.clone())
+        };
 
         #[allow(unused_mut)]
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
@@ -1830,6 +1857,11 @@ impl AgentFactory {
                 env = env.with_refresh_coordinator(coord);
             }
         }
+        if let Some(handle) = auth_lease_handle.clone()
+            && lease_connection_ref.is_some()
+        {
+            env = env.with_auth_lease_handle(handle);
+        }
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
@@ -1838,6 +1870,11 @@ impl AgentFactory {
             .resolve(&realm, &connection_ref, &env)
             .await
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+        if let Some(handle) = auth_lease_handle
+            && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
+        {
+            Self::publish_auth_lease(&handle, lease_connection_ref, &connection)?;
+        }
         provider_registry
             .build_client(connection)
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))
@@ -2281,6 +2318,24 @@ impl AgentFactory {
         ) {
             return Ok(());
         }
+        if let Some(expected) = connection.auth_lease.auth_lease_snapshot() {
+            let current = handle.snapshot(&lease_key);
+            if current == expected {
+                return Ok(());
+            }
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "AuthMachine lease publication refused for {:?}: resolved credential was \
+                 authorized by phase={:?} expires_at={:?} generation={}, but current \
+                 lease truth is phase={:?} expires_at={:?} generation={}",
+                connection_ref,
+                expected.phase,
+                expected.expires_at,
+                expected.generation,
+                current.phase,
+                current.expires_at,
+                current.generation
+            )));
+        }
         let expires_at = connection
             .auth_lease
             .expires_at()
@@ -2692,6 +2747,28 @@ impl AgentFactory {
                             .await
                             .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
                         provider = connection.provider;
+                        // Phase 1.5-rev loop closure — refresh-loop middle:
+                        // The DSL tracks per-binding auth lifecycle state.
+                        // On successful resolve, record the lease's expiry
+                        // in the DSL so the runner's CallingLlm arm can
+                        // observe `valid` / `expiring` / `reauth_required`
+                        // states for this binding. Connects the resolver
+                        // side to the state the agent runner consults.
+                        //
+                        // This must happen before constructing any downstream
+                        // executor from the resolved connection, because
+                        // `publish_auth_lease` is the fail-closed generation
+                        // check for lease-bound durable credential material.
+                        if let RuntimeBuildMode::SessionOwned(bindings) =
+                            &build_config.runtime_build_mode
+                            && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
+                        {
+                            Self::publish_auth_lease(
+                                &bindings.auth_lease,
+                                lease_connection_ref,
+                                &connection,
+                            )?;
+                        }
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             let selected_realm = build_config.realm_id.as_deref();
@@ -2712,24 +2789,6 @@ impl AgentFactory {
                                     "skipping image executor reuse for LLM connection outside selected realm"
                                 );
                             }
-                        }
-
-                        // Phase 1.5-rev loop closure — refresh-loop middle:
-                        // The DSL tracks per-binding auth lifecycle state.
-                        // On successful resolve, record the lease's expiry
-                        // in the DSL so the runner's CallingLlm arm can
-                        // observe `valid` / `expiring` / `reauth_required`
-                        // states for this binding. Connects the resolver
-                        // side to the state the agent runner consults.
-                        if let RuntimeBuildMode::SessionOwned(bindings) =
-                            &build_config.runtime_build_mode
-                            && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
-                        {
-                            Self::publish_auth_lease(
-                                &bindings.auth_lease,
-                                lease_connection_ref,
-                                &connection,
-                            )?;
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
@@ -2825,6 +2884,11 @@ impl AgentFactory {
                 else {
                     continue;
                 };
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
+                    && !connection_ref.is_env_default()
+                {
+                    Self::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)?;
+                }
                 let Ok(Some(executor)) = self
                     .provider_registry
                     .build_image_generation_executor(connection)
@@ -4306,6 +4370,247 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn build_llm_client_for_identity_with_auth_lease_skips_env_default_handle() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct RecordingOpenAiRuntime {
+            auth_lease_handle_seen: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for RecordingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
+                self.auth_lease_handle_seen.store(
+                    env.auth_lease_handle.is_some(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "test-openai-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let auth_lease_handle_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RecordingOpenAiRuntime {
+                auth_lease_handle_seen: Arc::clone(&auth_lease_handle_seen),
+            }));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+
+        factory
+            .build_llm_client_for_identity_with_auth_lease(
+                &Config::default(),
+                &identity,
+                Some(Arc::clone(&auth_lease)),
+            )
+            .await
+            .expect("env-default client build should still succeed");
+
+        assert!(
+            !auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "env-default hot-swap helper must not receive an AuthMachine lease handle"
+        );
+        let env_default_connection_ref = ConnectionRef {
+            realm: RealmId::parse("env_default").expect("valid realm"),
+            binding: BindingId::parse("default").expect("valid binding"),
+            profile: None,
+        };
+        let snapshot = auth_lease.snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &env_default_connection_ref,
+        ));
+        assert_eq!(
+            snapshot.phase, None,
+            "env-default hot-swap helper must not publish synthetic lease truth"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn build_llm_client_for_identity_with_auth_lease_plumbs_runtime_handle() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct RecordingOpenAiRuntime {
+            auth_lease_handle_seen: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for RecordingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "dev");
+                self.auth_lease_handle_seen.store(
+                    env.auth_lease_handle.is_some(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "test-openai-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let auth_lease_handle_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RecordingOpenAiRuntime {
+                auth_lease_handle_seen: Arc::clone(&auth_lease_handle_seen),
+            }));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "dev".to_string(),
+            inline_realm_section(&[("openai", "test-openai-key")]),
+        );
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(connection_ref.clone()),
+        };
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+
+        factory
+            .build_llm_client_for_identity_with_auth_lease(
+                &config,
+                &identity,
+                Some(Arc::clone(&auth_lease)),
+            )
+            .await
+            .expect("hot-swap client build should resolve with auth lease handle");
+
+        assert!(
+            auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "hot-swap client resolution must receive the runtime AuthMachine lease handle"
+        );
+        let snapshot = auth_lease.snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &connection_ref,
+        ));
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+    }
+
     #[test]
     fn realm_default_binding_is_explicit_config_auth_source() {
         let mut config = Config::default();
@@ -5161,6 +5466,70 @@ mod tests {
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[test]
+    fn publish_auth_lease_rejects_same_expiry_stale_generation() {
+        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let transition = handle.acquire_lease(&lease_key, 1_800_000_000).unwrap();
+        let resolved_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: transition.generation,
+        };
+        let refreshing = handle.begin_refresh(&lease_key).unwrap();
+        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
+            expires_at: Some(1_800_000_000),
+            generation: refreshing.generation,
+        };
+        handle
+            .complete_refresh_if_snapshot(
+                &lease_key,
+                &refreshing_snapshot,
+                1_800_000_000,
+                1_700_000_000,
+            )
+            .unwrap()
+            .expect("same-expiry refresh should complete");
+
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: meerkat_llm_core::provider_runtime::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "openai_backend".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                    "stale-token".to_string(),
+                    meerkat_core::AuthMetadata::default(),
+                    chrono::DateTime::from_timestamp(1_800_000_000, 0),
+                    "test",
+                )
+                .with_auth_lease_snapshot(Some(resolved_snapshot.clone())),
+            ),
+        };
+
+        let err = AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection)
+            .expect_err("factory publication must fail closed on stale lease generation");
+        assert!(err.to_string().contains("authorized by"), "got {err:?}");
+        let current = handle.snapshot(&lease_key);
+        assert_ne!(current.generation, resolved_snapshot.generation);
+        assert_eq!(current.expires_at, resolved_snapshot.expires_at);
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn publish_auth_lease_skips_unobserved_dynamic_authorizer() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5685,6 +6054,387 @@ mod tests {
                 && err.contains("selected realm 'default'")
                 && err.contains("has no default binding"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn selected_image_binding_rejects_stale_auth_lease_snapshot_before_executor_build() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+        use meerkat_llm_core::{
+            ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
+            ProviderImageGenerationRequest,
+        };
+
+        struct SnapshotOpenAiRuntime {
+            stale_snapshot: meerkat_core::handles::AuthLeaseSnapshot,
+            image_executor_builds: Arc<std::sync::atomic::AtomicUsize>,
+            auth_lease_handle_seen: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        struct UnusedImageExecutor;
+
+        #[async_trait::async_trait]
+        impl ImageGenerationExecutor for UnusedImageExecutor {
+            async fn execute_image_generation(
+                &self,
+                _request: ProviderImageGenerationRequest,
+            ) -> Result<ProviderImageGenerationOutput, LlmError> {
+                Err(LlmError::InvalidRequest {
+                    message: "unused test executor".to_string(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for SnapshotOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "session_a");
+                self.auth_lease_handle_seen.store(
+                    env.auth_lease_handle.is_some(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(
+                        StaticLease::inline_secret(
+                            "stale-openai-key".to_string(),
+                            meerkat_core::AuthMetadata::default(),
+                            chrono::DateTime::from_timestamp(1_800_000_000, 0),
+                            "test",
+                        )
+                        .with_auth_lease_snapshot(Some(self.stale_snapshot.clone())),
+                    ),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+
+            fn build_image_generation_executor(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+                self.image_executor_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(Arc::new(UnusedImageExecutor)))
+            }
+        }
+
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("session_a").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let first_valid = bindings
+            .auth_lease
+            .acquire_lease(&lease_key, 1_800_000_000)
+            .expect("initial valid lease");
+        let stale_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: first_valid.generation,
+        };
+        let refreshing = bindings
+            .auth_lease
+            .begin_refresh(&lease_key)
+            .expect("begin refresh");
+        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
+            expires_at: Some(1_800_000_000),
+            generation: refreshing.generation,
+        };
+        bindings
+            .auth_lease
+            .complete_refresh_if_snapshot(
+                &lease_key,
+                &refreshing_snapshot,
+                1_800_000_000,
+                1_700_000_000,
+            )
+            .expect("complete same-expiry refresh")
+            .expect("refresh transition");
+
+        let image_executor_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let auth_lease_handle_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(SnapshotOpenAiRuntime {
+                stale_snapshot,
+                image_executor_builds: Arc::clone(&image_executor_builds),
+                auth_lease_handle_seen: Arc::clone(&auth_lease_handle_seen),
+            }));
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "session_a".to_string(),
+            inline_realm_section(&[("openai", "image-openai-key")]),
+        );
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.realm_id = Some("session_a".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("stale image auth lease snapshot must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(
+            auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "selected image binding resolution must receive the session AuthMachine lease handle"
+        );
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lease publication refused"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stale image credentials must not be installed into an executor"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn same_connection_image_executor_rejects_stale_auth_lease_snapshot_before_executor_build()
+     {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+        use meerkat_llm_core::{
+            ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
+            ProviderImageGenerationRequest,
+        };
+
+        struct SnapshotOpenAiRuntime {
+            stale_snapshot: meerkat_core::handles::AuthLeaseSnapshot,
+            image_executor_builds: Arc<std::sync::atomic::AtomicUsize>,
+            auth_lease_handle_seen: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        struct UnusedImageExecutor;
+
+        #[async_trait::async_trait]
+        impl ImageGenerationExecutor for UnusedImageExecutor {
+            async fn execute_image_generation(
+                &self,
+                _request: ProviderImageGenerationRequest,
+            ) -> Result<ProviderImageGenerationOutput, LlmError> {
+                Err(LlmError::InvalidRequest {
+                    message: "unused test executor".to_string(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for SnapshotOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "session_a");
+                self.auth_lease_handle_seen.store(
+                    env.auth_lease_handle.is_some(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(
+                        StaticLease::inline_secret(
+                            "stale-openai-key".to_string(),
+                            meerkat_core::AuthMetadata::default(),
+                            chrono::DateTime::from_timestamp(1_800_000_000, 0),
+                            "test",
+                        )
+                        .with_auth_lease_snapshot(Some(self.stale_snapshot.clone())),
+                    ),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+
+            fn build_image_generation_executor(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+                self.image_executor_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(Arc::new(UnusedImageExecutor)))
+            }
+        }
+
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("session_a").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let first_valid = bindings
+            .auth_lease
+            .acquire_lease(&lease_key, 1_800_000_000)
+            .expect("initial valid lease");
+        let stale_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: first_valid.generation,
+        };
+        let refreshing = bindings
+            .auth_lease
+            .begin_refresh(&lease_key)
+            .expect("begin refresh");
+        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
+            expires_at: Some(1_800_000_000),
+            generation: refreshing.generation,
+        };
+        bindings
+            .auth_lease
+            .complete_refresh_if_snapshot(
+                &lease_key,
+                &refreshing_snapshot,
+                1_800_000_000,
+                1_700_000_000,
+            )
+            .expect("complete same-expiry refresh")
+            .expect("refresh transition");
+
+        let image_executor_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let auth_lease_handle_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(SnapshotOpenAiRuntime {
+                stale_snapshot,
+                image_executor_builds: Arc::clone(&image_executor_builds),
+                auth_lease_handle_seen: Arc::clone(&auth_lease_handle_seen),
+            }));
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "session_a".to_string(),
+            inline_realm_section(&[("openai", "image-openai-key")]),
+        );
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some("session_a".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("stale LLM auth lease snapshot must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(
+            auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "same-connection resolution must receive the session AuthMachine lease handle"
+        );
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lease publication refused"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stale same-connection credentials must not be installed into an image executor"
         );
     }
 

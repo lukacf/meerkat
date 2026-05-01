@@ -76,18 +76,21 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
                 source_label,
             )),
             _ => {
-                let secret = crate::resolver::resolve_simple_secret(
+                let resolved = crate::resolver::resolve_simple_secret_with_auth_context(
                     &binding.auth_profile.source,
                     env,
                     binding,
                 )
                 .await?;
-                Arc::new(StaticLease::inline_secret(
-                    secret,
-                    AuthMetadata::default(),
-                    None,
-                    source_label,
-                ))
+                Arc::new(
+                    StaticLease::inline_secret(
+                        resolved.secret,
+                        AuthMetadata::default(),
+                        None,
+                        source_label,
+                    )
+                    .with_auth_lease_snapshot(resolved.auth_lease_snapshot),
+                )
             }
         };
 

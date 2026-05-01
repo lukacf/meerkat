@@ -12,8 +12,7 @@ use super::status::AuthStatusPhase;
 use super::token_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
 use crate::connection::ConnectionRef;
 use crate::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
-    LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
 };
 
 pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
@@ -36,37 +35,6 @@ pub fn persisted_token_acquired_snapshot(
         expires_at,
         generation,
     }
-}
-
-pub fn publish_token_lifecycle_acquired(
-    handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
-    tokens: &PersistedTokens,
-) -> Result<AuthLeaseTransition, DslTransitionError> {
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
-}
-
-pub fn publish_token_lifecycle_acquired_if_snapshot(
-    handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
-    expected: &AuthLeaseSnapshot,
-    tokens: &PersistedTokens,
-) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.acquire_lease_if_snapshot(
-        &lease_key,
-        expected,
-        persisted_token_expires_at_epoch_secs(tokens),
-    )
-}
-
-pub fn publish_token_lifecycle_released(
-    handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
-) -> Result<(), DslTransitionError> {
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.release_lease(&lease_key)
 }
 
 #[derive(Debug, Error)]
@@ -1258,31 +1226,21 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_acquire_uses_persisted_token_expiry_as_machine_input() {
-        let handle = RecordingAuthLeaseHandle::default();
+    fn persisted_token_expires_at_epoch_secs_uses_persisted_token_expiry() {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
-        let connection_ref = connection_ref();
-
-        publish_token_lifecycle_acquired(&handle, &connection_ref, &tokens).unwrap();
 
         assert_eq!(
-            handle.acquired(),
-            vec![(
-                LeaseKey::from_connection_ref(&connection_ref),
-                1_800_000_000
-            )]
+            persisted_token_expires_at_epoch_secs(&tokens),
+            1_800_000_000
         );
     }
 
     #[test]
-    fn lifecycle_acquire_maps_non_expiring_tokens_to_unbounded_lease() {
-        let handle = RecordingAuthLeaseHandle::default();
+    fn persisted_token_expires_at_epoch_secs_maps_non_expiring_tokens_to_unbounded_lease() {
         let tokens = tokens_with_expiry(None);
 
-        publish_token_lifecycle_acquired(&handle, &connection_ref(), &tokens).unwrap();
-
-        assert_eq!(handle.acquired()[0].1, u64::MAX);
+        assert_eq!(persisted_token_expires_at_epoch_secs(&tokens), u64::MAX);
     }
 
     #[tokio::test]
@@ -1329,6 +1287,61 @@ mod tests {
             &stored, &key, &snapshot
         ));
         assert_eq!(stored.auth_lease.unwrap().pending_owner_generation, None);
+    }
+
+    #[tokio::test]
+    async fn save_boundary_does_not_acquire_over_newer_authmachine_truth_after_token_prepare() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let concurrent_snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::ReauthRequired),
+            expires_at: Some(1_800_000_000),
+            generation: 9,
+        };
+        let expected_concurrent_snapshot = concurrent_snapshot.clone();
+        let handle_for_save = Arc::clone(&handle);
+        let observed_lease_key = lease_key.clone();
+        let store = SaveObservingTokenStore::new(Box::new(move |_tokens| {
+            handle_for_save.force_snapshot(concurrent_snapshot.clone());
+        }));
+        let tokens = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ));
+
+        let err = save_tokens_and_publish_lifecycle_acquired(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TokenLifecycleSaveError::AuthMachineAcquireRace {
+                pending_token_restored: true,
+            }
+        ));
+        assert!(
+            handle.acquired().is_empty(),
+            "save boundary must not unconditionally acquire over newer AuthMachine truth"
+        );
+        assert_eq!(
+            handle.snapshot(&observed_lease_key),
+            expected_concurrent_snapshot
+        );
+        assert!(
+            store.load(&key).await.unwrap().is_none(),
+            "pending token material must be rolled back when AuthMachine truth wins the race"
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::AuthError;
 use super::metadata::AuthMetadata;
+use crate::handles::AuthLeaseSnapshot;
 
 /// Why a refresh or re-resolution was triggered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,10 +136,16 @@ pub trait HttpAuthorizer: Send + Sync {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AuthLease: Send + Sync {
-    fn kind(&self) -> &ResolvedAuthKind;
+    fn kind(&self) -> ResolvedAuthKind;
     fn metadata(&self) -> &AuthMetadata;
     fn expires_at(&self) -> Option<DateTime<Utc>>;
     fn source_label(&self) -> &str;
+    /// Snapshot of the AuthMachine state that authorized this resolved
+    /// credential, when the credential was loaded from lease-bound durable
+    /// material.
+    fn auth_lease_snapshot(&self) -> Option<AuthLeaseSnapshot> {
+        None
+    }
     async fn refresh(&self, reason: AuthRefreshReason) -> Result<(), AuthError>;
 }
 
@@ -252,8 +259,8 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AuthLease for StubLease {
-        fn kind(&self) -> &ResolvedAuthKind {
-            &self.kind
+        fn kind(&self) -> ResolvedAuthKind {
+            self.kind.clone()
         }
         fn metadata(&self) -> &AuthMetadata {
             &self.metadata

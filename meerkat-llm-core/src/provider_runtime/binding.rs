@@ -12,6 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use meerkat_core::handles::AuthLeaseSnapshot;
 use meerkat_core::{
     AuthError, AuthLease, AuthMetadata, AuthProfile, AuthRefreshReason, BackendProfile,
     BindingPolicy, ConnectionRef, HttpAuthorizer, Provider, ResolvedAuthKind,
@@ -101,7 +102,7 @@ impl ResolvedConnection {
     /// (replaces the prior `__secret__` synthetic-header convention).
     pub fn resolved_secret(&self) -> Option<String> {
         match self.auth_lease.kind() {
-            meerkat_core::ResolvedAuthKind::InlineSecret(secret) => Some((**secret).clone()),
+            meerkat_core::ResolvedAuthKind::InlineSecret(secret) => Some((*secret).clone()),
             _ => None,
         }
     }
@@ -111,7 +112,7 @@ impl ResolvedConnection {
     /// `None` for non-authorizer leases. Plan §6.11.
     pub fn resolved_authorizer(&self) -> Option<Arc<dyn HttpAuthorizer>> {
         match self.auth_lease.kind() {
-            meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => Some(auth.clone()),
+            meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => Some(auth),
             _ => None,
         }
     }
@@ -128,6 +129,7 @@ pub struct StaticLease {
     metadata: AuthMetadata,
     expires_at: Option<DateTime<Utc>>,
     source_label: String,
+    auth_lease_snapshot: Option<AuthLeaseSnapshot>,
 }
 
 impl StaticLease {
@@ -146,6 +148,7 @@ impl StaticLease {
             metadata,
             expires_at,
             source_label: source_label.into(),
+            auth_lease_snapshot: None,
         }
     }
 
@@ -165,7 +168,13 @@ impl StaticLease {
             metadata,
             expires_at,
             source_label: source_label.into(),
+            auth_lease_snapshot: None,
         }
+    }
+
+    pub fn with_auth_lease_snapshot(mut self, snapshot: Option<AuthLeaseSnapshot>) -> Self {
+        self.auth_lease_snapshot = snapshot;
+        self
     }
 
     /// Construct a lease with no credential material (authorizer-backed
@@ -178,6 +187,7 @@ impl StaticLease {
             metadata,
             expires_at: None,
             source_label: source_label.into(),
+            auth_lease_snapshot: None,
         }
     }
 }
@@ -185,8 +195,8 @@ impl StaticLease {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AuthLease for StaticLease {
-    fn kind(&self) -> &ResolvedAuthKind {
-        &self.kind
+    fn kind(&self) -> ResolvedAuthKind {
+        self.kind.clone()
     }
     fn metadata(&self) -> &AuthMetadata {
         &self.metadata
@@ -196,6 +206,9 @@ impl AuthLease for StaticLease {
     }
     fn source_label(&self) -> &str {
         &self.source_label
+    }
+    fn auth_lease_snapshot(&self) -> Option<AuthLeaseSnapshot> {
+        self.auth_lease_snapshot.clone()
     }
     async fn refresh(&self, _reason: AuthRefreshReason) -> Result<(), AuthError> {
         // StaticLease has no refresh semantics in Phase 2.
@@ -250,8 +263,8 @@ impl DynamicLease {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AuthLease for DynamicLease {
-    fn kind(&self) -> &ResolvedAuthKind {
-        &self.kind
+    fn kind(&self) -> ResolvedAuthKind {
+        self.kind.clone()
     }
     fn metadata(&self) -> &AuthMetadata {
         &self.metadata

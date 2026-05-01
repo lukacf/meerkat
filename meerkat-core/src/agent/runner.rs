@@ -108,6 +108,34 @@ fn runtime_execution_snapshot(
     })
 }
 
+fn rotate_auth_lease_connection_ref_with_handle(
+    handle: Option<&dyn crate::handles::AuthLeaseHandle>,
+    previous: Option<&crate::ConnectionRef>,
+    target: Option<&crate::ConnectionRef>,
+) -> Result<(), AgentError> {
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+    if previous == target {
+        return Ok(());
+    }
+    if let Some(previous) = previous {
+        let previous_key = crate::handles::LeaseKey::from_connection_ref(previous);
+        let previous_snapshot = handle.snapshot(&previous_key);
+        if previous_snapshot.phase.is_some() {
+            handle
+                .release_lease_if_snapshot(&previous_key, &previous_snapshot)
+                .map_err(|err| {
+                    AgentError::InternalError(format!(
+                        "failed to release previous auth lease during hot-swap: {err}"
+                    ))
+                })?;
+        }
+    }
+    let _ = target;
+    Ok(())
+}
+
 fn runtime_external_tool_surface_snapshot(
     handle: &dyn crate::ExternalToolSurfaceHandle,
 ) -> Option<ExternalToolSurfaceSnapshot> {
@@ -368,31 +396,25 @@ where
         self.apply_llm_request_policy(policy);
     }
 
-    /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
+    /// Conditionally release runtime auth-lease tracking for the previous LLM identity.
+    ///
+    /// The target identity's lease truth is published by typed provider
+    /// resolution before the client is swapped in. This method must not mint a
+    /// synthetic target lease, because doing so would overwrite the generation
+    /// and expiry that authorized any lease-bound credential material. The
+    /// previous identity is released only when AuthMachine truth still matches
+    /// the snapshot observed by this rotation; concurrent refresh/reacquire
+    /// owners win without being erased.
     pub fn rotate_auth_lease_connection_ref(
         &self,
         previous: Option<&crate::ConnectionRef>,
         target: Option<&crate::ConnectionRef>,
     ) -> Result<(), AgentError> {
-        let Some(handle) = self.auth_lease_handle.as_deref() else {
-            return Ok(());
-        };
-        if previous == target {
-            return Ok(());
-        }
-        if let Some(previous) = previous {
-            let previous_key = crate::handles::LeaseKey::from_connection_ref(previous);
-            let _ = handle.release_lease(&previous_key);
-        }
-        if let Some(target) = target {
-            let target_key = crate::handles::LeaseKey::from_connection_ref(target);
-            handle.acquire_lease(&target_key, u64::MAX).map_err(|err| {
-                AgentError::ConfigError(format!(
-                    "failed to rotate auth lease to connection_ref {target_key}: {err}"
-                ))
-            })?;
-        }
-        Ok(())
+        rotate_auth_lease_connection_ref_with_handle(
+            self.auth_lease_handle.as_deref(),
+            previous,
+            target,
+        )
     }
 
     /// Shared live control flag for boundary-only cancellation requests.
@@ -1097,5 +1119,219 @@ where
         } else {
             format!("{}\n\n{user_input}", prefix_parts.join("\n\n"))
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::rotate_auth_lease_connection_ref_with_handle;
+    use crate::handles::{
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
+        DslTransitionError, LeaseKey,
+    };
+    use crate::{BindingId, ConnectionRef, RealmId};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RecordingAuthLeaseHandle {
+        acquired: Mutex<Vec<LeaseKey>>,
+        conditional_release_attempts: Mutex<Vec<(LeaseKey, AuthLeaseSnapshot)>>,
+        accepted_releases: Mutex<Vec<LeaseKey>>,
+        snapshot: Mutex<AuthLeaseSnapshot>,
+        race_release: AtomicBool,
+    }
+
+    impl Default for RecordingAuthLeaseHandle {
+        fn default() -> Self {
+            Self {
+                acquired: Mutex::new(Vec::new()),
+                conditional_release_attempts: Mutex::new(Vec::new()),
+                accepted_releases: Mutex::new(Vec::new()),
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::Valid),
+                    expires_at: Some(1_800_000_000),
+                    generation: 1,
+                }),
+                race_release: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl AuthLeaseHandle for RecordingAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            lease_key: &LeaseKey,
+            _expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            self.acquired.lock().unwrap().push(lease_key.clone());
+            Ok(AuthLeaseTransition { generation: 1 })
+        }
+
+        fn acquire_lease_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _expires_at: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            panic!("target rotation must not acquire leases")
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn begin_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
+        }
+
+        fn begin_refresh_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            Ok(Some(AuthLeaseTransition { generation: 1 }))
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
+        }
+
+        fn complete_refresh_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            Ok(Some(AuthLeaseTransition { generation: 1 }))
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn refresh_failed_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _permanent: bool,
+        ) -> Result<bool, DslTransitionError> {
+            Ok(true)
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn mark_reauth_required_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            Ok(true)
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            panic!("hot-swap rotation must use conditional release")
+        }
+
+        fn release_lease_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            self.conditional_release_attempts
+                .lock()
+                .unwrap()
+                .push((lease_key.clone(), expected.clone()));
+            if self.race_release.load(Ordering::SeqCst) {
+                *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::ReauthRequired),
+                    expires_at: Some(1_800_000_000),
+                    generation: expected.generation + 1,
+                };
+                return Ok(false);
+            }
+            if *self.snapshot.lock().unwrap() != *expected {
+                return Ok(false);
+            }
+            self.accepted_releases
+                .lock()
+                .unwrap()
+                .push(lease_key.clone());
+            *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
+                phase: None,
+                expires_at: None,
+                generation: expected.generation + 1,
+            };
+            Ok(true)
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    fn connection_ref(binding: &str) -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse(binding).unwrap(),
+            profile: None,
+        }
+    }
+
+    #[test]
+    fn hot_swap_rotation_conditionally_releases_previous_without_touching_target_lease() {
+        let handle = RecordingAuthLeaseHandle::default();
+        let previous = connection_ref("previous");
+        let target = connection_ref("target");
+
+        rotate_auth_lease_connection_ref_with_handle(Some(&handle), Some(&previous), Some(&target))
+            .unwrap();
+
+        assert_eq!(
+            handle.accepted_releases.lock().unwrap().as_slice(),
+            &[LeaseKey::from_connection_ref(&previous)]
+        );
+        assert_eq!(handle.conditional_release_attempts.lock().unwrap().len(), 1);
+        assert!(
+            handle.acquired.lock().unwrap().is_empty(),
+            "target lease must be owned by provider resolution, not hot-swap rotation"
+        );
+    }
+
+    #[test]
+    fn hot_swap_rotation_does_not_release_previous_after_snapshot_race() {
+        let handle = RecordingAuthLeaseHandle::default();
+        handle.race_release.store(true, Ordering::SeqCst);
+        let previous = connection_ref("previous");
+        let target = connection_ref("target");
+
+        rotate_auth_lease_connection_ref_with_handle(Some(&handle), Some(&previous), Some(&target))
+            .unwrap();
+
+        assert!(
+            handle.accepted_releases.lock().unwrap().is_empty(),
+            "conditional release must not erase newer AuthMachine truth"
+        );
+        assert_eq!(
+            handle
+                .snapshot(&LeaseKey::from_connection_ref(&previous))
+                .phase,
+            Some(AuthLeasePhase::ReauthRequired)
+        );
     }
 }

@@ -52,6 +52,16 @@ impl FixedAuthLeaseHandle {
         }
     }
 
+    fn valid_non_expiring(generation: u64) -> Self {
+        Self {
+            snapshot: AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: None,
+                generation,
+            },
+        }
+    }
+
     fn reauth_required() -> Self {
         Self {
             snapshot: AuthLeaseSnapshot {
@@ -375,7 +385,8 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         account_id: None,
         metadata: serde_json::Value::Null,
         auth_lease: None,
-    };
+    }
+    .with_auth_lease_binding(default_token_key(), 7);
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
@@ -385,7 +396,9 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         .unwrap();
 
     let realm = realm_with_oauth_binding("oauth_to_api_key");
-    let env = ResolverEnvironment::testing().with_token_store(store.clone());
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_auth_lease_handle(Arc::new(FixedAuthLeaseHandle::valid_non_expiring(7)));
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -400,13 +413,63 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     );
 }
 
-// --- Missing tokens → InteractiveLoginRequired ------------------------
+#[tokio::test]
+async fn oauth_to_api_key_unbound_token_does_not_bypass_lease_truth() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::OauthToApiKey,
+        primary_secret: Some("sk-ant-api03-xyz".into()),
+        refresh_token: None,
+        id_token: None,
+        expires_at: None,
+        last_refresh: Some(Utc::now()),
+        scopes: vec![],
+        account_id: None,
+        metadata: serde_json::Value::Null,
+        auth_lease: None,
+    };
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &persisted,
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("oauth_to_api_key");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(FixedAuthLeaseHandle::valid_non_expiring(7)));
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect_err("oauth_to_api_key must not return unbound TokenStore material");
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::Expired
+            )
+        ),
+        "got {err:?}"
+    );
+}
+
+// --- Missing tokens under lease truth → Expired -----------------------
 
 #[tokio::test]
-async fn missing_oauth_tokens_surface_interactive_login_required() {
+async fn missing_oauth_tokens_surface_expired_under_authmachine_truth() {
     let store = Arc::new(EphemeralTokenStore::new());
+    let expires_at = Utc::now() + ChronoDuration::hours(1);
     let realm = realm_with_oauth_binding("claude_ai_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(FixedAuthLeaseHandle::valid(expires_at, 7)));
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -419,7 +482,7 @@ async fn missing_oauth_tokens_surface_interactive_login_required() {
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
+                meerkat_core::AuthError::Expired
             )
         ),
         "got {err:?}"

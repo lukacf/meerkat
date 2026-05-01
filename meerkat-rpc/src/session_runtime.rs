@@ -271,6 +271,7 @@ struct SessionRuntimeLlmReconfigureHost {
     factory: AgentFactory,
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
 }
 
 impl SessionRuntimeLlmReconfigureHost {
@@ -309,7 +310,11 @@ impl SessionRuntimeLlmReconfigureHost {
         } else {
             let config = self.load_config_for_hot_swap().await?;
             self.factory
-                .build_llm_client_for_identity(&config, identity)
+                .build_llm_client_for_identity_with_auth_lease(
+                    &config,
+                    identity,
+                    Some(Arc::clone(&self.auth_lease)),
+                )
                 .await
                 .map_err(|e| {
                     RuntimeDriverError::Internal(format!(
@@ -984,6 +989,7 @@ impl SessionRuntime {
                 factory: factory_clone.clone(),
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
+                auth_lease: Arc::clone(&auth_lease),
             },
         ));
 
@@ -1061,6 +1067,7 @@ impl SessionRuntime {
                 factory: factory_clone.clone(),
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
+                auth_lease: Arc::clone(&auth_lease),
             },
         ));
 
@@ -1638,6 +1645,7 @@ impl SessionRuntime {
             factory: self.factory.clone(),
             default_llm_client: Arc::clone(&self.default_llm_client),
             config_runtime: Arc::clone(&self.config_runtime),
+            auth_lease: self.runtime_adapter.auth_lease_handle(),
         }
     }
 

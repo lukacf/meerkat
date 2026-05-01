@@ -1965,7 +1965,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
+        RuntimeState::Attached,
+        "stale attachment repair should keep the repaired runtime attached after consuming new work"
     );
 }
 
@@ -2227,10 +2228,15 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     .await;
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
+        RuntimeState::Stopped,
+        "boundary commit rollback must terminalize through runtime stop authority before the loop exits"
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
+    assert_eq!(
+        state.seed.phase,
+        InputLifecycleState::Abandoned,
+        "terminalized rollback must not leave the failed input runnable with no live executor"
+    );
 }
 
 #[tokio::test]

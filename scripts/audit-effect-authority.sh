@@ -42,6 +42,36 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+async fn bad(machine: &Machine) {
+    let _ = machine.interrupt_current_run_with_reason(&session_id, "bad".to_string()).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: peer interrupt alias fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+fn bad(session_id: SessionId, reason: String) {
+    let _ = MeerkatMachineCommand::InterruptCurrentRun { session_id, reason };
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: peer InterruptCurrentRun command fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
 fn bad() {
@@ -490,12 +520,13 @@ report_matches "$run_control_name references remain" "$(run_rg "\\b${run_control
 report_matches "$core_control_name references remain" "$(run_rg "\\b${core_control_name}\\b")"
 
 peer_matches=""
+hard_interrupt_authority_pattern='\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason)\b|MeerkatMachineCommand::InterruptCurrentRun|runtime\.interrupt\(|session_service\.interrupt\('
 for peer_file in \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_control.rs" \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
 do
   if [[ -f "$peer_file" ]]; then
-    found="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$peer_file")"
+    found="$(capture_rg -n "$hard_interrupt_authority_pattern" "$peer_file")"
     if [[ -n "$found" ]]; then
       peer_matches+="$found"$'\n'
     fi
@@ -505,7 +536,7 @@ peer_admission_files="$(cd "$root" && capture_rg --files)"
 peer_admission_files="$(filter_rg "$peer_admission_files" '(^|/)peer_admission[^/]*\.rs$|(^|/)peer_admission/')"
 while IFS= read -r peer_file; do
   [[ -z "$peer_file" ]] && continue
-  found="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$root/$peer_file")"
+  found="$(capture_rg -n "$hard_interrupt_authority_pattern" "$root/$peer_file")"
   if [[ -n "$found" ]]; then
     peer_matches+="$found"$'\n'
   fi
@@ -513,7 +544,7 @@ done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|\.interrupt_current_run\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
+  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
 
@@ -577,7 +608,7 @@ do
   if [[ -f "$surface_file" ]]; then
     stripped_surface="$(strip_core_executor_interrupt_impls "$surface_file")"
     stripped_surface="$(printf '%s\n' "$stripped_surface" | strip_cfg_test_modules)"
-    found="$(filter_rg "$stripped_surface" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(')"
+    found="$(filter_rg "$stripped_surface" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run(_with_reason)?\(')"
     if [[ -n "$found" ]]; then
       public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
     fi
@@ -585,13 +616,23 @@ do
 done
 report_matches "public surface interrupt paths must route through MeerkatMachine::hard_cancel_current_run" "$public_interrupt_bypasses"
 
-direct_interrupt_current_run="$(run_rg '\.interrupt_current_run\(' \
+direct_interrupt_current_run="$(run_rg '\.interrupt_current_run(_with_reason)?\(' \
   --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
+  --glob '!meerkat-runtime/src/user_interrupt.rs' \
   --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
   --glob '!meerkat-runtime/tests/**' \
   --glob '!**/tests/**' \
   --glob '!**/*tests.rs')"
 report_matches "direct interrupt_current_run callsites are forbidden outside runtime tests" "$direct_interrupt_current_run"
+
+direct_interrupt_command="$(run_rg 'MeerkatMachineCommand::InterruptCurrentRun[[:space:]]*\{[[:space:]]*(session_id|reason)' \
+  --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
+  --glob '!meerkat-runtime/src/meerkat_machine/dispatch_session.rs' \
+  --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
+  --glob '!meerkat-runtime/tests/**' \
+  --glob '!**/tests/**' \
+  --glob '!**/*tests.rs')"
+report_matches "direct InterruptCurrentRun command construction is forbidden outside the session command API" "$direct_interrupt_command"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"

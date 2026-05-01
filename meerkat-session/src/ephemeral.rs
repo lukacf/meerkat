@@ -596,6 +596,11 @@ fn validate_prompt_video_input_against_capability(
     Ok(())
 }
 
+fn wake_interrupt_notify(notify: &tokio::sync::Notify) {
+    notify.notify_waiters();
+    notify.notify_one();
+}
+
 // ---------------------------------------------------------------------------
 // EphemeralSessionService
 // ---------------------------------------------------------------------------
@@ -1993,7 +1998,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 .map_err(|_| SessionError::NotRunning { id: id.clone() })?
         };
         if woke {
-            handle.interrupt_notify.notify_waiters();
+            wake_interrupt_notify(&handle.interrupt_notify);
         }
         Ok(())
     }
@@ -2012,12 +2017,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         };
 
         let phase = lock_turn_admission(&handle.turn_admission).phase();
-        if phase != TurnAdmissionPhase::Running {
+        if !matches!(
+            phase,
+            TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running
+        ) {
             return Err(SessionError::NotRunning { id: id.clone() });
         }
 
         cancel_after_boundary_handle.store(true, Ordering::SeqCst);
-        handle.interrupt_notify.notify_waiters();
+        wake_interrupt_notify(&handle.interrupt_notify);
         Ok(())
     }
 
@@ -2779,6 +2787,10 @@ async fn session_task<A: SessionAgent>(
                     let mut interrupted = false;
 
                     let r = loop {
+                        if lock_turn_admission(&control.turn_admission).interrupt_pending() {
+                            interrupted = true;
+                            break Err(meerkat_core::error::AgentError::Cancelled);
+                        }
                         let interrupt_wait = control.interrupt_notify.notified();
                         tokio::select! {
                             result = &mut run_fut => break result,
@@ -3374,6 +3386,238 @@ mod runtime_turn_metadata_tests {
                 .is_empty(),
             "agent run must not start after setup failure"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_window_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions, SessionService};
+    use meerkat_core::types::HandlingMode;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct AdmissionProbeBuilder {
+        run_calls: Arc<AtomicUsize>,
+        cancel_calls: Arc<AtomicUsize>,
+        cancel_after_boundary: Arc<AtomicBool>,
+    }
+
+    struct AdmissionProbeAgent {
+        session_id: SessionId,
+        run_calls: Arc<AtomicUsize>,
+        cancel_calls: Arc<AtomicUsize>,
+        cancel_after_boundary: Arc<AtomicBool>,
+        system_context_state: Arc<Mutex<SessionSystemContextState>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for AdmissionProbeBuilder {
+        type Agent = AdmissionProbeAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(AdmissionProbeAgent {
+                session_id: SessionId::new(),
+                run_calls: Arc::clone(&self.run_calls),
+                cancel_calls: Arc::clone(&self.cancel_calls),
+                cancel_after_boundary: Arc::clone(&self.cancel_after_boundary),
+                system_context_state: Arc::new(Mutex::new(SessionSystemContextState::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for AdmissionProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.run_calls.fetch_add(1, Ordering::SeqCst);
+            let text = if self.cancel_after_boundary.load(Ordering::SeqCst) {
+                "boundary requested"
+            } else {
+                "ran"
+            };
+            Ok(RunResult {
+                text: text.to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn cancel(&mut self) {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+            Some(Arc::clone(&self.cancel_after_boundary))
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            meerkat_core::Session::new()
+        }
+
+        fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
+
+        fn system_context_state(&self) -> Arc<Mutex<SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    fn create_request() -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "admission-window-test".to_string(),
+            prompt: ContentInput::Text("defer".to_string()),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        }
+    }
+
+    async fn create_admitted_session(
+        service: &EphemeralSessionService<AdmissionProbeBuilder>,
+    ) -> (SessionId, mpsc::Sender<SessionCommand>) {
+        let result = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let command_tx = {
+            let sessions = service.sessions.read().await;
+            let handle = sessions.get(&result.session_id).expect("session handle");
+            EphemeralSessionService::<AdmissionProbeBuilder>::request_start_turn(
+                &result.session_id,
+                handle,
+            )
+            .expect("admit turn before command delivery");
+            handle.command_tx.clone()
+        };
+        (result.session_id, command_tx)
+    }
+
+    async fn deliver_start_turn(
+        command_tx: mpsc::Sender<SessionCommand>,
+    ) -> Result<RunResult, AgentError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::StartTurn {
+                prompt: ContentInput::Text("go".to_string()),
+                render_metadata: None,
+                handling_mode: HandlingMode::Queue,
+                event_tx: None,
+                result_tx,
+                skill_references: None,
+                flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
+                execution_kind: None,
+            })
+            .await
+            .expect("send start turn");
+        result_rx.await.expect("receive start turn result")
+    }
+
+    #[tokio::test]
+    async fn hard_interrupt_during_admission_cancels_before_agent_poll() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let service = EphemeralSessionService::new(
+            AdmissionProbeBuilder {
+                run_calls: Arc::clone(&run_calls),
+                cancel_calls: Arc::clone(&cancel_calls),
+                cancel_after_boundary: Arc::new(AtomicBool::new(false)),
+            },
+            1,
+        );
+        let (session_id, command_tx) = create_admitted_session(&service).await;
+
+        service
+            .interrupt(&session_id)
+            .await
+            .expect("admitted turn accepts hard interrupt");
+        let result = deliver_start_turn(command_tx).await;
+
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert_eq!(run_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn boundary_cancel_during_admission_sets_flag_for_delivered_turn() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_after_boundary = Arc::new(AtomicBool::new(false));
+        let service = EphemeralSessionService::new(
+            AdmissionProbeBuilder {
+                run_calls: Arc::clone(&run_calls),
+                cancel_calls: Arc::new(AtomicUsize::new(0)),
+                cancel_after_boundary: Arc::clone(&cancel_after_boundary),
+            },
+            1,
+        );
+        let (session_id, command_tx) = create_admitted_session(&service).await;
+
+        service
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect("admitted turn accepts boundary cancel");
+        assert!(cancel_after_boundary.load(Ordering::SeqCst));
+
+        let result = deliver_start_turn(command_tx)
+            .await
+            .expect("start turn should run cooperatively");
+        assert_eq!(result.text, "boundary requested");
+        assert_eq!(run_calls.load(Ordering::SeqCst), 1);
     }
 }
 

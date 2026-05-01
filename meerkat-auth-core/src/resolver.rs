@@ -18,9 +18,8 @@ use meerkat_core::auth::{PersistedAuthMode, TokenKey};
 use meerkat_core::handles::AuthLeasePhase;
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
-    AuthRouteHints, AuthStatusPhase, CredentialSourceSpec, GoogleAuthMetadata,
-    HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata,
-    ResolvedAuthEnvelope,
+    AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
+    HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata, ResolvedAuthEnvelope,
 };
 
 use meerkat_llm_core::provider_runtime::binding::{DynamicLease, StaticLease, ValidatedBinding};

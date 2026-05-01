@@ -6008,7 +6008,6 @@ fn build_cli_runtime_backed_service_with_defaults(
     factory: AgentFactory,
     config: Config,
     persistence: PersistenceBundle,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> (
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
@@ -6018,7 +6017,6 @@ fn build_cli_runtime_backed_service_with_defaults(
     meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
     let (service, runtime_adapter) =
         meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
-    runtime_adapter.set_auth_lease_handle(auth_lease);
     (service, runtime_adapter)
 }
 
@@ -6370,7 +6368,6 @@ async fn run_agent(
             factory,
             config.clone(),
             persistence.clone(),
-            Arc::clone(&scope.auth_lease),
             default_schedule_tools,
         );
 
@@ -7434,7 +7431,6 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         factory,
         config,
         persistence,
-        Arc::clone(&scope.auth_lease),
         default_schedule_tools,
     );
     let service = Arc::new(service);
@@ -14880,6 +14876,53 @@ capabilities = ["definitely_missing_capability"]
 
     #[cfg(feature = "session-store")]
     #[tokio::test]
+    async fn test_cli_runtime_backed_service_preserves_persistence_oauth_authority() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Some(runtime_store),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let persistence_adapter = persistence.runtime_adapter();
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
+            profile: None,
+        };
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1:1455/callback";
+        let state = persistence_adapter
+            .oauth_flow_authority()
+            .start(
+                connection_ref.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "cli-persistence-verifier".to_string(),
+            )
+            .expect("persistence authority should admit OAuth flow before CLI surface build");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (_service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            None,
+        );
+        let flow = runtime_adapter
+            .oauth_flow_authority()
+            .consume(&state, &connection_ref, provider, redirect_uri)
+            .expect("CLI service construction must preserve PersistenceBundle OAuth authority");
+
+        assert_eq!(flow.pkce_verifier, "cli-persistence-verifier");
+    }
+
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
     async fn test_cli_runtime_backed_service_persists_authority_snapshot_for_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -14894,15 +14937,13 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
-            Arc::clone(&auth_lease),
             None,
         );
+        let auth_lease = runtime_adapter.auth_lease_handle();
 
         let session = Session::new();
         let session_id = session.id().clone();
@@ -14919,12 +14960,12 @@ capabilities = ["definitely_missing_capability"]
         bindings
             .auth_lease
             .acquire_lease(&lease_key, u64::MAX)
-            .expect("runtime bindings should publish into the CLI scope auth lease");
+            .expect("runtime bindings should publish into the bundle auth lease");
         let snapshot = auth_lease.snapshot(&lease_key);
         assert_eq!(
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            "CLI runtime-backed surfaces must share the same auth lease authority that status reads"
+            "CLI runtime-backed surfaces must use the PersistenceBundle auth lease authority"
         );
         let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
             Arc::new(Mutex::new(Vec::new())),
@@ -14991,13 +15032,10 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
-            auth_lease,
             None,
         );
         let service = Arc::new(service);

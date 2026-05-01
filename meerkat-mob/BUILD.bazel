@@ -43,6 +43,7 @@ rust_library(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -91,6 +92,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -156,6 +158,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -224,6 +227,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -290,6 +294,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -356,6 +361,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -422,6 +428,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -488,6 +495,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -554,6 +562,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [
@@ -620,6 +629,7 @@ rust_test(
         "src/runtime/actor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
         "src/runtime/recovery.rs",
     ],
     srcs = [

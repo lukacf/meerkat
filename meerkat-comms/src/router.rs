@@ -408,23 +408,20 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    // Inproc delivery is constrained by the resolved peer's
-                    // pubkey: the trust store already pinned it to `dest`,
-                    // so the registry lookup must agree or we refuse the
-                    // send rather than fall through to a name collision.
-                    match registry.send_with_signature_in_namespace_with_id(
+                    // Inproc delivery uses the trusted peer identity resolved
+                    // from `dest`; display names are not routing authority.
+                    match registry.send_to_pubkey_in_namespace_with_id(
                         inproc_namespace,
                         &self.keypair,
-                        &peer.name,
+                        &peer.pubkey,
                         envelope.id,
                         envelope.kind.clone(),
                         self.require_peer_auth,
                     ) {
                         Ok(uuid) => Ok(uuid),
                         Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_cross_namespace_with_id(
+                            .send_to_pubkey_any_namespace_with_id(
                                 &self.keypair,
-                                &peer.name,
                                 &peer.pubkey,
                                 envelope.id,
                                 envelope.kind,
@@ -445,19 +442,20 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    match registry.send_with_signature_in_namespace(
+                    match registry.send_to_pubkey_in_namespace_with_id(
                         inproc_namespace,
                         &self.keypair,
-                        &peer.name,
+                        &peer.pubkey,
+                        envelope.id,
                         envelope.kind.clone(),
                         self.require_peer_auth,
                     ) {
                         Ok(uuid) => Ok(uuid),
                         Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_cross_namespace(
+                            .send_to_pubkey_any_namespace_with_id(
                                 &self.keypair,
-                                &peer.name,
                                 &peer.pubkey,
+                                envelope.id,
                                 envelope.kind,
                                 self.require_peer_auth,
                             )

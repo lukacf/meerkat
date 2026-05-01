@@ -268,6 +268,16 @@ impl InprocRegistry {
             .map(|p| p.sender.clone())
     }
 
+    /// Look up an inproc peer by pubkey across all namespaces.
+    pub(crate) fn get_by_pubkey_any_namespace(&self, pubkey: &PubKey) -> Option<InboxSender> {
+        let state = self.state.read();
+        state
+            .namespaces
+            .values()
+            .find_map(|namespace_state| namespace_state.peers.get(pubkey))
+            .map(|peer| peer.sender.clone())
+    }
+
     /// Look up an inproc peer name by public key.
     pub fn get_name_by_pubkey(&self, pubkey: &PubKey) -> Option<String> {
         self.get_name_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
@@ -393,32 +403,40 @@ impl InprocRegistry {
             .get_by_name_and_pubkey_any_namespace(to_name, expected_pubkey)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
 
-        let mut envelope = Envelope {
-            id: envelope_id,
-            from: from_keypair.public_key(),
-            to: to_pubkey,
+        Self::deliver_to_sender(
+            from_keypair,
+            to_pubkey,
+            sender,
+            envelope_id,
             kind,
-            sig: Signature::new([0u8; 64]),
-        };
-        if sign_envelope {
-            envelope.sign(from_keypair);
-        }
+            sign_envelope,
+        )
+    }
 
-        let envelope_id = envelope.id;
-        match sender.send_classified(InboxItem::External { envelope }) {
-            AdmissionOutcome::Admitted => {}
-            AdmissionOutcome::Dropped {
-                reason: DropReason::SessionClosed,
-            } => return Err(InprocSendError::InboxClosed),
-            AdmissionOutcome::Dropped {
-                reason: DropReason::InboxFull,
-            } => return Err(InprocSendError::InboxFull),
-            AdmissionOutcome::Dropped { reason } => {
-                return Err(InprocSendError::IngressDropped(reason));
-            }
-        }
+    /// Send a message to an inproc peer by pubkey, searching ALL namespaces.
+    ///
+    /// Router call sites already resolved the destination from canonical trust
+    /// state, so delivery must use that identity rather than a display name.
+    pub(crate) fn send_to_pubkey_any_namespace_with_id(
+        &self,
+        from_keypair: &Keypair,
+        to_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let sender = self
+            .get_by_pubkey_any_namespace(to_pubkey)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
 
-        Ok(envelope_id)
+        Self::deliver_to_sender(
+            from_keypair,
+            *to_pubkey,
+            sender,
+            envelope_id,
+            kind,
+            sign_envelope,
+        )
     }
 
     /// Send a message directly to an inproc peer within a namespace.
@@ -455,7 +473,48 @@ impl InprocRegistry {
             .get_by_name_in_namespace(namespace, to_name)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
 
-        // Create and sign the envelope
+        Self::deliver_to_sender(
+            from_keypair,
+            to_pubkey,
+            sender,
+            envelope_id,
+            kind,
+            sign_envelope,
+        )
+    }
+
+    /// Send a message directly to an inproc peer within a namespace by pubkey.
+    pub(crate) fn send_to_pubkey_in_namespace_with_id(
+        &self,
+        namespace: &str,
+        from_keypair: &Keypair,
+        to_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let sender = self
+            .get_by_pubkey_in_namespace(namespace, to_pubkey)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
+
+        Self::deliver_to_sender(
+            from_keypair,
+            *to_pubkey,
+            sender,
+            envelope_id,
+            kind,
+            sign_envelope,
+        )
+    }
+
+    fn deliver_to_sender(
+        from_keypair: &Keypair,
+        to_pubkey: PubKey,
+        sender: InboxSender,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
         let mut envelope = Envelope {
             id: envelope_id,
             from: from_keypair.public_key(),
@@ -885,6 +944,55 @@ mod tests {
 
         let items = inbox.try_drain();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn test_send_to_pubkey_in_namespace_ignores_display_name_collision() {
+        let registry = InprocRegistry::new();
+        let target_keypair = make_keypair();
+        let target_pubkey = target_keypair.public_key();
+        let shadow_keypair = make_keypair();
+        let shadow_pubkey = shadow_keypair.public_key();
+        let (mut target_inbox, target_sender) = Inbox::new();
+        let (mut shadow_inbox, shadow_sender) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "",
+            "canonical-target",
+            target_pubkey,
+            target_sender,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "",
+            "shared-display-name",
+            shadow_pubkey,
+            shadow_sender,
+            PeerMeta::default(),
+        );
+
+        let sender_keypair = make_keypair();
+        let result = registry.send_to_pubkey_in_namespace_with_id(
+            "",
+            &sender_keypair,
+            &target_pubkey,
+            Uuid::new_v4(),
+            MessageKind::Message {
+                blocks: None,
+                body: "hello canonical".to_string(),
+                handling_mode: None,
+            },
+            true,
+        );
+        assert!(result.is_ok());
+
+        assert_eq!(shadow_inbox.try_drain().len(), 0);
+        let items = target_inbox.try_drain();
+        assert_eq!(items.len(), 1);
+        let InboxItem::External { envelope } = &items[0] else {
+            panic!("expected external envelope");
+        };
+        assert_eq!(envelope.to, target_pubkey);
     }
 
     #[test]

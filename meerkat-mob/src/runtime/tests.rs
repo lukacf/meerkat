@@ -3200,8 +3200,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 candidate.interaction.id.0,
                             ))
                             .expect("record inbound peer request before response");
-                        let reply_name = candidate.interaction.from.clone();
-                        let to = test_trusted_peer_route(responder_runtime.as_ref(), &reply_name);
+                        let to = trust_candidate_sender_for_reply(
+                            responder_runtime.as_ref(),
+                            &candidate,
+                        )
+                        .await;
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
                         let mut remove_supervisors_after_response = Vec::new();
@@ -3880,6 +3883,47 @@ fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> P
     let trusted = comms.trusted_peers_shared();
     let trusted = trusted.read();
     panic!("trusted or inproc peer route not found for {name}; trusted={trusted:?}");
+}
+
+async fn trust_candidate_sender_for_reply(
+    comms: &meerkat_comms::CommsRuntime,
+    candidate: &meerkat_core::interaction::PeerInputCandidate,
+) -> PeerRoute {
+    let route = candidate
+        .ingress
+        .route
+        .clone()
+        .or_else(|| {
+            candidate.interaction.from_route.map(|peer_id| {
+                PeerRoute::with_display_name(
+                    peer_id,
+                    PeerName::new(candidate.interaction.from.clone())
+                        .expect("candidate sender display name should be valid"),
+                )
+            })
+        })
+        .expect("peer request candidate must carry a typed reply route");
+    let display_name = route
+        .display_name
+        .clone()
+        .or_else(|| candidate.ingress.display_name.clone())
+        .expect("inproc reply route must carry the sender display name");
+    let signing_pubkey = candidate
+        .ingress
+        .signing_pubkey
+        .expect("peer request candidate must carry the sender signing pubkey");
+    let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        display_name.as_str(),
+        route.peer_id.to_string(),
+        signing_pubkey,
+        format!("inproc://{}", display_name.as_str()),
+    )
+    .expect("typed ingress sender should convert to a reply trusted peer");
+    comms
+        .add_trusted_peer(descriptor)
+        .await
+        .expect("trust typed ingress sender for bridge reply");
+    route
 }
 
 fn with_unique_mob_id(mut definition: MobDefinition, label: &str) -> MobDefinition {

@@ -578,7 +578,17 @@ pub(crate) enum MeerkatMachineCommandResult {
 
 #[doc(hidden)]
 #[must_use]
-pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<MeerkatMachineInputVariant> {
+pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+    canonical_meerkat_machine_command_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_command_input_variant_manifest()
+-> IndexSet<MeerkatMachineInputVariant> {
     canonical_meerkat_machine_command_classifications()
         .into_iter()
         .flat_map(|record| record.classification.catalog_input_variants())

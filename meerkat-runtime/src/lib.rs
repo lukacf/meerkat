@@ -134,6 +134,7 @@ pub use meerkat_machine_types::{
     MeerkatMachineCommandClassification, MeerkatMachineCommandClassificationRecord,
     MeerkatMachineCommandVariant, MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot,
     MeerkatOpsSnapshot, canonical_meerkat_machine_command_classifications,
+    canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
 };
 pub use ops_lifecycle::{

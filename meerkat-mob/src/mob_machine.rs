@@ -222,7 +222,16 @@ pub(crate) enum MobMachineCommandResult {
 
 #[doc(hidden)]
 #[must_use]
-pub fn canonical_mob_machine_command_manifest() -> IndexSet<MobMachineInputVariant> {
+pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
+    canonical_mob_machine_command_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_mob_machine_command_input_variant_manifest() -> IndexSet<MobMachineInputVariant> {
     canonical_mob_machine_command_classifications()
         .into_iter()
         .flat_map(|record| record.classification.catalog_input_variants())
@@ -231,7 +240,17 @@ pub fn canonical_mob_machine_command_manifest() -> IndexSet<MobMachineInputVaria
 
 #[doc(hidden)]
 #[must_use]
-pub fn canonical_mob_machine_runtime_internal_manifest() -> IndexSet<MobMachineInputVariant> {
+pub fn canonical_mob_machine_runtime_internal_manifest() -> IndexSet<&'static str> {
+    canonical_mob_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_mob_machine_runtime_internal_input_variant_manifest()
+-> IndexSet<MobMachineInputVariant> {
     canonical_mob_machine_runtime_internal_classifications()
         .iter()
         .map(|record| record.input.input_variant())

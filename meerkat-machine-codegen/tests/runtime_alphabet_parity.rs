@@ -16,11 +16,12 @@ use meerkat_machine_schema::identity::{IdentityError, InputVariantId, SignalVari
 use meerkat_mob::{
     MobMachineCatalogInput as MobInput, MobMachineCommandClassification,
     MobMachineCommandClassificationRecord, canonical_mob_machine_command_classifications,
-    canonical_mob_machine_command_manifest,
+    canonical_mob_machine_command_input_variant_manifest, canonical_mob_machine_command_manifest,
 };
 use meerkat_runtime::{
     MeerkatMachineCatalogInput as MeerkatInput, MeerkatMachineCommandClassification,
     MeerkatMachineCommandClassificationRecord, canonical_meerkat_machine_command_classifications,
+    canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
 };
 use std::collections::BTreeSet;
@@ -374,7 +375,7 @@ fn machine_inputs_equal_runtime_manifest_through_typed_generated_facts() {
 #[test]
 fn canonical_command_manifests_are_generated_input_variants() {
     let meerkat_manifest: BTreeSet<MeerkatMachineInputVariant> =
-        canonical_meerkat_machine_command_manifest()
+        canonical_meerkat_machine_command_input_variant_manifest()
             .into_iter()
             .collect();
     let meerkat_records = canonical_meerkat_machine_command_classifications();
@@ -384,14 +385,44 @@ fn canonical_command_manifests_are_generated_input_variants() {
         "MeerkatMachine canonical command manifest must expose typed generated input variants"
     );
 
-    let mob_manifest: BTreeSet<MobMachineInputVariant> = canonical_mob_machine_command_manifest()
-        .into_iter()
-        .collect();
+    let mob_manifest: BTreeSet<MobMachineInputVariant> =
+        canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .collect();
     let mob_records = canonical_mob_machine_command_classifications();
     assert_eq!(
         mob_manifest,
         mob_runtime_command_input_variants(&mob_records),
         "MobMachine canonical command manifest must expose typed generated input variants"
+    );
+}
+
+#[test]
+fn legacy_canonical_command_manifests_preserve_string_api() {
+    let meerkat_manifest: BTreeSet<&'static str> = canonical_meerkat_machine_command_manifest()
+        .into_iter()
+        .collect();
+    let typed_meerkat_manifest: BTreeSet<&'static str> =
+        canonical_meerkat_machine_command_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        meerkat_manifest, typed_meerkat_manifest,
+        "legacy MeerkatMachine command manifest must remain a string projection of the typed manifest"
+    );
+
+    let mob_manifest: BTreeSet<&'static str> = canonical_mob_machine_command_manifest()
+        .into_iter()
+        .collect();
+    let typed_mob_manifest: BTreeSet<&'static str> =
+        canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        mob_manifest, typed_mob_manifest,
+        "legacy MobMachine command manifest must remain a string projection of the typed manifest"
     );
 }
 
@@ -452,11 +483,11 @@ fn runtime_classifications_do_not_expose_string_catalog_input_names() {
 fn canonical_command_manifests_do_not_project_through_strings() {
     assert_command_manifest_body_uses_typed_variants(
         "meerkat-runtime/src/meerkat_machine_types.rs",
-        "pub fn canonical_meerkat_machine_command_manifest",
+        "pub fn canonical_meerkat_machine_command_input_variant_manifest",
     );
     assert_command_manifest_body_uses_typed_variants(
         "meerkat-mob/src/mob_machine.rs",
-        "pub fn canonical_mob_machine_command_manifest",
+        "pub fn canonical_mob_machine_command_input_variant_manifest",
     );
 }
 

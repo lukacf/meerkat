@@ -58,6 +58,16 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
             #(#variant_idents),*
         }
 
+        impl #variant_name {
+            #[doc(hidden)]
+            #[must_use]
+            pub const fn as_str(&self) -> &'static str {
+                match *self {
+                    #(Self::#variant_idents => stringify!(#variant_idents)),*
+                }
+            }
+        }
+
         impl #name {
             #[doc(hidden)]
             pub const VARIANT_MANIFEST: &'static [#variant_name] = &[

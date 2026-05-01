@@ -515,9 +515,10 @@ fn mob_flow_projection_kernels_are_audited_as_non_canonical_support() {
 #[test]
 fn mob_runtime_parity_production_command_manifest_closes_command_backed_inputs() {
     let catalog_inputs = generated_mob_input_variants();
-    let production_command_manifest = meerkat_mob::canonical_mob_machine_command_manifest()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let production_command_manifest =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
     let command_backed_runtime_inputs = mob_catalog_input_variants([
         MobMachineCatalogInput::RunFlow,
         MobMachineCatalogInput::CancelFlow,
@@ -544,9 +545,10 @@ fn mob_runtime_parity_production_command_manifest_closes_command_backed_inputs()
 
 #[test]
 fn mob_runtime_parity_critical_command_inputs_cannot_be_shell_mechanics() {
-    let production_runtime_path = meerkat_mob::canonical_mob_machine_command_manifest()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let production_runtime_path =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
     let critical = critical_mob_runtime_command_inputs();
 
     assert!(
@@ -566,9 +568,10 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
     let declared = mob_machine_runtime_internal_input_variants()
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let typed_manifest = meerkat_mob::canonical_mob_machine_runtime_internal_manifest()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let typed_manifest =
+        meerkat_mob::canonical_mob_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
 
     assert!(
         !records.is_empty(),
@@ -589,6 +592,37 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
             record.input
         );
     }
+}
+
+#[test]
+fn mob_runtime_parity_legacy_manifests_preserve_string_api() {
+    let command_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_command_manifest()
+            .into_iter()
+            .collect();
+    let typed_command_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_command_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        command_manifest, typed_command_manifest,
+        "legacy MobMachine command manifest must remain a string projection of the typed manifest"
+    );
+
+    let runtime_internal_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_runtime_internal_manifest()
+            .into_iter()
+            .collect();
+    let typed_runtime_internal_manifest: BTreeSet<&'static str> =
+        meerkat_mob::canonical_mob_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .map(|variant| variant.as_str())
+            .collect();
+    assert_eq!(
+        runtime_internal_manifest, typed_runtime_internal_manifest,
+        "legacy MobMachine runtime-internal manifest must remain a string projection of the typed manifest"
+    );
 }
 
 #[test]

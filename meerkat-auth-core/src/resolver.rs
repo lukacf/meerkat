@@ -244,14 +244,19 @@ fn oauth_lifecycle_marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn release_oauth_lifecycle_after_marker_save_failure(
+fn restore_oauth_lifecycle_after_marker_save_failure(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     lease_key: &meerkat_core::handles::LeaseKey,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    tokens: &PersistedTokens,
 ) -> String {
+    let expires_at = snapshot
+        .expires_at
+        .or_else(|| Some(meerkat_core::persisted_token_expires_at_epoch_secs(tokens)));
     auth_lease
-        .release_credential_lifecycle(lease_key)
+        .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
         .err()
-        .map(|e| format!("; AuthMachine lifecycle rollback release failed: {e}"))
+        .map(|e| format!("; AuthMachine lifecycle rollback failed: {e}"))
         .unwrap_or_default()
 }
 
@@ -320,6 +325,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             && !snapshot.credential_present
             && meerkat_core::tokens_lifecycle_published(&tokens)
         {
+            let previous_snapshot = snapshot.clone();
             let transition = meerkat_core::publish_token_lifecycle_acquired(
                 auth_lease.as_ref(),
                 &binding.connection_ref,
@@ -334,11 +340,12 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 meerkat_core::mark_tokens_lifecycle_published_for_transition(&tokens, transition);
             if marked != tokens {
                 if let Err(save_error) = store.save(&key, &marked).await {
-                    let rollback = auth_lease
-                        .release_credential_lifecycle(&lease_key)
-                        .err()
-                        .map(|e| format!("; AuthMachine lifecycle rollback failed: {e}"))
-                        .unwrap_or_default();
+                    let rollback = restore_oauth_lifecycle_after_marker_save_failure(
+                        auth_lease.as_ref(),
+                        &lease_key,
+                        &previous_snapshot,
+                        &tokens,
+                    );
                     return Err(ProviderAuthError::SourceResolutionFailed(format!(
                         "TokenStore lifecycle marker generation save failed after AuthMachine lifecycle acquire: {save_error}{rollback}"
                     )));
@@ -357,6 +364,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             match oauth_lifecycle_marker_relation(&tokens, &snapshot) {
                 OAuthLifecycleMarkerRelation::Matches => {}
                 OAuthLifecycleMarkerRelation::TokenNewer => {
+                    let previous_snapshot = snapshot.clone();
                     let transition = meerkat_core::publish_token_lifecycle_acquired(
                         auth_lease.as_ref(),
                         &binding.connection_ref,
@@ -372,9 +380,11 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                     );
                     if marked != tokens {
                         if let Err(save_error) = store.save(&key, &marked).await {
-                            let rollback = release_oauth_lifecycle_after_marker_save_failure(
+                            let rollback = restore_oauth_lifecycle_after_marker_save_failure(
                                 auth_lease.as_ref(),
                                 &lease_key,
+                                &previous_snapshot,
+                                &tokens,
                             );
                             return Err(ProviderAuthError::SourceResolutionFailed(format!(
                                 "TokenStore lifecycle marker save failed after shared OAuth credential adoption: {save_error}{rollback}"
@@ -556,15 +566,18 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
                 )
             {
                 if relation == OAuthLifecycleMarkerRelation::TokenNewer {
+                    let previous_adoption_snapshot = current_snapshot.clone();
                     let transition = publish_managed_store_tokens_lifecycle(env, binding, current)?;
                     let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
                         current, transition,
                     );
                     if committed != *current {
                         if let Err(e) = previous.store.save(&previous.key, &committed).await {
-                            let rollback = release_oauth_lifecycle_after_marker_save_failure(
+                            let rollback = restore_oauth_lifecycle_after_marker_save_failure(
                                 auth_lease.as_ref(),
                                 &lease_key,
+                                &previous_adoption_snapshot,
+                                current,
                             );
                             return Err(ProviderAuthError::SourceResolutionFailed(format!(
                                 "TokenStore lifecycle marker save failed after shared OAuth refresh adoption: {e}{rollback}"
@@ -1243,6 +1256,16 @@ mod tests {
             Ok(())
         }
 
+        fn restore_auth_lifecycle_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            snapshot: &AuthLeaseSnapshot,
+            _expires_at: Option<u64>,
+        ) -> Result<(), DslTransitionError> {
+            *self.snapshot.lock().expect("snapshot lock") = snapshot.clone();
+            Ok(())
+        }
+
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
             self.snapshot.lock().expect("snapshot lock").clone()
         }
@@ -1336,6 +1359,11 @@ mod tests {
             self.inner.save(key, tokens).await.unwrap();
             self.fail_saves
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn allow_saves(&self) {
+            self.fail_saves
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1860,7 +1888,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_oauth_shared_adoption_save_failure_releases_lifecycle() {
+    async fn managed_store_oauth_shared_adoption_save_failure_remains_retryable() {
         let store = Arc::new(SaveFailingTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
@@ -1884,7 +1912,7 @@ mod tests {
             credential_published_at_millis: Some(2_000),
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(initial_snapshot);
-        let store_dyn: Arc<dyn TokenStore> = store;
+        let store_dyn: Arc<dyn TokenStore> = store.clone();
         let env = ResolverEnvironment::testing()
             .with_token_store(store_dyn)
             .with_auth_lease_handle(auth_lease.clone());
@@ -1897,15 +1925,25 @@ mod tests {
         assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
         let snapshot = auth_lease.snapshot(&lease_key);
         assert!(
-            !snapshot.credential_present,
-            "failed durable marker adoption must not leave AuthMachine on the adopted credential"
+            snapshot.credential_present,
+            "failed durable marker adoption must restore the previous credential lifecycle"
         );
-        assert_eq!(snapshot.phase, None);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snapshot.credential_published_at_millis, Some(2_000));
+
+        store.allow_saves();
+        let retry = load_managed_store_tokens_with_lifecycle(&env, &binding)
+            .await
+            .expect("marker adoption should be retryable after a transient save failure");
+        assert_eq!(
+            retry.tokens.primary_secret.as_deref(),
+            Some("shared-adoption-access")
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_oauth_refresh_adoption_save_failure_releases_lifecycle() {
+    async fn managed_store_oauth_refresh_adoption_save_failure_remains_retryable() {
         let store = Arc::new(SaveFailingTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
@@ -1936,7 +1974,7 @@ mod tests {
             credential_published_at_millis: Some(2_000),
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(initial_snapshot.clone());
-        let store_dyn: Arc<dyn TokenStore> = store;
+        let store_dyn: Arc<dyn TokenStore> = store.clone();
         let previous = managed_store_tokens(
             Arc::clone(&store_dyn),
             key,
@@ -1957,10 +1995,23 @@ mod tests {
         assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
         let snapshot = auth_lease.snapshot(&lease_key);
         assert!(
-            !snapshot.credential_present,
-            "failed durable refresh adoption must not leave AuthMachine on the adopted credential"
+            snapshot.credential_present,
+            "failed durable refresh adoption must restore the previous credential lifecycle"
         );
-        assert_eq!(snapshot.phase, None);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snapshot.credential_published_at_millis, Some(2_000));
+
+        store.allow_saves();
+        let retry =
+            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &tokens)
+                .await
+                .expect(
+                    "refresh adoption should be retryable after a transient marker save failure",
+                );
+        assert_eq!(
+            retry.primary_secret.as_deref(),
+            Some("refresh-adoption-access")
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

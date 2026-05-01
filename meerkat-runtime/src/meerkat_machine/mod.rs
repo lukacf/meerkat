@@ -175,6 +175,16 @@ impl meerkat_core::handles::AuthLeaseHandle for AuthLeaseHandleWithOAuthRelease 
         self.inner.release_credential_lifecycle(lease_key)
     }
 
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner
+            .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
+    }
+
     fn snapshot(
         &self,
         lease_key: &meerkat_core::handles::LeaseKey,

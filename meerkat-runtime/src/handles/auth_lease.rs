@@ -349,6 +349,16 @@ fn map_phase(phase: auth_dsl::AuthLifecyclePhase) -> AuthLeasePhase {
     }
 }
 
+fn restore_phase(phase: AuthLeasePhase) -> auth_dsl::AuthLifecyclePhase {
+    match phase {
+        AuthLeasePhase::Valid => auth_dsl::AuthLifecyclePhase::Valid,
+        AuthLeasePhase::Expiring => auth_dsl::AuthLifecyclePhase::Expiring,
+        AuthLeasePhase::Refreshing => auth_dsl::AuthLifecyclePhase::Refreshing,
+        AuthLeasePhase::ReauthRequired => auth_dsl::AuthLifecyclePhase::ReauthRequired,
+        AuthLeasePhase::Released => auth_dsl::AuthLifecyclePhase::Released,
+    }
+}
+
 impl Default for RuntimeAuthLeaseHandle {
     fn default() -> Self {
         Self::new()
@@ -498,6 +508,127 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             Self::audit_action_for(&input),
             from_phase,
             to_phase,
+        );
+        Ok(())
+    }
+
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        snapshot: &AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), DslTransitionError> {
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current_generation = guard.generations.get(lease_key).copied().unwrap_or(0);
+        let from_phase = guard
+            .authorities
+            .get(lease_key)
+            .map(|authority| map_phase(authority.state.lifecycle_phase))
+            .unwrap_or(AuthLeasePhase::Released);
+        let existing_oauth = guard.authorities.get(lease_key).map(|authority| {
+            (
+                authority.state.oauth_browser_flow_ids.clone(),
+                authority.state.oauth_device_flow_ids.clone(),
+                authority.state.oauth_device_poll_ids.clone(),
+            )
+        });
+        let has_oauth_membership = existing_oauth.as_ref().is_some_and(
+            |(browser_flow_ids, device_flow_ids, device_poll_ids)| {
+                !browser_flow_ids.is_empty()
+                    || !device_flow_ids.is_empty()
+                    || !device_poll_ids.is_empty()
+            },
+        );
+
+        if !snapshot.credential_present
+            || snapshot.phase.is_none()
+            || snapshot.phase == Some(AuthLeasePhase::Released)
+        {
+            guard.credential_published_at_millis.remove(lease_key);
+            if has_oauth_membership {
+                let (oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids) =
+                    existing_oauth.unwrap_or_default();
+                guard.authorities.insert(
+                    lease_key.clone(),
+                    auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState {
+                        lifecycle_phase: auth_dsl::AuthLifecyclePhase::ReauthRequired,
+                        credential_present: false,
+                        oauth_browser_flow_ids,
+                        oauth_device_flow_ids,
+                        oauth_device_poll_ids,
+                        ..Default::default()
+                    }),
+                );
+                guard.generations.insert(
+                    lease_key.clone(),
+                    current_generation.max(snapshot.generation),
+                );
+            } else {
+                guard.authorities.remove(lease_key);
+                if snapshot.generation == 0 {
+                    guard.generations.remove(lease_key);
+                } else {
+                    guard
+                        .generations
+                        .insert(lease_key.clone(), snapshot.generation);
+                }
+            }
+            emit_audit(
+                lease_key,
+                "restore_auth_lifecycle_snapshot",
+                from_phase,
+                AuthLeasePhase::ReauthRequired,
+            );
+            return Ok(());
+        }
+
+        let Some(phase) = snapshot.phase else {
+            return Ok(());
+        };
+        let Some(expires_at) = expires_at else {
+            return Ok(());
+        };
+        let expires_at = if expires_at == u64::MAX {
+            None
+        } else {
+            Some(expires_at)
+        };
+        let (oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids) =
+            existing_oauth.unwrap_or_default();
+        guard.authorities.insert(
+            lease_key.clone(),
+            auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState {
+                lifecycle_phase: restore_phase(phase),
+                expires_at,
+                credential_present: true,
+                oauth_browser_flow_ids,
+                oauth_device_flow_ids,
+                oauth_device_poll_ids,
+                ..Default::default()
+            }),
+        );
+        guard.generations.insert(
+            lease_key.clone(),
+            current_generation.max(snapshot.generation),
+        );
+        match snapshot.credential_published_at_millis {
+            Some(published_at) => {
+                guard
+                    .credential_published_at_millis
+                    .insert(lease_key.clone(), published_at);
+            }
+            None => {
+                guard.credential_published_at_millis.remove(lease_key);
+            }
+        }
+        emit_audit(
+            lease_key,
+            "restore_auth_lifecycle_snapshot",
+            from_phase,
+            phase,
         );
         Ok(())
     }
@@ -689,6 +820,62 @@ mod tests {
         let snap = h.snapshot(&key);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_900_000_000));
+    }
+
+    #[test]
+    fn restore_snapshot_preserves_publication_marker_without_lowering_generation() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared");
+
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let before = h.snapshot(&key);
+        assert_eq!(before.phase, Some(AuthLeasePhase::Valid));
+        assert!(before.credential_present);
+        assert!(before.credential_published_at_millis.is_some());
+
+        h.acquire_lease(&key, 1_900_000_000).unwrap();
+        let advanced = h.snapshot(&key);
+        assert!(advanced.generation > before.generation);
+
+        h.restore_auth_lifecycle_snapshot(&key, &before, before.expires_at)
+            .unwrap();
+
+        let restored = h.snapshot(&key);
+        assert_eq!(restored.phase, before.phase);
+        assert_eq!(restored.expires_at, before.expires_at);
+        assert_eq!(restored.credential_present, before.credential_present);
+        assert_eq!(
+            restored.credential_published_at_millis,
+            before.credential_published_at_millis
+        );
+        assert_eq!(restored.generation, advanced.generation);
+    }
+
+    #[test]
+    fn restore_empty_zero_generation_snapshot_clears_runtime_authority() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+
+        h.restore_auth_lifecycle_snapshot(
+            &key,
+            &AuthLeaseSnapshot {
+                phase: None,
+                expires_at: None,
+                credential_present: false,
+                generation: 0,
+                credential_published_at_millis: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let restored = h.snapshot(&key);
+        assert_eq!(restored.phase, None);
+        assert_eq!(restored.expires_at, None);
+        assert!(!restored.credential_present);
+        assert_eq!(restored.generation, 0);
+        assert_eq!(restored.credential_published_at_millis, None);
     }
 
     #[test]

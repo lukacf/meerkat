@@ -344,14 +344,7 @@ pub fn restore_token_lifecycle_snapshot(
     else {
         return Ok(());
     };
-    handle.acquire_lease(lease_key, expires_at)?;
-    match phase {
-        AuthLeasePhase::Valid => Ok(()),
-        AuthLeasePhase::Expiring => handle.mark_expiring(lease_key),
-        AuthLeasePhase::Refreshing => handle.begin_refresh(lease_key),
-        AuthLeasePhase::ReauthRequired => handle.mark_reauth_required(lease_key),
-        AuthLeasePhase::Released => Ok(()),
-    }
+    handle.restore_auth_lifecycle_snapshot(lease_key, snapshot, Some(expires_at))
 }
 
 pub fn lease_snapshot_expires_at_datetime(snapshot: &AuthLeaseSnapshot) -> Option<DateTime<Utc>> {

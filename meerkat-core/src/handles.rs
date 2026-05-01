@@ -1126,6 +1126,40 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         self.release_lease(lease_key)
     }
 
+    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    ///
+    /// The default implementation can reconstruct credential-present snapshots
+    /// through public lease transitions. Runtime-backed handles override this to
+    /// preserve machine-owned metadata such as credential publication time and to
+    /// restore empty snapshots without leaving an unretryable generation behind.
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        snapshot: &AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), DslTransitionError> {
+        if !snapshot.credential_present {
+            return Ok(());
+        }
+        let Some(phase) = snapshot.phase else {
+            return Ok(());
+        };
+        if phase == AuthLeasePhase::Released {
+            return Ok(());
+        }
+        let Some(expires_at) = expires_at else {
+            return Ok(());
+        };
+        self.acquire_lease(lease_key, expires_at)?;
+        match phase {
+            AuthLeasePhase::Valid => Ok(()),
+            AuthLeasePhase::Expiring => self.mark_expiring(lease_key),
+            AuthLeasePhase::Refreshing => self.begin_refresh(lease_key),
+            AuthLeasePhase::ReauthRequired => self.mark_reauth_required(lease_key),
+            AuthLeasePhase::Released => Ok(()),
+        }
+    }
+
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;
 }

@@ -88,6 +88,12 @@ fn authoritative_receipt(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Stable key for process-local auth/OAuth authority reuse across reopened
+    /// handles for the same durable store.
+    fn auth_authority_key(&self) -> Option<String> {
+        None
+    }
+
     /// Atomically persist session delta + authoritative receipt + input state updates.
     ///
     /// The receipt MUST be minted by the durable commit seam itself, not by the

@@ -204,7 +204,9 @@ impl RuntimeAuthLeaseHandle {
             (from_phase, to_phase)
         };
         let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
-        *generation = generation.saturating_add(1);
+        if publishes_credential {
+            *generation = generation.saturating_add(1);
+        }
         let accepted_generation = *generation;
         let credential_published_at_millis = if publishes_credential {
             let published_at = current_time_millis();
@@ -530,8 +532,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             let to_phase = map_phase(entry.state.lifecycle_phase);
             (input, remove_after_accept, from_phase, to_phase)
         };
-        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
-        *generation = generation.saturating_add(1);
         guard.credential_published_at_millis.remove(lease_key);
         if remove_after_accept {
             guard.authorities.remove(lease_key);
@@ -769,6 +769,26 @@ mod tests {
         h.refresh_failed(&k, false).unwrap();
 
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
+    }
+
+    #[test]
+    fn transient_refresh_failure_preserves_credential_marker_generation() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "retryable_refresh");
+
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        let before = h.snapshot(&k);
+        h.begin_refresh(&k).unwrap();
+        h.refresh_failed(&k, false).unwrap();
+        let after = h.snapshot(&k);
+
+        assert_eq!(after.phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(
+            after.credential_published_at_millis,
+            before.credential_published_at_millis
+        );
     }
 
     #[test]

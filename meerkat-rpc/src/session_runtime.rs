@@ -970,7 +970,6 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -980,10 +979,8 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
-        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
-        let reconfigure_auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            auth_lease.clone();
+        let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -1049,7 +1046,6 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -1059,10 +1055,8 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
-        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
-        let reconfigure_auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            auth_lease.clone();
+        let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -6321,6 +6315,44 @@ mod tests {
             meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         )
+    }
+
+    #[test]
+    fn session_runtime_new_preserves_persistence_oauth_flow_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let persistence = meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store);
+        let adapter = persistence.runtime_adapter();
+        let target = test_connection_ref("dev", "default_openai");
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1:1455/callback";
+        let state = adapter
+            .oauth_flow_authority()
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "rpc-persistent-verifier".to_string(),
+            )
+            .expect("persistence authority admits OAuth flow before surface construction");
+
+        let runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            persistence,
+            crate::router::NotificationSink::noop(),
+        );
+        let flow = runtime
+            .oauth_flow_authority()
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("surface construction must preserve PersistenceBundle OAuth authority");
+
+        assert_eq!(flow.pkce_verifier, "rpc-persistent-verifier");
     }
 
     fn approval_request() -> meerkat_core::ApprovalRequest {

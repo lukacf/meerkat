@@ -357,7 +357,6 @@ impl AppState {
                 Ok(store) => store,
                 Err(_) => Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
             };
-        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
@@ -395,8 +394,7 @@ impl AppState {
         );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
-        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
+        let auth_lease = runtime_adapter.auth_lease_handle();
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
@@ -5075,6 +5073,55 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn rest_app_state_reopen_preserves_persistent_oauth_flow_authority() {
+        let temp = TempDir::new().unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "luc-194-rest-oauth".to_string(),
+        };
+        bootstrap.realm.backend_hint = Some("sqlite".to_string());
+        bootstrap.realm.state_root = Some(temp.path().join("realms"));
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        let target = meerkat_core::ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("valid realm fixture"),
+            binding: meerkat_core::BindingId::parse("default_openai")
+                .expect("valid binding fixture"),
+            profile: None,
+        };
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1:1455/callback";
+        let state_token = {
+            let state = AppState::load_from_with_bootstrap(
+                temp.path().to_path_buf(),
+                bootstrap.clone(),
+                false,
+            )
+            .await
+            .unwrap();
+            state
+                .oauth_flow_authority()
+                .start(
+                    target.clone(),
+                    provider,
+                    redirect_uri.to_string(),
+                    "rest-persistent-verifier".to_string(),
+                )
+                .expect("persistent REST authority admits OAuth flow")
+        };
+
+        let reopened =
+            AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
+                .await
+                .unwrap();
+        let flow = reopened
+            .oauth_flow_authority()
+            .consume(&state_token, &target, provider, redirect_uri)
+            .expect("reopened REST state must preserve persistent OAuth authority");
+
+        assert_eq!(flow.pkce_verifier, "rest-persistent-verifier");
     }
 
     #[tokio::test]

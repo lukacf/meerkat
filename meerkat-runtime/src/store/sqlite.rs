@@ -188,6 +188,11 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
 
     #[async_trait::async_trait]
     impl RuntimeStore for SqliteRuntimeStore {
+        fn auth_authority_key(&self) -> Option<String> {
+            let path = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+            Some(format!("sqlite:{}", path.display()))
+        }
+
         async fn commit_session_boundary(
             &self,
             runtime_id: &LogicalRuntimeId,

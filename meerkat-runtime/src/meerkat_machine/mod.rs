@@ -89,13 +89,25 @@ struct PersistentAuthAuthorityBundle {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PersistentAuthAuthorityKey {
+    Durable(String),
+    Process(usize),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 static PERSISTENT_AUTH_AUTHORITIES: OnceLock<
-    StdMutex<HashMap<usize, Arc<PersistentAuthAuthorityBundle>>>,
+    StdMutex<HashMap<PersistentAuthAuthorityKey, Arc<PersistentAuthAuthorityBundle>>>,
 > = OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
-fn runtime_store_identity(store: &Arc<dyn RuntimeStore>) -> usize {
-    Arc::as_ptr(store) as *const () as usize
+fn runtime_store_identity(store: &Arc<dyn RuntimeStore>) -> PersistentAuthAuthorityKey {
+    store
+        .auth_authority_key()
+        .map(PersistentAuthAuthorityKey::Durable)
+        .unwrap_or_else(|| {
+            PersistentAuthAuthorityKey::Process(Arc::as_ptr(store) as *const () as usize)
+        })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -107,11 +119,14 @@ fn persistent_auth_authorities(
     let mut authorities = authorities
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(existing) = authorities
-        .get(&key)
-        .filter(|bundle| bundle.store.upgrade().is_some())
-    {
-        return Arc::clone(existing);
+    if let Some(existing) = authorities.get(&key) {
+        match &key {
+            PersistentAuthAuthorityKey::Durable(_) => return Arc::clone(existing),
+            PersistentAuthAuthorityKey::Process(_) if existing.store.upgrade().is_some() => {
+                return Arc::clone(existing);
+            }
+            PersistentAuthAuthorityKey::Process(_) => {}
+        }
     }
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(

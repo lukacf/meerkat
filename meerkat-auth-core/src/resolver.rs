@@ -201,17 +201,35 @@ fn oauth_lifecycle_marker_relation(
     if !snapshot.credential_present {
         return OAuthLifecycleMarkerRelation::TokenStale;
     }
+    let generation_matches = publication
+        .generation
+        .is_some_and(|generation| generation == snapshot.generation);
+    let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
+
+    if let (Some(marker_published_at), Some(snapshot_published_at)) = (
+        publication.credential_published_at_millis,
+        snapshot.credential_published_at_millis,
+    ) {
+        return match marker_published_at.cmp(&snapshot_published_at) {
+            std::cmp::Ordering::Greater => OAuthLifecycleMarkerRelation::TokenNewer,
+            std::cmp::Ordering::Less => OAuthLifecycleMarkerRelation::TokenStale,
+            std::cmp::Ordering::Equal => {
+                if token_expires_at == snapshot_expires_at && generation_matches {
+                    OAuthLifecycleMarkerRelation::Matches
+                } else {
+                    OAuthLifecycleMarkerRelation::Invalid
+                }
+            }
+        };
+    }
+
     if let Some(relation) = oauth_lifecycle_publication_time_relation(
         publication.credential_published_at_millis,
         snapshot.credential_published_at_millis,
     ) {
         return relation;
     }
-    let generation_matches = publication
-        .generation
-        .is_some_and(|generation| generation == snapshot.generation);
 
-    let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
     match token_expires_at.cmp(&snapshot_expires_at) {
         std::cmp::Ordering::Greater => return OAuthLifecycleMarkerRelation::TokenNewer,
         std::cmp::Ordering::Less => return OAuthLifecycleMarkerRelation::TokenStale,
@@ -1460,7 +1478,6 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut snapshot = self.snapshot.lock().expect("snapshot lock");
             snapshot.phase = Some(AuthLeasePhase::Refreshing);
-            snapshot.generation += 1;
             Ok(())
         }
 
@@ -1501,7 +1518,6 @@ mod tests {
             } else {
                 Some(AuthLeasePhase::Expiring)
             };
-            snapshot.generation += 1;
             Ok(())
         }
 
@@ -2184,7 +2200,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn oauth_lifecycle_marker_relation_equal_publication_time_still_checks_expiry() {
+    fn oauth_lifecycle_marker_relation_rejects_equal_publication_time_expiry_drift() {
         let snapshot_expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
         let snapshot = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
@@ -2205,7 +2221,8 @@ mod tests {
         );
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_longer, &snapshot),
-            OAuthLifecycleMarkerRelation::TokenNewer
+            OAuthLifecycleMarkerRelation::Invalid,
+            "same-ms publication ties must not adopt a token as newer based on expiry drift"
         );
 
         let mut same_time_shorter = chatgpt_oauth_tokens("same-time-shorter-access");
@@ -2219,7 +2236,8 @@ mod tests {
         );
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_shorter, &snapshot),
-            OAuthLifecycleMarkerRelation::TokenStale
+            OAuthLifecycleMarkerRelation::Invalid,
+            "same-ms publication ties with expiry drift are inconsistent, not ordered"
         );
 
         let mut same_time_same_expiry_future_generation =
@@ -2548,6 +2566,61 @@ mod tests {
             auth_lease.snapshot(&lease_key).phase,
             Some(AuthLeasePhase::ReauthRequired)
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_transient_refresh_failure_keeps_retryable_marker() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let mut expired_tokens = chatgpt_oauth_tokens("transient-refresh-access");
+        expired_tokens.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
+        let tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &expired_tokens,
+            AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: Some(2_000),
+            },
+        );
+        store.save(&key, &tokens).await.unwrap();
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Expiring),
+            expires_at: Some(meerkat_core::persisted_token_expires_at_epoch_secs(&tokens)),
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: Some(2_000),
+        });
+        let env = ResolverEnvironment::testing()
+            .with_token_store(Arc::clone(&store))
+            .with_auth_lease_handle(auth_lease.clone());
+        let mut loaded = load_managed_store_tokens_with_lifecycle(&env, &binding)
+            .await
+            .expect("expiring managed OAuth token should load for refresh");
+        assert!(matches!(
+            loaded.lifecycle,
+            ManagedStoreLifecycle::RefreshRequired
+        ));
+
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut loaded)
+                .expect("refresh lifecycle should begin");
+        assert!(refresh_started);
+        mark_managed_store_oauth_refresh_failed(&env, &binding, refresh_started, false)
+            .expect("transient refresh failure should publish retryable lifecycle");
+
+        let after_failure = auth_lease.snapshot(&lease_key);
+        assert_eq!(after_failure.phase, Some(AuthLeasePhase::Expiring));
+        drop(loaded);
+        let retryable = load_managed_store_tokens_with_lifecycle(&env, &binding)
+            .await
+            .expect("transient refresh failure must leave stored OAuth marker retryable");
+        assert!(matches!(
+            retryable.lifecycle,
+            ManagedStoreLifecycle::RefreshRequired
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -530,13 +530,17 @@ fn load_tool_def() -> ToolDef {
 mod tests {
     use super::*;
     use meerkat_core::ToolFilter;
-    use meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle;
+    use meerkat_core::agent::{
+        build_agent_after_factory_policy as build_agent_after_factory_policy_for_test,
+        test_turn_state_handle::TestTurnStateHandle,
+    };
     use meerkat_core::error::AgentError;
     use meerkat_core::types::ToolProvenance;
     use meerkat_core::types::{AssistantBlock, StopReason, Usage};
     use meerkat_core::{
         AgentBuilder, AgentLlmClient, AgentSessionStore, DynamicToolComposite, LlmStreamResult,
-        Session,
+        Provider, SESSION_METADATA_SCHEMA_VERSION, Session, SessionBuildState, SessionMetadata,
+        SessionTooling,
     };
     use serde_json::json;
     use serde_json::value::RawValue;
@@ -591,6 +595,34 @@ mod tests {
         async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
             Ok(None)
         }
+    }
+
+    fn factory_policy_session() -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: SESSION_METADATA_SCHEMA_VERSION,
+                model: "catalog-load-route-test".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("test metadata serializes");
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("test build state serializes");
+        session
     }
 
     struct CatalogLoadRouteClient {
@@ -1122,10 +1154,23 @@ mod tests {
             control_dispatcher,
         ]));
         let client = Arc::new(CatalogLoadRouteClient::new());
-        let mut agent = AgentBuilder::new()
-            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
-            .build(client.clone(), tools, Arc::new(NoopAgentStore))
-            .await;
+        let builder = AgentBuilder::new()
+            .resume_session(factory_policy_session())
+            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()));
+        // SAFETY: this is a unit-test bridge that supplies the same durable
+        // factory policy metadata/build state required by the production
+        // AgentFactory before entering core construction.
+        #[allow(unsafe_code)]
+        let mut agent = unsafe {
+            build_agent_after_factory_policy_for_test(
+                builder,
+                client.clone(),
+                tools,
+                Arc::new(NoopAgentStore),
+            )
+            .await
+        }
+        .expect("test factory policy metadata should satisfy core build validation");
         visibility_provider.set_scope(agent.tool_scope().clone());
 
         let result = agent.run("prompt".to_string().into()).await.unwrap();

@@ -7,23 +7,19 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::compact::{CompactionContext, CompactionResult, Compactor};
-use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
-use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, RunApplyBoundary};
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionError,
     SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
     SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
-use meerkat_core::types::{
-    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
-};
+use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
-    HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint,
-    HookReasonCode, LlmStreamResult, Session, SessionDeferredTurnState,
+    HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint,
+    HookReasonCode, Session, SessionDeferredTurnState,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -32,39 +28,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
-
-fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
-    let mut session = Session::new();
-    session
-        .set_session_metadata(meerkat_core::SessionMetadata {
-            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-            model: "test-model".to_string(),
-            max_tokens: 1024,
-            structured_output_retries: 2,
-            provider: meerkat_core::Provider::Other,
-            self_hosted_server_id: None,
-            provider_params: None,
-            tooling: meerkat_core::SessionTooling::default(),
-            keep_alive: false,
-            comms_name: None,
-            peer_meta: None,
-            realm_id: None,
-            instance_id: None,
-            backend: None,
-            config_generation: None,
-            connection_ref: None,
-        })
-        .expect("test metadata serializes");
-    session
-        .set_build_state(meerkat_core::SessionBuildState::default())
-        .expect("test build state serializes");
-
-    AgentBuilder::new()
-        .resume_session(session)
-        .with_turn_state_handle(Arc::new(
-            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ))
-}
 
 // ---------------------------------------------------------------------------
 // Mock agent
@@ -294,70 +257,6 @@ impl SessionAgentBuilder for MockAgentBuilder {
 // Real agent fixtures (runtime boundary assertions)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct NoopSessionStore;
-
-#[async_trait]
-impl AgentSessionStore for NoopSessionStore {
-    async fn save(
-        &self,
-        _session: &meerkat_core::Session,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        Ok(())
-    }
-
-    async fn load(
-        &self,
-        _id: &str,
-    ) -> Result<Option<meerkat_core::Session>, meerkat_core::error::AgentError> {
-        Ok(None)
-    }
-}
-
-struct StaticToolDispatcher {
-    tools: Arc<[Arc<ToolDef>]>,
-}
-
-impl StaticToolDispatcher {
-    fn new(tool_names: &[&str]) -> Self {
-        let defs: Vec<Arc<ToolDef>> = tool_names
-            .iter()
-            .map(|name| {
-                Arc::new(ToolDef {
-                    name: (*name).into(),
-                    description: format!("{name} tool"),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {},
-                    }),
-                    provenance: None,
-                })
-            })
-            .collect();
-        Self { tools: defs.into() }
-    }
-}
-
-#[async_trait]
-impl AgentToolDispatcher for StaticToolDispatcher {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tools)
-    }
-
-    async fn dispatch(
-        &self,
-        call: ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        Err(ToolError::not_found(call.name))
-    }
-}
-
-struct RecordingLlmClient {
-    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
-    provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
-    delay_ms: Option<u64>,
-}
-
 struct DenyNextPreLlmHookEngine {
     deny_next: AtomicBool,
 }
@@ -409,64 +308,136 @@ impl HookEngine for DenyNextPreLlmHookEngine {
     }
 }
 
-#[async_trait]
-impl AgentLlmClient for RecordingLlmClient {
-    async fn stream_response(
-        &self,
-        messages: &[meerkat_core::types::Message],
-        tools: &[Arc<ToolDef>],
-        _max_tokens: u32,
-        _temperature: Option<f32>,
-        _provider_params: Option<&ProviderParamsOverride>,
-    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
-        let names = tools.iter().map(|t| t.name.to_string()).collect::<Vec<_>>();
-        self.provider_visible_tools
-            .lock()
-            .expect("provider_visible_tools lock poisoned")
-            .push(names);
-        if let Some(delay_ms) = self.delay_ms {
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-        }
-        self.provider_visible_system_prompts
-            .lock()
-            .expect("provider_visible_system_prompts lock poisoned")
-            .push(
-                messages
-                    .iter()
-                    .filter_map(|message| match message {
-                        meerkat_core::types::Message::System(system) => {
-                            Some(system.content.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-            );
-
-        Ok(LlmStreamResult::new(
-            vec![AssistantBlock::Text {
-                text: "ok".to_string(),
-                meta: None,
-            }],
-            StopReason::EndTurn,
-            Usage::default(),
-        ))
+fn session_for_request(req: &CreateSessionRequest) -> Session {
+    let mut session = Session::new();
+    if let Some(system_prompt) = &req.system_prompt {
+        session.set_system_prompt(system_prompt.clone());
     }
+    session
+}
 
-    fn provider(&self) -> &'static str {
-        "recording-mock"
-    }
-
-    fn model(&self) -> &'static str {
-        "mock-model"
+fn session_snapshot(session: &Session) -> SessionSnapshot {
+    SessionSnapshot {
+        created_at: session.created_at(),
+        updated_at: session.updated_at(),
+        message_count: session.messages().len(),
+        total_tokens: session.total_tokens(),
+        usage: session.total_usage(),
+        last_assistant_text: session.last_assistant_text(),
     }
 }
 
-type RealInnerAgent = Agent<RecordingLlmClient, StaticToolDispatcher, NoopSessionStore>;
-type CompactionInnerAgent =
-    Agent<CompactionTrackingLlmClient, StaticToolDispatcher, NoopSessionStore>;
+fn session_clone_with_system_context(
+    session: &Session,
+    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+) -> Session {
+    let mut clone = session.clone();
+    clone
+        .set_system_context_state(
+            state
+                .lock()
+                .expect("system-context state lock poisoned")
+                .clone(),
+        )
+        .expect("serialize system-context state");
+    clone
+}
+
+fn sync_session_context_state(
+    session: &Session,
+    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+) {
+    if let Some(session_state) = session.system_context_state() {
+        *state.lock().expect("system-context state lock poisoned") = session_state;
+    }
+}
+
+fn sync_shared_system_context_to_session(
+    session: &mut Session,
+    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+) {
+    let state = state
+        .lock()
+        .expect("system-context state lock poisoned")
+        .clone();
+    session
+        .set_system_context_state(state)
+        .expect("serialize system-context state");
+}
+
+fn successful_run_result(session: &Session, text: impl Into<String>) -> RunResult {
+    RunResult {
+        text: text.into(),
+        session_id: session.id().clone(),
+        usage: Usage::default(),
+        turns: 1,
+        tool_calls: 0,
+        structured_output: None,
+        schema_warnings: None,
+        skill_diagnostics: None,
+    }
+}
+
+fn filtered_tool_names(overlay: &Option<TurnToolOverlay>) -> Vec<String> {
+    let mut names = vec!["alpha".to_string(), "beta".to_string()];
+    if let Some(overlay) = overlay {
+        if let Some(allowed) = &overlay.allowed_tools {
+            names.retain(|name| allowed.iter().any(|allowed| allowed == name));
+        }
+        if let Some(blocked) = &overlay.blocked_tools {
+            names.retain(|name| !blocked.iter().any(|blocked| blocked == name));
+        }
+    }
+    names
+}
+
+fn rendered_system_prompts(
+    session: &Session,
+    appends: &[meerkat_core::PendingSystemContextAppend],
+) -> Vec<String> {
+    let mut session = session.clone();
+    session.append_system_context_blocks(appends);
+    session
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            meerkat_core::types::Message::System(system) => Some(system.content.clone()),
+            _ => None,
+        })
+        .collect()
+}
 
 struct RealSessionAgent {
-    agent: RealInnerAgent,
+    session: Session,
+    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    delay_ms: Option<u64>,
+    hook_engine: Option<Arc<dyn HookEngine>>,
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    cancel_after_boundary_requested: Arc<AtomicBool>,
+}
+
+impl RealSessionAgent {
+    fn take_pending_system_context_boundary(
+        &mut self,
+    ) -> Vec<meerkat_core::PendingSystemContextAppend> {
+        let pending = {
+            let mut state = self
+                .system_context_state
+                .lock()
+                .expect("system-context state lock poisoned");
+            if state.pending.is_empty() {
+                return Vec::new();
+            }
+            let pending = state.pending.clone();
+            state.mark_pending_applied();
+            pending
+        };
+
+        sync_shared_system_context_to_session(&mut self.session, &self.system_context_state);
+        pending
+    }
 }
 
 #[async_trait]
@@ -474,30 +445,89 @@ impl SessionAgent for RealSessionAgent {
     async fn run_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        event_tx: mpsc::Sender<AgentEvent>,
+        _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_with_events(prompt, event_tx).await
+        self.session.append_external_user_content(prompt.clone());
+
+        if let Some(hook_engine) = &self.hook_engine {
+            let report = hook_engine
+                .execute(
+                    HookInvocation::new(HookPoint::PreLlmRequest, self.session.id().clone()),
+                    None,
+                )
+                .await
+                .map_err(
+                    |error| meerkat_core::error::AgentError::HookExecutionFailed {
+                        hook_id: "test-pre-llm".to_string(),
+                        reason: error.to_string(),
+                    },
+                )?;
+            if let Some(HookDecision::Deny {
+                reason_code,
+                message,
+                payload,
+                ..
+            }) = report.decision
+            {
+                return Err(meerkat_core::error::AgentError::HookDenied {
+                    point: HookPoint::PreLlmRequest,
+                    reason_code,
+                    message,
+                    payload,
+                });
+            }
+        }
+
+        let boundary_system_context = self.take_pending_system_context_boundary();
+
+        self.provider_visible_tools
+            .lock()
+            .expect("provider_visible_tools lock poisoned")
+            .push(filtered_tool_names(&self.flow_tool_overlay));
+        self.provider_visible_system_prompts
+            .lock()
+            .expect("provider_visible_system_prompts lock poisoned")
+            .push(rendered_system_prompts(
+                &self.session,
+                &boundary_system_context,
+            ));
+
+        if let Some(delay_ms) = self.delay_ms {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        self.session.append_external_assistant_blocks(
+            vec![AssistantBlock::Text {
+                text: "ok".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        );
+
+        Ok(successful_run_result(&self.session, "ok"))
     }
 
-    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
-        self.agent.pending_skill_references = refs;
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        // The session-service contract tests only need to verify that the call
+        // is admitted and does not alter provider-visible tool/system context.
     }
 
     fn set_flow_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.agent
-            .set_flow_tool_overlay(overlay)
-            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+        self.flow_tool_overlay = overlay;
+        Ok(())
     }
 
     fn cancel(&mut self) {
-        self.agent.cancel();
+        self.cancel_after_boundary_requested
+            .store(true, Ordering::Release);
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
-        Some(self.agent.cancel_after_boundary_handle())
+        Some(Arc::clone(&self.cancel_after_boundary_requested))
     }
 
     fn hot_swap_llm_identity(
@@ -510,43 +540,43 @@ impl SessionAgent for RealSessionAgent {
     }
 
     fn session_id(&self) -> SessionId {
-        self.agent.session().id().clone()
+        self.session.id().clone()
     }
 
     fn snapshot(&self) -> SessionSnapshot {
-        let session = self.agent.session();
-        SessionSnapshot {
-            created_at: session.created_at(),
-            updated_at: session.updated_at(),
-            message_count: session.messages().len(),
-            total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
-            last_assistant_text: session.last_assistant_text(),
-        }
+        session_snapshot(&self.session)
     }
 
     fn session_clone(&self) -> meerkat_core::Session {
-        self.agent.session_with_system_context_state()
+        session_clone_with_system_context(&self.session, &self.system_context_state)
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        self.agent
-            .session_mut()
-            .append_system_context_blocks(appends);
+        self.session.append_system_context_blocks(appends);
+        sync_session_context_state(&self.session, &self.system_context_state);
     }
 
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        self.agent.system_context_state()
+        Arc::clone(&self.system_context_state)
+    }
+
+    fn sync_system_context_state(&mut self) {
+        sync_session_context_state(&self.session, &self.system_context_state);
     }
 }
 
 struct CompactionSessionAgent {
-    agent: CompactionInnerAgent,
+    session: Session,
+    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
+    compactor: Arc<TrackingCompactor>,
+    boundary_index: u64,
+    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    cancel_after_boundary_requested: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -554,30 +584,59 @@ impl SessionAgent for CompactionSessionAgent {
     async fn run_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        event_tx: mpsc::Sender<AgentEvent>,
+        _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_with_events(prompt, event_tx).await
+        let context = CompactionContext {
+            last_input_tokens: 0,
+            message_count: self.session.messages().len(),
+            estimated_history_tokens: 0,
+            last_compaction_boundary_index: None,
+            session_boundary_index: self.boundary_index,
+        };
+        if self.compactor.should_compact(&context) {
+            self.seen_last_user_messages
+                .lock()
+                .expect("seen_last_user_messages lock poisoned")
+                .push(self.compactor.compaction_prompt().to_string());
+        }
+        self.boundary_index += 1;
+
+        let prompt_text = prompt.text_content();
+        self.seen_last_user_messages
+            .lock()
+            .expect("seen_last_user_messages lock poisoned")
+            .push(prompt_text.clone());
+        self.session.append_external_user_content(prompt);
+        self.session.append_external_assistant_blocks(
+            vec![AssistantBlock::Text {
+                text: "ok".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        );
+
+        Ok(successful_run_result(&self.session, "ok"))
     }
 
-    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
-        self.agent.pending_skill_references = refs;
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        // No-op for the compaction-focused test agent.
     }
 
     fn set_flow_tool_overlay(
         &mut self,
-        overlay: Option<TurnToolOverlay>,
+        _overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.agent
-            .set_flow_tool_overlay(overlay)
-            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+        Ok(())
     }
 
     fn cancel(&mut self) {
-        self.agent.cancel();
+        self.cancel_after_boundary_requested
+            .store(true, Ordering::Release);
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
-        Some(self.agent.cancel_after_boundary_handle())
+        Some(Arc::clone(&self.cancel_after_boundary_requested))
     }
 
     fn hot_swap_llm_identity(
@@ -590,38 +649,33 @@ impl SessionAgent for CompactionSessionAgent {
     }
 
     fn session_id(&self) -> SessionId {
-        self.agent.session().id().clone()
+        self.session.id().clone()
     }
 
     fn snapshot(&self) -> SessionSnapshot {
-        let session = self.agent.session();
-        SessionSnapshot {
-            created_at: session.created_at(),
-            updated_at: session.updated_at(),
-            message_count: session.messages().len(),
-            total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
-            last_assistant_text: session.last_assistant_text(),
-        }
+        session_snapshot(&self.session)
     }
 
     fn session_clone(&self) -> meerkat_core::Session {
-        self.agent.session_with_system_context_state()
+        session_clone_with_system_context(&self.session, &self.system_context_state)
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        self.agent
-            .session_mut()
-            .append_system_context_blocks(appends);
+        self.session.append_system_context_blocks(appends);
+        sync_session_context_state(&self.session, &self.system_context_state);
     }
 
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        self.agent.system_context_state()
+        Arc::clone(&self.system_context_state)
+    }
+
+    fn sync_system_context_state(&mut self) {
+        sync_session_context_state(&self.session, &self.system_context_state);
     }
 }
 
@@ -630,55 +684,6 @@ struct RealAgentBuilder {
     provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     llm_delay_ms: Option<u64>,
     hook_engine: Option<Arc<dyn HookEngine>>,
-}
-
-struct CompactionTrackingLlmClient {
-    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl AgentLlmClient for CompactionTrackingLlmClient {
-    async fn stream_response(
-        &self,
-        messages: &[meerkat_core::types::Message],
-        _tools: &[Arc<ToolDef>],
-        _max_tokens: u32,
-        _temperature: Option<f32>,
-        _provider_params: Option<&ProviderParamsOverride>,
-    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
-        let last_user = messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                meerkat_core::types::Message::User(user) => Some(user.text_content()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        self.seen_last_user_messages
-            .lock()
-            .expect("seen_last_user_messages lock poisoned")
-            .push(last_user.clone());
-
-        let text = if last_user == "COMPACT NOW" {
-            "summary".to_string()
-        } else {
-            "ok".to_string()
-        };
-
-        Ok(LlmStreamResult::new(
-            vec![AssistantBlock::Text { text, meta: None }],
-            StopReason::EndTurn,
-            Usage::default(),
-        ))
-    }
-
-    fn provider(&self) -> &'static str {
-        "compaction-mock"
-    }
-
-    fn model(&self) -> &'static str {
-        "mock-model"
-    }
 }
 
 struct TrackingCompactor {
@@ -747,23 +752,14 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<CompactionSessionAgent, SessionError> {
-        let mut builder = agent_builder_with_ephemeral_turn_state()
-            .model(req.model.clone())
-            .compactor(self.compactor.clone());
-        if let Some(max_tokens) = req.max_tokens {
-            builder = builder.max_tokens_per_turn(max_tokens);
-        }
-        if let Some(system_prompt) = &req.system_prompt {
-            builder = builder.system_prompt(system_prompt.clone());
-        }
-
-        let client = Arc::new(CompactionTrackingLlmClient {
+        Ok(CompactionSessionAgent {
+            session: session_for_request(req),
             seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
-        });
-        let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
-        let store = Arc::new(NoopSessionStore);
-        let agent = builder.build_standalone(client, tools, store).await;
-        Ok(CompactionSessionAgent { agent })
+            compactor: Arc::clone(&self.compactor),
+            boundary_index: 0,
+            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
+        })
     }
 }
 
@@ -776,27 +772,16 @@ impl SessionAgentBuilder for RealAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RealSessionAgent, SessionError> {
-        let mut builder = agent_builder_with_ephemeral_turn_state().model(req.model.clone());
-        if let Some(max_tokens) = req.max_tokens {
-            builder = builder.max_tokens_per_turn(max_tokens);
-        }
-        if let Some(system_prompt) = &req.system_prompt {
-            builder = builder.system_prompt(system_prompt.clone());
-        }
-        if let Some(hook_engine) = &self.hook_engine {
-            builder = builder.with_hook_engine(Arc::clone(hook_engine));
-        }
-
-        let client = Arc::new(RecordingLlmClient {
+        Ok(RealSessionAgent {
+            session: session_for_request(req),
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
             provider_visible_system_prompts: Arc::clone(&self.provider_visible_system_prompts),
             delay_ms: self.llm_delay_ms,
-        });
-        let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
-        let store = Arc::new(NoopSessionStore);
-        let agent = builder.build_standalone(client, tools, store).await;
-
-        Ok(RealSessionAgent { agent })
+            hook_engine: self.hook_engine.as_ref().map(Arc::clone),
+            flow_tool_overlay: None,
+            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
+        })
     }
 }
 

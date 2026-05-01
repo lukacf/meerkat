@@ -42,16 +42,16 @@ fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactor
 
     let guard_type = agent_factory_build_authority_guard_type();
     let source_type = agent_factory_build_authority_source_type();
-    let witness_type = meerkat_agent_build_authority::AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE();
+    let witness_type = source_type;
     let authority = AuthorityRepr {
         guard_type,
         source_type,
         witness_type,
     };
 
-    // SAFETY: the facade stamps private marker TypeIds plus the
-    // authority-crate witness. The concrete authority representation is
-    // intentionally opaque to downstream dependents.
+    // SAFETY: the facade stamps private marker TypeIds plus a source-coupled
+    // witness. The concrete authority representation is intentionally opaque
+    // to downstream dependents.
     unsafe {
         std::mem::transmute::<
             AuthorityRepr,

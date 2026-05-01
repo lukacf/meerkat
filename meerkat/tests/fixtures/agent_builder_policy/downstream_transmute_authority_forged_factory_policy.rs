@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::any::TypeId;
 use std::sync::Arc;
 
 use meerkat_core::{
@@ -10,18 +10,30 @@ fn fabricated<T>() -> T {
     panic!("compile-only fixture should never run")
 }
 
-fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-    // SAFETY: this fixture reproduces the reviewed bypass: the public
-    // authority type is a transparent wrapper over this fixed non-zero seal.
-    let seal = unsafe { NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
+#[derive(Clone, Copy)]
+struct AgentFactoryBuildAuthorityRepr {
+    guard_type: TypeId,
+    source_type: TypeId,
+    witness_type: TypeId,
+}
 
-    // SAFETY: the current authority representation is public and transparent
-    // over `NonZeroUsize`, so downstream unsafe code can fabricate it.
+struct ForgedAuthorityGuard;
+struct ForgedAuthoritySource;
+
+fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    let authority = AgentFactoryBuildAuthorityRepr {
+        guard_type: TypeId::of::<ForgedAuthorityGuard>(),
+        source_type: TypeId::of::<ForgedAuthoritySource>(),
+        witness_type: meerkat_agent_build_authority::AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE(),
+    };
+
+    // SAFETY: this fixture mirrors the current three-TypeId authority layout
+    // and uses the public witness oracle that the finalizer currently accepts.
     unsafe {
-        std::mem::transmute::<NonZeroUsize, meerkat_agent_build_authority::AgentFactoryBuildAuthority>(
-            seal,
-        )
+        std::mem::transmute::<
+            AgentFactoryBuildAuthorityRepr,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+        >(authority)
     }
 }
 

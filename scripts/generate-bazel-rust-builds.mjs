@@ -162,7 +162,6 @@ function publicCoreCrateFeatures(key, pkg) {
 function coreAgentFactoryBuildFeatures(key, pkg) {
   const features = new Set(crateFeaturesFor(key, pkg));
   features.delete("internal-agent-factory-build");
-  features.delete("standalone-agent-builder");
   return [...features].sort();
 }
 
@@ -483,6 +482,9 @@ function testTags(pkg, target) {
   }
   if (target["required-features"]?.length) tags.push("required-feature");
   if (!tags.length) tags.push("fast");
+  if (packageKey(pkg) === "meerkat" && target.name === "agent_builder_policy_canary") {
+    tags.push("unit");
+  }
   return [...new Set(tags)].sort();
 }
 
@@ -695,11 +697,21 @@ for (const pkg of localPackages.values()) {
       : localDeps(pkg, false);
     const procMacroDeps = localDeps(pkg, true, isTest);
     const isCorePublicLibrary = key === "meerkat-core" && rule === "rust_library";
+    const targetSourceText = isTest ? readFileSync(target.src_path, "utf8") : "";
     let targetDeps = deps;
     if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
       targetDeps = deps
         .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule")
         .concat("//meerkat-schedule:meerkat_schedule_machine_schema_exports")
+        .sort();
+    }
+    if (isTest && targetSourceText.includes(".build_standalone(")) {
+      targetDeps = targetDeps
+        .map((dep) =>
+          dep === "//meerkat-core:meerkat_core"
+            ? "//meerkat-core:meerkat_core_agent_factory_build"
+            : dep
+        )
         .sort();
     }
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
@@ -718,7 +730,6 @@ for (const pkg of localPackages.values()) {
       ? `aliases(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`
       : `aliases(package_name = ${q(key)})`;
     const extraData = isTest ? workspaceDataLabels(target) : [];
-    const targetSourceText = isTest ? readFileSync(target.src_path, "utf8") : "";
     const usesTrybuild = targetSourceText.includes("trybuild::");
     const scansWorkspaceRustSources = targetSourceText.includes("walk_rust_sources(&root)");
     const needsLiveWorkspaceRunfiles = targetSourceText.includes("LIVE_WORKSPACE_RUNFILES");

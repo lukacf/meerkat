@@ -106,6 +106,14 @@ where
     Ok(builder.build_inner(client, tools, store).await)
 }
 
+#[cfg(all(not(test), feature = "standalone-agent-builder"))]
+mod standalone_build_authority {
+    #[derive(Debug, Clone, Copy)]
+    pub struct StandaloneAgentBuildAuthority {
+        _private: (),
+    }
+}
+
 impl AgentBuilder {
     /// Create a new agent builder with default config
     pub fn new() -> Self {
@@ -260,9 +268,25 @@ impl AgentBuilder {
     /// should route through `AgentFactory::build_agent`. The method is not part
     /// of the default production API; embedding users must opt into the
     /// `standalone-agent-builder` feature explicitly.
-    #[cfg(any(test, feature = "standalone-agent-builder"))]
+    #[cfg(test)]
     pub async fn build_standalone<C, T, S>(
         self,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Agent<C, T, S>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        self.build_inner(client, tools, store).await
+    }
+
+    #[cfg(all(not(test), feature = "standalone-agent-builder"))]
+    pub async fn build_standalone<C, T, S>(
+        self,
+        _authority: standalone_build_authority::StandaloneAgentBuildAuthority,
         client: Arc<C>,
         tools: Arc<T>,
         store: Arc<S>,

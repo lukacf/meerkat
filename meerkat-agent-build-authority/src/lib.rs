@@ -2,8 +2,8 @@
 //!
 //! This crate exists so `meerkat-core` can require a concrete capability type
 //! without re-exporting a minting API from `meerkat_core::agent`. The facade
-//! factory owns private source markers and stamps the authority-crate-owned
-//! witness; core accepts only authority values carrying that witness.
+//! factory owns private source markers and stamps a source-coupled witness;
+//! core accepts only authority values carrying that witness.
 
 use std::any::TypeId;
 
@@ -19,15 +19,6 @@ pub struct AgentFactoryBuildAuthority {
     witness_type: TypeId,
 }
 
-/// Facade bridge hook for stamping the authority-crate-owned witness TypeId.
-///
-/// This is intentionally a function pointer constant rather than a validator:
-/// downstream crates can no longer satisfy authority validation by defining an
-/// overrideable linker symbol.
-#[doc(hidden)]
-pub const AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE: fn() -> TypeId =
-    private::canonical_witness_type;
-
 impl AgentFactoryBuildAuthority {
     /// Validate that this value was minted for the linked facade factory marker
     /// types.
@@ -39,16 +30,10 @@ impl AgentFactoryBuildAuthority {
 
 mod private {
     use super::AgentFactoryBuildAuthority;
-    use std::any::TypeId;
-
-    struct CanonicalAuthorityWitness;
-
-    pub(super) fn canonical_witness_type() -> TypeId {
-        TypeId::of::<CanonicalAuthorityWitness>()
-    }
 
     pub(super) fn is_canonical_factory_authority(authority: &AgentFactoryBuildAuthority) -> bool {
-        authority.witness_type == canonical_witness_type()
+        authority.guard_type != authority.source_type
+            && authority.witness_type == authority.source_type
     }
 }
 
@@ -61,13 +46,11 @@ mod tests {
     struct TestFactoryAuthoritySource;
     struct ForgedAuthorityGuard;
     struct ForgedAuthoritySource;
-    struct ForgedAuthorityWitness;
-
     fn authority_from_source<G: 'static, T: 'static>() -> AgentFactoryBuildAuthority {
         AgentFactoryBuildAuthority {
             guard_type: TypeId::of::<G>(),
             source_type: TypeId::of::<T>(),
-            witness_type: super::AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE(),
+            witness_type: TypeId::of::<T>(),
         }
     }
 
@@ -102,11 +85,11 @@ mod tests {
     }
 
     #[test]
-    fn non_registered_factory_witness_is_rejected() {
+    fn mismatched_factory_witness_is_rejected() {
         let authority = authority_from_parts::<
             TestFactoryAuthorityGuard,
             TestFactoryAuthoritySource,
-            ForgedAuthorityWitness,
+            ForgedAuthoritySource,
         >();
 
         assert!(!authority.is_canonical_factory_authority());

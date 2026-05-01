@@ -4592,7 +4592,7 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
             .build
             .as_ref()
             .and_then(|build| build.resume_session.clone())
-            .unwrap_or_else(Session::new);
+            .unwrap_or_default();
         let session =
             factory_policy_session(session, req.model.clone(), req.max_tokens.unwrap_or(1024));
         Ok(OverlayProbeSessionAgent {

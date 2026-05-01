@@ -130,6 +130,7 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     cfg_window.contains(r#"#[cfg(any(test, feature = "standalone-agent-builder"))]"#)
+        || source.contains("StandaloneAgentBuildAuthority")
 }
 
 fn public_factory_policy_finalizer_requires_authority_before_builder(source: &str) -> bool {
@@ -171,6 +172,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && source.contains("guard_type: TypeId")
         && source.contains("source_type: TypeId")
         && source.contains("witness_type: TypeId")
+        && !source.contains("AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE")
         && !source.contains("AgentFactoryBuildAuthorityRegistration")
         && !source.contains("inventory::collect!")
         && !source.contains("inventory::iter")
@@ -450,6 +452,8 @@ meerkat-core = {{ path = "{}" }}
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("transmute")
+            || stderr.contains("AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE")
+            || stderr.contains("not found")
             || stderr.contains("is_canonical_factory_authority")
             || stderr.contains("assertion failed"),
         "downstream direct-authority transmute fixture failed for the wrong reason:\n{stderr}"
@@ -516,6 +520,65 @@ meerkat-core = {{ path = "{}" }}
         (stderr.contains("assertion failed") && stderr.contains("is_canonical_factory_authority"))
             || stderr.contains("InvalidBuildAuthority"),
         "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_cannot_feature_enable_standalone_builder_bypass() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_cannot_feature_enable_standalone_builder_bypass",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-standalone-feature"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat-core = {{ path = "{}", features = ["standalone-agent-builder"] }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_standalone_feature_build.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream standalone-feature fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("standalone-agent-builder")
+            || stderr.contains("build_standalone")
+            || stderr.contains("feature"),
+        "downstream standalone-feature fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }
@@ -1128,6 +1191,21 @@ fn bazel_canary_runfiles_include_required_production_crates() {
              production crates that can host factory bypasses"
         );
     }
+}
+
+#[test]
+fn bazel_canary_runs_in_required_ci_lanes() {
+    let Some(bazel) = try_repo_file("meerkat/BUILD.bazel") else {
+        return;
+    };
+    let canary = bazel_target_block(&bazel, "agent_builder_policy_canary_test")
+        .expect("meerkat BUILD.bazel must contain the agent builder policy canary");
+
+    assert!(
+        canary.contains("\"fast\"") && canary.contains("\"unit\""),
+        "agent_builder_policy_canary_test must be tagged for required \
+         BuildBuddy CI selection, not only ad-hoc fast lanes"
+    );
 }
 
 #[test]

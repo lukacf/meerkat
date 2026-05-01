@@ -565,7 +565,7 @@ Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime o
 - `CommsInputBridge`: `InboxInteraction` → `PeerInput` conversion.
 - `SessionServiceRuntimeExt` + `RuntimeSessionAdapter`: per-session driver registry.
 - `MobRuntimeAdapter`: flow step delivery, member registration.
-- Core lifecycle primitives in `meerkat-core/src/lifecycle/`: `RunPrimitive`, `RunEvent`, `RunBoundaryReceipt`, `RunControlCommand`, `CoreExecutor` trait, `RunId`/`InputId` newtypes.
+- Core lifecycle primitives in `meerkat-core/src/lifecycle/`: `RunPrimitive`, `RunEvent`, `RunBoundaryReceipt`, split executor boundary/interrupt handles, `CoreExecutor` trait, `RunId`/`InputId` newtypes.
 - 222+ tests across the crate.
 
 #### JSON-RPC Parity — 9 Wire-Feasible Gaps Closed (#138)

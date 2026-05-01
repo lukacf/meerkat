@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 # Root package marker for Bazel module extension labels.
 
 filegroup(
@@ -126,6 +128,16 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+sh_test(
+    name = "audit_effect_authority_test",
+    srcs = ["scripts/audit-effect-authority.sh"],
+    data = [":workspace_runfiles"],
+    size = "small",
+    tags = [
+        "fast",
+    ],
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
@@ -146,6 +158,7 @@ test_suite(
         "//meerkat-client:meerkat_client_unit_test",
         "//meerkat-client:rct_contracts_test",
         "//meerkat-comms:inbox_admission_toctou_test",
+        "//meerkat-comms:inproc_canonical_peer_routing_test",
         "//meerkat-comms:meerkat_comms_unit_test",
         "//meerkat-comms:router_ambiguous_name_typed_error_test",
         "//meerkat-comms:trust_duplicate_name_ok_duplicate_id_rejected_test",

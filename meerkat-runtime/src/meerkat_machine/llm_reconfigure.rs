@@ -361,21 +361,23 @@ impl MeerkatMachine {
         .await
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
-        // 1b. Drive any in-flight turn into DrainingBoundary via the control
+        // 1b. Drive any in-flight turn into DrainingBoundary via the effect
         // plane. Do this eagerly, before host hydration, so the executor's
-        // cancel-after-boundary control command is observed even when
+        // cancel-after-boundary effect is observed even when
         // hydration is fast relative to run completion. cancel_after_boundary
-        // is a no-op when the runtime loop has no control channel (Idle /
-        // disattached), so we call it unconditionally when a control channel
+        // is a no-op when the runtime loop has no effect channel (Idle /
+        // disattached), so we call it unconditionally when an effect channel
         // is live; its send is idempotent.
         {
             let sessions = self.sessions.read().await;
-            let has_control = sessions
+            let has_effect_channel = sessions
                 .get(&session_id)
-                .and_then(super::RuntimeSessionEntry::control_sender)
+                .and_then(super::RuntimeSessionEntry::effect_sender)
                 .is_some();
             drop(sessions);
-            if has_control && let Err(error) = self.cancel_after_boundary_inner(&session_id).await {
+            if has_effect_channel
+                && let Err(error) = self.cancel_after_boundary_inner(&session_id).await
+            {
                 let _ = self
                     .stage_session_dsl_input(
                         &session_id,

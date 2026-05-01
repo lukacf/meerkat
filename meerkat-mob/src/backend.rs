@@ -45,14 +45,10 @@ pub enum RuntimeBinding {
         bootstrap_token: Option<BridgeBootstrapToken>,
         /// Ed25519 signing pubkey (32 bytes) of the external process.
         ///
-        /// When present, the supervisor registers the external peer in its
-        /// comms trust store with this pubkey so envelope signature
-        /// verification succeeds on inbound replies. When absent (legacy
-        /// call sites that pre-date the pubkey plumbing), the supervisor
-        /// installs a zero-pubkey descriptor — inproc transports tolerate
-        /// this because signatures are not verified on the loopback path,
-        /// but real-comms round-trips with signed envelopes will be
-        /// rejected at admission with `UntrustedSender`.
+        /// Required for peer-only trust registration. Legacy callers may
+        /// deserialize with this field absent, but live wiring and bridge
+        /// control paths fail closed instead of installing a zero-pubkey
+        /// trust descriptor.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pubkey: Option<[u8; 32]>,
     },

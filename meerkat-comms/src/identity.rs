@@ -91,6 +91,11 @@ impl PubKey {
         Self(bytes)
     }
 
+    /// True when this key is the all-zero sentinel and not real key material.
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+
     /// Get the raw bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

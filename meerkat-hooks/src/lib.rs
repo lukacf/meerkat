@@ -135,15 +135,27 @@ impl LocalHookPatchDelivery {
         }
 
         let mut guard = self.queue.lock().await;
-        guard.extend(patches.into_iter().map(|envelope| DeliveredHookPatch {
-            target: target.clone(),
-            envelope,
-        }));
+        let mut patches = patches;
+        guard.reserve(patches.len());
+        let Some(last) = patches.pop() else {
+            return;
+        };
+        for envelope in patches {
+            guard.push(DeliveredHookPatch {
+                target: target.clone(),
+                envelope,
+            });
+        }
+        guard.push(DeliveredHookPatch {
+            target,
+            envelope: last,
+        });
     }
 
     async fn drain(&self, target: &HookPatchDeliveryTarget) -> Vec<HookPatchEnvelope> {
         let mut guard = self.queue.lock().await;
-        let mut remaining = Vec::new();
+        let queued = guard.len();
+        let mut remaining = Vec::with_capacity(queued);
         let mut drained = Vec::new();
         for published in guard.drain(..) {
             if &published.target == target {
@@ -238,8 +250,8 @@ impl DefaultHookEngine {
     where
         R: AsyncRead + Unpin,
     {
-        let mut out = Vec::new();
-        let mut chunk = vec![0u8; 8 * 1024];
+        let mut out = Vec::with_capacity(byte_limit.min(8 * 1024));
+        let mut chunk = [0u8; 8 * 1024];
 
         loop {
             let read = stream
@@ -276,10 +288,17 @@ impl DefaultHookEngine {
                 return Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()));
             }
 
-            let mut entries = self.base_entries.as_ref().clone();
-            if !overrides.disable.is_empty() {
+            let mut entries = Vec::with_capacity(self.base_entries.len() + overrides.entries.len());
+            if overrides.disable.is_empty() {
+                entries.extend(self.base_entries.iter().cloned());
+            } else {
                 let disabled: HashSet<HookId> = overrides.disable.iter().cloned().collect();
-                entries.retain(|entry| !disabled.contains(&entry.id));
+                entries.extend(
+                    self.base_entries
+                        .iter()
+                        .filter(|entry| !disabled.contains(&entry.id))
+                        .cloned(),
+                );
             }
             entries.extend(overrides.entries.clone());
 
@@ -747,25 +766,24 @@ impl HookEngine for DefaultHookEngine {
         invocation: HookInvocation,
         overrides: Option<&HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError> {
-        let entries = self
-            .effective_entries(overrides)?
+        let mut foreground = Vec::new();
+        let mut background = Vec::new();
+        let entries = self.effective_entries(overrides)?;
+        for (registration_index, entry) in entries
             .iter()
             .filter(|entry| entry.enabled && entry.point == invocation.point)
             .cloned()
-            .collect::<Vec<_>>();
-
-        if entries.is_empty() {
-            return Ok(HookExecutionReport::empty());
-        }
-
-        let mut foreground = Vec::new();
-        let mut background = Vec::new();
-        for (registration_index, entry) in entries.into_iter().enumerate() {
+            .enumerate()
+        {
             if entry.mode == HookExecutionMode::Background {
                 background.push((registration_index, entry));
             } else {
                 foreground.push((registration_index, entry));
             }
+        }
+
+        if foreground.is_empty() && background.is_empty() {
+            return Ok(HookExecutionReport::empty());
         }
 
         foreground.sort_by(|(a_idx, a_entry), (b_idx, b_entry)| {

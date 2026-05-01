@@ -1239,7 +1239,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             if let Err(error) = state
                                                                 .runtime
                                                                 .runtime_adapter()
-                                                                .interrupt_current_run(&session_id)
+                                                                .hard_cancel_current_run(
+                                                                    &session_id,
+                                                                    "realtime channel interrupt",
+                                                                )
                                                                 .await
                                                             {
                                                                 let _ = send_server_frame(
@@ -2312,37 +2315,31 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         )
                                                         .await;
                                                         break;
-                                                    } else {
-                                                        let next_attempt = channel_status
-                                                            .attempt_count
-                                                            .saturating_add(1);
-                                                        let schedule = reconnect_retry
-                                                            .retry_schedule_for_attempt(
-                                                                next_attempt,
-                                                                now_utc,
-                                                                None,
-                                                            );
-                                                        schedule_reconnect_retry_in_dsl(
-                                                            &state.runtime,
-                                                            binding.as_ref(),
-                                                            &schedule,
+                                                    }
+                                                    let next_attempt =
+                                                        channel_status.attempt_count.saturating_add(1);
+                                                    let schedule = reconnect_retry.retry_schedule_for_attempt(
+                                                        next_attempt,
+                                                        now_utc,
+                                                        None,
+                                                    );
+                                                    schedule_reconnect_retry_in_dsl(
+                                                        &state.runtime,
+                                                        binding.as_ref(),
+                                                        &schedule,
+                                                    )
+                                                    .await;
+                                                    if let Ok(status) =
+                                                        current_channel_status(&state.runtime, binding.as_ref()).await
+                                                    {
+                                                        let _ = emit_status_update(
+                                                            &mut socket,
+                                                            &mut last_visible_status,
+                                                            status,
+                                                            false,
+                                                            Some((state.host.as_ref(), &registered)),
                                                         )
                                                         .await;
-                                                        if let Ok(status) = current_channel_status(
-                                                            &state.runtime,
-                                                            binding.as_ref(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            let _ = emit_status_update(
-                                                                &mut socket,
-                                                                &mut last_visible_status,
-                                                                status,
-                                                                false,
-                                                                Some((state.host.as_ref(), &registered)),
-                                                            )
-                                                            .await;
-                                                        }
                                                     }
                                                 }
                                             }
@@ -4242,7 +4239,6 @@ mod tests {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{SessionId, StopReason};
@@ -4278,7 +4274,17 @@ mod tests {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

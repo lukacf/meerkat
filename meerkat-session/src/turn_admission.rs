@@ -168,12 +168,12 @@ impl TurnAdmissionSlot {
         }
     }
 
-    /// Flag an interrupt request. Only permitted while a turn is actively
-    /// running; returns `true` if the flag flipped from clear to set so the
-    /// caller can wake any waiter.
+    /// Flag an interrupt request. Permitted once a turn slot has been admitted;
+    /// returns `true` if the flag flipped from clear to set so the caller can
+    /// wake any waiter.
     pub(crate) fn request_interrupt(&mut self) -> Result<bool, TurnAdmissionError> {
         match self.phase {
-            TurnAdmissionPhase::Running => {
+            TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running => {
                 let already_pending = self.interrupt_pending;
                 self.interrupt_pending = true;
                 Ok(!already_pending)
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_only_allowed_while_running() {
+    fn interrupt_allowed_after_turn_admission() {
         let mut slot = TurnAdmissionSlot::new();
         let err = slot
             .request_interrupt()
@@ -233,11 +233,17 @@ mod tests {
         assert_eq!(err.from, TurnAdmissionPhase::Idle);
 
         slot.claim().unwrap();
+        let admitted_woke = slot
+            .request_interrupt()
+            .expect("admitted session should accept interrupt");
+        assert!(admitted_woke);
+        assert!(slot.interrupt_pending());
+
         slot.begin().unwrap();
         let woke = slot
             .request_interrupt()
-            .expect("running session should accept interrupt");
-        assert!(woke);
+            .expect("running session should retain interrupt");
+        assert!(!woke);
         assert_eq!(slot.phase(), TurnAdmissionPhase::Running);
         assert!(slot.interrupt_pending());
     }

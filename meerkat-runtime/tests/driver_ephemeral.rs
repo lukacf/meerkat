@@ -848,23 +848,25 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
 }
 
 #[tokio::test]
-async fn accept_peer_response_terminal_defers_context_projection_to_machine_batch() {
+async fn accept_peer_response_terminal_defers_context_projection_to_machine_batch()
+-> Result<(), String> {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = make_peer_terminal("done");
 
     let outcome = driver.accept_input(input).await.unwrap();
     let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = outcome else {
-        panic!("expected terminal peer response to be accepted");
+        return Err("expected terminal peer response to be accepted".to_string());
     };
 
     let projection = driver
         .admitted_primitive_projection(&input_id)
-        .expect("accepted input should have primitive projection");
+        .ok_or_else(|| "accepted input should have primitive projection".to_string())?;
     assert!(projection.append.is_none());
     assert!(
         projection.context_append.is_none(),
         "terminal peer response context must be projected by the machine-selected runtime batch"
     );
+    Ok(())
 }
 
 #[tokio::test]

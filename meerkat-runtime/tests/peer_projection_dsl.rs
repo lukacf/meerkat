@@ -46,6 +46,55 @@ fn new_authority() -> Arc<HandleDslAuthority> {
     dsl
 }
 
+#[test]
+fn handle_dsl_authority_rejects_raw_fieldless_runtime_internal_input_before_dsl_apply() {
+    let dsl = new_authority();
+
+    let err = dsl
+        .apply_input(
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+            "test::raw_interrupt_bypass",
+        )
+        .expect_err("raw runtime-internal input must not apply through HandleDslAuthority");
+
+    assert!(
+        err.reason
+            .contains("must use typed runtime-internal staging authority"),
+        "raw runtime-internal handle input must fail before DSL apply, got {err}"
+    );
+
+    let effects_err = dsl
+        .apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+            "test::raw_interrupt_bypass_effects",
+        )
+        .expect_err(
+            "raw runtime-internal input must not apply through HandleDslAuthority effects path",
+        );
+    assert!(
+        effects_err
+            .reason
+            .contains("must use typed runtime-internal staging authority"),
+        "raw runtime-internal handle effects input must fail before DSL apply, got {effects_err}"
+    );
+
+    let sample_err = dsl
+        .apply_input_with_effects_and_sample(
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+            "test::raw_interrupt_bypass_sample",
+            |_| (),
+        )
+        .expect_err(
+            "raw runtime-internal input must not apply through HandleDslAuthority sample path",
+        );
+    assert!(
+        sample_err
+            .reason
+            .contains("must use typed runtime-internal staging authority"),
+        "raw runtime-internal handle sample input must fail before DSL apply, got {sample_err}"
+    );
+}
+
 fn endpoint(name: &str, peer_id: &str, address: &str) -> mm_dsl::PeerEndpoint {
     mm_dsl::PeerEndpoint {
         name: name.into(),

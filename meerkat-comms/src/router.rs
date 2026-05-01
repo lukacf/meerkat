@@ -25,7 +25,7 @@ use crate::inproc::{InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
-use crate::trust::{TrustedPeer, TrustedPeers};
+use crate::trust::{TrustError, TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::PeerId;
 
@@ -101,9 +101,9 @@ pub struct Router {
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Canonical peer IDs supplied at descriptor registration time, keyed by
-    /// signing pubkey. This preserves explicit `PeerId`s for legacy
-    /// zero-pubkey descriptors where deriving from the pubkey would collapse
-    /// every entry onto the all-zero pubkey hash.
+    /// signing pubkey. This preserves explicit `PeerId`s for descriptor
+    /// registrations where the runtime owns a stable routing id in addition
+    /// to the peer's signing key.
     trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
     /// Directory-filter side-channel for private (control-plane) trust
     /// edges. Membership here is additive to `trusted_peers`: the peer
@@ -117,14 +117,21 @@ pub struct Router {
     inproc_namespace: Option<String>,
 }
 
+enum TrustedPeerLookup {
+    Resolved(TrustedPeer),
+    Ambiguous,
+    Missing,
+}
+
 impl Router {
     pub fn new(
         keypair: Keypair,
-        trusted_peers: TrustedPeers,
+        mut trusted_peers: TrustedPeers,
         config: CommsConfig,
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        trusted_peers.retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
@@ -144,6 +151,7 @@ impl Router {
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        trusted_peers.write().retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
@@ -211,50 +219,73 @@ impl Router {
         self.trusted_peers.read().has_peers()
     }
 
-    pub fn add_trusted_peer(&self, peer: TrustedPeer) {
+    pub fn add_trusted_peer(&self, peer: TrustedPeer) -> Result<(), TrustError> {
         let peer_id = peer_id_from_pubkey(&peer.pubkey);
-        self.add_trusted_peer_with_peer_id(peer_id, peer);
+        self.add_trusted_peer_with_peer_id(peer_id, peer)
     }
 
-    pub(crate) fn add_trusted_peer_with_peer_id(&self, peer_id: PeerId, peer: TrustedPeer) {
-        self.trusted_peer_ids.write().insert(peer.pubkey, peer_id);
-        self.trusted_peers.write().upsert(peer);
+    pub(crate) fn add_trusted_peer_with_peer_id(
+        &self,
+        peer_id: PeerId,
+        peer: TrustedPeer,
+    ) -> Result<(), TrustError> {
+        let pubkey = peer.pubkey;
+        self.trusted_peers.write().upsert(peer)?;
+        self.trusted_peer_ids.write().insert(pubkey, peer_id);
+        Ok(())
     }
 
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
         let peer_ids = self.trusted_peer_ids.read().clone();
-        let removed = {
+        let removed_pubkeys = {
             let mut trusted = self.trusted_peers.write();
-            let Some(index) = trusted.peers.iter().position(|peer| {
-                peer_ids
+            let mut removed_pubkeys = Vec::new();
+            trusted.peers.retain(|peer| {
+                let matches = peer_ids
                     .get(&peer.pubkey)
                     .copied()
                     .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id
-            }) else {
-                return false;
-            };
-            trusted.peers.remove(index)
+                    == *peer_id;
+                if matches {
+                    removed_pubkeys.push(peer.pubkey);
+                    false
+                } else {
+                    true
+                }
+            });
+            removed_pubkeys
         };
-        self.trusted_peer_ids.write().remove(&removed.pubkey);
+        if removed_pubkeys.is_empty() {
+            return false;
+        }
+        let mut trusted_peer_ids = self.trusted_peer_ids.write();
+        for pubkey in removed_pubkeys {
+            trusted_peer_ids.remove(&pubkey);
+        }
+        drop(trusted_peer_ids);
         self.private_peer_ids.write().remove(peer_id);
         true
     }
 
-    fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> Option<TrustedPeer> {
+    fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
         let peer_ids = self.trusted_peer_ids.read().clone();
-        self.trusted_peers
-            .read()
-            .peers
-            .iter()
-            .find(|peer| {
-                peer_ids
+        let trusted = self.trusted_peers.read();
+        let mut matches = trusted.peers.iter().filter(|peer| {
+            !peer.pubkey.is_zero()
+                && peer_ids
                     .get(&peer.pubkey)
                     .copied()
                     .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
                     == *peer_id
-            })
-            .cloned()
+        });
+        let Some(peer) = matches.next() else {
+            return TrustedPeerLookup::Missing;
+        };
+        if matches.next().is_some() {
+            TrustedPeerLookup::Ambiguous
+        } else {
+            TrustedPeerLookup::Resolved(peer.clone())
+        }
     }
 
     /// Get the trusted peers Arc.
@@ -344,28 +375,29 @@ impl Router {
         kind: MessageKind,
     ) -> Result<Uuid, SendError> {
         let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
-        let peer = self
-            .trusted_peer_by_peer_id(&dest)
-            .or_else(|| {
-                if self.require_peer_auth {
-                    None
-                } else {
-                    // Auth-disabled fallback: scan the inproc registry for an
-                    // entry whose derived PeerId matches. Display names remain
-                    // the inproc lookup key, but the routing match is PeerId.
-                    InprocRegistry::global()
-                        .peers_in_namespace(inproc_namespace)
-                        .into_iter()
-                        .find(|p| peer_id_from_pubkey(&p.pubkey) == dest)
-                        .map(|p| TrustedPeer {
-                            name: p.name.clone(),
-                            pubkey: p.pubkey,
-                            addr: format!("inproc://{}", p.name),
-                            meta: p.meta,
-                        })
-                }
-            })
-            .ok_or(SendError::PeerNotFound(dest))?;
+        let peer = match self.trusted_peer_by_peer_id(&dest) {
+            TrustedPeerLookup::Resolved(peer) => peer,
+            TrustedPeerLookup::Ambiguous => return Err(SendError::PeerNotFound(dest)),
+            TrustedPeerLookup::Missing if self.require_peer_auth => {
+                return Err(SendError::PeerNotFound(dest));
+            }
+            TrustedPeerLookup::Missing => {
+                // Auth-disabled fallback: scan the inproc registry for an
+                // entry whose derived PeerId matches. Display names remain
+                // the inproc lookup key, but the routing match is PeerId.
+                InprocRegistry::global()
+                    .peers_in_namespace(inproc_namespace)
+                    .into_iter()
+                    .find(|p| !p.pubkey.is_zero() && peer_id_from_pubkey(&p.pubkey) == dest)
+                    .map(|p| TrustedPeer {
+                        name: p.name.clone(),
+                        pubkey: p.pubkey,
+                        addr: format!("inproc://{}", p.name),
+                        meta: p.meta,
+                    })
+                    .ok_or(SendError::PeerNotFound(dest))?
+            }
+        };
         let addr = PeerAddr::parse(&peer.addr)?;
         let mut envelope = Envelope {
             id: envelope_id,
@@ -401,31 +433,18 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    // Inproc delivery is constrained by the resolved peer's
-                    // pubkey: the trust store already pinned it to `dest`,
-                    // so the registry lookup must agree or we refuse the
-                    // send rather than fall through to a name collision.
-                    match registry.send_with_signature_in_namespace_with_id(
-                        inproc_namespace,
-                        &self.keypair,
-                        &peer.name,
-                        envelope.id,
-                        envelope.kind.clone(),
-                        self.require_peer_auth,
-                    ) {
-                        Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_cross_namespace_with_id(
-                                &self.keypair,
-                                &peer.name,
-                                &peer.pubkey,
-                                envelope.id,
-                                envelope.kind,
-                                self.require_peer_auth,
-                            )
-                            .map_err(|err| map_inproc_send_error(err, dest)),
-                        Err(other) => Err(map_inproc_send_error(other, dest)),
-                    }
+                    // Router sends have a typed peer identity, but not a
+                    // typed target namespace. Require the canonical pubkey to
+                    // have exactly one live inproc owner before delivery.
+                    registry
+                        .send_to_pubkey_any_namespace_with_id(
+                            &self.keypair,
+                            &peer.pubkey,
+                            envelope.id,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }
         }
@@ -438,25 +457,15 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    match registry.send_with_signature_in_namespace(
-                        inproc_namespace,
-                        &self.keypair,
-                        &peer.name,
-                        envelope.kind.clone(),
-                        self.require_peer_auth,
-                    ) {
-                        Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_cross_namespace(
-                                &self.keypair,
-                                &peer.name,
-                                &peer.pubkey,
-                                envelope.kind,
-                                self.require_peer_auth,
-                            )
-                            .map_err(|err| map_inproc_send_error(err, dest)),
-                        Err(other) => Err(map_inproc_send_error(other, dest)),
-                    }
+                    registry
+                        .send_to_pubkey_any_namespace_with_id(
+                            &self.keypair,
+                            &peer.pubkey,
+                            envelope.id,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }
         }

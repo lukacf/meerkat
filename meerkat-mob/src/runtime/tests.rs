@@ -48,8 +48,14 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
-use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
-use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_mob_machine as schema_mob_machine,
+    mob_machine::{
+        MobMachineInput as SchemaMobMachineInput,
+        MobMachineInputVariant as SchemaMobMachineInputVariant,
+    },
+};
+use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind, identity::InputVariantId};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde::Serialize;
@@ -97,6 +103,24 @@ fn install_ephemeral_peer_request_response_authority(
     );
 }
 
+fn test_trusted_peer_descriptor(name: &str, address: &str) -> TrustedPeerDescriptor {
+    let mut pubkey = [0u8; 32];
+    for (index, byte) in name.bytes().enumerate() {
+        let slot = index % pubkey.len();
+        pubkey[slot] = pubkey[slot].wrapping_add(byte).wrapping_add(index as u8);
+    }
+    if pubkey == [0u8; 32] {
+        pubkey[0] = 1;
+    }
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        name,
+        PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+        pubkey,
+        address,
+    )
+    .expect("valid non-zero test trusted peer descriptor")
+}
+
 async fn install_machine_peer_request_response_authority(
     adapter: &meerkat_runtime::MeerkatMachine,
     runtime: &Arc<meerkat_comms::CommsRuntime>,
@@ -137,6 +161,7 @@ struct MockCommsBehavior {
 struct MockCommsRuntime {
     default_peer_id: PeerId,
     default_public_key: String,
+    default_public_key_bytes: [u8; 32],
     behavior: std::sync::RwLock<MockCommsBehavior>,
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
@@ -154,10 +179,14 @@ impl MockCommsRuntime {
                 .wrapping_add(byte)
                 .rotate_left((index % 8) as u32);
         }
+        if key_bytes == [0u8; 32] {
+            key_bytes[0] = 1;
+        }
         let public_key = meerkat_comms::PubKey::new(key_bytes);
         Self {
             default_peer_id: public_key.to_peer_id(),
             default_public_key: public_key.to_pubkey_string(),
+            default_public_key_bytes: key_bytes,
             behavior: std::sync::RwLock::new(behavior),
             remove_failures_remaining: std::sync::Mutex::new(usize::from(
                 behavior.fail_remove_trust_once,
@@ -260,6 +289,18 @@ impl CoreCommsRuntime for MockCommsRuntime {
         }
     }
 
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        let behavior = self
+            .behavior
+            .read()
+            .expect("poisoned behavior lock in mock runtime");
+        if behavior.missing_public_key {
+            None
+        } else {
+            Some(self.default_public_key_bytes)
+        }
+    }
+
     async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
         if self
             .behavior
@@ -271,6 +312,8 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 "mock add_trusted_peer failure".to_string(),
             ));
         }
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+            .map_err(SendError::Validation)?;
         let mut peers = self.trusted_peers.write().await;
         peers.insert(peer.peer_id.to_string(), peer);
         Ok(())
@@ -493,6 +536,8 @@ struct MockSessionService {
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
+    cancel_after_boundary_supported: AtomicBool,
+    cancel_after_boundary_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
     create_session_delay_ms: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -546,6 +591,8 @@ impl MockSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
+            cancel_after_boundary_supported: AtomicBool::new(true),
+            cancel_after_boundary_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
             create_session_delay_ms: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -776,6 +823,15 @@ impl MockSessionService {
 
     fn interrupt_call_count(&self) -> u64 {
         self.interrupt_calls.load(Ordering::Relaxed)
+    }
+
+    fn cancel_after_boundary_call_count(&self) -> u64 {
+        self.cancel_after_boundary_calls.load(Ordering::Relaxed)
+    }
+
+    fn set_cancel_after_boundary_supported(&self, enabled: bool) {
+        self.cancel_after_boundary_supported
+            .store(enabled, Ordering::Relaxed);
     }
 
     fn inject_call_count(&self) -> u64 {
@@ -1214,6 +1270,26 @@ impl SessionService for MockSessionService {
         // poll loop in `stop_autonomous_member` doesn't spin to its 1s cap.
         self.active_sessions.write().await.remove(id);
         Ok(())
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.cancel_after_boundary_calls
+            .fetch_add(1, Ordering::Relaxed);
+        if !self.cancel_after_boundary_supported.load(Ordering::Relaxed) {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary".to_string(),
+            ));
+        }
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
+            return Ok(());
+        }
+        Err(SessionError::NotRunning { id: id.clone() })
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -2962,10 +3038,13 @@ struct LiveExternalPeerHarness {
     binding: crate::RuntimeBinding,
     runtime: Arc<meerkat_comms::CommsRuntime>,
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
+    interrupt_count: Arc<std::sync::atomic::AtomicUsize>,
     bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
+    hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
+    bind_peer_id_override: Arc<RwLock<Option<String>>>,
     fail_next_authorize: Arc<AtomicBool>,
     fail_next_bind: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
@@ -3006,12 +3085,20 @@ impl LiveExternalPeerHarness {
         self.bind_count.load(Ordering::Relaxed)
     }
 
+    fn interrupt_count(&self) -> usize {
+        self.interrupt_count.load(Ordering::Relaxed)
+    }
+
     async fn bind_protocol_versions(&self) -> Vec<super::bridge_protocol::BridgeProtocolVersion> {
         self.bind_protocol_versions.read().await.clone()
     }
 
     async fn delivered_input_ids(&self) -> Vec<String> {
         self.delivered_inputs.read().await.clone()
+    }
+
+    async fn hard_cancel_reasons(&self) -> Vec<String> {
+        self.hard_cancel_reasons.read().await.clone()
     }
 
     async fn received_intents(&self) -> Vec<String> {
@@ -3036,6 +3123,10 @@ impl LiveExternalPeerHarness {
 
     fn fail_next_bind(&self) {
         self.fail_next_bind.store(true, Ordering::Relaxed);
+    }
+
+    async fn override_next_bind_peer_id(&self, peer_id: String) {
+        *self.bind_peer_id_override.write().await = Some(peer_id);
     }
 }
 
@@ -3066,16 +3157,22 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let responder_bind_count = bind_count.clone();
+    let interrupt_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let responder_interrupt_count = interrupt_count.clone();
     let bind_protocol_versions = Arc::new(RwLock::new(Vec::new()));
     let responder_bind_protocol_versions = bind_protocol_versions.clone();
     let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
     let responder_delivered_inputs = delivered_inputs.clone();
+    let hard_cancel_reasons = Arc::new(RwLock::new(Vec::new()));
+    let responder_hard_cancel_reasons = hard_cancel_reasons.clone();
     let delivery_responses = Arc::new(RwLock::new(HashMap::new()));
     let responder_delivery_responses = delivery_responses.clone();
     let received_intents = Arc::new(RwLock::new(Vec::new()));
     let responder_received_intents = received_intents.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
+    let bind_peer_id_override: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    let responder_bind_peer_id_override = bind_peer_id_override.clone();
     let fail_next_authorize = Arc::new(AtomicBool::new(false));
     let responder_fail_next_authorize = fail_next_authorize.clone();
     let fail_next_bind = Arc::new(AtomicBool::new(false));
@@ -3109,8 +3206,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 candidate.interaction.id.0,
                             ))
                             .expect("record inbound peer request before response");
-                        let reply_name = candidate.interaction.from.clone();
-                        let to = test_trusted_peer_route(responder_runtime.as_ref(), &reply_name);
+                        let to = trust_candidate_sender_for_reply(
+                            responder_runtime.as_ref(),
+                            &candidate,
+                        )
+                        .await;
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
                         let mut remove_supervisors_after_response = Vec::new();
@@ -3209,13 +3309,23 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 }
                                                 serde_json::to_value(
                                                     super::bridge_protocol::BridgeBindResponse {
-                                                        peer_id: responder_runtime.public_key().to_peer_id().to_string(),
+                                                        peer_id: responder_bind_peer_id_override
+                                                            .write()
+                                                            .await
+                                                            .take()
+                                                            .unwrap_or_else(|| {
+                                                                responder_runtime
+                                                                    .public_key()
+                                                                    .to_peer_id()
+                                                                    .to_string()
+                                                            }),
                                                         address: format!("inproc://{peer_name}"),
                                                         capabilities:
                                                             super::bridge_protocol::BridgeCapabilities {
                                                                 deliver_member_input: true,
                                                                 observe_member: true,
                                                                 interrupt_member: true,
+                                                                hard_cancel_member: false,
                                                                 retire_member: true,
                                                                 destroy_member: true,
                                                                 wire_member: true,
@@ -3326,10 +3436,23 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     .expect("revoke ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
+                                    responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
                                     })
                                     .expect("interrupt ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::HardCancelMember(
+                                    payload,
+                                ) => {
+                                    responder_hard_cancel_reasons
+                                        .write()
+                                        .await
+                                        .push(payload.reason);
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("hard-cancel ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                                     payload,
@@ -3543,10 +3666,13 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         binding,
         runtime,
         bind_count,
+        interrupt_count,
         bind_protocol_versions,
         delivered_inputs,
+        hard_cancel_reasons,
         received_intents,
         supervisor_state,
+        bind_peer_id_override,
         fail_next_authorize,
         fail_next_bind,
         task,
@@ -3765,6 +3891,47 @@ fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> P
     panic!("trusted or inproc peer route not found for {name}; trusted={trusted:?}");
 }
 
+async fn trust_candidate_sender_for_reply(
+    comms: &meerkat_comms::CommsRuntime,
+    candidate: &meerkat_core::interaction::PeerInputCandidate,
+) -> PeerRoute {
+    let route = candidate
+        .ingress
+        .route
+        .clone()
+        .or_else(|| {
+            candidate.interaction.from_route.map(|peer_id| {
+                PeerRoute::with_display_name(
+                    peer_id,
+                    PeerName::new(candidate.interaction.from.clone())
+                        .expect("candidate sender display name should be valid"),
+                )
+            })
+        })
+        .expect("peer request candidate must carry a typed reply route");
+    let display_name = route
+        .display_name
+        .clone()
+        .or_else(|| candidate.ingress.display_name.clone())
+        .expect("inproc reply route must carry the sender display name");
+    let signing_pubkey = candidate
+        .ingress
+        .signing_pubkey
+        .expect("peer request candidate must carry the sender signing pubkey");
+    let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        display_name.as_str(),
+        route.peer_id.to_string(),
+        signing_pubkey,
+        format!("inproc://{}", display_name.as_str()),
+    )
+    .expect("typed ingress sender should convert to a reply trusted peer");
+    comms
+        .add_trusted_peer(descriptor)
+        .await
+        .expect("trust typed ingress sender for bridge reply");
+    route
+}
+
 fn with_unique_mob_id(mut definition: MobDefinition, label: &str) -> MobDefinition {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     definition.id = MobId::from(format!("test-mob-{label}-{suffix}"));
@@ -3928,6 +4095,10 @@ impl SessionService for PersistedListingSessionService {
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.interrupt(id).await
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -4105,6 +4276,10 @@ impl SessionService for InactiveReadSessionService {
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.interrupt(id).await
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -5611,6 +5786,48 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
         external.delivered_input_ids().await.len(),
         1,
         "rebound peer should still receive the requested input"
+    );
+}
+
+#[tokio::test]
+async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-bind-peer-id-mismatch",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let mismatched_peer_id = PeerId::from_ed25519_pubkey(&[77u8; 32]).to_string();
+    external
+        .override_next_bind_peer_id(mismatched_peer_id)
+        .await;
+
+    let err = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect_err("bind response peer id must derive from the stored pubkey");
+
+    assert!(
+        err.to_string().contains("pubkey-derived id"),
+        "unexpected error: {err}"
+    );
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberSpawned(spawned)
+                    if spawned.agent_identity.as_str() == "w-ext"
+            )
+        }),
+        "rejected bind response must not append a member spawn event"
     );
 }
 
@@ -9246,6 +9463,7 @@ async fn test_resume_treats_normalized_external_binding_overlay_as_projection_on
                     address: old_address.clone(),
                     bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9262,6 +9480,7 @@ async fn test_resume_treats_normalized_external_binding_overlay_as_projection_on
                     address: old_address.clone(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9399,6 +9618,7 @@ async fn test_resume_treats_failed_external_binding_overlay_as_projection_only()
                     address: "tcp://test.invalid/w-ext".to_string(),
                     bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9525,6 +9745,7 @@ async fn resume_with_stale_external_binding_overlay(
                     address: "tcp://test.invalid/w-ext".to_string(),
                     bootstrap_token: None,
                     session_id: Some(old_sid),
+                    pubkey: None,
                 })),
             ),
         })
@@ -9565,6 +9786,7 @@ async fn test_resume_ignores_stale_normalized_external_binding_overlay_for_membe
             address: "tcp://test.invalid/w-ext".to_string(),
             bootstrap_token: None,
             session_id: None,
+            pubkey: None,
         }),
     )
     .await;
@@ -9677,6 +9899,7 @@ async fn test_reconcile_spawns_member_despite_stale_overlay_only_record() {
                     address: "tcp://test.invalid/ghost".to_string(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9755,6 +9978,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     address: address.clone(),
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 })),
             ),
         })
@@ -9771,6 +9995,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     address,
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey: None,
                 }),
                 bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -9848,7 +10073,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         peer_id,
         address,
         bootstrap_token,
-        pubkey: _,
+        pubkey,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -9871,6 +10096,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                     address: address.clone(),
                     bootstrap_token: bootstrap_token.clone(),
                     session_id: None,
+                    pubkey,
                 })),
             ),
         })
@@ -9887,6 +10113,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                     address,
                     bootstrap_token: None,
                     session_id: None,
+                    pubkey,
                 }),
                 bootstrap_token: bootstrap_token.clone(),
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -10295,12 +10522,10 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .expect("spawn w-2");
     handle.stop().await.expect("stop");
 
-    let stale = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let stale = test_trusted_peer_descriptor(
         "remote-mob/worker/stale-peer",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/stale-peer",
-    )
-    .expect("valid stale peer");
+    );
     service
         .force_add_trust_from_spec(&sid_1, stale.clone())
         .await;
@@ -10343,12 +10568,10 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
     handle
         .wire(
             AgentIdentity::from("l-1"),
@@ -11453,9 +11676,12 @@ async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_publi
     );
 
     let alias_name = format!("{}/worker/right-alias", handle.mob_id());
-    let alias_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let right_pubkey = meerkat_comms::PubKey::from_pubkey_string(&right_public_key)
+        .expect("right transport public key should decode");
+    let alias_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
         alias_name.clone(),
-        right_peer_id,
+        right_peer_id.to_string(),
+        *right_pubkey.as_bytes(),
         format!("inproc://{alias_name}"),
     )
     .expect("valid alias peer spec");
@@ -11531,12 +11757,10 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -11600,12 +11824,10 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -11662,12 +11884,10 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
         .expect("session-backed")
         .clone();
 
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/machine-agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/machine-agent",
-    )
-    .expect("valid external peer");
+    );
     let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
         crate::machines::mob_machine::AgentIdentity::from("l-machine"),
         crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
@@ -11730,12 +11950,10 @@ async fn test_unwire_external_removes_trust_and_projection() {
         .bridge_session_id()
         .expect("session-backed")
         .clone();
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/agent-b",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/agent-b",
-    )
-    .expect("valid external peer");
+    );
 
     handle
         .wire(
@@ -11922,12 +12140,10 @@ async fn test_resume_seeds_mob_machine_topology_from_event_projection() {
         .wire(AgentIdentity::from("l-resume"), MeerkatId::from("w-resume"))
         .await
         .expect("wire local peers");
-    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+    let external = test_trusted_peer_descriptor(
         "remote-mob/worker/resume-agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://remote-mob/worker/resume-agent",
-    )
-    .expect("valid external peer");
+    );
     handle
         .wire(
             AgentIdentity::from("l-resume"),
@@ -14305,7 +14521,7 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
 }
 
 #[tokio::test]
-async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
+async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("cancel-target");
     let member_ref = handle
@@ -14322,6 +14538,7 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .bridge_session_id()
         .cloned()
         .expect("session-backed target");
+    let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
 
     handle
@@ -14329,10 +14546,14 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .await
         .expect("force cancel should succeed");
 
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "force-cancel must request cooperative boundary cancel"
+    );
     assert_eq!(
         service.interrupt_call_count(),
-        baseline_interrupts + 1,
-        "force-cancel must route through the runtime adapter interrupt path exactly once"
+        baseline_interrupts,
+        "force-cancel must not use hard session interrupt authority"
     );
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
@@ -14351,6 +14572,206 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
     assert!(
         service.read(&session_id).await.is_ok(),
         "force-cancel must leave the backing session reachable"
+    );
+}
+
+#[tokio::test]
+async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cancel() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("runtime-unsupported-boundary");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn runtime-backed target");
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("member exists");
+    service.set_cancel_after_boundary_supported(false);
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    let error = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await
+        .expect_err("unsupported runtime-backed boundary cancel must not report success");
+
+    assert!(
+        matches!(&error, MobError::Internal(message) if message.contains("cancel_after_boundary")),
+        "runtime-backed unsupported boundary cancel should surface through the adapter path, got {error:?}"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "runtime-backed cancel_all_work should attempt exactly one live boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "runtime-backed unsupported boundary cancel must not fall back to hard interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_interrupt() {
+    let service = Arc::new(MockSessionService::new());
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter boundary".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-boundary".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let wake = service
+        .keep_alive_notifiers
+        .read()
+        .await
+        .get(&session.session_id)
+        .cloned()
+        .expect("keep-alive session should install a cooperative wake notifier");
+    let notified = wake.notified();
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    provisioner
+        .interrupt_member(&member_ref)
+        .await
+        .expect("no-adapter member interrupt should request cooperative boundary cancel");
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("no-adapter cooperative boundary cancel should wake the waiting turn");
+
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "no-adapter member interrupt must request cooperative boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "no-adapter member interrupt must not use hard session interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_cancel() {
+    let service = Arc::new(MockSessionService::new());
+    service.set_cancel_after_boundary_supported(false);
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter unsupported boundary".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-unsupported-boundary".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    let error = provisioner
+        .interrupt_member(&member_ref)
+        .await
+        .expect_err("unsupported boundary cancel must not be reported as success");
+
+    assert!(
+        matches!(
+            error,
+            MobError::SessionError(SessionError::Unsupported(ref operation))
+                if operation == "cancel_after_boundary"
+        ),
+        "unsupported cooperative boundary cancel should surface as a session error, got {error:?}"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "no-adapter interrupt should attempt cooperative boundary cancel before failing"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "unsupported cooperative boundary cancel must not fall back to hard interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_explicit_hard_cancel_member_without_adapter_still_uses_hard_interrupt() {
+    let service = Arc::new(MockSessionService::new());
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter hard cancel".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-hard-cancel".to_string()),
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    provisioner
+        .hard_cancel_member(&member_ref, "explicit no-adapter force cancel")
+        .await
+        .expect("no-adapter hard_cancel_member should remain explicit hard cancel");
+
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts + 1,
+        "explicit no-adapter force cancel should use hard session interrupt"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "explicit force cancel must not be downgraded to boundary cancel"
     );
 }
 
@@ -16012,6 +16433,7 @@ fn test_top_level_mob_schema_does_not_duplicate_bridge_protocol_effects() {
         "BridgeDeliverMemberInput",
         "BridgeObserveMember",
         "BridgeInterruptMember",
+        "BridgeHardCancelMember",
         "BridgeRetireMember",
         "BridgeDestroyMember",
         "BridgeWireMember",
@@ -16071,13 +16493,13 @@ fn test_top_level_mob_schema_does_not_model_schema_only_rotation_transitions() {
         "top-level mob schema must not model schema-only AckRotation transitions"
     );
 
-    let manifest = crate::mob_machine::canonical_mob_machine_command_manifest();
+    let manifest = crate::mob_machine::MobMachineCommand::command_manifest();
     assert!(
-        !manifest.contains("RotateSupervisor"),
+        !manifest.contains(&"RotateSupervisor"),
         "canonical mob machine command surface must not include schema-only RotateSupervisor"
     );
     assert!(
-        !manifest.contains("AckRotation"),
+        !manifest.contains(&"AckRotation"),
         "canonical mob machine command surface must not include schema-only AckRotation"
     );
 }
@@ -18490,8 +18912,8 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .retire(AgentIdentity::from("w-1"))
         .await
         .expect("retire worker");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that retire succeeds (above).
     assert!(
         handle
@@ -18535,8 +18957,8 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     );
 
     handle.stop().await.expect("stop");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that stop succeeds (above) and the
     // mob transitions to Stopped.
     assert_eq!(
@@ -18590,8 +19012,8 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     );
 
     handle.destroy().await.expect("destroy");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that destroy succeeds (above) and
     // transitions to Destroyed.
     assert_eq!(
@@ -22347,6 +22769,42 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
 }
 
 #[tokio::test]
+async fn test_force_cancel_peer_only_external_member_uses_cooperative_bridge_interrupt() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-force-cancel",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-cancel")).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-cancel");
+    spec.binding = Some(external.binding());
+    let spawn = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn peer-only external member");
+
+    handle
+        .force_cancel_member(spawn.agent_identity.clone())
+        .await
+        .expect("force-cancel peer-only external member");
+
+    assert_eq!(
+        external.interrupt_count(),
+        1,
+        "peer-only force-cancel must use the cooperative interrupt bridge command"
+    );
+    assert_eq!(
+        external.hard_cancel_reasons().await,
+        Vec::<String>::new(),
+        "peer-only force-cancel must not use the hard-cancel bridge command"
+    );
+}
+
+#[tokio::test]
 async fn test_external_spawn_without_binding_errors() {
     let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
 
@@ -24838,7 +25296,7 @@ struct MobRuntimeParitySchemaTransitionSummary {
 
 #[derive(Debug, Clone)]
 struct MobRuntimeParitySchemaRow {
-    input_variant: String,
+    input_variant: SchemaMobMachineInputVariant,
     classification: MobRuntimeParityClassification,
     left: Vec<MobRuntimeParitySchemaTransitionSummary>,
     right: Vec<MobRuntimeParitySchemaTransitionSummary>,
@@ -24874,6 +25332,7 @@ struct MobRuntimeParityPairSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -24893,6 +25352,7 @@ struct MobRuntimeParityAuditSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -25170,43 +25630,94 @@ fn mob_runtime_parity_target_pairs() -> &'static [(MobRuntimeParityPhase, MobRun
     ]
 }
 
+fn mob_schema_input_variant_id(input_variant: SchemaMobMachineInputVariant) -> InputVariantId {
+    InputVariantId::parse(input_variant.as_str()).expect("schema MobMachine input variant id")
+}
+
+fn mob_schema_input_variant_set(
+    input_ids: &[InputVariantId],
+) -> BTreeSet<SchemaMobMachineInputVariant> {
+    let input_ids = input_ids.iter().cloned().collect::<BTreeSet<_>>();
+    SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| input_ids.contains(&mob_schema_input_variant_id(*input_variant)))
+        .collect()
+}
+
+fn mob_runtime_internal_input_variant_set() -> BTreeSet<SchemaMobMachineInputVariant> {
+    crate::canonical_mob_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .collect()
+}
+
+fn mob_runtime_parity_probe_required(
+    input_variant: SchemaMobMachineInputVariant,
+    surface_only_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+    runtime_internal_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+) -> bool {
+    !surface_only_inputs.contains(&input_variant)
+        && !runtime_internal_inputs.contains(&input_variant)
+}
+
+const MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED: &str =
+    "surface-only input: runtime probe not required";
+const MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED: &str =
+    "runtime-internal input: runtime probe not required";
+
 fn mob_runtime_parity_probe_for_input_variant(
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
 ) -> Option<MobRuntimeParityProbeInput> {
     match input_variant {
-        "Spawn" => Some(MobRuntimeParityProbeInput::Spawn),
-        "EnsureMember" => Some(MobRuntimeParityProbeInput::EnsureMember),
-        "Reconcile" => Some(MobRuntimeParityProbeInput::Reconcile),
-        "SubmitWork" => Some(MobRuntimeParityProbeInput::SubmitWork),
-        "RunFlow" => Some(MobRuntimeParityProbeInput::RunFlow),
-        "CancelFlow" => Some(MobRuntimeParityProbeInput::CancelFlow),
-        "Retire" => Some(MobRuntimeParityProbeInput::Retire),
-        "Respawn" => Some(MobRuntimeParityProbeInput::Respawn),
-        "RetireAll" => Some(MobRuntimeParityProbeInput::RetireAll),
-        "WireMembers" => Some(MobRuntimeParityProbeInput::WireMembers),
-        "UnwireMembers" => Some(MobRuntimeParityProbeInput::UnwireMembers),
-        "WireExternalPeer" => Some(MobRuntimeParityProbeInput::WireExternalPeer),
-        "UnwireExternalPeer" => Some(MobRuntimeParityProbeInput::UnwireExternalPeer),
-        "ExternalTurn" => Some(MobRuntimeParityProbeInput::ExternalTurn),
-        "InternalTurn" => Some(MobRuntimeParityProbeInput::InternalTurn),
-        "CancelWork" => Some(MobRuntimeParityProbeInput::CancelWork),
-        "CancelAllWork" => Some(MobRuntimeParityProbeInput::CancelAllWork),
-        "Stop" => Some(MobRuntimeParityProbeInput::Stop),
-        "Resume" => Some(MobRuntimeParityProbeInput::Resume),
-        "Complete" => Some(MobRuntimeParityProbeInput::Complete),
-        "Reset" => Some(MobRuntimeParityProbeInput::Reset),
-        "Destroy" => Some(MobRuntimeParityProbeInput::Destroy),
-        "TaskCreate" => Some(MobRuntimeParityProbeInput::TaskCreate),
-        "TaskUpdate" => Some(MobRuntimeParityProbeInput::TaskUpdate),
-        "SubscribeAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAgentEvents),
-        "SubscribeAllAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents),
-        "SubscribeMobEvents" => Some(MobRuntimeParityProbeInput::SubscribeMobEvents),
-        "RecordOperatorActionProvenance" => {
+        SchemaMobMachineInputVariant::Spawn => Some(MobRuntimeParityProbeInput::Spawn),
+        SchemaMobMachineInputVariant::EnsureMember => {
+            Some(MobRuntimeParityProbeInput::EnsureMember)
+        }
+        SchemaMobMachineInputVariant::Reconcile => Some(MobRuntimeParityProbeInput::Reconcile),
+        SchemaMobMachineInputVariant::SubmitWork => Some(MobRuntimeParityProbeInput::SubmitWork),
+        SchemaMobMachineInputVariant::RunFlow => Some(MobRuntimeParityProbeInput::RunFlow),
+        SchemaMobMachineInputVariant::CancelFlow => Some(MobRuntimeParityProbeInput::CancelFlow),
+        SchemaMobMachineInputVariant::Retire => Some(MobRuntimeParityProbeInput::Retire),
+        SchemaMobMachineInputVariant::Respawn => Some(MobRuntimeParityProbeInput::Respawn),
+        SchemaMobMachineInputVariant::RetireAll => Some(MobRuntimeParityProbeInput::RetireAll),
+        SchemaMobMachineInputVariant::WireMembers => Some(MobRuntimeParityProbeInput::WireMembers),
+        SchemaMobMachineInputVariant::UnwireMembers => {
+            Some(MobRuntimeParityProbeInput::UnwireMembers)
+        }
+        SchemaMobMachineInputVariant::WireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::WireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::UnwireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::UnwireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::CancelWork => Some(MobRuntimeParityProbeInput::CancelWork),
+        SchemaMobMachineInputVariant::CancelAllWork => {
+            Some(MobRuntimeParityProbeInput::CancelAllWork)
+        }
+        SchemaMobMachineInputVariant::Stop => Some(MobRuntimeParityProbeInput::Stop),
+        SchemaMobMachineInputVariant::Resume => Some(MobRuntimeParityProbeInput::Resume),
+        SchemaMobMachineInputVariant::Complete => Some(MobRuntimeParityProbeInput::Complete),
+        SchemaMobMachineInputVariant::Reset => Some(MobRuntimeParityProbeInput::Reset),
+        SchemaMobMachineInputVariant::Destroy => Some(MobRuntimeParityProbeInput::Destroy),
+        SchemaMobMachineInputVariant::TaskCreate => Some(MobRuntimeParityProbeInput::TaskCreate),
+        SchemaMobMachineInputVariant::TaskUpdate => Some(MobRuntimeParityProbeInput::TaskUpdate),
+        SchemaMobMachineInputVariant::SubscribeAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeAllAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeMobEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeMobEvents)
+        }
+        SchemaMobMachineInputVariant::RecordOperatorActionProvenance => {
             Some(MobRuntimeParityProbeInput::RecordOperatorActionProvenance)
         }
-        "SetSpawnPolicy" => Some(MobRuntimeParityProbeInput::SetSpawnPolicy),
-        "Shutdown" => Some(MobRuntimeParityProbeInput::Shutdown),
-        "ForceCancel" => Some(MobRuntimeParityProbeInput::ForceCancel),
+        SchemaMobMachineInputVariant::SetSpawnPolicy => {
+            Some(MobRuntimeParityProbeInput::SetSpawnPolicy)
+        }
+        SchemaMobMachineInputVariant::Shutdown => Some(MobRuntimeParityProbeInput::Shutdown),
+        SchemaMobMachineInputVariant::ForceCancel => Some(MobRuntimeParityProbeInput::ForceCancel),
         _ => None,
     }
 }
@@ -25873,12 +26384,10 @@ async fn build_mob_runtime_parity_fixture() -> MobRuntimeParityFixture {
 }
 
 fn mob_runtime_parity_external_peer() -> TrustedPeerDescriptor {
-    TrustedPeerDescriptor::test_only_unsigned_typed(
+    test_trusted_peer_descriptor(
         "mob-runtime-parity/external/agent",
-        meerkat_core::comms::PeerId::new(),
         "inproc://mob-runtime-parity/external/agent",
     )
-    .expect("valid runtime parity external peer")
 }
 
 async fn mob_runtime_parity_prepare_probe(
@@ -26370,15 +26879,16 @@ fn mob_runtime_parity_transition_enabled(
 fn mob_runtime_parity_schema_transition_summaries_for_phase_input(
     schema: &MachineSchema,
     phase: &str,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Vec<MobRuntimeParitySchemaTransitionSummary> {
+    let input_variant_name = input_variant.as_str();
     let mut summaries = schema
         .transitions
         .iter()
         .filter(|transition| {
             transition.on.kind() == TriggerKind::Input
-                && transition.on.variant_str() == input_variant
+                && transition.on.variant_str() == input_variant_name
                 && transition.from.iter().any(|from| from.as_str() == phase)
                 && mob_runtime_parity_transition_enabled(transition, representative)
         })
@@ -26455,7 +26965,7 @@ fn mob_runtime_parity_schema_row_for_input(
     schema: &MachineSchema,
     left_phase: MobRuntimeParityPhase,
     right_phase: MobRuntimeParityPhase,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     left_representative: Option<&MobRuntimeParitySnapshotSummary>,
     right_representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Option<MobRuntimeParitySchemaRow> {
@@ -26489,7 +26999,7 @@ fn mob_runtime_parity_schema_row_for_input(
     );
 
     Some(MobRuntimeParitySchemaRow {
-        input_variant: input_variant.to_string(),
+        input_variant,
         classification: classify_mob_runtime_parity_schema_row(&left, &right),
         left,
         right,
@@ -26502,53 +27012,63 @@ async fn build_mob_runtime_parity_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (mut probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_parity_row(
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                        MobRuntimeParityClassification::SameSurface,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
+        let (mut probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_parity_row(
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                    MobRuntimeParityClassification::SameSurface,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
+            None => (
+                None,
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
+            ),
+        };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -26561,7 +27081,7 @@ async fn build_mob_runtime_parity_pair_report(
         }
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: schema_row.classification,
             schema_left: schema_row.left,
@@ -26587,10 +27107,19 @@ async fn build_mob_runtime_parity_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -26607,53 +27136,63 @@ async fn build_mob_runtime_full_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing full {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_full_parity_row(
-                        schema,
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
+        let (probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_full_parity_row(
+                    schema,
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
+            None => (
+                None,
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
+            ),
+        };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine full runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -26675,7 +27214,7 @@ async fn build_mob_runtime_full_pair_report(
         };
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: effective_schema_classification,
             schema_left: schema_row.left,
@@ -26701,10 +27240,19 @@ async fn build_mob_runtime_full_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -26715,42 +27263,143 @@ async fn build_mob_runtime_full_pair_report(
     }
 }
 
-fn mob_runtime_parity_probe_variant_name(probe: MobRuntimeParityProbeInput) -> &'static str {
+fn mob_runtime_parity_probe_input_variant(
+    probe: MobRuntimeParityProbeInput,
+) -> Option<SchemaMobMachineInputVariant> {
     match probe {
-        MobRuntimeParityProbeInput::Spawn => "Spawn",
-        MobRuntimeParityProbeInput::EnsureMember => "EnsureMember",
-        MobRuntimeParityProbeInput::Reconcile => "Reconcile",
-        MobRuntimeParityProbeInput::SubmitWork => "SubmitWork",
-        MobRuntimeParityProbeInput::RunFlow => "RunFlow",
-        MobRuntimeParityProbeInput::CancelFlow => "CancelFlow",
-        MobRuntimeParityProbeInput::Retire => "Retire",
-        MobRuntimeParityProbeInput::Respawn => "Respawn",
-        MobRuntimeParityProbeInput::RetireAll => "RetireAll",
-        MobRuntimeParityProbeInput::WireMembers => "WireMembers",
-        MobRuntimeParityProbeInput::UnwireMembers => "UnwireMembers",
-        MobRuntimeParityProbeInput::WireExternalPeer => "WireExternalPeer",
-        MobRuntimeParityProbeInput::UnwireExternalPeer => "UnwireExternalPeer",
-        MobRuntimeParityProbeInput::ExternalTurn => "ExternalTurn",
-        MobRuntimeParityProbeInput::InternalTurn => "InternalTurn",
-        MobRuntimeParityProbeInput::CancelWork => "CancelWork",
-        MobRuntimeParityProbeInput::CancelAllWork => "CancelAllWork",
-        MobRuntimeParityProbeInput::Stop => "Stop",
-        MobRuntimeParityProbeInput::Resume => "Resume",
-        MobRuntimeParityProbeInput::Complete => "Complete",
-        MobRuntimeParityProbeInput::Reset => "Reset",
-        MobRuntimeParityProbeInput::Destroy => "Destroy",
-        MobRuntimeParityProbeInput::TaskCreate => "TaskCreate",
-        MobRuntimeParityProbeInput::TaskUpdate => "TaskUpdate",
-        MobRuntimeParityProbeInput::SubscribeAgentEvents => "SubscribeAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => "SubscribeAllAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeMobEvents => "SubscribeMobEvents",
-        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
-            "RecordOperatorActionProvenance"
+        MobRuntimeParityProbeInput::Spawn => Some(SchemaMobMachineInputVariant::Spawn),
+        MobRuntimeParityProbeInput::EnsureMember => {
+            Some(SchemaMobMachineInputVariant::EnsureMember)
         }
-        MobRuntimeParityProbeInput::SetSpawnPolicy => "SetSpawnPolicy",
-        MobRuntimeParityProbeInput::Shutdown => "Shutdown",
-        MobRuntimeParityProbeInput::ForceCancel => "ForceCancel",
+        MobRuntimeParityProbeInput::Reconcile => Some(SchemaMobMachineInputVariant::Reconcile),
+        MobRuntimeParityProbeInput::SubmitWork => Some(SchemaMobMachineInputVariant::SubmitWork),
+        MobRuntimeParityProbeInput::RunFlow => Some(SchemaMobMachineInputVariant::RunFlow),
+        MobRuntimeParityProbeInput::CancelFlow => Some(SchemaMobMachineInputVariant::CancelFlow),
+        MobRuntimeParityProbeInput::Retire => Some(SchemaMobMachineInputVariant::Retire),
+        MobRuntimeParityProbeInput::Respawn => Some(SchemaMobMachineInputVariant::Respawn),
+        MobRuntimeParityProbeInput::RetireAll => Some(SchemaMobMachineInputVariant::RetireAll),
+        MobRuntimeParityProbeInput::WireMembers => Some(SchemaMobMachineInputVariant::WireMembers),
+        MobRuntimeParityProbeInput::UnwireMembers => {
+            Some(SchemaMobMachineInputVariant::UnwireMembers)
+        }
+        MobRuntimeParityProbeInput::WireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::WireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::UnwireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::UnwireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::ExternalTurn | MobRuntimeParityProbeInput::InternalTurn => None,
+        MobRuntimeParityProbeInput::CancelWork => Some(SchemaMobMachineInputVariant::CancelWork),
+        MobRuntimeParityProbeInput::CancelAllWork => {
+            Some(SchemaMobMachineInputVariant::CancelAllWork)
+        }
+        MobRuntimeParityProbeInput::Stop => Some(SchemaMobMachineInputVariant::Stop),
+        MobRuntimeParityProbeInput::Resume => Some(SchemaMobMachineInputVariant::Resume),
+        MobRuntimeParityProbeInput::Complete => Some(SchemaMobMachineInputVariant::Complete),
+        MobRuntimeParityProbeInput::Reset => Some(SchemaMobMachineInputVariant::Reset),
+        MobRuntimeParityProbeInput::Destroy => Some(SchemaMobMachineInputVariant::Destroy),
+        MobRuntimeParityProbeInput::TaskCreate => Some(SchemaMobMachineInputVariant::TaskCreate),
+        MobRuntimeParityProbeInput::TaskUpdate => Some(SchemaMobMachineInputVariant::TaskUpdate),
+        MobRuntimeParityProbeInput::SubscribeAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAllAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeMobEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeMobEvents)
+        }
+        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
+            Some(SchemaMobMachineInputVariant::RecordOperatorActionProvenance)
+        }
+        MobRuntimeParityProbeInput::SetSpawnPolicy => {
+            Some(SchemaMobMachineInputVariant::SetSpawnPolicy)
+        }
+        MobRuntimeParityProbeInput::Shutdown => Some(SchemaMobMachineInputVariant::Shutdown),
+        MobRuntimeParityProbeInput::ForceCancel => Some(SchemaMobMachineInputVariant::ForceCancel),
     }
+}
+
+#[test]
+fn mob_runtime_parity_probe_manifest_round_trips_through_typed_generated_variants() {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
+            continue;
+        };
+        assert_eq!(
+            mob_runtime_parity_probe_input_variant(probe).expect("typed probe variant"),
+            input_variant,
+            "mob runtime parity probe mapping must round-trip through typed generated input variants"
+        );
+    }
+}
+
+#[test]
+fn mob_runtime_parity_probe_inventory_closes_required_executable_probes() {
+    let schema = schema_mob_machine();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
+    let unprobed_required = SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| {
+            mob_runtime_parity_probe_required(
+                *input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) && mob_runtime_parity_probe_for_input_variant(*input_variant).is_none()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        unprobed_required.is_empty(),
+        "every non-surface MobMachine input that requires a runtime parity probe must be backed by the executable typed probe map; missing {unprobed_required:?}"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_pair_report_executes_required_probe_inventory() {
+    let schema = schema_mob_machine();
+    let report = build_mob_runtime_parity_pair_report(
+        &schema,
+        MobRuntimeParityPhase::Running,
+        MobRuntimeParityPhase::Stopped,
+    )
+    .await;
+
+    assert_eq!(
+        report.summary.unprobed_rows, 0,
+        "mob runtime parity report must fail closed on required probes that are missing or fail setup"
+    );
+    assert!(
+        report.summary.probed_rows > 0,
+        "mob runtime parity report must execute the typed probe map, not only inspect it"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_audit_writers_execute_required_probe_inventory() {
+    let full_report =
+        write_mob_runtime_full_parity_audit_report(mob_runtime_parity_full_report_path()).await;
+    assert_eq!(
+        full_report.summary.unprobed_rows, 0,
+        "full mob runtime parity audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        full_report.summary.probed_rows > 0,
+        "full mob runtime parity audit must execute the typed probe map, not only inspect it"
+    );
+
+    let modeled_report =
+        write_mob_runtime_modeled_state_audit_report(mob_modeled_state_report_path()).await;
+    assert_eq!(
+        modeled_report.summary.unprobed_rows, 0,
+        "modeled-state audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        modeled_report.summary.row_count > 0,
+        "modeled-state audit must exercise required typed runtime probes"
+    );
 }
 
 fn mob_modeled_normalize_json_value(value: serde_json::Value) -> serde_json::Value {
@@ -27272,10 +27921,10 @@ fn mob_modeled_kernel_input(
     before: &MobRuntimeParitySnapshotSummary,
     probe: MobRuntimeParityProbeInput,
 ) -> Result<meerkat_machine_kernels::test_oracle::KernelInput, String> {
-    let variant = meerkat_machine_schema::identity::InputVariantId::parse(
-        mob_runtime_parity_probe_variant_name(probe),
-    )
-    .expect("valid variant slug");
+    let input_variant = mob_runtime_parity_probe_input_variant(probe)
+        .ok_or_else(|| format!("{probe:?} has no MobMachine input variant"))?;
+    let variant = meerkat_machine_schema::identity::InputVariantId::parse(input_variant.as_str())
+        .expect("valid variant slug");
     let input_variant = schema
         .inputs
         .variant_named(&variant)
@@ -27479,11 +28128,8 @@ fn mob_modeled_runtime_report(
 
 async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModeledStateAuditReport {
     let schema = meerkat_machine_kernels::generated::mob::schema();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
     let mut rows = Vec::new();
 
     for phase in [
@@ -27491,16 +28137,19 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
         MobRuntimeParityPhase::Stopped,
         MobRuntimeParityPhase::Completed,
     ] {
-        for input_variant in &schema.inputs.variants {
-            if surface_only_inputs.contains(input_variant.name.as_str()) {
+        for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+            let input_variant_name = input_variant.as_str();
+            if !mob_runtime_parity_probe_required(
+                input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) {
                 continue;
             }
-            let Some(probe) =
-                mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str())
-            else {
+            let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
                 rows.push(MobModeledStateRowReport {
                     phase: phase.schema_name().to_string(),
-                    input_variant: input_variant.name.as_str().to_string(),
+                    input_variant: input_variant_name.to_string(),
                     aligned: false,
                     differing_keys: vec!["unprobed".to_string()],
                     runtime: MobModeledStateRuntimeReport {
@@ -27536,7 +28185,7 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
 
             rows.push(MobModeledStateRowReport {
                 phase: phase.schema_name().to_string(),
-                input_variant: input_variant.name.as_str().to_string(),
+                input_variant: input_variant_name.to_string(),
                 aligned,
                 differing_keys,
                 runtime: runtime_report,
@@ -27560,6 +28209,10 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob modeled-state audit must fail closed when a required typed probe is missing"
     );
 
     let report = MobModeledStateAuditReport {
@@ -27598,8 +28251,13 @@ async fn write_mob_runtime_full_parity_audit_report(path: PathBuf) -> MobRuntime
             summary.mismatched_rows += pair.summary.mismatched_rows;
             summary.unprobed_rows += pair.summary.unprobed_rows;
             summary.surface_only_unprobed_rows += pair.summary.surface_only_unprobed_rows;
+            summary.runtime_internal_unprobed_rows += pair.summary.runtime_internal_unprobed_rows;
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     let report = MobRuntimeParityAuditReport {

@@ -50,6 +50,7 @@ pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
+pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
 pub mod handles;
@@ -131,9 +132,17 @@ pub use meerkat_machine_types::{
     MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
     MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineCatalogInput,
     MeerkatMachineCommandClassification, MeerkatMachineCommandClassificationRecord,
-    MeerkatMachineCommandVariant, MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot, canonical_meerkat_machine_command_classifications,
+    MeerkatMachineCommandVariant, MeerkatMachineFieldlessRuntimeInternalInput,
+    MeerkatMachineRuntimeInternalClassificationRecord, MeerkatMachineRuntimeInternalInput,
+    MeerkatMachineRuntimeInternalReason, MeerkatMachineShellMechanicReason,
+    MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    canonical_meerkat_machine_command_classifications,
+    canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
+    canonical_meerkat_machine_runtime_internal_classifications,
+    canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest,
+    canonical_meerkat_machine_runtime_internal_input_variant_manifest,
+    canonical_meerkat_machine_runtime_internal_manifest,
 };
 pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,

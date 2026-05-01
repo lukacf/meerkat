@@ -34,7 +34,7 @@ use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
-use meerkat_runtime::{RuntimeMode, RuntimeStore};
+use meerkat_runtime::{RuntimeMode, RuntimeState, RuntimeStore};
 use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -707,6 +707,45 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(selected)
     }
 
+    async fn load_runtime_state_for_session(
+        runtime_store: &Arc<dyn RuntimeStore>,
+        id: &SessionId,
+    ) -> Result<Option<RuntimeState>, SessionError> {
+        let mut selected = None;
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            let loaded = runtime_store
+                .load_runtime_state(&runtime_id)
+                .await
+                .map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to load runtime state: {err}"
+                    )))
+                });
+            match loaded {
+                Ok(Some(state)) => {
+                    if candidate_index == 0 {
+                        return Ok(Some(state));
+                    }
+                    selected = Some(state);
+                }
+                Ok(None) => {}
+                Err(err) if candidate_index > 0 && selected.is_some() => {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = ?err,
+                        "ignoring legacy runtime state fallback error because canonical authority was already loaded"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(selected)
+    }
+
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
         SessionError::Unsupported(format!(
             "{operation} cannot mutate store-only compatibility projection for session {id}; runtime-backed control mutations require an authoritative runtime snapshot"
@@ -1003,6 +1042,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
         self.runtime_store.clone()
+    }
+
+    pub async fn persisted_runtime_state(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<RuntimeState>, SessionError> {
+        let Some(runtime_store) = self.runtime_store.as_ref() else {
+            return Ok(None);
+        };
+        Self::load_runtime_state_for_session(runtime_store, id).await
     }
 
     pub fn has_event_projection(&self) -> bool {
@@ -3422,6 +3471,16 @@ mod tests {
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
     }
 
+    fn expected_tool_dispatch_witness(tool_name: &str) -> meerkat_core::ToolVisibilityWitness {
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some(format!("callback:{tool_name}")),
+            last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: tool_name.to_string().into(),
+            }),
+        }
+    }
+
     #[async_trait::async_trait]
     impl SessionAgent for ToolDispatchAgent {
         async fn run_with_events(
@@ -3476,9 +3535,13 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let mut state = session.tool_visibility_state().unwrap_or_default();
+            let requested_name = format!("requested:{}", call.name);
             state
                 .staged_requested_deferred_names
-                .insert(format!("requested:{}", call.name));
+                .insert(requested_name.clone());
+            state
+                .requested_witnesses
+                .insert(requested_name, expected_tool_dispatch_witness(&call.name));
             session.set_tool_visibility_state(state).map_err(|err| {
                 meerkat_core::error::AgentError::InternalError(format!(
                     "failed to persist tool dispatch state: {err}"
@@ -5236,6 +5299,35 @@ mod tests {
         assert!(
             authoritative.build_state().is_none(),
             "runtime authority must not backfill build state from the store projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persisted_runtime_state_loads_runtime_store_state() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+        runtime_store
+            .persist_runtime_state(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id),
+                meerkat_runtime::RuntimeState::Retired,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        assert_eq!(
+            service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("runtime state load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Retired)
         );
     }
 
@@ -7126,14 +7218,14 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-1".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )
             .await
             .expect("dispatch external tool call");
 
-        assert_eq!(outcome.result.text_content(), "handled tool_catalog_load");
+        assert_eq!(outcome.result.text_content(), "handled callback_probe_tool");
 
         let persisted = store
             .load(&id)
@@ -7146,7 +7238,7 @@ mod tests {
         assert!(
             visibility_state
                 .staged_requested_deferred_names
-                .contains("requested:tool_catalog_load"),
+                .contains("requested:callback_probe_tool"),
             "expected persisted tool-dispatch state to include the requested tool"
         );
     }
@@ -7174,7 +7266,7 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-2".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )

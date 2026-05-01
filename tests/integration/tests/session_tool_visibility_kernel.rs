@@ -6,8 +6,9 @@ use meerkat_machine_kernels::generated::meerkat;
 use meerkat_machine_kernels::test_oracle::{
     GeneratedMachineKernel, KernelInput, KernelSignal, KernelState, KernelValue,
 };
+use meerkat_machine_schema::RustTypeAtom;
 use meerkat_machine_schema::identity::{
-    EffectVariantId, FieldId, InputVariantId, NamedTypeId, PhaseId, SignalVariantId,
+    EffectVariantId, EnumVariantId, FieldId, InputVariantId, NamedTypeId, PhaseId, SignalVariantId,
 };
 
 fn field(slug: &str) -> FieldId {
@@ -24,6 +25,10 @@ fn signal(slug: &str) -> SignalVariantId {
 
 fn effect(slug: &str) -> EffectVariantId {
     EffectVariantId::parse(slug).expect("effect id")
+}
+
+fn enum_variant(slug: &str) -> EnumVariantId {
+    EnumVariantId::parse(slug).expect("enum variant id")
 }
 
 fn phase(slug: &str) -> PhaseId {
@@ -49,11 +54,7 @@ fn named_u64(type_name: &str, value: u64) -> KernelValue {
 }
 
 fn tool_filter_all() -> KernelValue {
-    named_string(
-        "ToolFilter",
-        &serde_json::to_string(&meerkat_core::ToolFilter::All)
-            .expect("tool filter should serialize"),
-    )
+    named_string("ToolFilter", "All")
 }
 
 fn string_key(value: &str) -> KernelValue {
@@ -272,6 +273,169 @@ fn session_tool_visibility_kernel_publishes_committed_deferred_set_with_structur
     assert_eq!(
         published.effects[0].variant,
         effect("CommittedVisibleSetPublished")
+    );
+}
+
+#[test]
+fn session_tool_visibility_kernel_rejects_witness_when_source_kind_binding_changes() {
+    let mut schema = meerkat::schema();
+    schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolSourceKind")
+        .expect("ToolSourceKind binding")
+        .rust = RustTypeAtom::StringEnum {
+        variants: vec![enum_variant("Builtin")],
+    };
+    let kernel = GeneratedMachineKernel::new(schema);
+    let attached = prepared_meerkat_state(&kernel);
+    let names = string_set(&["search"]);
+    let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
+
+    let err = kernel
+        .transition(
+            &attached,
+            &KernelInput {
+                variant: input("PublishCommittedVisibleSet"),
+                fields: BTreeMap::from([
+                    (field("active_filter"), tool_filter_all()),
+                    (field("staged_filter"), tool_filter_all()),
+                    (field("active_requested_deferred_names"), names.clone()),
+                    (field("staged_requested_deferred_names"), names),
+                    (field("active_deferred_authorities"), authorities.clone()),
+                    (field("staged_deferred_authorities"), authorities),
+                    (field("active_visibility_revision"), KernelValue::U64(1)),
+                    (field("staged_visibility_revision"), KernelValue::U64(1)),
+                ]),
+            },
+        )
+        .expect_err("witness source kind must follow the ToolSourceKind binding");
+
+    assert!(
+        format!("{err:?}").contains("active_deferred_authorities"),
+        "mutated ToolSourceKind binding must reject witness payload: {err:?}"
+    );
+}
+
+#[test]
+fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_is_missing() {
+    let mut schema = meerkat::schema();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolProvenance");
+    let kernel = GeneratedMachineKernel::new(schema);
+    let attached = prepared_meerkat_state(&kernel);
+    let names = string_set(&["search"]);
+    let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
+
+    let err = kernel
+        .transition(
+            &attached,
+            &KernelInput {
+                variant: input("PublishCommittedVisibleSet"),
+                fields: BTreeMap::from([
+                    (field("active_filter"), tool_filter_all()),
+                    (field("staged_filter"), tool_filter_all()),
+                    (field("active_requested_deferred_names"), names.clone()),
+                    (field("staged_requested_deferred_names"), names),
+                    (field("active_deferred_authorities"), authorities.clone()),
+                    (field("staged_deferred_authorities"), authorities),
+                    (field("active_visibility_revision"), KernelValue::U64(1)),
+                    (field("staged_visibility_revision"), KernelValue::U64(1)),
+                ]),
+            },
+        )
+        .expect_err("witness provenance must follow the ToolProvenance binding");
+
+    assert!(
+        format!("{err:?}").contains("active_deferred_authorities"),
+        "missing ToolProvenance binding must reject witness payload: {err:?}"
+    );
+}
+
+#[test]
+fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_changes_shape() {
+    let mut schema = meerkat::schema();
+    schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolProvenance")
+        .expect("ToolProvenance binding")
+        .rust = RustTypeAtom::String;
+    let kernel = GeneratedMachineKernel::new(schema);
+    let attached = prepared_meerkat_state(&kernel);
+    let names = string_set(&["search"]);
+    let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
+
+    let err = kernel
+        .transition(
+            &attached,
+            &KernelInput {
+                variant: input("PublishCommittedVisibleSet"),
+                fields: BTreeMap::from([
+                    (field("active_filter"), tool_filter_all()),
+                    (field("staged_filter"), tool_filter_all()),
+                    (field("active_requested_deferred_names"), names.clone()),
+                    (field("staged_requested_deferred_names"), names),
+                    (field("active_deferred_authorities"), authorities.clone()),
+                    (field("staged_deferred_authorities"), authorities),
+                    (field("active_visibility_revision"), KernelValue::U64(1)),
+                    (field("staged_visibility_revision"), KernelValue::U64(1)),
+                ]),
+            },
+        )
+        .expect_err("witness provenance must follow the ToolProvenance binding");
+
+    assert!(
+        format!("{err:?}").contains("active_deferred_authorities"),
+        "mutated ToolProvenance binding must reject witness payload: {err:?}"
+    );
+}
+
+#[test]
+fn session_tool_visibility_kernel_rejects_empty_authorities_when_witness_binding_is_missing() {
+    let base_kernel = GeneratedMachineKernel::new(meerkat::schema());
+    let attached = prepared_meerkat_state(&base_kernel);
+    let mut schema = meerkat::schema();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolVisibilityWitness");
+    let kernel = GeneratedMachineKernel::new(schema);
+
+    let err = kernel
+        .transition(
+            &attached,
+            &KernelInput {
+                variant: input("PublishCommittedVisibleSet"),
+                fields: BTreeMap::from([
+                    (field("active_filter"), tool_filter_all()),
+                    (field("staged_filter"), tool_filter_all()),
+                    (
+                        field("active_requested_deferred_names"),
+                        KernelValue::Set(BTreeSet::new()),
+                    ),
+                    (
+                        field("staged_requested_deferred_names"),
+                        KernelValue::Set(BTreeSet::new()),
+                    ),
+                    (
+                        field("active_deferred_authorities"),
+                        KernelValue::Map(BTreeMap::new()),
+                    ),
+                    (
+                        field("staged_deferred_authorities"),
+                        KernelValue::Map(BTreeMap::new()),
+                    ),
+                    (field("active_visibility_revision"), KernelValue::U64(1)),
+                    (field("staged_visibility_revision"), KernelValue::U64(1)),
+                ]),
+            },
+        )
+        .expect_err("missing ToolVisibilityWitness binding must reject empty authority maps");
+
+    assert!(
+        format!("{err:?}").contains("active_deferred_authorities"),
+        "missing witness binding must reject empty authority map before it passes vacuously: {err:?}"
     );
 }
 

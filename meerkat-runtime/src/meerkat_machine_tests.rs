@@ -8,8 +8,10 @@ use std::time::Duration;
 use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use chrono::Utc;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -22,7 +24,13 @@ use meerkat_machine_kernels::test_oracle::{
     GeneratedMachineKernel, KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
     TransitionRefusal,
 };
-use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine as schema_meerkat_machine;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as schema_meerkat_machine,
+    meerkat_machine::{
+        MeerkatMachineInput as SchemaMeerkatMachineInput,
+        MeerkatMachineInputVariant as SchemaMeerkatMachineInputVariant,
+    },
+};
 use meerkat_machine_schema::{MachineSchema, TypeRef};
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -560,7 +568,17 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1235,7 +1253,17 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -3129,7 +3157,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3274,7 +3313,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3362,8 +3412,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission currently routes one control command through the executor seam while requesting immediate processing"
+        0,
+        "attached steered admission should not route a queued executor control command while requesting immediate processing"
     );
 
     allow_finish.notify_waiters();
@@ -3438,7 +3488,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3551,8 +3612,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
 
     allow_finish.notify_waiters();
@@ -3684,7 +3745,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3793,7 +3865,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     registry
         .complete_operation(
@@ -3899,7 +3971,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
+        0,
         "isolated attached steered completion should not emit extra executor control commands"
     );
 }
@@ -3941,7 +4013,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -4048,7 +4131,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -4137,14 +4220,14 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
 }
 
 #[tokio::test]
-async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
+async fn hard_cancel_current_run_returns_not_ready_without_attached_loop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "idle hard-cancel probe")
         .await
         .expect_err("interrupt should reject when no attached loop exists");
     match err {
@@ -4153,6 +4236,53 @@ async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
         }
         other => panic!("expected NotReady(Idle), got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn raw_fieldless_runtime_internal_stage_is_rejected_before_dsl_apply() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let err = adapter
+        .stage_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+            "raw interrupt bypass probe",
+        )
+        .await
+        .expect_err(
+            "raw fieldless runtime-internal input must not stage through the generic DSL gate",
+        );
+
+    assert!(
+        err.contains("must use typed runtime-internal staging authority"),
+        "raw fieldless runtime-internal staging must fail before DSL apply, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn raw_fieldless_runtime_internal_routed_input_is_rejected_before_dsl_apply() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let err = adapter
+        .apply_routed_meerkat_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::InterruptCurrentRun,
+        )
+        .await
+        .expect_err(
+            "raw fieldless runtime-internal input must not apply through routed input delivery",
+        );
+
+    assert!(
+        err.contains("must use typed runtime-internal staging authority"),
+        "raw fieldless runtime-internal routed input must fail before DSL apply, got {err}"
+    );
 }
 
 #[tokio::test]
@@ -4175,7 +4305,68 @@ async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
 }
 
 #[tokio::test]
-async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes() {
+async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_executor_attach() {
+    struct CountingInterruptHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    adapter
+        .install_prepared_session_interrupt_handle(
+            &session_id,
+            Arc::new(CountingInterruptHandle {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .await
+        .expect("install prepared interrupt handle");
+
+    bindings
+        .turn_state
+        .start_conversation_run(
+            RunId::new(),
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+            meerkat_core::turn_execution_authority::ContentShape::Conversation,
+            false,
+            false,
+            0,
+        )
+        .expect("simulate service-owned first turn");
+
+    let running = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("prepared session should exist");
+    assert_eq!(running.control.phase, RuntimeState::Running);
+
+    adapter
+        .hard_cancel_current_run(&session_id, "user interrupt during materialization")
+        .await
+        .expect("prepared session interrupt should reach provisional live handle");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "hard cancel must reach the pre-attachment service-owned turn"
+    );
+}
+
+#[tokio::test]
+async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
@@ -4184,8 +4375,26 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         allow_finish: Arc<Notify>,
     }
 
+    struct InterruptHandle {
+        cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for InterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(InterruptHandle {
+                cancel_calls: Arc::clone(&self.cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -4210,10 +4419,17 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelCurrentRun { .. }) {
-                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4240,7 +4456,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         .await;
 
     let input = Input::Prompt(crate::input::PromptInput::new(
-        "attached steered deferred interrupt",
+        "attached steered live interrupt",
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
@@ -4292,9 +4508,9 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     );
 
     adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "attached live hard-cancel probe")
         .await
-        .expect("interrupt should enqueue against the attached loop");
+        .expect("interrupt should use the attached live interrupt handle");
 
     let after_interrupt = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -4303,7 +4519,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(
         after_interrupt.control.phase,
         RuntimeState::Running,
-        "interrupt should stay deferred while the attached executor is still inside apply()"
+        "live interrupt should not mutate queued runtime state while apply() is blocked"
     );
     assert_eq!(
         after_interrupt.control.current_run_id,
@@ -4321,8 +4537,8 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     );
     assert_eq!(
         cancel_calls.load(Ordering::SeqCst),
-        0,
-        "cancel should remain queued until apply returns"
+        1,
+        "hard cancel should reach the live interrupt handle immediately"
     );
 
     allow_finish.notify_waiters();
@@ -4347,7 +4563,6 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
                 && snapshot.control.current_run_id.is_none()
                 && snapshot.inputs.current_run_id.is_none()
                 && snapshot.completion_waiters.waiter_count == 0
-                && cancel_calls.load(Ordering::SeqCst) == 1
             {
                 break snapshot;
             }
@@ -4355,7 +4570,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         }
     })
     .await
-    .expect("attached runtime should eventually return to Attached after queued cancel drains");
+    .expect("attached runtime should eventually return to Attached after apply finishes");
     assert!(settled.inputs.queue.is_empty());
     assert!(settled.inputs.steer_queue.is_empty());
     assert_eq!(settled.completion_waiters.input_count, 0);
@@ -4364,27 +4579,47 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
         1,
-        "queued cancel should not replay the already-running attached steered turn"
+        "live interrupt should not replay the already-running attached steered turn"
     );
     assert_eq!(
         cancel_calls.load(Ordering::SeqCst),
         1,
-        "queued cancel should reach the executor exactly once after apply finishes"
+        "live interrupt should reach the executor exactly once"
     );
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finishes() {
+async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_effect() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
         boundary_cancel_calls: Arc<AtomicUsize>,
         apply_started: Arc<Notify>,
         apply_finished: Arc<Notify>,
         allow_finish: Arc<Notify>,
     }
 
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -4409,10 +4644,18 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
-                self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4420,6 +4663,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
     let apply_finished = Arc::new(Notify::new());
@@ -4430,6 +4674,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
             session_id.clone(),
             Box::new(BlockingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
                 boundary_cancel_calls: Arc::clone(&boundary_cancel_calls),
                 apply_started: Arc::clone(&apply_started),
                 apply_finished: Arc::clone(&apply_finished),
@@ -4471,9 +4716,14 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(after_request.control.phase, RuntimeState::Running);
     assert!(after_request.control.current_run_id.is_some());
     assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "public boundary cancel should also call the live boundary handle while apply is in flight"
+    );
+    assert_eq!(
         boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "boundary cancel should remain queued until apply returns"
+        "in-loop boundary cancel should remain queued until apply returns"
     );
 
     allow_finish.notify_waiters();
@@ -4514,7 +4764,153 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
 }
 
 #[tokio::test]
-async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
+async fn cancel_after_boundary_live_wake_is_not_blocked_by_full_effect_channel() {
+    struct BlockingExecutor {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+        queued_boundary_cancel_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "attached steered saturated boundary cancel",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("attached steered prompt should expose a completion waiter");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("attached steered prompt should request immediate processing");
+
+    for _ in 0..16 {
+        adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect("boundary cancel should enqueue until the effect channel is full");
+    }
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        16,
+        "each queued boundary cancel should deliver the live wake first"
+    );
+    assert_eq!(
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "runtime loop is still blocked inside apply, so queued effects have not drained"
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        adapter.cancel_after_boundary(&session_id),
+    )
+    .await
+    .expect("live boundary cancel must not wait for capacity in the bounded effect channel")
+    .expect("live boundary cancel should succeed after best-effort enqueue");
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        17,
+        "saturated effect channel must not prevent the live cooperative wake"
+    );
+
+    allow_finish.notify_waiters();
+    match completion_handle.wait().await {
+        CompletionOutcome::CompletedWithoutResult => {}
+        other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     struct BlockingThenImmediateExecutor {
         apply_calls: Arc<AtomicUsize>,
         interrupt_calls: Arc<AtomicUsize>,
@@ -4563,14 +4959,22 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
-                self.events
-                    .lock()
-                    .expect("events mutex poisoned")
-                    .push("interrupt_yielding");
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
+            self.events
+                .lock()
+                .expect("events mutex poisoned")
+                .push("interrupt_yielding");
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4768,17 +5172,15 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
 }
 
 #[tokio::test]
-async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
-    struct LiveControlHandle {
+async fn service_peer_admission_uses_live_cancel_after_boundary() {
+    struct LiveBoundaryHandle {
         calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::CoreExecutorControl for LiveControlHandle {
-        async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-            }
+    impl CoreExecutorBoundaryHandle for LiveBoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -4793,8 +5195,8 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
 
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
-        fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
-            Some(Arc::new(LiveControlHandle {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(LiveBoundaryHandle {
                 calls: Arc::clone(&self.live_control_calls),
             }))
         }
@@ -4821,10 +5223,18 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4906,12 +5316,12 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
     assert_eq!(
         live_control_calls.load(Ordering::SeqCst),
         1,
-        "service ext Ingest should signal the live out-of-band control handle while apply is blocked"
+        "service ext Ingest should signal the live boundary handle while apply is blocked"
     );
     assert_eq!(
         queued_control_calls.load(Ordering::SeqCst),
         0,
-        "ordered runtime-loop control still cannot drain until apply returns"
+        "ordered runtime-loop boundary effect still cannot drain until apply returns"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
 
@@ -4926,7 +5336,7 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
         }
     })
     .await
-    .expect("queued control should still drain after apply returns");
+    .expect("queued boundary effect should still drain after apply returns");
 }
 
 #[tokio::test]
@@ -4966,11 +5376,20 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -5084,8 +5503,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5094,12 +5513,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "attached steered deferred stop".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "attached steered deferred stop")
         .await
         .expect("stop should queue against the attached loop");
 
@@ -5143,8 +5557,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "the explicit stop command should still be queued instead of reaching the executor mid-apply"
+        0,
+        "the explicit stop command should stay queued instead of reaching the executor mid-apply"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5259,8 +5673,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        2,
-        "one admission control plus one deferred stop command should reach the attached executor"
+        1,
+        "only the deferred stop command should reach the attached executor"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5298,7 +5712,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -5427,12 +5852,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop test".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop test")
         .await
         .expect("stop should terminate active completion waiters");
 
@@ -5494,10 +5914,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -5557,12 +5985,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop completion waiter".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop completion waiter")
         .await
         .expect("stop should terminate queued completion waiters through the live control seam");
 
@@ -5694,7 +6117,17 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -5833,7 +6266,18 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -6013,7 +6457,18 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7222,7 +7677,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7491,7 +7957,18 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7769,7 +8246,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8009,7 +8497,18 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8714,7 +9213,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8920,7 +9430,18 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9389,7 +9910,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9575,7 +10107,18 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9801,12 +10344,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop wait_all test".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop wait_all test")
         .await
         .expect("stop should preserve the active wait_all carrier");
 
@@ -9962,12 +10500,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop steered split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop steered split lifetimes")
         .await
         .expect("stop should clear steered completion waiters while preserving wait_all");
 
@@ -10119,12 +10652,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop split lifetimes")
         .await
         .expect("stop should split completion and wait_all lifetimes");
 
@@ -10247,10 +10775,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -10327,12 +10863,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop wait_all".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop wait_all")
         .await
         .expect("stop should preserve the active wait_all carrier through the live control seam");
 
@@ -10437,10 +10968,18 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -10534,12 +11073,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop split lifetimes")
         .await
         .expect("stop should split completion and wait_all lifetimes on attached runtimes");
 
@@ -11095,7 +11629,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -11346,7 +11890,18 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -11712,7 +12267,7 @@ async fn unregister_session_rejects_unknown_session() {
 }
 
 #[tokio::test]
-async fn interrupt_current_run_rejects_destroyed_session() {
+async fn hard_cancel_current_run_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -11724,7 +12279,7 @@ async fn interrupt_current_run_rejects_destroyed_session() {
         .expect("destroy should succeed");
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "destroyed hard-cancel probe")
         .await
         .expect_err("interrupt should reject a destroyed session");
     assert!(
@@ -11768,12 +12323,7 @@ async fn stop_runtime_executor_rejects_destroyed_session() {
         .expect("destroy should succeed");
 
     let err = adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test".to_string())
         .await
         .expect_err("stop_runtime_executor should reject a destroyed session");
     assert!(
@@ -11911,12 +12461,7 @@ async fn ingest_rejects_stopped_session() {
     // Stop the session by driving it through retire → stop.
     let runtime_id = runtime_id_for_session(&session_id);
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test stop".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test stop".to_string())
         .await
         .expect("stop should succeed");
 
@@ -11946,12 +12491,7 @@ async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
 
     // First stop
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test".to_string())
         .await
         .expect("stop should succeed");
 
@@ -12685,6 +13225,13 @@ fn runtime_deferred_tool(name: &str, owner: &str) -> Arc<meerkat_core::ToolDef> 
     )
 }
 
+fn deferred_load_authority(
+    name: &str,
+    witness: meerkat_core::ToolVisibilityWitness,
+) -> meerkat_core::DeferredToolLoadAuthority {
+    meerkat_core::DeferredToolLoadAuthority::new(name, witness)
+}
+
 fn seed_deferred_tool_authority_catalog(
     bindings: &meerkat_core::SessionRuntimeBindings,
     tools: Vec<Arc<meerkat_core::ToolDef>>,
@@ -12715,15 +13262,13 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
         vec![Arc::clone(&deferred_tool)],
         &["deferred_tool"],
     );
-    let authorities = [(
-        "deferred_tool".to_string(),
+    let authorities = vec![deferred_load_authority(
+        "deferred_tool",
         meerkat_core::ToolVisibilityWitness {
             stable_owner_key: Some("callback:test".to_string()),
             last_seen_provenance: deferred_tool.provenance.clone(),
         },
-    )]
-    .into_iter()
-    .collect();
+    )];
 
     let revision = adapter
         .request_deferred_tools(&session_id, authorities)
@@ -12764,9 +13309,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
     adapter
         .request_deferred_tools(
             &session_id,
-            [("deferred_tool".to_string(), witness.clone())]
-                .into_iter()
-                .collect(),
+            vec![deferred_load_authority("deferred_tool", witness.clone())],
         )
         .await
         .expect("request should succeed");
@@ -12816,9 +13359,7 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
     adapter
         .request_deferred_tools(
             &session_id,
-            [("first_tool".to_string(), first_witness)]
-                .into_iter()
-                .collect(),
+            vec![deferred_load_authority("first_tool", first_witness)],
         )
         .await
         .expect("first request should succeed");
@@ -12834,9 +13375,10 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
     adapter
         .request_deferred_tools(
             &session_id,
-            [("second_tool".to_string(), second_witness.clone())]
-                .into_iter()
-                .collect(),
+            vec![deferred_load_authority(
+                "second_tool",
+                second_witness.clone(),
+            )],
         )
         .await
         .expect("stale witnesses outside staged names must not poison DSL authority");
@@ -12872,15 +13414,13 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
     let err = adapter
         .request_deferred_tools(
             &session_id,
-            [(
-                "deferred_tool".to_string(),
+            vec![deferred_load_authority(
+                "deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
                     stable_owner_key: Some("callback:test".to_string()),
                     last_seen_provenance: None,
                 },
-            )]
-            .into_iter()
-            .collect(),
+            )],
         )
         .await
         .expect_err("missing deferred-tool provenance authority should fail");
@@ -12901,12 +13441,10 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
     let err = adapter
         .request_deferred_tools(
             &session_id,
-            [(
-                "deferred_tool".to_string(),
+            vec![deferred_load_authority(
+                "deferred_tool",
                 meerkat_core::ToolVisibilityWitness::default(),
-            )]
-            .into_iter()
-            .collect(),
+            )],
         )
         .await
         .expect_err("empty deferred-tool witnesses should fail");
@@ -12940,15 +13478,13 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
     let unknown_err = adapter
         .request_deferred_tools(
             &session_id,
-            [(
-                "unknown_deferred_tool".to_string(),
+            vec![deferred_load_authority(
+                "unknown_deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
                     stable_owner_key: Some("callback:catalog".to_string()),
                     last_seen_provenance: Some(catalog_provenance.clone()),
                 },
-            )]
-            .into_iter()
-            .collect(),
+            )],
         )
         .await
         .expect_err("unknown deferred authority must not stage through public request path");
@@ -12960,8 +13496,8 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
     let forged_err = adapter
         .request_deferred_tools(
             &session_id,
-            [(
-                "deferred_tool".to_string(),
+            vec![deferred_load_authority(
+                "deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
                     stable_owner_key: Some("callback:forged".to_string()),
                     last_seen_provenance: Some(meerkat_core::ToolProvenance {
@@ -12969,9 +13505,7 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
                         source_id: "forged".into(),
                     }),
                 },
-            )]
-            .into_iter()
-            .collect(),
+            )],
         )
         .await
         .expect_err("mismatched deferred authority must not stage through public request path");
@@ -13112,9 +13646,7 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
     adapter
         .request_deferred_tools(
             &session_id,
-            [("deferred_tool".to_string(), witness.clone())]
-                .into_iter()
-                .collect(),
+            vec![deferred_load_authority("deferred_tool", witness.clone())],
         )
         .await
         .expect("request should succeed");
@@ -13568,7 +14100,7 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
 
     let revision = fixture
         .adapter
-        .request_deferred_tools(&fixture.session_id, runtime_parity_witnesses())
+        .request_deferred_tools(&fixture.session_id, runtime_parity_load_authorities())
         .await
         .expect("request should succeed after active-ahead reconfigure");
     assert_eq!(
@@ -13815,7 +14347,17 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -13923,7 +14465,17 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14068,7 +14620,17 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14173,7 +14735,17 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14366,10 +14938,18 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
-                self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14924,7 +15504,7 @@ struct RuntimeParitySchemaTransitionSummary {
 
 #[derive(Debug, Clone)]
 struct RuntimeParitySchemaRow {
-    input_variant: String,
+    input_variant: SchemaMeerkatMachineInputVariant,
     classification: RuntimeParityClassification,
     left: Vec<RuntimeParitySchemaTransitionSummary>,
     right: Vec<RuntimeParitySchemaTransitionSummary>,
@@ -15107,12 +15687,7 @@ impl RuntimeParityFixture {
         }
         let _ = self
             .adapter
-            .stop_runtime_executor(
-                &self.session_id,
-                RunControlCommand::StopRuntimeExecutor {
-                    reason: "runtime parity cleanup".to_string(),
-                },
-            )
+            .stop_runtime_executor(&self.session_id, "runtime parity cleanup".to_string())
             .await;
         let _ =
             crate::traits::RuntimeControlPlane::destroy(self.adapter.as_ref(), &self.runtime_id)
@@ -15144,7 +15719,11 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
         })
     }
 
-    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -15177,7 +15756,11 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
         })
     }
 
-    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -15209,47 +15792,95 @@ fn runtime_parity_target_pairs() -> &'static [(RuntimeParityPhase, RuntimeParity
     ]
 }
 
-fn runtime_parity_probe_for_input_variant(input_variant: &str) -> Option<RuntimeParityProbeInput> {
+fn runtime_parity_probe_for_input_variant(
+    input_variant: SchemaMeerkatMachineInputVariant,
+) -> Option<RuntimeParityProbeInput> {
     match input_variant {
-        "RegisterSession" => Some(RuntimeParityProbeInput::RegisterSession),
-        "UnregisterSession" => Some(RuntimeParityProbeInput::UnregisterSession),
-        "EnsureSessionWithExecutor" => Some(RuntimeParityProbeInput::EnsureSessionWithExecutor),
-        "SetSilentIntents" => Some(RuntimeParityProbeInput::SetSilentIntents),
-        "ReconfigureSessionLlmIdentity" => {
+        SchemaMeerkatMachineInputVariant::RegisterSession => {
+            Some(RuntimeParityProbeInput::RegisterSession)
+        }
+        SchemaMeerkatMachineInputVariant::UnregisterSession => {
+            Some(RuntimeParityProbeInput::UnregisterSession)
+        }
+        SchemaMeerkatMachineInputVariant::EnsureSessionWithExecutor => {
+            Some(RuntimeParityProbeInput::EnsureSessionWithExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::SetSilentIntents => {
+            Some(RuntimeParityProbeInput::SetSilentIntents)
+        }
+        SchemaMeerkatMachineInputVariant::ReconfigureSessionLlmIdentity => {
             Some(RuntimeParityProbeInput::ReconfigureSessionLlmIdentity)
         }
-        "ContainsSession" => Some(RuntimeParityProbeInput::ContainsSession),
-        "SessionHasExecutor" => Some(RuntimeParityProbeInput::SessionHasExecutor),
-        "SessionHasComms" => Some(RuntimeParityProbeInput::SessionHasComms),
-        "OpsLifecycleRegistry" => Some(RuntimeParityProbeInput::OpsLifecycleRegistry),
-        "PrepareBindings" => Some(RuntimeParityProbeInput::PrepareBindings),
-        "InputState" => Some(RuntimeParityProbeInput::InputState),
-        "ListActiveInputs" => Some(RuntimeParityProbeInput::ListActiveInputs),
-        "SetPeerIngressContext" => Some(RuntimeParityProbeInput::SetPeerIngressContext),
-        "NotifyDrainExited" => Some(RuntimeParityProbeInput::NotifyDrainExited),
-        "InterruptCurrentRun" => Some(RuntimeParityProbeInput::InterruptCurrentRun),
-        "CancelAfterBoundary" => Some(RuntimeParityProbeInput::CancelAfterBoundary),
-        "StagePersistentFilter" => Some(RuntimeParityProbeInput::StagePersistentFilter),
-        "RequestDeferredTools" => Some(RuntimeParityProbeInput::RequestDeferredTools),
-        "PublishCommittedVisibleSet" => Some(RuntimeParityProbeInput::PublishCommittedVisibleSet),
-        "AbortAll" => Some(RuntimeParityProbeInput::AbortAll),
-        "Abort" => Some(RuntimeParityProbeInput::Abort),
-        "Wait" => Some(RuntimeParityProbeInput::Wait),
-        "Ingest" => Some(RuntimeParityProbeInput::Ingest),
-        "PublishEvent" => Some(RuntimeParityProbeInput::PublishEvent),
-        "Recover" => Some(RuntimeParityProbeInput::Recover),
-        "Retire" => Some(RuntimeParityProbeInput::Retire),
-        "Recycle" => Some(RuntimeParityProbeInput::Recycle),
-        "RuntimeState" => Some(RuntimeParityProbeInput::RuntimeState),
-        "LoadBoundaryReceipt" => Some(RuntimeParityProbeInput::LoadBoundaryReceipt),
-        "AcceptWithCompletion" => Some(RuntimeParityProbeInput::AcceptWithCompletion),
-        "AcceptWithoutWake" => Some(RuntimeParityProbeInput::AcceptWithoutWake),
-        "Prepare" => Some(RuntimeParityProbeInput::Prepare),
-        "Commit" => Some(RuntimeParityProbeInput::Commit),
-        "Fail" => Some(RuntimeParityProbeInput::Fail),
-        "Reset" => Some(RuntimeParityProbeInput::Reset),
-        "StopRuntimeExecutor" => Some(RuntimeParityProbeInput::StopRuntimeExecutor),
-        "Destroy" => Some(RuntimeParityProbeInput::Destroy),
+        SchemaMeerkatMachineInputVariant::ContainsSession => {
+            Some(RuntimeParityProbeInput::ContainsSession)
+        }
+        SchemaMeerkatMachineInputVariant::SessionHasExecutor => {
+            Some(RuntimeParityProbeInput::SessionHasExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::SessionHasComms => {
+            Some(RuntimeParityProbeInput::SessionHasComms)
+        }
+        SchemaMeerkatMachineInputVariant::OpsLifecycleRegistry => {
+            Some(RuntimeParityProbeInput::OpsLifecycleRegistry)
+        }
+        SchemaMeerkatMachineInputVariant::PrepareBindings => {
+            Some(RuntimeParityProbeInput::PrepareBindings)
+        }
+        SchemaMeerkatMachineInputVariant::InputState => Some(RuntimeParityProbeInput::InputState),
+        SchemaMeerkatMachineInputVariant::ListActiveInputs => {
+            Some(RuntimeParityProbeInput::ListActiveInputs)
+        }
+        SchemaMeerkatMachineInputVariant::SetPeerIngressContext => {
+            Some(RuntimeParityProbeInput::SetPeerIngressContext)
+        }
+        SchemaMeerkatMachineInputVariant::NotifyDrainExited => {
+            Some(RuntimeParityProbeInput::NotifyDrainExited)
+        }
+        SchemaMeerkatMachineInputVariant::InterruptCurrentRun => {
+            Some(RuntimeParityProbeInput::InterruptCurrentRun)
+        }
+        SchemaMeerkatMachineInputVariant::CancelAfterBoundary => {
+            Some(RuntimeParityProbeInput::CancelAfterBoundary)
+        }
+        SchemaMeerkatMachineInputVariant::StagePersistentFilter => {
+            Some(RuntimeParityProbeInput::StagePersistentFilter)
+        }
+        SchemaMeerkatMachineInputVariant::RequestDeferredTools => {
+            Some(RuntimeParityProbeInput::RequestDeferredTools)
+        }
+        SchemaMeerkatMachineInputVariant::PublishCommittedVisibleSet => {
+            Some(RuntimeParityProbeInput::PublishCommittedVisibleSet)
+        }
+        SchemaMeerkatMachineInputVariant::AbortAll => Some(RuntimeParityProbeInput::AbortAll),
+        SchemaMeerkatMachineInputVariant::Abort => Some(RuntimeParityProbeInput::Abort),
+        SchemaMeerkatMachineInputVariant::Wait => Some(RuntimeParityProbeInput::Wait),
+        SchemaMeerkatMachineInputVariant::Ingest => Some(RuntimeParityProbeInput::Ingest),
+        SchemaMeerkatMachineInputVariant::PublishEvent => {
+            Some(RuntimeParityProbeInput::PublishEvent)
+        }
+        SchemaMeerkatMachineInputVariant::Recover => Some(RuntimeParityProbeInput::Recover),
+        SchemaMeerkatMachineInputVariant::Retire => Some(RuntimeParityProbeInput::Retire),
+        SchemaMeerkatMachineInputVariant::Recycle => Some(RuntimeParityProbeInput::Recycle),
+        SchemaMeerkatMachineInputVariant::RuntimeState => {
+            Some(RuntimeParityProbeInput::RuntimeState)
+        }
+        SchemaMeerkatMachineInputVariant::LoadBoundaryReceipt => {
+            Some(RuntimeParityProbeInput::LoadBoundaryReceipt)
+        }
+        SchemaMeerkatMachineInputVariant::AcceptWithCompletion => {
+            Some(RuntimeParityProbeInput::AcceptWithCompletion)
+        }
+        SchemaMeerkatMachineInputVariant::AcceptWithoutWake => {
+            Some(RuntimeParityProbeInput::AcceptWithoutWake)
+        }
+        SchemaMeerkatMachineInputVariant::Prepare => Some(RuntimeParityProbeInput::Prepare),
+        SchemaMeerkatMachineInputVariant::Commit => Some(RuntimeParityProbeInput::Commit),
+        SchemaMeerkatMachineInputVariant::Fail => Some(RuntimeParityProbeInput::Fail),
+        SchemaMeerkatMachineInputVariant::Reset => Some(RuntimeParityProbeInput::Reset),
+        SchemaMeerkatMachineInputVariant::StopRuntimeExecutor => {
+            Some(RuntimeParityProbeInput::StopRuntimeExecutor)
+        }
+        SchemaMeerkatMachineInputVariant::Destroy => Some(RuntimeParityProbeInput::Destroy),
         _ => None,
     }
 }
@@ -15326,7 +15957,9 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) => {
-            if let Some(value) = runtime_modeled_default_string_enum_named_value(name) {
+            if name.as_str() == "ToolFilter" {
+                runtime_modeled_named_value(name, runtime_modeled_tool_filter_all_inner())
+            } else if let Some(value) = runtime_modeled_default_string_enum_named_value(name) {
                 value
             } else {
                 runtime_modeled_named_value(
@@ -15452,6 +16085,13 @@ fn runtime_modeled_named_value(
         } if existing == type_name
     ) {
         return value;
+    }
+
+    if type_name.as_str() == "ToolFilter" {
+        return KernelValue::Named {
+            type_name: type_name.clone(),
+            value: Box::new(runtime_modeled_tool_filter_inner(value)),
+        };
     }
 
     if let Some(value) = runtime_modeled_string_enum_named_value(type_name, &value) {
@@ -15582,6 +16222,10 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 value,
             )),
         },
+        TypeRef::Named(name) if name.as_str() == "ToolFilter" => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(runtime_modeled_tool_filter_inner_from_json(value)),
+        },
         TypeRef::Named(name) => runtime_modeled_string_enum_named_value_from_json(name, value)
             .unwrap_or_else(|| KernelValue::Named {
                 type_name: name.clone(),
@@ -15656,6 +16300,9 @@ fn runtime_modeled_json_from_kernel_value(value: &KernelValue) -> serde_json::Va
         KernelValue::U64(value) => serde_json::Value::Number(serde_json::Number::from(*value)),
         KernelValue::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        KernelValue::Named { type_name, value } if type_name.as_str() == "ToolFilter" => {
+            runtime_modeled_tool_filter_json_from_inner(value)
         }
         KernelValue::Named { value, .. } => runtime_modeled_json_from_kernel_value(value),
         KernelValue::NamedVariant { variant, .. } => {
@@ -15744,6 +16391,122 @@ fn runtime_modeled_string_set(values: &[&str]) -> KernelValue {
     )
 }
 
+fn runtime_modeled_tool_filter_all_inner() -> KernelValue {
+    KernelValue::String("All".to_string())
+}
+
+fn runtime_modeled_tool_filter_names(values: impl Iterator<Item = String>) -> KernelValue {
+    KernelValue::Set(values.map(KernelValue::String).collect())
+}
+
+fn runtime_modeled_tool_filter_inner_from_domain(filter: &meerkat_core::ToolFilter) -> KernelValue {
+    match filter {
+        meerkat_core::ToolFilter::All => runtime_modeled_tool_filter_all_inner(),
+        meerkat_core::ToolFilter::Allow(names) => KernelValue::Map(BTreeMap::from([
+            (
+                KernelValue::String("tag".to_string()),
+                KernelValue::String("Allow".to_string()),
+            ),
+            (
+                KernelValue::String("names".to_string()),
+                runtime_modeled_tool_filter_names(
+                    names.iter().map(|name| name.as_str().to_string()),
+                ),
+            ),
+        ])),
+        meerkat_core::ToolFilter::Deny(names) => KernelValue::Map(BTreeMap::from([
+            (
+                KernelValue::String("tag".to_string()),
+                KernelValue::String("Deny".to_string()),
+            ),
+            (
+                KernelValue::String("names".to_string()),
+                runtime_modeled_tool_filter_names(
+                    names.iter().map(|name| name.as_str().to_string()),
+                ),
+            ),
+        ])),
+    }
+}
+
+fn runtime_modeled_tool_filter_inner_from_json(value: &serde_json::Value) -> KernelValue {
+    serde_json::from_value::<meerkat_core::ToolFilter>(value.clone())
+        .map(|filter| runtime_modeled_tool_filter_inner_from_domain(&filter))
+        .unwrap_or_else(|_| KernelValue::String(String::new()))
+}
+
+fn runtime_modeled_tool_filter_inner(value: KernelValue) -> KernelValue {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == "ToolFilter" => {
+            runtime_modeled_tool_filter_inner(*value)
+        }
+        KernelValue::NamedVariant { enum_name, variant }
+            if enum_name.as_str() == "ToolFilter" && variant.as_str() == "All" =>
+        {
+            runtime_modeled_tool_filter_all_inner()
+        }
+        KernelValue::String(raw) => KernelValue::String(raw),
+        map @ KernelValue::Map(_) => map,
+        other => serde_json::from_value::<meerkat_core::ToolFilter>(
+            runtime_modeled_json_from_kernel_value(&other),
+        )
+        .map(|filter| runtime_modeled_tool_filter_inner_from_domain(&filter))
+        .unwrap_or(other),
+    }
+}
+
+fn runtime_modeled_tool_filter_deny_inner(names: &[&str]) -> KernelValue {
+    let mut filter_names = meerkat_core::ToolNameSet::new();
+    for name in names {
+        filter_names.insert(*name);
+    }
+    runtime_modeled_tool_filter_inner_from_domain(&meerkat_core::ToolFilter::Deny(filter_names))
+}
+
+fn runtime_modeled_tool_filter_json_from_inner(value: &KernelValue) -> serde_json::Value {
+    match value {
+        KernelValue::String(tag) if tag == "All" => serde_json::Value::String("All".to_string()),
+        KernelValue::NamedVariant { enum_name, variant }
+            if enum_name.as_str() == "ToolFilter" && variant.as_str() == "All" =>
+        {
+            serde_json::Value::String("All".to_string())
+        }
+        KernelValue::Map(fields) => {
+            let tag = fields
+                .get(&KernelValue::String("tag".to_string()))
+                .and_then(|value| match value {
+                    KernelValue::String(tag) if matches!(tag.as_str(), "Allow" | "Deny") => {
+                        Some(tag.clone())
+                    }
+                    _ => None,
+                });
+            let names = fields
+                .get(&KernelValue::String("names".to_string()))
+                .and_then(|value| match value {
+                    KernelValue::Set(names) => Some(
+                        names
+                            .iter()
+                            .filter_map(|name| match name {
+                                KernelValue::String(name) => {
+                                    Some(serde_json::Value::String(name.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                });
+            match (tag, names) {
+                (Some(tag), Some(names)) => serde_json::Value::Object(serde_json::Map::from_iter(
+                    [(tag, serde_json::Value::Array(names))],
+                )),
+                _ => runtime_modeled_json_from_kernel_value(value),
+            }
+        }
+        other => runtime_modeled_json_from_kernel_value(other),
+    }
+}
+
 fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -> &'static str {
     match kind {
         meerkat_core::ToolSourceKind::Builtin => "Builtin",
@@ -15760,10 +16523,17 @@ fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -
 }
 
 fn runtime_modeled_tool_provenance_inner(provenance: &meerkat_core::ToolProvenance) -> KernelValue {
+    let tool_source_kind = meerkat_machine_schema::identity::NamedTypeId::parse("ToolSourceKind")
+        .expect("ToolSourceKind named type");
     KernelValue::Map(BTreeMap::from([
         (
             KernelValue::String("kind".to_string()),
-            KernelValue::String(runtime_modeled_tool_source_kind_label(&provenance.kind).into()),
+            runtime_modeled_named_value(
+                &tool_source_kind,
+                KernelValue::String(
+                    runtime_modeled_tool_source_kind_label(&provenance.kind).into(),
+                ),
+            ),
         ),
         (
             KernelValue::String("source_id".to_string()),
@@ -15902,7 +16672,9 @@ fn runtime_modeled_kernel_input(
     before: &RuntimeParitySnapshotSummary,
     probe: RuntimeParityProbeInput,
 ) -> Result<KernelInput, String> {
-    let variant_name = runtime_parity_probe_variant_name(probe).to_string();
+    let variant_name = runtime_parity_probe_input_variant(probe)
+        .as_str()
+        .to_string();
     let input_variant = schema
         .inputs
         .variant_named(&variant_name)
@@ -15968,14 +16740,9 @@ fn runtime_modeled_kernel_input(
                 })
                 .unwrap_or_else(|_| "\"<next-visibility-state>\"".into()),
             ),
-            "next_capability_base_filter" => runtime_modeled_named_string(
-                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
-                    [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-                        .into_iter()
-                        .collect(),
-                ))
-                .unwrap_or_else(|_| "\"<next-capability-base-filter>\"".into()),
-            ),
+            "next_capability_base_filter" => {
+                runtime_modeled_tool_filter_deny_inner(&[meerkat_core::VIEW_IMAGE_TOOL_NAME])
+            }
             "next_active_visibility_revision" => KernelValue::U64(1),
             "tool_visibility_delta" => {
                 runtime_modeled_named_string("\"<tool-visibility-delta>\"".to_string())
@@ -15985,16 +16752,8 @@ fn runtime_modeled_kernel_input(
             "provider" => KernelValue::String("openai".to_string()),
             "provider_params" => KernelValue::None,
             "intents" => runtime_modeled_string_set(&["mob.peer_added", "probe.intent"]),
-            "filter" => KernelValue::String(
-                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
-                    ["probe_tool".to_string()].into_iter().collect(),
-                ))
-                .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-            ),
-            "active_filter" | "staged_filter" => KernelValue::String(
-                serde_json::to_string(&meerkat_core::ToolFilter::All)
-                    .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-            ),
+            "filter" => runtime_modeled_tool_filter_deny_inner(&["probe_tool"]),
+            "active_filter" | "staged_filter" => runtime_modeled_tool_filter_all_inner(),
             "witnesses" | "authorities" => runtime_modeled_witness_map(),
             "names" => runtime_modeled_string_set(&["probe_tool"]),
             "active_requested_deferred_names" | "staged_requested_deferred_names" => {
@@ -16022,45 +16781,108 @@ fn runtime_modeled_kernel_input(
     Ok(KernelInput { variant, fields })
 }
 
-fn runtime_parity_probe_variant_name(probe: RuntimeParityProbeInput) -> &'static str {
+fn runtime_parity_probe_input_variant(
+    probe: RuntimeParityProbeInput,
+) -> SchemaMeerkatMachineInputVariant {
     match probe {
-        RuntimeParityProbeInput::RegisterSession => "RegisterSession",
-        RuntimeParityProbeInput::UnregisterSession => "UnregisterSession",
-        RuntimeParityProbeInput::EnsureSessionWithExecutor => "EnsureSessionWithExecutor",
-        RuntimeParityProbeInput::SetSilentIntents => "SetSilentIntents",
-        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => "ReconfigureSessionLlmIdentity",
-        RuntimeParityProbeInput::ContainsSession => "ContainsSession",
-        RuntimeParityProbeInput::SessionHasExecutor => "SessionHasExecutor",
-        RuntimeParityProbeInput::SessionHasComms => "SessionHasComms",
-        RuntimeParityProbeInput::OpsLifecycleRegistry => "OpsLifecycleRegistry",
-        RuntimeParityProbeInput::PrepareBindings => "PrepareBindings",
-        RuntimeParityProbeInput::InputState => "InputState",
-        RuntimeParityProbeInput::ListActiveInputs => "ListActiveInputs",
-        RuntimeParityProbeInput::SetPeerIngressContext => "SetPeerIngressContext",
-        RuntimeParityProbeInput::NotifyDrainExited => "NotifyDrainExited",
-        RuntimeParityProbeInput::InterruptCurrentRun => "InterruptCurrentRun",
-        RuntimeParityProbeInput::CancelAfterBoundary => "CancelAfterBoundary",
-        RuntimeParityProbeInput::StagePersistentFilter => "StagePersistentFilter",
-        RuntimeParityProbeInput::RequestDeferredTools => "RequestDeferredTools",
-        RuntimeParityProbeInput::PublishCommittedVisibleSet => "PublishCommittedVisibleSet",
-        RuntimeParityProbeInput::AbortAll => "AbortAll",
-        RuntimeParityProbeInput::Abort => "Abort",
-        RuntimeParityProbeInput::Wait => "Wait",
-        RuntimeParityProbeInput::Ingest => "Ingest",
-        RuntimeParityProbeInput::PublishEvent => "PublishEvent",
-        RuntimeParityProbeInput::Recover => "Recover",
-        RuntimeParityProbeInput::Retire => "Retire",
-        RuntimeParityProbeInput::Recycle => "Recycle",
-        RuntimeParityProbeInput::RuntimeState => "RuntimeState",
-        RuntimeParityProbeInput::LoadBoundaryReceipt => "LoadBoundaryReceipt",
-        RuntimeParityProbeInput::AcceptWithCompletion => "AcceptWithCompletion",
-        RuntimeParityProbeInput::AcceptWithoutWake => "AcceptWithoutWake",
-        RuntimeParityProbeInput::Prepare => "Prepare",
-        RuntimeParityProbeInput::Commit => "Commit",
-        RuntimeParityProbeInput::Fail => "Fail",
-        RuntimeParityProbeInput::Reset => "Reset",
-        RuntimeParityProbeInput::StopRuntimeExecutor => "StopRuntimeExecutor",
-        RuntimeParityProbeInput::Destroy => "Destroy",
+        RuntimeParityProbeInput::RegisterSession => {
+            SchemaMeerkatMachineInputVariant::RegisterSession
+        }
+        RuntimeParityProbeInput::UnregisterSession => {
+            SchemaMeerkatMachineInputVariant::UnregisterSession
+        }
+        RuntimeParityProbeInput::EnsureSessionWithExecutor => {
+            SchemaMeerkatMachineInputVariant::EnsureSessionWithExecutor
+        }
+        RuntimeParityProbeInput::SetSilentIntents => {
+            SchemaMeerkatMachineInputVariant::SetSilentIntents
+        }
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => {
+            SchemaMeerkatMachineInputVariant::ReconfigureSessionLlmIdentity
+        }
+        RuntimeParityProbeInput::ContainsSession => {
+            SchemaMeerkatMachineInputVariant::ContainsSession
+        }
+        RuntimeParityProbeInput::SessionHasExecutor => {
+            SchemaMeerkatMachineInputVariant::SessionHasExecutor
+        }
+        RuntimeParityProbeInput::SessionHasComms => {
+            SchemaMeerkatMachineInputVariant::SessionHasComms
+        }
+        RuntimeParityProbeInput::OpsLifecycleRegistry => {
+            SchemaMeerkatMachineInputVariant::OpsLifecycleRegistry
+        }
+        RuntimeParityProbeInput::PrepareBindings => {
+            SchemaMeerkatMachineInputVariant::PrepareBindings
+        }
+        RuntimeParityProbeInput::InputState => SchemaMeerkatMachineInputVariant::InputState,
+        RuntimeParityProbeInput::ListActiveInputs => {
+            SchemaMeerkatMachineInputVariant::ListActiveInputs
+        }
+        RuntimeParityProbeInput::SetPeerIngressContext => {
+            SchemaMeerkatMachineInputVariant::SetPeerIngressContext
+        }
+        RuntimeParityProbeInput::NotifyDrainExited => {
+            SchemaMeerkatMachineInputVariant::NotifyDrainExited
+        }
+        RuntimeParityProbeInput::InterruptCurrentRun => {
+            SchemaMeerkatMachineInputVariant::InterruptCurrentRun
+        }
+        RuntimeParityProbeInput::CancelAfterBoundary => {
+            SchemaMeerkatMachineInputVariant::CancelAfterBoundary
+        }
+        RuntimeParityProbeInput::StagePersistentFilter => {
+            SchemaMeerkatMachineInputVariant::StagePersistentFilter
+        }
+        RuntimeParityProbeInput::RequestDeferredTools => {
+            SchemaMeerkatMachineInputVariant::RequestDeferredTools
+        }
+        RuntimeParityProbeInput::PublishCommittedVisibleSet => {
+            SchemaMeerkatMachineInputVariant::PublishCommittedVisibleSet
+        }
+        RuntimeParityProbeInput::AbortAll => SchemaMeerkatMachineInputVariant::AbortAll,
+        RuntimeParityProbeInput::Abort => SchemaMeerkatMachineInputVariant::Abort,
+        RuntimeParityProbeInput::Wait => SchemaMeerkatMachineInputVariant::Wait,
+        RuntimeParityProbeInput::Ingest => SchemaMeerkatMachineInputVariant::Ingest,
+        RuntimeParityProbeInput::PublishEvent => SchemaMeerkatMachineInputVariant::PublishEvent,
+        RuntimeParityProbeInput::Recover => SchemaMeerkatMachineInputVariant::Recover,
+        RuntimeParityProbeInput::Retire => SchemaMeerkatMachineInputVariant::Retire,
+        RuntimeParityProbeInput::Recycle => SchemaMeerkatMachineInputVariant::Recycle,
+        RuntimeParityProbeInput::RuntimeState => SchemaMeerkatMachineInputVariant::RuntimeState,
+        RuntimeParityProbeInput::LoadBoundaryReceipt => {
+            SchemaMeerkatMachineInputVariant::LoadBoundaryReceipt
+        }
+        RuntimeParityProbeInput::AcceptWithCompletion => {
+            SchemaMeerkatMachineInputVariant::AcceptWithCompletion
+        }
+        RuntimeParityProbeInput::AcceptWithoutWake => {
+            SchemaMeerkatMachineInputVariant::AcceptWithoutWake
+        }
+        RuntimeParityProbeInput::Prepare => SchemaMeerkatMachineInputVariant::Prepare,
+        RuntimeParityProbeInput::Commit => SchemaMeerkatMachineInputVariant::Commit,
+        RuntimeParityProbeInput::Fail => SchemaMeerkatMachineInputVariant::Fail,
+        RuntimeParityProbeInput::Reset => SchemaMeerkatMachineInputVariant::Reset,
+        RuntimeParityProbeInput::StopRuntimeExecutor => {
+            SchemaMeerkatMachineInputVariant::StopRuntimeExecutor
+        }
+        RuntimeParityProbeInput::Destroy => SchemaMeerkatMachineInputVariant::Destroy,
+    }
+}
+
+#[test]
+fn runtime_parity_probe_manifest_round_trips_through_typed_generated_variants() {
+    for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+    {
+        let Some(probe) = runtime_parity_probe_for_input_variant(input_variant) else {
+            continue;
+        };
+        assert_eq!(
+            runtime_parity_probe_input_variant(probe),
+            input_variant,
+            "runtime parity probe mapping must round-trip through typed generated input variants"
+        );
     }
 }
 
@@ -16190,20 +17012,8 @@ fn runtime_modeled_publish_input(
     modeled_kernel_input(
         "PublishCommittedVisibleSet",
         [
-            (
-                "active_filter",
-                KernelValue::String(
-                    serde_json::to_string(&meerkat_core::ToolFilter::All)
-                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-                ),
-            ),
-            (
-                "staged_filter",
-                KernelValue::String(
-                    serde_json::to_string(&meerkat_core::ToolFilter::All)
-                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-                ),
-            ),
+            ("active_filter", runtime_modeled_tool_filter_all_inner()),
+            ("staged_filter", runtime_modeled_tool_filter_all_inner()),
             (
                 "active_requested_deferred_names",
                 runtime_modeled_string_set(&[]),
@@ -16232,6 +17042,38 @@ fn runtime_modeled_publish_input(
     )
 }
 
+#[test]
+fn modeled_tool_filter_input_rejects_legacy_json_string_payload() {
+    let schema = modeled_meerkat_kernel::schema();
+    let legacy_filter = KernelValue::String(
+        serde_json::to_string(&meerkat_core::ToolFilter::Deny(
+            ["probe_tool".to_string()].into_iter().collect(),
+        ))
+        .expect("legacy filter serializes"),
+    );
+    let input = modeled_kernel_input(
+        "StagePersistentFilter",
+        [
+            ("filter", legacy_filter),
+            ("witnesses", runtime_modeled_witness_map()),
+        ],
+    );
+    let kernel = GeneratedMachineKernel::new(schema);
+    let state = kernel.initial_state().expect("initial modeled state");
+    let err = kernel
+        .transition(&state, &input)
+        .expect_err("legacy JSON-string ToolFilter payload must not be normalized");
+
+    assert!(
+        matches!(
+            err,
+            TransitionRefusal::InvalidInputPayload { ref reason, .. }
+                if reason.contains("filter")
+        ),
+        "legacy JSON-string ToolFilter should fail input payload validation, got {err:?}"
+    );
+}
+
 fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {
     [(
         "probe_tool".to_string(),
@@ -16245,6 +17087,13 @@ fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWi
     )]
     .into_iter()
     .collect()
+}
+
+fn runtime_parity_load_authorities() -> Vec<meerkat_core::DeferredToolLoadAuthority> {
+    runtime_parity_witnesses()
+        .into_iter()
+        .map(|(name, witness)| deferred_load_authority(&name, witness))
+        .collect()
 }
 
 fn runtime_parity_steered_prompt(text: &str) -> Input {
@@ -16615,12 +17464,7 @@ async fn meerkat_stop_runtime_executor_clears_silent_intent_overrides() {
 
     fixture
         .adapter
-        .stop_runtime_executor(
-            &fixture.session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "clear silent intents".into(),
-            },
-        )
+        .stop_runtime_executor(&fixture.session_id, "clear silent intents")
         .await
         .expect("stop runtime executor should succeed");
 
@@ -17015,12 +17859,7 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
         RuntimeParityPhase::Stopped => {
             adapter.register_session(session_id.clone()).await;
             adapter
-                .stop_runtime_executor(
-                    &session_id,
-                    RunControlCommand::StopRuntimeExecutor {
-                        reason: "runtime parity stopped fixture".to_string(),
-                    },
-                )
+                .stop_runtime_executor(&session_id, "runtime parity stopped fixture".to_string())
                 .await
                 .expect("stopped fixture should stop");
             wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Stopped).await;
@@ -17171,9 +18010,7 @@ fn runtime_parity_probe_command(
             reason: DrainExitReason::Dismissed,
         },
         RuntimeParityProbeInput::InterruptCurrentRun => {
-            MeerkatMachineCommand::InterruptCurrentRun {
-                session_id: fixture.session_id.clone(),
-            }
+            unreachable!("user interrupt probes use MeerkatMachine::hard_cancel_current_run")
         }
         RuntimeParityProbeInput::CancelAfterBoundary => {
             MeerkatMachineCommand::CancelAfterBoundary {
@@ -17192,7 +18029,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::RequestDeferredTools => {
             MeerkatMachineCommand::RequestDeferredTools {
                 session_id: fixture.session_id.clone(),
-                authorities: runtime_parity_witnesses(),
+                authorities: runtime_parity_load_authorities(),
             }
         }
         RuntimeParityProbeInput::PublishCommittedVisibleSet => {
@@ -17280,9 +18117,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::StopRuntimeExecutor => {
             MeerkatMachineCommand::StopRuntimeExecutor {
                 session_id: fixture.session_id.clone(),
-                command: RunControlCommand::StopRuntimeExecutor {
-                    reason: "runtime parity probe".to_string(),
-                },
+                reason: "runtime parity probe".to_string(),
             }
         }
         RuntimeParityProbeInput::Destroy => MeerkatMachineCommand::Destroy {
@@ -17449,6 +18284,13 @@ async fn execute_runtime_parity_probe(
         .await
         .map(MeerkatMachineCommandResult::LlmReconfigured)
         .map_err(MeerkatMachineCommandError::from)
+    } else if matches!(probe, RuntimeParityProbeInput::InterruptCurrentRun) {
+        fixture
+            .adapter
+            .hard_cancel_current_run(&fixture.session_id, "runtime parity probe interrupt")
+            .await
+            .map(|()| MeerkatMachineCommandResult::Unit)
+            .map_err(MeerkatMachineCommandError::from)
     } else {
         fixture
             .adapter
@@ -17726,8 +18568,9 @@ async fn probe_runtime_parity_row(
 fn runtime_parity_schema_transition_summaries_for_phase_input(
     schema: &MachineSchema,
     phase: &str,
-    input_variant: &str,
+    input_variant: SchemaMeerkatMachineInputVariant,
 ) -> Vec<RuntimeParitySchemaTransitionSummary> {
+    let input_variant_name = input_variant.as_str();
     let mut summaries = schema
         .transitions
         .iter()
@@ -17735,7 +18578,7 @@ fn runtime_parity_schema_transition_summaries_for_phase_input(
             matches!(
                 &transition.on,
                 meerkat_machine_schema::TriggerMatch::Input { variant, .. }
-                    if variant.as_str() == input_variant
+                    if variant.as_str() == input_variant_name
             ) && transition.from.iter().any(|from| from.as_str() == phase)
         })
         .map(|transition| RuntimeParitySchemaTransitionSummary {
@@ -17821,23 +18664,26 @@ fn runtime_parity_schema_rows_for_pair(
 ) -> Vec<RuntimeParitySchemaRow> {
     let mut rows = Vec::new();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+    {
         let left = runtime_parity_schema_transition_summaries_for_phase_input(
             schema,
             left_phase.schema_name(),
-            input_variant.name.as_str(),
+            input_variant,
         );
         let right = runtime_parity_schema_transition_summaries_for_phase_input(
             schema,
             right_phase.schema_name(),
-            input_variant.name.as_str(),
+            input_variant,
         );
         if left.is_empty() && right.is_empty() {
             continue;
         }
 
         rows.push(RuntimeParitySchemaRow {
-            input_variant: input_variant.name.as_str().to_string(),
+            input_variant,
             classification: classify_runtime_parity_schema_row(&left, &right),
             left,
             right,
@@ -17864,7 +18710,7 @@ async fn build_runtime_parity_pair_report(
     for schema_row in runtime_parity_schema_rows_for_pair(static_schema, left_phase, right_phase) {
         let probe_required = !surface_only_inputs.contains(schema_row.input_variant.as_str());
         let probe =
-            runtime_parity_probe_for_input_variant(&schema_row.input_variant).map(|probe_input| {
+            runtime_parity_probe_for_input_variant(schema_row.input_variant).map(|probe_input| {
                 Box::pin(probe_runtime_parity_row(
                     modeled_schema,
                     left_phase,
@@ -17901,7 +18747,7 @@ async fn build_runtime_parity_pair_report(
         };
 
         rows.push(RuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             static_schema_classification: schema_row.classification,
             static_schema_left: schema_row.left,
@@ -18016,15 +18862,18 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
         RuntimeParityPhase::Retired,
         RuntimeParityPhase::Stopped,
     ] {
-        for input_variant in &schema.inputs.variants {
-            if surface_only_inputs.contains(input_variant.name.as_str()) {
+        for input_variant in SchemaMeerkatMachineInput::variant_manifest()
+            .iter()
+            .copied()
+        {
+            let input_variant_name = input_variant.as_str();
+            if surface_only_inputs.contains(input_variant_name) {
                 continue;
             }
-            let Some(probe) = runtime_parity_probe_for_input_variant(input_variant.name.as_str())
-            else {
+            let Some(probe) = runtime_parity_probe_for_input_variant(input_variant) else {
                 rows.push(RuntimeModeledStateRowReport {
                     phase: phase.schema_name().to_string(),
-                    input_variant: input_variant.name.as_str().to_string(),
+                    input_variant: input_variant_name.to_string(),
                     aligned: false,
                     differing_keys: vec!["unprobed".to_string()],
                     runtime: RuntimeModeledStateRuntimeReport {
@@ -18060,7 +18909,7 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
 
             rows.push(RuntimeModeledStateRowReport {
                 phase: phase.schema_name().to_string(),
-                input_variant: input_variant.name.as_str().to_string(),
+                input_variant: input_variant_name.to_string(),
                 aligned,
                 differing_keys,
                 runtime: runtime_report,

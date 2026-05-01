@@ -346,6 +346,27 @@ pub struct TrustedPeerDescriptor {
 }
 
 impl TrustedPeerDescriptor {
+    pub fn pubkey_is_zero(pubkey: &[u8; 32]) -> bool {
+        *pubkey == [0u8; 32]
+    }
+
+    pub fn has_zero_pubkey(&self) -> bool {
+        Self::pubkey_is_zero(&self.pubkey)
+    }
+
+    pub fn validate_pubkey_for_peer_id(peer_id: PeerId, pubkey: &[u8; 32]) -> Result<(), String> {
+        if Self::pubkey_is_zero(pubkey) {
+            return Err("TrustedPeerDescriptor.pubkey must be non-zero".to_string());
+        }
+        let derived = PeerId::from_ed25519_pubkey(pubkey);
+        if derived != peer_id {
+            return Err(format!(
+                "peer_id {peer_id} does not match pubkey-derived id {derived}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Build a descriptor with a **zero Ed25519 signing pubkey** from
     /// typed identity atoms.
     ///
@@ -442,6 +463,7 @@ impl TrustedPeerDescriptor {
         address: impl AsRef<str>,
     ) -> Result<Self, String> {
         let mut descriptor = Self::test_only_unsigned(name, peer_id, address)?;
+        Self::validate_pubkey_for_peer_id(descriptor.peer_id, &pubkey)?;
         descriptor.pubkey = pubkey;
         Ok(descriptor)
     }

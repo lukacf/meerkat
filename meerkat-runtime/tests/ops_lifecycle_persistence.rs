@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use meerkat_core::completion_feed::CompletionFeed;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
@@ -640,7 +639,11 @@ impl CoreExecutor for NoopExecutor {
             terminal: None,
         })
     }
-    async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }

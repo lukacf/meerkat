@@ -289,7 +289,7 @@ fn generated_meerkat_operation_kind_uses_string_enum_binding() {
 }
 
 #[test]
-fn generated_meerkat_schema_content_shape_binding_is_closed() {
+fn generated_meerkat_schema_content_shape_binding_is_closed() -> Result<(), String> {
     use meerkat_core::turn_execution_authority::ContentShape;
 
     let schema = meerkat_machine();
@@ -300,21 +300,22 @@ fn generated_meerkat_schema_content_shape_binding_is_closed() {
         .expect("ContentShape binding");
 
     let RustTypeAtom::StringEnum { variants } = &binding.rust else {
-        panic!("ContentShape binding must be a closed StringEnum");
+        return Err("ContentShape binding must be a closed StringEnum".to_string());
     };
     let variants = variants
         .iter()
-        .map(|variant| variant.as_str())
+        .map(EnumVariantId::as_str)
         .collect::<Vec<_>>();
 
     assert_eq!(
         variants.as_slice(),
         ContentShape::SCHEMA_VARIANTS.as_slice()
     );
+    Ok(())
 }
 
 #[test]
-fn generated_meerkat_immediate_starts_derive_content_shape() {
+fn generated_meerkat_immediate_starts_derive_content_shape() -> Result<(), String> {
     use meerkat_core::turn_execution_authority::ContentShape;
 
     let schema = meerkat_machine();
@@ -342,7 +343,7 @@ fn generated_meerkat_immediate_starts_derive_content_shape() {
                 .expect("immediate start transition");
 
             let TriggerMatch::Input { variant, bindings } = &transition.on else {
-                panic!("{transition_name} must trigger on an input");
+                return Err(format!("{transition_name} must trigger on an input"));
             };
             assert_eq!(variant.as_str(), input_name);
             assert!(
@@ -366,10 +367,14 @@ fn generated_meerkat_immediate_starts_derive_content_shape() {
                 .expect("admitted_content_shape assignment");
 
             let Expr::Some(inner) = assigned_shape else {
-                panic!("{transition_name} must assign Some(ContentShape::...)");
+                return Err(format!(
+                    "{transition_name} must assign Some(ContentShape::...)"
+                ));
             };
             let Expr::NamedVariant { enum_name, variant } = inner.as_ref() else {
-                panic!("{transition_name} must assign a typed ContentShape variant");
+                return Err(format!(
+                    "{transition_name} must assign a typed ContentShape variant"
+                ));
             };
             assert_eq!(enum_name.as_str(), ContentShape::SCHEMA_TYPE_NAME);
             assert_eq!(variant.as_str(), expected_shape.schema_variant());
@@ -391,6 +396,7 @@ fn generated_meerkat_immediate_starts_derive_content_shape() {
             "{transition_name} must reject immediate-only shapes on conversation starts"
         );
     }
+    Ok(())
 }
 
 #[test]

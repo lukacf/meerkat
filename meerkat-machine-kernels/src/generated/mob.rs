@@ -96,6 +96,110 @@ impl std::fmt::Display for BranchId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CollectionPolicyKind {
+    #[default]
+    #[serde(rename = "All")]
+    All,
+    #[serde(rename = "Any")]
+    Any,
+    #[serde(rename = "Quorum")]
+    Quorum,
+}
+impl CollectionPolicyKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Any => "Any",
+            Self::Quorum => "Quorum",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CollectionPolicyKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "All" => Ok(Self::All),
+            "Any" => Ok(Self::Any),
+            "Quorum" => Ok(Self::Quorum),
+            other => Err(format!("invalid CollectionPolicyKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CollectionPolicyKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CollectionPolicyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DependencyMode {
+    #[default]
+    #[serde(rename = "All")]
+    All,
+    #[serde(rename = "Any")]
+    Any,
+}
+impl DependencyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Any => "Any",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DependencyMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "All" => Ok(Self::All),
+            "Any" => Ok(Self::Any),
+            other => Err(format!("invalid DependencyMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DependencyMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DependencyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type ExternalPeerEdge = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerEdge;
 #[derive(
     Debug,
@@ -119,6 +223,86 @@ impl From<u64> for FenceToken {
 impl std::fmt::Display for FenceToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowFrameReducerCommandKind {
+    #[default]
+    #[serde(rename = "StartRootFrame")]
+    StartRootFrame,
+    #[serde(rename = "StartBodyFrame")]
+    StartBodyFrame,
+    #[serde(rename = "AdmitNextReadyNode")]
+    AdmitNextReadyNode,
+    #[serde(rename = "CompleteNode")]
+    CompleteNode,
+    #[serde(rename = "RecordNodeOutput")]
+    RecordNodeOutput,
+    #[serde(rename = "FailNode")]
+    FailNode,
+    #[serde(rename = "SkipNode")]
+    SkipNode,
+    #[serde(rename = "CancelNode")]
+    CancelNode,
+    #[serde(rename = "SealFrame")]
+    SealFrame,
+}
+impl FlowFrameReducerCommandKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StartRootFrame => "StartRootFrame",
+            Self::StartBodyFrame => "StartBodyFrame",
+            Self::AdmitNextReadyNode => "AdmitNextReadyNode",
+            Self::CompleteNode => "CompleteNode",
+            Self::RecordNodeOutput => "RecordNodeOutput",
+            Self::FailNode => "FailNode",
+            Self::SkipNode => "SkipNode",
+            Self::CancelNode => "CancelNode",
+            Self::SealFrame => "SealFrame",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowFrameReducerCommandKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StartRootFrame" => Ok(Self::StartRootFrame),
+            "StartBodyFrame" => Ok(Self::StartBodyFrame),
+            "AdmitNextReadyNode" => Ok(Self::AdmitNextReadyNode),
+            "CompleteNode" => Ok(Self::CompleteNode),
+            "RecordNodeOutput" => Ok(Self::RecordNodeOutput),
+            "FailNode" => Ok(Self::FailNode),
+            "SkipNode" => Ok(Self::SkipNode),
+            "CancelNode" => Ok(Self::CancelNode),
+            "SealFrame" => Ok(Self::SealFrame),
+            other => Err(format!(
+                "invalid FlowFrameReducerCommandKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowFrameReducerCommandKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowFrameReducerCommandKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -147,6 +331,264 @@ impl From<&str> for FlowNodeId {
 impl std::fmt::Display for FlowNodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowNodeKind {
+    #[default]
+    #[serde(rename = "Step")]
+    Step,
+    #[serde(rename = "Loop")]
+    Loop,
+}
+impl FlowNodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Step => "Step",
+            Self::Loop => "Loop",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowNodeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Step" => Ok(Self::Step),
+            "Loop" => Ok(Self::Loop),
+            other => Err(format!("invalid FlowNodeKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowNodeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowNodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowRunReducerCommandKind {
+    #[default]
+    #[serde(rename = "CreateRun")]
+    CreateRun,
+    #[serde(rename = "StartRun")]
+    StartRun,
+    #[serde(rename = "DispatchStep")]
+    DispatchStep,
+    #[serde(rename = "CompleteStep")]
+    CompleteStep,
+    #[serde(rename = "RecordStepOutput")]
+    RecordStepOutput,
+    #[serde(rename = "ConditionPassed")]
+    ConditionPassed,
+    #[serde(rename = "ConditionRejected")]
+    ConditionRejected,
+    #[serde(rename = "FailStep")]
+    FailStep,
+    #[serde(rename = "SkipStep")]
+    SkipStep,
+    #[serde(rename = "ProjectFrameStepStatus")]
+    ProjectFrameStepStatus,
+    #[serde(rename = "CancelStep")]
+    CancelStep,
+    #[serde(rename = "RegisterTargets")]
+    RegisterTargets,
+    #[serde(rename = "RecordTargetSuccess")]
+    RecordTargetSuccess,
+    #[serde(rename = "RecordTargetTerminalFailure")]
+    RecordTargetTerminalFailure,
+    #[serde(rename = "RecordTargetCanceled")]
+    RecordTargetCanceled,
+    #[serde(rename = "RecordTargetFailure")]
+    RecordTargetFailure,
+    #[serde(rename = "RegisterReadyFrame")]
+    RegisterReadyFrame,
+    #[serde(rename = "PumpNodeScheduler")]
+    PumpNodeScheduler,
+    #[serde(rename = "RegisterPendingBodyFrame")]
+    RegisterPendingBodyFrame,
+    #[serde(rename = "PumpFrameScheduler")]
+    PumpFrameScheduler,
+    #[serde(rename = "NodeExecutionReleased")]
+    NodeExecutionReleased,
+    #[serde(rename = "FrameTerminated")]
+    FrameTerminated,
+    #[serde(rename = "TerminalizeCompleted")]
+    TerminalizeCompleted,
+    #[serde(rename = "TerminalizeFailed")]
+    TerminalizeFailed,
+    #[serde(rename = "TerminalizeCanceled")]
+    TerminalizeCanceled,
+}
+impl FlowRunReducerCommandKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CreateRun => "CreateRun",
+            Self::StartRun => "StartRun",
+            Self::DispatchStep => "DispatchStep",
+            Self::CompleteStep => "CompleteStep",
+            Self::RecordStepOutput => "RecordStepOutput",
+            Self::ConditionPassed => "ConditionPassed",
+            Self::ConditionRejected => "ConditionRejected",
+            Self::FailStep => "FailStep",
+            Self::SkipStep => "SkipStep",
+            Self::ProjectFrameStepStatus => "ProjectFrameStepStatus",
+            Self::CancelStep => "CancelStep",
+            Self::RegisterTargets => "RegisterTargets",
+            Self::RecordTargetSuccess => "RecordTargetSuccess",
+            Self::RecordTargetTerminalFailure => "RecordTargetTerminalFailure",
+            Self::RecordTargetCanceled => "RecordTargetCanceled",
+            Self::RecordTargetFailure => "RecordTargetFailure",
+            Self::RegisterReadyFrame => "RegisterReadyFrame",
+            Self::PumpNodeScheduler => "PumpNodeScheduler",
+            Self::RegisterPendingBodyFrame => "RegisterPendingBodyFrame",
+            Self::PumpFrameScheduler => "PumpFrameScheduler",
+            Self::NodeExecutionReleased => "NodeExecutionReleased",
+            Self::FrameTerminated => "FrameTerminated",
+            Self::TerminalizeCompleted => "TerminalizeCompleted",
+            Self::TerminalizeFailed => "TerminalizeFailed",
+            Self::TerminalizeCanceled => "TerminalizeCanceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowRunReducerCommandKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CreateRun" => Ok(Self::CreateRun),
+            "StartRun" => Ok(Self::StartRun),
+            "DispatchStep" => Ok(Self::DispatchStep),
+            "CompleteStep" => Ok(Self::CompleteStep),
+            "RecordStepOutput" => Ok(Self::RecordStepOutput),
+            "ConditionPassed" => Ok(Self::ConditionPassed),
+            "ConditionRejected" => Ok(Self::ConditionRejected),
+            "FailStep" => Ok(Self::FailStep),
+            "SkipStep" => Ok(Self::SkipStep),
+            "ProjectFrameStepStatus" => Ok(Self::ProjectFrameStepStatus),
+            "CancelStep" => Ok(Self::CancelStep),
+            "RegisterTargets" => Ok(Self::RegisterTargets),
+            "RecordTargetSuccess" => Ok(Self::RecordTargetSuccess),
+            "RecordTargetTerminalFailure" => Ok(Self::RecordTargetTerminalFailure),
+            "RecordTargetCanceled" => Ok(Self::RecordTargetCanceled),
+            "RecordTargetFailure" => Ok(Self::RecordTargetFailure),
+            "RegisterReadyFrame" => Ok(Self::RegisterReadyFrame),
+            "PumpNodeScheduler" => Ok(Self::PumpNodeScheduler),
+            "RegisterPendingBodyFrame" => Ok(Self::RegisterPendingBodyFrame),
+            "PumpFrameScheduler" => Ok(Self::PumpFrameScheduler),
+            "NodeExecutionReleased" => Ok(Self::NodeExecutionReleased),
+            "FrameTerminated" => Ok(Self::FrameTerminated),
+            "TerminalizeCompleted" => Ok(Self::TerminalizeCompleted),
+            "TerminalizeFailed" => Ok(Self::TerminalizeFailed),
+            "TerminalizeCanceled" => Ok(Self::TerminalizeCanceled),
+            other => Err(format!("invalid FlowRunReducerCommandKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowRunReducerCommandKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowRunReducerCommandKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowRunStatus {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl FlowRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowRunStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Pending" => Ok(Self::Pending),
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid FlowRunStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowRunStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -205,6 +647,114 @@ impl std::fmt::Display for FrameNodeKey {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FrameScope {
+    #[default]
+    #[serde(rename = "Root")]
+    Root,
+    #[serde(rename = "Body")]
+    Body,
+}
+impl FrameScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Root => "Root",
+            Self::Body => "Body",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FrameScope {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Root" => Ok(Self::Root),
+            "Body" => Ok(Self::Body),
+            other => Err(format!("invalid FrameScope value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FrameScope {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FrameScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FrameStatus {
+    #[default]
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl FrameStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FrameStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid FrameStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FrameStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FrameStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -227,6 +777,72 @@ impl From<u64> for Generation {
 impl std::fmt::Display for Generation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum KickoffIntent {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Starting")]
+    Starting,
+    #[serde(rename = "Started")]
+    Started,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl KickoffIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Starting => "Starting",
+            Self::Started => "Started",
+            Self::CallbackPending => "CallbackPending",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for KickoffIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Starting" => Ok(Self::Starting),
+            "Started" => Ok(Self::Started),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!("invalid KickoffIntent value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for KickoffIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for KickoffIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -351,6 +967,268 @@ impl std::fmt::Display for LoopInstanceId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LoopIterationReducerCommandKind {
+    #[default]
+    #[serde(rename = "StartLoop")]
+    StartLoop,
+    #[serde(rename = "BodyFrameStarted")]
+    BodyFrameStarted,
+    #[serde(rename = "BodyFrameCompleted")]
+    BodyFrameCompleted,
+    #[serde(rename = "BodyFrameFailed")]
+    BodyFrameFailed,
+    #[serde(rename = "BodyFrameCanceled")]
+    BodyFrameCanceled,
+    #[serde(rename = "UntilConditionMet")]
+    UntilConditionMet,
+    #[serde(rename = "UntilConditionFailed")]
+    UntilConditionFailed,
+    #[serde(rename = "CancelLoop")]
+    CancelLoop,
+}
+impl LoopIterationReducerCommandKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StartLoop => "StartLoop",
+            Self::BodyFrameStarted => "BodyFrameStarted",
+            Self::BodyFrameCompleted => "BodyFrameCompleted",
+            Self::BodyFrameFailed => "BodyFrameFailed",
+            Self::BodyFrameCanceled => "BodyFrameCanceled",
+            Self::UntilConditionMet => "UntilConditionMet",
+            Self::UntilConditionFailed => "UntilConditionFailed",
+            Self::CancelLoop => "CancelLoop",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LoopIterationReducerCommandKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StartLoop" => Ok(Self::StartLoop),
+            "BodyFrameStarted" => Ok(Self::BodyFrameStarted),
+            "BodyFrameCompleted" => Ok(Self::BodyFrameCompleted),
+            "BodyFrameFailed" => Ok(Self::BodyFrameFailed),
+            "BodyFrameCanceled" => Ok(Self::BodyFrameCanceled),
+            "UntilConditionMet" => Ok(Self::UntilConditionMet),
+            "UntilConditionFailed" => Ok(Self::UntilConditionFailed),
+            "CancelLoop" => Ok(Self::CancelLoop),
+            other => Err(format!(
+                "invalid LoopIterationReducerCommandKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LoopIterationReducerCommandKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LoopIterationReducerCommandKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LoopIterationStage {
+    #[default]
+    #[serde(rename = "AwaitingBodyFrame")]
+    AwaitingBodyFrame,
+    #[serde(rename = "BodyFrameActive")]
+    BodyFrameActive,
+    #[serde(rename = "AwaitingUntilEvaluation")]
+    AwaitingUntilEvaluation,
+}
+impl LoopIterationStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AwaitingBodyFrame => "AwaitingBodyFrame",
+            Self::BodyFrameActive => "BodyFrameActive",
+            Self::AwaitingUntilEvaluation => "AwaitingUntilEvaluation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LoopIterationStage {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AwaitingBodyFrame" => Ok(Self::AwaitingBodyFrame),
+            "BodyFrameActive" => Ok(Self::BodyFrameActive),
+            "AwaitingUntilEvaluation" => Ok(Self::AwaitingUntilEvaluation),
+            other => Err(format!("invalid LoopIterationStage value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LoopIterationStage {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LoopIterationStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LoopStatus {
+    #[default]
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Exhausted")]
+    Exhausted,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl LoopStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Exhausted => "Exhausted",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LoopStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Exhausted" => Ok(Self::Exhausted),
+            "Failed" => Ok(Self::Failed),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid LoopStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LoopStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LoopStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberLifecycleKind {
+    #[default]
+    #[serde(rename = "Spawned")]
+    Spawned,
+    #[serde(rename = "Retiring")]
+    Retiring,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Reset")]
+    Reset,
+    #[serde(rename = "Respawned")]
+    Respawned,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl MemberLifecycleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Spawned => "Spawned",
+            Self::Retiring => "Retiring",
+            Self::Retired => "Retired",
+            Self::Reset => "Reset",
+            Self::Respawned => "Respawned",
+            Self::Completed => "Completed",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberLifecycleKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Spawned" => Ok(Self::Spawned),
+            "Retiring" => Ok(Self::Retiring),
+            "Retired" => Ok(Self::Retired),
+            "Reset" => Ok(Self::Reset),
+            "Respawned" => Ok(Self::Respawned),
+            "Completed" => Ok(Self::Completed),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!("invalid MemberLifecycleKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberLifecycleKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberLifecycleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -455,6 +1333,76 @@ impl From<&str> for MobTask {
 impl std::fmt::Display for MobTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum NodeRunStatus {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl NodeRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Ready => "Ready",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Skipped => "Skipped",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for NodeRunStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Ready" => Ok(Self::Ready),
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Skipped" => Ok(Self::Skipped),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid NodeRunStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for NodeRunStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for NodeRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -567,6 +1515,68 @@ impl From<&str> for StepId {
 impl std::fmt::Display for StepId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum StepRunStatus {
+    #[default]
+    #[serde(rename = "Dispatched")]
+    Dispatched,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "Canceled")]
+    Canceled,
+}
+impl StepRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dispatched => "Dispatched",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Skipped => "Skipped",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for StepRunStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Dispatched" => Ok(Self::Dispatched),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Skipped" => Ok(Self::Skipped),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("invalid StepRunStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for StepRunStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for StepRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -683,6 +1693,56 @@ impl std::fmt::Display for WiringEdge {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WiringLifecycleKind {
+    #[default]
+    #[serde(rename = "Wired")]
+    Wired,
+    #[serde(rename = "Unwired")]
+    Unwired,
+}
+impl WiringLifecycleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wired => "Wired",
+            Self::Unwired => "Unwired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WiringLifecycleKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Wired" => Ok(Self::Wired),
+            "Unwired" => Ok(Self::Unwired),
+            other => Err(format!("invalid WiringLifecycleKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WiringLifecycleKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WiringLifecycleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -761,647 +1821,6 @@ impl std::convert::TryFrom<String> for WorkOrigin {
     }
 }
 impl std::fmt::Display for WorkOrigin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum CollectionPolicyKind {
-    #[default]
-    All,
-    Any,
-    Quorum,
-}
-impl CollectionPolicyKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Any => "Any",
-            Self::Quorum => "Quorum",
-        }
-    }
-}
-impl std::fmt::Display for CollectionPolicyKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum DependencyMode {
-    #[default]
-    All,
-    Any,
-}
-impl DependencyMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Any => "Any",
-        }
-    }
-}
-impl std::fmt::Display for DependencyMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FlowFrameReducerCommandKind {
-    #[default]
-    StartRootFrame,
-    StartBodyFrame,
-    AdmitNextReadyNode,
-    CompleteNode,
-    RecordNodeOutput,
-    FailNode,
-    SkipNode,
-    CancelNode,
-    SealFrame,
-}
-impl FlowFrameReducerCommandKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::StartRootFrame => "StartRootFrame",
-            Self::StartBodyFrame => "StartBodyFrame",
-            Self::AdmitNextReadyNode => "AdmitNextReadyNode",
-            Self::CompleteNode => "CompleteNode",
-            Self::RecordNodeOutput => "RecordNodeOutput",
-            Self::FailNode => "FailNode",
-            Self::SkipNode => "SkipNode",
-            Self::CancelNode => "CancelNode",
-            Self::SealFrame => "SealFrame",
-        }
-    }
-}
-impl std::fmt::Display for FlowFrameReducerCommandKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FlowNodeKind {
-    #[default]
-    Step,
-    Loop,
-}
-impl FlowNodeKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Step => "Step",
-            Self::Loop => "Loop",
-        }
-    }
-}
-impl std::fmt::Display for FlowNodeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FlowRunReducerCommandKind {
-    #[default]
-    CreateRun,
-    StartRun,
-    DispatchStep,
-    CompleteStep,
-    RecordStepOutput,
-    ConditionPassed,
-    ConditionRejected,
-    FailStep,
-    SkipStep,
-    ProjectFrameStepStatus,
-    CancelStep,
-    RegisterTargets,
-    RecordTargetSuccess,
-    RecordTargetTerminalFailure,
-    RecordTargetCanceled,
-    RecordTargetFailure,
-    RegisterReadyFrame,
-    PumpNodeScheduler,
-    RegisterPendingBodyFrame,
-    PumpFrameScheduler,
-    NodeExecutionReleased,
-    FrameTerminated,
-    TerminalizeCompleted,
-    TerminalizeFailed,
-    TerminalizeCanceled,
-}
-impl FlowRunReducerCommandKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CreateRun => "CreateRun",
-            Self::StartRun => "StartRun",
-            Self::DispatchStep => "DispatchStep",
-            Self::CompleteStep => "CompleteStep",
-            Self::RecordStepOutput => "RecordStepOutput",
-            Self::ConditionPassed => "ConditionPassed",
-            Self::ConditionRejected => "ConditionRejected",
-            Self::FailStep => "FailStep",
-            Self::SkipStep => "SkipStep",
-            Self::ProjectFrameStepStatus => "ProjectFrameStepStatus",
-            Self::CancelStep => "CancelStep",
-            Self::RegisterTargets => "RegisterTargets",
-            Self::RecordTargetSuccess => "RecordTargetSuccess",
-            Self::RecordTargetTerminalFailure => "RecordTargetTerminalFailure",
-            Self::RecordTargetCanceled => "RecordTargetCanceled",
-            Self::RecordTargetFailure => "RecordTargetFailure",
-            Self::RegisterReadyFrame => "RegisterReadyFrame",
-            Self::PumpNodeScheduler => "PumpNodeScheduler",
-            Self::RegisterPendingBodyFrame => "RegisterPendingBodyFrame",
-            Self::PumpFrameScheduler => "PumpFrameScheduler",
-            Self::NodeExecutionReleased => "NodeExecutionReleased",
-            Self::FrameTerminated => "FrameTerminated",
-            Self::TerminalizeCompleted => "TerminalizeCompleted",
-            Self::TerminalizeFailed => "TerminalizeFailed",
-            Self::TerminalizeCanceled => "TerminalizeCanceled",
-        }
-    }
-}
-impl std::fmt::Display for FlowRunReducerCommandKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FlowRunStatus {
-    #[default]
-    Absent,
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Canceled,
-}
-impl FlowRunStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Absent => "Absent",
-            Self::Pending => "Pending",
-            Self::Running => "Running",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Canceled => "Canceled",
-        }
-    }
-}
-impl std::fmt::Display for FlowRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FrameScope {
-    #[default]
-    Root,
-    Body,
-}
-impl FrameScope {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Root => "Root",
-            Self::Body => "Body",
-        }
-    }
-}
-impl std::fmt::Display for FrameScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FrameStatus {
-    #[default]
-    Running,
-    Completed,
-    Failed,
-    Canceled,
-}
-impl FrameStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "Running",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Canceled => "Canceled",
-        }
-    }
-}
-impl std::fmt::Display for FrameStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum KickoffIntent {
-    #[default]
-    Pending,
-    Starting,
-    Started,
-    CallbackPending,
-    Failed,
-    Cancelled,
-}
-impl KickoffIntent {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::Starting => "Starting",
-            Self::Started => "Started",
-            Self::CallbackPending => "CallbackPending",
-            Self::Failed => "Failed",
-            Self::Cancelled => "Cancelled",
-        }
-    }
-}
-impl std::fmt::Display for KickoffIntent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LoopIterationReducerCommandKind {
-    #[default]
-    StartLoop,
-    BodyFrameStarted,
-    BodyFrameCompleted,
-    BodyFrameFailed,
-    BodyFrameCanceled,
-    UntilConditionMet,
-    UntilConditionFailed,
-    CancelLoop,
-}
-impl LoopIterationReducerCommandKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::StartLoop => "StartLoop",
-            Self::BodyFrameStarted => "BodyFrameStarted",
-            Self::BodyFrameCompleted => "BodyFrameCompleted",
-            Self::BodyFrameFailed => "BodyFrameFailed",
-            Self::BodyFrameCanceled => "BodyFrameCanceled",
-            Self::UntilConditionMet => "UntilConditionMet",
-            Self::UntilConditionFailed => "UntilConditionFailed",
-            Self::CancelLoop => "CancelLoop",
-        }
-    }
-}
-impl std::fmt::Display for LoopIterationReducerCommandKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LoopIterationStage {
-    #[default]
-    AwaitingBodyFrame,
-    BodyFrameActive,
-    AwaitingUntilEvaluation,
-}
-impl LoopIterationStage {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AwaitingBodyFrame => "AwaitingBodyFrame",
-            Self::BodyFrameActive => "BodyFrameActive",
-            Self::AwaitingUntilEvaluation => "AwaitingUntilEvaluation",
-        }
-    }
-}
-impl std::fmt::Display for LoopIterationStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LoopStatus {
-    #[default]
-    Running,
-    Completed,
-    Exhausted,
-    Failed,
-    Canceled,
-}
-impl LoopStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "Running",
-            Self::Completed => "Completed",
-            Self::Exhausted => "Exhausted",
-            Self::Failed => "Failed",
-            Self::Canceled => "Canceled",
-        }
-    }
-}
-impl std::fmt::Display for LoopStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum MemberLifecycleKind {
-    #[default]
-    Spawned,
-    Retiring,
-    Retired,
-    Reset,
-    Respawned,
-    Completed,
-    Destroyed,
-}
-impl MemberLifecycleKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Spawned => "Spawned",
-            Self::Retiring => "Retiring",
-            Self::Retired => "Retired",
-            Self::Reset => "Reset",
-            Self::Respawned => "Respawned",
-            Self::Completed => "Completed",
-            Self::Destroyed => "Destroyed",
-        }
-    }
-}
-impl std::fmt::Display for MemberLifecycleKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum NodeRunStatus {
-    #[default]
-    Pending,
-    Ready,
-    Running,
-    Completed,
-    Failed,
-    Skipped,
-    Canceled,
-}
-impl NodeRunStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::Ready => "Ready",
-            Self::Running => "Running",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Skipped => "Skipped",
-            Self::Canceled => "Canceled",
-        }
-    }
-}
-impl std::fmt::Display for NodeRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum StepRunStatus {
-    #[default]
-    Dispatched,
-    Completed,
-    Failed,
-    Skipped,
-    Canceled,
-}
-impl StepRunStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Dispatched => "Dispatched",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Skipped => "Skipped",
-            Self::Canceled => "Canceled",
-        }
-    }
-}
-impl std::fmt::Display for StepRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum WiringLifecycleKind {
-    #[default]
-    Wired,
-    Unwired,
-}
-impl WiringLifecycleKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Wired => "Wired",
-            Self::Unwired => "Unwired",
-        }
-    }
-}
-impl std::fmt::Display for WiringLifecycleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

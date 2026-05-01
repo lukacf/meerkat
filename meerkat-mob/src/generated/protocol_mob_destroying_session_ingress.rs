@@ -14,6 +14,14 @@ pub struct MobDestroyingSessionIngressObligation {
     pub agent_runtime_id: AgentRuntimeId,
 }
 
+#[macro_export]
+macro_rules! mob_destroying_session_ingress_feedback_input_patterns {
+    () => {
+        $crate::machines::mob_machine::MobMachineInput::SessionIngressDetachedForMobDestroy { .. }
+        | $crate::machines::mob_machine::MobMachineInput::SessionIngressDetachFailedForMobDestroy { .. }
+    };
+}
+
 pub fn extract_obligations(
     effects: &[MobMachineEffect],
 ) -> Vec<MobDestroyingSessionIngressObligation> {

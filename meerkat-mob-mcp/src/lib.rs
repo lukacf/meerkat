@@ -34,7 +34,9 @@ use meerkat_contracts::MobDefinitionInput;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
-use meerkat_core::comms::{CommsCommand, PeerName, SendError, SendReceipt, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsCommand, PeerId, PeerName, SendError, SendReceipt, TrustedPeerDescriptor,
+};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
 use meerkat_core::service::{
@@ -1530,16 +1532,61 @@ impl MobMcpState {
 }
 
 struct LocalCommsRuntime {
+    peer_id: PeerId,
+    public_key_bytes: [u8; 32],
+    address: String,
     key: String,
     trusted: RwLock<HashSet<String>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
+fn encode_ed25519_public_key(bytes: &[u8; 32]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity("ed25519:".len() + 44);
+    encoded.push_str("ed25519:");
+    for chunk in bytes.chunks_exact(3) {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        encoded.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        encoded.push(TABLE[(n & 0x3f) as usize] as char);
+    }
+    let remainder = bytes.chunks_exact(3).remainder();
+    if !remainder.is_empty() {
+        let b0 = remainder[0];
+        let b1 = remainder.get(1).copied().unwrap_or(0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8);
+        encoded.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if remainder.len() == 2 {
+            encoded.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+            encoded.push('=');
+        } else {
+            encoded.push('=');
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
 impl LocalCommsRuntime {
     fn new(name: &str) -> Self {
-        let _ = name;
+        let mut public_key_bytes = [0u8; 32];
+        for (index, byte) in name.bytes().enumerate() {
+            let slot = index % public_key_bytes.len();
+            public_key_bytes[slot] = public_key_bytes[slot]
+                .wrapping_add(byte)
+                .wrapping_add(index as u8);
+        }
+        if public_key_bytes == [0u8; 32] {
+            public_key_bytes[0] = 1;
+        }
+        let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
         Self {
-            key: meerkat_core::comms::PeerId::new().to_string(),
+            peer_id,
+            public_key_bytes,
+            address: format!("inproc://{name}"),
+            key: encode_ed25519_public_key(&public_key_bytes),
             trusted: RwLock::new(HashSet::new()),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -1549,11 +1596,25 @@ impl LocalCommsRuntime {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for LocalCommsRuntime {
+    fn peer_id(&self) -> Option<PeerId> {
+        Some(self.peer_id)
+    }
+
     fn public_key(&self) -> Option<String> {
         Some(self.key.clone())
     }
 
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        Some(self.public_key_bytes)
+    }
+
+    fn advertised_address(&self) -> Option<String> {
+        Some(self.address.clone())
+    }
+
     async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+            .map_err(SendError::Validation)?;
         self.trusted
             .write()
             .await
@@ -1561,10 +1622,9 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Ok(())
     }
 
-    async fn add_private_trusted_peer(
-        &self,
-        _peer: TrustedPeerDescriptor,
-    ) -> Result<(), SendError> {
+    async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+            .map_err(SendError::Validation)?;
         Ok(())
     }
 
@@ -3227,6 +3287,9 @@ mod tests {
     }
 
     struct MockComms {
+        peer_id: meerkat_core::comms::PeerId,
+        public_key_bytes: [u8; 32],
+        address: String,
         key: String,
         trusted: RwLock<HashSet<String>>,
         notify: Arc<Notify>,
@@ -3275,9 +3338,22 @@ mod tests {
 
     impl MockComms {
         fn new(name: &str) -> Self {
-            let _ = name;
+            let mut public_key_bytes = [0u8; 32];
+            for (index, byte) in name.bytes().enumerate() {
+                let slot = index % public_key_bytes.len();
+                public_key_bytes[slot] = public_key_bytes[slot]
+                    .wrapping_add(byte)
+                    .wrapping_add(index as u8);
+            }
+            if public_key_bytes == [0u8; 32] {
+                public_key_bytes[0] = 1;
+            }
+            let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&public_key_bytes);
             Self {
-                key: meerkat_core::comms::PeerId::new().to_string(),
+                peer_id,
+                public_key_bytes,
+                address: format!("inproc://{name}"),
+                key: super::encode_ed25519_public_key(&public_key_bytes),
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(Notify::new()),
             }
@@ -3286,14 +3362,31 @@ mod tests {
 
     #[async_trait]
     impl CoreCommsRuntime for MockComms {
+        fn peer_id(&self) -> Option<meerkat_core::comms::PeerId> {
+            Some(self.peer_id)
+        }
+
         fn public_key(&self) -> Option<String> {
             Some(self.key.clone())
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            Some(self.public_key_bytes)
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(self.address.clone())
         }
 
         async fn add_trusted_peer(
             &self,
             peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
+            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                peer.peer_id,
+                &peer.pubkey,
+            )
+            .map_err(SendError::Validation)?;
             self.trusted
                 .write()
                 .await
@@ -3303,8 +3396,13 @@ mod tests {
 
         async fn add_private_trusted_peer(
             &self,
-            _peer: meerkat_core::comms::TrustedPeerDescriptor,
+            peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
+            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                peer.peer_id,
+                &peer.pubkey,
+            )
+            .map_err(SendError::Validation)?;
             Ok(())
         }
 

@@ -19,9 +19,9 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::SessionRuntime;
+use crate::session_runtime::{InterruptNoopTarget, SessionRuntime};
 use meerkat::surface::{RequestContext, request_action};
-use meerkat_runtime::SessionServiceRuntimeExt;
+use meerkat_runtime::{RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt};
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -170,14 +170,16 @@ pub async fn handle_start(
     };
 
     if let Some(context) = request_context.as_ref() {
-        let runtime = Arc::clone(&runtime);
+        let runtime_adapter = Arc::clone(runtime_adapter);
         let session_id = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime = Arc::clone(&runtime);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
                 let session_id = session_id.clone();
                 async move {
-                    let _ = runtime.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -295,7 +297,7 @@ pub async fn handle_interrupt(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
-    #[cfg(feature = "mob")] mob_state: &meerkat_mob_mcp::MobMcpState,
+    #[cfg(feature = "mob")] _mob_state: &meerkat_mob_mcp::MobMcpState,
 ) -> RpcResponse {
     let params: InterruptParams = match parse_params(params) {
         Ok(p) => p,
@@ -307,17 +309,41 @@ pub async fn handle_interrupt(
         Err(resp) => return resp,
     };
 
-    match runtime.interrupt(&session_id).await {
+    match runtime
+        .runtime_adapter()
+        .hard_cancel_current_run(&session_id, "RPC turn interrupt")
+        .await
+    {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
-        #[cfg(feature = "mob")]
-        Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
-            match mob_state.session_service().interrupt(&session_id).await {
-                Ok(()) | Err(meerkat_core::service::SessionError::NotRunning { .. }) => {
+        Err(RuntimeDriverError::NotReady {
+            state: RuntimeState::Idle | RuntimeState::Attached,
+        }) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+        Err(RuntimeDriverError::NotReady {
+            state: RuntimeState::Destroyed,
+        })
+        | Err(RuntimeDriverError::Destroyed) => {
+            match runtime.interrupt_noop_target(&session_id).await {
+                Ok(InterruptNoopTarget::Present) => {
                     RpcResponse::success(id, serde_json::json!({"interrupted": true}))
                 }
-                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                Ok(InterruptNoopTarget::Missing) => RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                ),
+                Ok(InterruptNoopTarget::NotInterruptible(state)) => RpcResponse::error(
+                    id,
+                    error::INVALID_REQUEST,
+                    format!("Session is not interruptible while runtime is {state}"),
+                ),
+                Err(err) => RpcResponse::error(id, err.code, err.message),
             }
         }
-        Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+        Err(RuntimeDriverError::NotReady { state }) => RpcResponse::error(
+            id,
+            error::INVALID_REQUEST,
+            format!("Session is not interruptible while runtime is {state}"),
+        ),
+        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }
 }

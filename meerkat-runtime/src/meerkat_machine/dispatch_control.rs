@@ -7,16 +7,16 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
-                let (session_id, driver, _completions, wake_tx, control_tx, control_handle) = {
+                let (session_id, driver, _completions, wake_tx, effect_tx, boundary_handle) = {
                     let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
-                    let (ctrl, ctrl_handle) = {
+                    let (effect, boundary_handle) = {
                         let sessions = self.sessions.read().await;
                         match sessions.get(&sid) {
-                            Some(entry) => (entry.control_sender(), entry.control_handle()),
+                            Some(entry) => (entry.effect_sender(), entry.boundary_handle()),
                             None => (None, None),
                         }
                     };
-                    (sid, d, c, w, ctrl, ctrl_handle)
+                    (sid, d, c, w, effect, boundary_handle)
                 };
 
                 // DSL-first: stage Ingest input before driver mutation.
@@ -47,7 +47,7 @@ impl MeerkatMachine {
                     }
                 };
 
-                let (outcome, signal) = {
+                let (outcome, signal, runtime_effect) = {
                     let mut drv = driver.lock().await;
                     let runtime_idle = self
                         .existing_session_runtime_state(&session_id)
@@ -99,14 +99,20 @@ impl MeerkatMachine {
                                 )
                                 .await
                                 .map_err(RuntimeControlPlaneError::Internal)?;
+                            let signal = Self::post_admission_signal_from_effects(&effects);
+                            let runtime_effect =
+                                crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                                    &effects,
+                                )
+                                .map_err(RuntimeControlPlaneError::Internal)?;
                             drv.absorb_post_admission_effects(&effects);
-                            Self::post_admission_signal_from_effects(&effects)
+                            (signal, runtime_effect)
                         }
                         AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
-                            crate::driver::ephemeral::PostAdmissionSignal::None
+                            (crate::driver::ephemeral::PostAdmissionSignal::None, None)
                         }
                     };
-                    (result, signal)
+                    (result, signal.0, signal.1)
                 };
 
                 // If the driver rejected the input, rollback DSL state.
@@ -121,24 +127,21 @@ impl MeerkatMachine {
                     let _ = tx.try_send(());
                 }
                 if signal.should_interrupt_yielding()
-                    && let Some(ref tx) = control_tx
+                    && let (Some(tx), Some(projected_effect)) = (&effect_tx, runtime_effect.clone())
                 {
-                    let _ = tx.try_send(
-                        meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-                    );
+                    let _ = tx.try_send(projected_effect.into_effect());
                 }
                 if signal.should_interrupt_yielding()
-                    && let Some(control_handle) = control_handle
+                    && let (Some(boundary_handle), Some(projected_effect)) =
+                        (boundary_handle, runtime_effect)
                 {
-                    let result = control_handle
-                        .control(
-                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-                        )
+                    let result = boundary_handle
+                        .cancel_after_boundary(projected_effect.reason().to_string())
                         .await;
                     if let Err(err) = result {
                         tracing::trace!(
                             error = %err,
-                            "out-of-band Ingest InterruptYielding control was not applied"
+                            "out-of-band Ingest boundary cancel was not applied"
                         );
                     }
                 }
@@ -434,7 +437,12 @@ impl MeerkatMachine {
                 };
                 drv.sync_control_projection_from_dsl_authority();
                 let report = prepared_destroy.report;
-                match machine_commit_prepared_destroy(&mut drv, prepared_destroy.lifecycle).await {
+                match Box::pin(machine_commit_prepared_destroy(
+                    &mut drv,
+                    prepared_destroy.lifecycle,
+                ))
+                .await
+                {
                     Ok(()) => {}
                     Err(err) => {
                         drv.sync_control_projection_from_dsl_authority();

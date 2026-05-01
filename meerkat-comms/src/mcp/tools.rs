@@ -14,6 +14,7 @@ use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -470,12 +471,35 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
+    let peer_id_counts: HashMap<PeerId, usize> = peers
+        .peers
+        .iter()
+        .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
+        .fold(HashMap::new(), |mut counts, peer| {
+            *counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
+            counts
+        });
     peers
         .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
         .filter_map(|p| {
+            if p.pubkey.is_zero() {
+                tracing::warn!(
+                    peer_name = %p.name,
+                    "skipping zero-pubkey trusted peer in MCP peer directory"
+                );
+                return None;
+            }
             let peer_id = p.pubkey.to_peer_id();
+            if peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
+                tracing::warn!(
+                    peer_name = %p.name,
+                    peer_id = %peer_id,
+                    "skipping duplicate trusted peer id in MCP peer directory"
+                );
+                return None;
+            }
             let name = match PeerName::new(p.name.clone()) {
                 Ok(name) => name,
                 Err(err) => {
@@ -978,6 +1002,53 @@ mod tests {
         assert_eq!(peer["reachability"], "unknown");
         assert_eq!(peer["last_unreachable_reason"], Value::Null);
         assert!(peer["meta"].is_object());
+    }
+
+    #[test]
+    fn test_runtime_less_peer_directory_skips_duplicate_canonical_peer_ids() {
+        let sender_keypair = Keypair::generate();
+        let peer_keypair = Keypair::generate();
+        let peer_pubkey = peer_keypair.public_key();
+        let peer_id = peer_pubkey.to_peer_id();
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::with_shared_peers(
+            sender_keypair,
+            trusted_peers.clone(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        trusted_peers.write().peers.extend([
+            TrustedPeer {
+                name: "runtime-less-primary".to_string(),
+                pubkey: peer_pubkey,
+                addr: "inproc://runtime-less-primary".to_string(),
+                meta: crate::PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: "runtime-less-shadow".to_string(),
+                pubkey: peer_pubkey,
+                addr: "inproc://runtime-less-shadow".to_string(),
+                meta: crate::PeerMeta::default(),
+            },
+        ]);
+        let ctx = ToolContext {
+            router,
+            trusted_peers,
+            runtime: None,
+        };
+
+        assert!(
+            ensure_peer_id_is_trusted(&ctx, &peer_id).is_err(),
+            "duplicate canonical trust is not send-resolvable"
+        );
+
+        let peers = runtime_less_peer_directory(&ctx);
+        assert!(
+            peers.iter().all(|peer| peer.peer_id != peer_id),
+            "runtime-less peer directory must not advertise duplicate canonical ids: {peers:?}"
+        );
     }
 
     #[tokio::test]

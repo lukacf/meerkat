@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "../user_interrupt.rs"]
+mod user_interrupt;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionBindingPreparation {
     /// The runtime binding itself is the semantic event: apply
@@ -28,6 +31,54 @@ fn visibility_authorities_for_names(
 }
 
 impl MeerkatMachine {
+    async fn dispatch_user_interrupt(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+    ) -> Result<(), RuntimeDriverError> {
+        // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+        if matches!(
+            self.existing_session_runtime_state(session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return Err(RuntimeDriverError::Destroyed);
+        }
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let previous_dsl_state = match self
+            .stage_session_runtime_internal_dsl_input(
+                session_id,
+                crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::InterruptCurrentRun,
+            )
+            .await
+        {
+            Ok(state) => state,
+            Err(_) => {
+                let state = self
+                    .existing_session_runtime_state(session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
+                return Err(RuntimeDriverError::NotReady { state });
+            }
+        };
+
+        if let Err(err) = self
+            .apply_user_interrupt_live_cancel(session_id, reason)
+            .await
+        {
+            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                .await;
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
     async fn prepare_session_runtime_bindings(
         &self,
         session_id: SessionId,
@@ -252,45 +303,6 @@ impl MeerkatMachine {
                 let _ = previous_dsl_state;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::InterruptCurrentRun { session_id } => {
-                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-
-                let previous_dsl_state = match self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::InterruptCurrentRun,
-                        "InterruptCurrentRun",
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeDriverError::NotReady { state });
-                    }
-                };
-                if let Err(err) = self.interrupt_current_run_inner(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
-                Ok(MeerkatMachineCommandResult::Unit)
-            }
             MeerkatMachineCommand::CancelAfterBoundary { session_id } => {
                 // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
                 if matches!(
@@ -306,34 +318,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = match self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::CancelAfterBoundary,
-                        "CancelAfterBoundary",
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeDriverError::NotReady { state });
-                    }
-                };
-                if let Err(err) = self.cancel_after_boundary_inner(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
+                self.cancel_after_boundary_inner(&session_id).await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::StopRuntimeExecutor {
-                session_id,
-                command,
-            } => {
+            MeerkatMachineCommand::StopRuntimeExecutor { session_id, reason } => {
                 // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
                 if matches!(
                     self.existing_session_runtime_state(&session_id).await,
@@ -348,19 +336,8 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
-                        "StopRuntimeExecutor",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                if let Err(err) = self.stop_runtime_executor_inner(&session_id, command).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
+                self.stop_runtime_executor_inner(&session_id, reason)
+                    .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::ContainsSession { session_id } => {

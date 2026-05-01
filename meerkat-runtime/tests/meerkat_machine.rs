@@ -740,7 +740,6 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
@@ -765,7 +764,17 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
                 terminal: None,
             })
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -808,7 +817,6 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::{PeerConvention, PeerInput, ResponseProgressPhase};
@@ -839,7 +847,17 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -953,7 +971,6 @@ async fn accept_with_executor_triggers_loop() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -988,7 +1005,17 @@ async fn accept_with_executor_triggers_loop() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1031,7 +1058,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::{
@@ -1093,7 +1119,17 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1308,7 +1344,6 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_runtime::input_state::InputLifecycleState;
     struct FailingExecutor;
@@ -1323,7 +1358,17 @@ async fn failed_executor_does_not_strand_input_in_apc() {
             Err(CoreExecutorError::apply_failed_runtime_turn("LLM error"))
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1372,7 +1417,6 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_runtime::input_state::InputLifecycleState;
 
@@ -1391,7 +1435,17 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
             Err(CoreExecutorError::apply_failed_runtime_turn("always fails"))
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1458,7 +1512,6 @@ async fn failed_executor_continues_processing_backlog() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -1499,7 +1552,17 @@ async fn failed_executor_continues_processing_backlog() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1564,7 +1627,6 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -1596,7 +1658,17 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1653,7 +1725,6 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -1684,7 +1755,17 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1741,15 +1822,14 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
 
-    struct PanicOnCancelExecutor;
+    struct PanicOnStopExecutor;
 
     #[async_trait::async_trait]
-    impl CoreExecutor for PanicOnCancelExecutor {
+    impl CoreExecutor for PanicOnStopExecutor {
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -1769,11 +1849,18 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
             })
         }
 
-        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(cmd, RunControlCommand::CancelCurrentRun { .. }) {
-                panic!("synthetic cancel panic to kill the loop and leave driver attached");
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            panic!("synthetic stop panic to kill the loop and leave driver attached");
         }
     }
 
@@ -1803,7 +1890,17 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1811,7 +1908,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
-        .register_session_with_executor(sid.clone(), Box::new(PanicOnCancelExecutor))
+        .register_session_with_executor(sid.clone(), Box::new(PanicOnStopExecutor))
         .await;
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
@@ -1819,13 +1916,16 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     );
 
     adapter
-        .interrupt_current_run(&sid)
+        .stop_runtime_executor(&sid, "stale attachment repair test")
         .await
-        .expect("attached runtime should accept the first interrupt command");
+        .expect("attached runtime should accept the stop effect");
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            match adapter.interrupt_current_run(&sid).await {
+            match adapter
+                .hard_cancel_current_run(&sid, "stale attachment repair probe")
+                .await
+            {
                 Err(RuntimeDriverError::NotReady {
                     state: RuntimeState::Attached,
                 }) => break,
@@ -1872,9 +1972,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
 #[tokio::test]
 async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     use meerkat_core::lifecycle::core_executor::{
-        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use tokio::sync::Notify;
@@ -1882,10 +1981,29 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     struct BlockingStopExecutor {
         stop_entered: Arc<Notify>,
         release_stop: Arc<Notify>,
+        interrupt_calls: Arc<AtomicUsize>,
+    }
+
+    struct BlockingStopInterruptHandle {
+        interrupt_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for BlockingStopInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingStopExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(BlockingStopInterruptHandle {
+                interrupt_calls: Arc::clone(&self.interrupt_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -1905,11 +2023,19 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
             })
         }
 
-        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_entered.notify_one();
-                self.release_stop.notified().await;
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_entered.notify_one();
+            self.release_stop.notified().await;
             Ok(())
         }
     }
@@ -1918,6 +2044,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     let sid = SessionId::new();
     let stop_entered = Arc::new(Notify::new());
     let release_stop = Arc::new(Notify::new());
+    let interrupt_calls = Arc::new(AtomicUsize::new(0));
 
     adapter
         .register_session_with_executor(
@@ -1925,6 +2052,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
             Box::new(BlockingStopExecutor {
                 stop_entered: Arc::clone(&stop_entered),
                 release_stop: Arc::clone(&release_stop),
+                interrupt_calls: Arc::clone(&interrupt_calls),
             }),
         )
         .await;
@@ -1933,12 +2061,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     let stop_sid = sid.clone();
     let stop_task = tokio::spawn(async move {
         stop_adapter
-            .stop_runtime_executor(
-                &stop_sid,
-                RunControlCommand::StopRuntimeExecutor {
-                    reason: "ownership-stop".into(),
-                },
-            )
+            .stop_runtime_executor(&stop_sid, "ownership-stop")
             .await
             .expect("stop command should send successfully");
     });
@@ -1947,9 +2070,10 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     stop_task.await.unwrap();
 
     adapter
-        .interrupt_current_run(&sid)
+        .hard_cancel_current_run(&sid, "blocking stop attachment probe")
         .await
         .expect("attachment should remain published while stop is still in progress");
+    assert_eq!(interrupt_calls.load(Ordering::SeqCst), 1);
 
     release_stop.notify_one();
 
@@ -1965,7 +2089,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     .expect("runtime should reach Stopped after the blocking stop control is released");
 
     let err = adapter
-        .interrupt_current_run(&sid)
+        .hard_cancel_current_run(&sid, "stopped runtime interrupt probe")
         .await
         .expect_err("stopped runtime should no longer expose a live attachment");
     assert!(matches!(
@@ -2034,7 +2158,6 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -2064,10 +2187,18 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
             })
         }
 
-        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_called.store(true, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_called.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -2107,7 +2238,6 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::completion::CompletionOutcome;
@@ -2135,7 +2265,17 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2168,7 +2308,6 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
@@ -2199,11 +2338,19 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
             })
         }
 
-        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_called.store(true, Ordering::SeqCst);
-                self.adapter.unregister_session(&self.session_id).await;
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_called.store(true, Ordering::SeqCst);
+            self.adapter.unregister_session(&self.session_id).await;
             Ok(())
         }
     }
@@ -2318,7 +2465,6 @@ async fn dedup_terminal_input_returns_none_handle() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{RunResult, Usage};
@@ -2355,7 +2501,17 @@ async fn dedup_terminal_input_returns_none_handle() {
                 run_result,
             ))
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2415,7 +2571,6 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{RunResult, Usage};
@@ -2454,7 +2609,17 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                 run_result,
             ))
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2559,7 +2724,6 @@ async fn completion_handle_resolves_without_result() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
@@ -2584,7 +2748,17 @@ async fn completion_handle_resolves_without_result() {
                 terminal: None, // No RunResult
             })
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2792,7 +2966,6 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use tokio::sync::Notify;
@@ -2853,7 +3026,17 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2884,7 +3067,6 @@ async fn successful_execution_fires_boundary_applied() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -2912,7 +3094,17 @@ async fn successful_execution_fires_boundary_applied() {
             })
         }
 
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2966,7 +3158,6 @@ async fn executor_attached_session_is_executor_ready() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
@@ -2991,7 +3182,17 @@ async fn executor_attached_session_is_executor_ready() {
                 terminal: None,
             })
         }
-        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

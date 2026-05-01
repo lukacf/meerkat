@@ -276,6 +276,86 @@ impl<'de> Deserialize<'de> for StorePrimitiveId {
     }
 }
 
+/// Payload field shapes for structural variants in a [`RustTypeAtom::TypePathEnum`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypePathEnumPayloadAtom {
+    StringSet,
+}
+
+/// One field in a structural enum-variant sample carried by the typed owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathEnumPayloadField {
+    pub name: FieldId,
+    pub atom: TypePathEnumPayloadAtom,
+}
+
+impl TypePathEnumPayloadField {
+    /// Construct a payload field whose value is a finite set of strings.
+    pub fn string_set(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural enum field slug"),
+            atom: TypePathEnumPayloadAtom::StringSet,
+        }
+    }
+}
+
+/// Structural enum variants whose sample values are represented as tagged maps.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathEnumStructuralVariant {
+    pub variant: EnumVariantId,
+    pub fields: Vec<TypePathEnumPayloadField>,
+}
+
+impl TypePathEnumStructuralVariant {
+    /// Construct a one-field structural variant with a string-set payload.
+    pub fn string_set(variant: &str, field: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            variant: EnumVariantId::parse(variant).expect("valid enum variant slug"),
+            fields: vec![TypePathEnumPayloadField::string_set(field)],
+        }
+    }
+}
+
+/// Field value shapes for structural type-path records.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypePathStructFieldAtom {
+    String,
+    Named(NamedTypeId),
+}
+
+/// One field in a structural record carried by the typed owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TypePathStructField {
+    pub name: FieldId,
+    pub atom: TypePathStructFieldAtom,
+}
+
+impl TypePathStructField {
+    /// Construct a structural field whose value is a string.
+    pub fn string(name: &str) -> Self {
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural record field slug"),
+            atom: TypePathStructFieldAtom::String,
+        }
+    }
+
+    /// Construct a structural field whose value is another named type.
+    pub fn named(name: &str, type_name: &str) -> Self {
+        #[allow(clippy::expect_used)]
+        let type_name = NamedTypeId::parse(type_name).expect("valid nested named-type slug");
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural record field slug"),
+            atom: TypePathStructFieldAtom::Named(type_name),
+        }
+    }
+}
+
 /// Atomic Rust-level representation used by [`NamedTypeBinding`] to anchor a
 /// DSL-declared named type to the concrete Rust type codegen must emit.
 ///
@@ -301,6 +381,79 @@ pub enum RustTypeAtom {
     },
     /// Fully-qualified Rust type path, e.g. `"crate::domain::MySpecialType"`.
     TypePath(String),
+    /// Fully-qualified Rust struct type path whose model domain is represented
+    /// as finite sets of present field names.
+    TypePathFieldPresenceSet {
+        path: String,
+        fields: Vec<FieldId>,
+    },
+    /// Fully-qualified Rust struct type path whose model and runtime domains are
+    /// represented as structural records with typed fields.
+    TypePathStruct {
+        path: String,
+        fields: Vec<TypePathStructField>,
+    },
+    /// Fully-qualified Rust enum type path with explicit unit variants that
+    /// can appear as DSL named-variant literals.
+    TypePathEnum {
+        path: String,
+        unit_variants: Vec<EnumVariantId>,
+        #[serde(default)]
+        structural_variants: Vec<TypePathEnumStructuralVariant>,
+    },
+}
+
+impl RustTypeAtom {
+    /// Returns whether two named-type bindings project to the same composition
+    /// model domain shape.
+    ///
+    /// Machine-local `TypePath` owners can differ by Rust module path while
+    /// still sharing a composition-level TLA domain through the named slug.
+    /// `TypePathEnum` owners are likewise path-agnostic here, but their unit
+    /// and structural variant payload shapes must agree because those variants
+    /// define the generated finite domain.
+    pub fn has_same_composition_domain_shape(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+
+        match (self, other) {
+            (Self::TypePath(_), Self::TypePath(_)) => true,
+            (
+                Self::TypePathFieldPresenceSet {
+                    fields: left_fields,
+                    ..
+                },
+                Self::TypePathFieldPresenceSet {
+                    fields: right_fields,
+                    ..
+                },
+            ) => left_fields == right_fields,
+            (
+                Self::TypePathStruct {
+                    fields: left_fields,
+                    ..
+                },
+                Self::TypePathStruct {
+                    fields: right_fields,
+                    ..
+                },
+            ) => left_fields == right_fields,
+            (
+                Self::TypePathEnum {
+                    unit_variants: left_units,
+                    structural_variants: left_structural,
+                    ..
+                },
+                Self::TypePathEnum {
+                    unit_variants: right_units,
+                    structural_variants: right_structural,
+                    ..
+                },
+            ) => left_units == right_units && left_structural == right_structural,
+            _ => false,
+        }
+    }
 }
 
 /// Authoritative binding from a DSL-declared named type to its Rust atom.
@@ -371,5 +524,101 @@ impl NamedTypeBinding {
             name: NamedTypeId::parse(name).expect("valid named-type slug"),
             rust: RustTypeAtom::TypePath(rust_path.into()),
         }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified type
+    /// path and whose generated model domain is finite field-presence sets.
+    pub fn type_path_field_presence_set(
+        name: &str,
+        rust_path: impl Into<String>,
+        fields: &[&str],
+    ) -> Self {
+        assert!(
+            !fields.is_empty(),
+            "field-presence named-type bindings require at least one field"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathFieldPresenceSet {
+                path: rust_path.into(),
+                fields: fields
+                    .iter()
+                    .map(|field| {
+                        #[allow(clippy::expect_used)]
+                        FieldId::parse(*field).expect("valid field-presence slug")
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified type
+    /// path and whose generated model/runtime domain is a typed structural
+    /// record.
+    pub fn type_path_struct(
+        name: &str,
+        rust_path: impl Into<String>,
+        fields: Vec<TypePathStructField>,
+    ) -> Self {
+        assert!(
+            !fields.is_empty(),
+            "struct named-type bindings require at least one field"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathStruct {
+                path: rust_path.into(),
+                fields,
+            },
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified
+    /// structural enum type path with a closed variant domain.
+    pub fn type_path_enum(
+        name: &str,
+        rust_path: impl Into<String>,
+        unit_variants: &[&str],
+    ) -> Self {
+        assert!(
+            !unit_variants.is_empty(),
+            "type-path enum named-type bindings require at least one unit variant"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathEnum {
+                path: rust_path.into(),
+                unit_variants: unit_variants
+                    .iter()
+                    .map(|variant| {
+                        #[allow(clippy::expect_used)]
+                        EnumVariantId::parse(*variant).expect("valid enum variant slug")
+                    })
+                    .collect(),
+                structural_variants: Vec::new(),
+            },
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified
+    /// structural enum type path with unit and payload-carrying variants.
+    pub fn type_path_enum_with_structural_variants(
+        name: &str,
+        rust_path: impl Into<String>,
+        unit_variants: &[&str],
+        structural_variants: Vec<TypePathEnumStructuralVariant>,
+    ) -> Self {
+        let mut binding = Self::type_path_enum(name, rust_path, unit_variants);
+        if let RustTypeAtom::TypePathEnum {
+            structural_variants: variants,
+            ..
+        } = &mut binding.rust
+        {
+            *variants = structural_variants;
+        }
+        binding
     }
 }

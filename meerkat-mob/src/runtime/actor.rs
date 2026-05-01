@@ -394,24 +394,17 @@ impl MobActor {
             .strip_prefix("inproc://")
             .map(|value| value.split('?').next().unwrap_or(value).to_string())
             .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}"));
-        let pubkey = pubkey.or_else(|| {
-            let (registry_pubkey, _) =
-                meerkat_comms::InprocRegistry::global().get_by_name(&peer_name)?;
-            (registry_pubkey.to_peer_id().as_str() == peer_id).then(|| *registry_pubkey.as_bytes())
-        });
-        let result = match pubkey {
-            Some(pubkey) => TrustedPeerDescriptor::unsigned_with_pubkey(
-                peer_name,
-                peer_id.to_string(),
-                pubkey,
-                address.to_string(),
-            ),
-            None => TrustedPeerDescriptor::test_only_unsigned(
-                peer_name,
-                peer_id.to_string(),
-                address.to_string(),
-            ),
-        };
+        let pubkey = pubkey.ok_or_else(|| {
+            MobError::WiringError(format!(
+                "{context}: peer-only runtime spec for '{peer_name}' requires pubkey"
+            ))
+        })?;
+        let result = TrustedPeerDescriptor::unsigned_with_pubkey(
+            peer_name,
+            peer_id.to_string(),
+            pubkey,
+            address.to_string(),
+        );
         result.map_err(|error| {
             MobError::WiringError(format!(
                 "{context}: invalid peer-only runtime spec: {error}"
@@ -842,6 +835,7 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let crate::RuntimeBinding::External {
             peer_id: prior_peer_id,
+            pubkey,
             ..
         } = prior_binding
         else {
@@ -850,6 +844,12 @@ impl MobActor {
         let bootstrap_token = Some(Self::bridge_bootstrap_token_from_binding(prior_binding)?);
         let canonical_address =
             super::bridge_protocol::canonicalize_bridge_address(&bind_response.address);
+        Self::peer_only_spec_from_parts(
+            &bind_response.peer_id,
+            &canonical_address,
+            "persist_rebound_binding",
+            *pubkey,
+        )?;
         let updated_entries = self
             .roster
             .write()
@@ -860,7 +860,7 @@ impl MobActor {
                 &canonical_address,
                 bootstrap_token.clone(),
             );
-        for (identity, generation) in updated_entries {
+        for (identity, generation, pubkey) in updated_entries {
             self.runtime_metadata
                 .upsert_external_binding_overlay(
                     &self.definition.id,
@@ -870,6 +870,7 @@ impl MobActor {
                         normalized_member_ref: Some(MemberRef::BackendPeer {
                             peer_id: bind_response.peer_id.clone(),
                             address: canonical_address.clone(),
+                            pubkey,
                             bootstrap_token: None,
                             session_id: None,
                         }),
@@ -5472,8 +5473,7 @@ impl MobActor {
             .map(|entry| entry.agent_identity.clone())
     }
 
-    /// P1-T05: retire() removes a meerkat.
-    /// Force-cancel a member's in-flight turn via session interrupt.
+    /// P1-T05: force-cancel a member's in-flight turn cooperatively.
     ///
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
@@ -6769,18 +6769,19 @@ impl MobActor {
             .identity
             .resolve()
             .map_err(|error| MobError::WiringError(error.to_string()))?;
-        let address = PeerAddress::parse(&binding.address).map_err(|error| {
+        let _address = PeerAddress::parse(&binding.address).map_err(|error| {
             MobError::WiringError(format!(
                 "external binding has invalid peer address '{}': {error}",
                 binding.address
             ))
         })?;
-        Ok(TrustedPeerDescriptor {
-            name,
-            peer_id: resolved.peer_id,
-            address,
-            pubkey: resolved.pubkey,
-        })
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name.as_str().to_string(),
+            resolved.peer_id.to_string(),
+            resolved.pubkey,
+            binding.address,
+        )
+        .map_err(|error| MobError::WiringError(format!("external binding is invalid: {error}")))
     }
 
     /// Wire a local member to an external trusted peer.
@@ -6797,6 +6798,9 @@ impl MobActor {
         local: MeerkatId,
         spec: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(spec.peer_id, &spec.pubkey).map_err(
+            |error| MobError::WiringError(format!("external peer descriptor is invalid: {error}")),
+        )?;
         let local_identity = AgentIdentity::from(local.as_str());
         let external_identity = AgentIdentity::from(spec.name.as_str());
         if local_identity == external_identity {
@@ -7387,13 +7391,14 @@ impl MobActor {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
                     address,
+                    pubkey,
                     bootstrap_token,
                     ..
                 } => crate::RuntimeBinding::External {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
                     bootstrap_token: bootstrap_token.clone(),
-                    pubkey: None,
+                    pubkey: *pubkey,
                 },
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
@@ -7974,13 +7979,14 @@ impl MobActor {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 bootstrap_token,
                 session_id: None,
             } => Some(crate::RuntimeBinding::External {
                 peer_id: peer_id.clone(),
                 address: super::bridge_protocol::canonicalize_bridge_address(address),
                 bootstrap_token: bootstrap_token.clone(),
-                pubkey: None,
+                pubkey: *pubkey,
             }),
             _ => None,
         }
@@ -7991,12 +7997,14 @@ impl MobActor {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 bootstrap_token,
                 session_id,
                 ..
             } => MemberRef::BackendPeer {
                 peer_id: peer_id.clone(),
                 address: super::bridge_protocol::canonicalize_bridge_address(address),
+                pubkey: *pubkey,
                 bootstrap_token: bootstrap_token.clone(),
                 session_id: session_id.clone(),
             },
@@ -8016,6 +8024,7 @@ impl MobActor {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                pubkey,
                 bootstrap_token,
                 session_id: None,
             } => Some(crate::store::ExternalBindingOverlayRecord {
@@ -8024,6 +8033,7 @@ impl MobActor {
                 normalized_member_ref: Some(MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: super::bridge_protocol::canonicalize_bridge_address(address),
+                    pubkey: *pubkey,
                     bootstrap_token: None,
                     session_id: None,
                 }),

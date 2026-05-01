@@ -2556,6 +2556,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeNotice`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `RuntimeEffectFact`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
 - `ModelRoutingStatusChanged`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`

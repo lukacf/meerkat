@@ -4695,9 +4695,15 @@ mod tests {
             ))
             .await
             .unwrap();
+        assert_eq!(
+            error_code(&interrupt_resp),
+            error::SESSION_NOT_FOUND,
+            "archived mob-backed session must reject generic turn/interrupt"
+        );
         assert!(
-            interrupt_resp.error.is_some(),
-            "retired mob-backed session must reject generic turn/interrupt"
+            error_message(&interrupt_resp).contains("Session not found"),
+            "unexpected error: {:?}",
+            interrupt_resp.error
         );
     }
 
@@ -7082,6 +7088,107 @@ mod tests {
         let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
         let interrupt_result = result_value(&interrupt_resp);
         assert_eq!(interrupt_result["interrupted"], true);
+    }
+
+    #[tokio::test]
+    async fn turn_interrupt_unknown_session_returns_not_found() {
+        let (router, _notif_rx) = test_router().await;
+        let unknown_session_id = meerkat_core::SessionId::new().to_string();
+
+        let interrupt_req = make_request(
+            "turn/interrupt",
+            serde_json::json!({"session_id": unknown_session_id}),
+        );
+        let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
+
+        assert_eq!(error_code(&interrupt_resp), error::SESSION_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn turn_interrupt_retired_runtime_returns_invalid_request() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({"prompt": "Hello"}),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let retire_resp = router
+            .dispatch(make_request(
+                "runtime/session_retire",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            retire_resp.error.is_none(),
+            "runtime/session_retire should succeed: {:?}",
+            retire_resp.error
+        );
+
+        let interrupt_resp = router
+            .dispatch(make_request(
+                "turn/interrupt",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&interrupt_resp), error::INVALID_REQUEST);
+        assert!(
+            error_message(&interrupt_resp).contains("runtime is retired"),
+            "unexpected error: {:?}",
+            interrupt_resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_interrupt_service_owned_idle_session_returns_ok() {
+        let (router, _notif_rx) = test_router().await;
+        let llm_override: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        let created = router
+            .runtime
+            .core_session_service()
+            .create_session(meerkat_core::service::CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("service-owned idle session should be created");
+
+        let interrupt_resp = router
+            .dispatch(make_request(
+                "turn/interrupt",
+                serde_json::json!({"session_id": created.session_id}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            interrupt_resp.error.is_none(),
+            "service-owned idle interrupt should no-op: {interrupt_resp:?}"
+        );
+        assert_eq!(result_value(&interrupt_resp)["interrupted"], true);
     }
 
     #[tokio::test]

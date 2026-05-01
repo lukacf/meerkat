@@ -200,6 +200,7 @@ pub enum BridgeCommand {
     DeliverMemberInput(BridgeDeliveryPayload),
     ObserveMember(BridgeSupervisorPayload),
     InterruptMember(BridgeSupervisorPayload),
+    HardCancelMember(BridgeHardCancelPayload),
     RetireMember(BridgeSupervisorPayload),
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
@@ -217,6 +218,7 @@ impl BridgeCommand {
             | Self::InterruptMember(payload)
             | Self::RetireMember(payload)
             | Self::DestroyMember(payload) => payload.protocol_version,
+            Self::HardCancelMember(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
         }
@@ -590,13 +592,14 @@ impl TryFrom<&BridgePeerSpec> for BridgePeerIdentity {
             PeerName::new(spec.name.clone()).map_err(|e| format!("invalid peer name: {e}"))?;
         let address = parse_peer_address(&spec.address)?;
         let pubkey = BridgePeerPubKey::new(spec.pubkey);
-        if !pubkey.is_zero() {
-            let derived = pubkey.derived_peer_id();
-            if derived != peer_id {
-                return Err(format!(
-                    "peer_id {peer_id} does not match pubkey-derived id {derived}"
-                ));
-            }
+        if pubkey.is_zero() {
+            return Err("peer pubkey must be non-zero".to_string());
+        }
+        let derived = pubkey.derived_peer_id();
+        if derived != peer_id {
+            return Err(format!(
+                "peer_id {peer_id} does not match pubkey-derived id {derived}"
+            ));
         }
         Ok(Self {
             name,
@@ -629,6 +632,20 @@ pub struct BridgeSupervisorPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
+}
+
+/// Explicit hard-cancel command payload.
+///
+/// `InterruptMember` is the cooperative boundary-break path. This payload is
+/// intentionally separate so supervisors cannot accidentally collapse boundary
+/// cancellation and immediate user/session interrupt authority onto one wire
+/// command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeHardCancelPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub reason: String,
 }
 
 /// One-time bootstrap proof exchanged between a mob supervisor and a
@@ -723,6 +740,8 @@ pub struct BridgeCapabilities {
     #[serde(default)]
     pub interrupt_member: bool,
     #[serde(default)]
+    pub hard_cancel_member: bool,
+    #[serde(default)]
     pub retire_member: bool,
     #[serde(default)]
     pub destroy_member: bool,
@@ -741,6 +760,7 @@ impl Default for BridgeCapabilities {
             deliver_member_input: false,
             observe_member: false,
             interrupt_member: false,
+            hard_cancel_member: false,
             retire_member: false,
             destroy_member: false,
             wire_member: false,
@@ -944,6 +964,15 @@ mod tests {
         }
     }
 
+    fn sample_hard_cancel_payload() -> BridgeHardCancelPayload {
+        BridgeHardCancelPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 42,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            reason: "test hard cancel".to_string(),
+        }
+    }
+
     fn sample_wiring_payload() -> BridgePeerWiringPayload {
         BridgePeerWiringPayload {
             supervisor: sample_peer_spec(),
@@ -1025,6 +1054,41 @@ mod tests {
     }
 
     #[test]
+    fn bridge_peer_spec_rejects_zero_pubkey() {
+        let spec = BridgePeerSpec {
+            name: "member-a".to_string(),
+            peer_id: PeerId::from_ed25519_pubkey(&[1u8; 32]).to_string(),
+            address: "tcp://127.0.0.1:7000".to_string(),
+            pubkey: [0u8; 32],
+        };
+
+        let err = meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+            .expect_err("supervisor bridge peer specs must fail closed on zero pubkeys");
+        assert!(
+            err.contains("pubkey") && err.contains("non-zero"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn bridge_peer_spec_missing_pubkey_defaults_to_zero_and_rejects() {
+        let value = json!({
+            "name": "member-a",
+            "peer_id": PeerId::from_ed25519_pubkey(&[2u8; 32]).to_string(),
+            "address": "tcp://127.0.0.1:7000"
+        });
+        let spec: BridgePeerSpec =
+            serde_json::from_value(value).expect("legacy bridge peer spec should deserialize");
+
+        let err = meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+            .expect_err("missing pubkey must not become trusted zero-key authority");
+        assert!(
+            err.contains("pubkey") && err.contains("non-zero"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
     fn bridge_command_authorize_supervisor_round_trip() {
         let cmd = BridgeCommand::AuthorizeSupervisor(sample_supervisor_payload());
         assert_command_round_trip(&cmd);
@@ -1058,6 +1122,12 @@ mod tests {
     #[test]
     fn bridge_command_interrupt_member_round_trip() {
         let cmd = BridgeCommand::InterruptMember(sample_supervisor_payload());
+        assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_command_hard_cancel_member_round_trip() {
+        let cmd = BridgeCommand::HardCancelMember(sample_hard_cancel_payload());
         assert_command_round_trip(&cmd);
     }
 
@@ -1238,6 +1308,7 @@ mod tests {
         assert!(capabilities.deliver_member_input);
         assert!(capabilities.observe_member);
         assert!(capabilities.interrupt_member);
+        assert!(!capabilities.hard_cancel_member);
         assert!(capabilities.retire_member);
         assert!(capabilities.destroy_member);
         assert!(capabilities.wire_member);
@@ -1482,6 +1553,7 @@ mod tests {
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,
+                    "hard_cancel_member": false,
                     "retire_member": false,
                     "destroy_member": false,
                     "wire_member": false,

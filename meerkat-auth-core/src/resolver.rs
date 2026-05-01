@@ -244,6 +244,24 @@ fn oauth_lifecycle_marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn oauth_lifecycle_snapshot_allows_marker_rehydrate(
+    phase: AuthStatusPhase,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    tokens: &PersistedTokens,
+) -> bool {
+    if phase != AuthStatusPhase::Unknown
+        || snapshot.credential_present
+        || !meerkat_core::tokens_lifecycle_published(tokens)
+    {
+        return false;
+    }
+    if snapshot.generation == 0 && snapshot.phase.is_none() {
+        return true;
+    }
+    snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn restore_oauth_lifecycle_after_marker_save_failure(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     lease_key: &meerkat_core::handles::LeaseKey,
@@ -319,11 +337,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         let mut snapshot = auth_lease.snapshot(&lease_key);
         let mut phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         if is_oauth_login
-            && phase == AuthStatusPhase::Unknown
-            && snapshot.generation == 0
-            && snapshot.phase.is_none()
-            && !snapshot.credential_present
-            && meerkat_core::tokens_lifecycle_published(&tokens)
+            && oauth_lifecycle_snapshot_allows_marker_rehydrate(phase, &snapshot, &tokens)
         {
             let previous_snapshot = snapshot.clone();
             let transition = meerkat_core::publish_token_lifecycle_acquired(
@@ -1675,6 +1689,84 @@ mod tests {
             auth_lease.acquire_count(),
             0,
             "a published marker without an explicit expiry must not rehydrate AuthMachine"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_only_lifecycle_adopts_valid_marked_token() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("oauth-only-access");
+        store
+            .save(
+                &key,
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+            )
+            .await
+            .unwrap();
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::ReauthRequired),
+            expires_at: None,
+            credential_present: false,
+            generation: 1,
+            credential_published_at_millis: None,
+        });
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .expect("OAuth-only flow membership must not block marked token adoption");
+
+        assert_eq!(secret, "oauth-only-access");
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert!(snapshot.credential_present);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_released_lifecycle_rejects_valid_marked_token() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("released-oauth-access");
+        store
+            .save(
+                &key,
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+            )
+            .await
+            .unwrap();
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: false,
+            generation: 1,
+            credential_published_at_millis: None,
+        });
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+        ));
+        assert_eq!(
+            auth_lease.acquire_count(),
+            0,
+            "explicit release must not rehydrate from durable OAuth token material"
         );
     }
 

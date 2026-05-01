@@ -1203,7 +1203,7 @@ impl MobProvisioner for SessionBackend {
             .cancel_after_boundary(&session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })?;
         Ok(())

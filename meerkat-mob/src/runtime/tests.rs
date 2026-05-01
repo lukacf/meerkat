@@ -493,6 +493,7 @@ struct MockSessionService {
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
+    cancel_after_boundary_supported: AtomicBool,
     cancel_after_boundary_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
     create_session_delay_ms: AtomicU64,
@@ -547,6 +548,7 @@ impl MockSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
+            cancel_after_boundary_supported: AtomicBool::new(true),
             cancel_after_boundary_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
             create_session_delay_ms: AtomicU64::new(0),
@@ -782,6 +784,11 @@ impl MockSessionService {
 
     fn cancel_after_boundary_call_count(&self) -> u64 {
         self.cancel_after_boundary_calls.load(Ordering::Relaxed)
+    }
+
+    fn set_cancel_after_boundary_supported(&self, enabled: bool) {
+        self.cancel_after_boundary_supported
+            .store(enabled, Ordering::Relaxed);
     }
 
     fn inject_call_count(&self) -> u64 {
@@ -1225,6 +1232,11 @@ impl SessionService for MockSessionService {
     async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
         self.cancel_after_boundary_calls
             .fetch_add(1, Ordering::Relaxed);
+        if !self.cancel_after_boundary_supported.load(Ordering::Relaxed) {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary".to_string(),
+            ));
+        }
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
@@ -14410,6 +14422,65 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
             event_tx: None,
             build: Some(meerkat_core::service::SessionBuildOptions {
                 comms_name: Some("test-mob/worker/w-boundary".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create session-backed member");
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
+    let wake = service
+        .keep_alive_notifiers
+        .read()
+        .await
+        .get(&session.session_id)
+        .cloned()
+        .expect("keep-alive session should install a cooperative wake notifier");
+    let notified = wake.notified();
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    provisioner
+        .interrupt_member(&member_ref)
+        .await
+        .expect("no-adapter member interrupt should request cooperative boundary cancel");
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("no-adapter cooperative boundary cancel should wake the waiting turn");
+
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "no-adapter member interrupt must request cooperative boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "no-adapter member interrupt must not use hard session interrupt"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_cancel() {
+    let service = Arc::new(MockSessionService::new());
+    service.set_cancel_after_boundary_supported(false);
+    let session = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "no-adapter unsupported boundary".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-unsupported-boundary".to_string()),
+                keep_alive: true,
                 ..Default::default()
             }),
             skill_references: None,
@@ -14424,20 +14495,28 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
     let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
 
-    provisioner
+    let error = provisioner
         .interrupt_member(&member_ref)
         .await
-        .expect("no-adapter member interrupt should request cooperative boundary cancel");
+        .expect_err("unsupported boundary cancel must not be reported as success");
 
+    assert!(
+        matches!(
+            error,
+            MobError::SessionError(SessionError::Unsupported(ref operation))
+                if operation == "cancel_after_boundary"
+        ),
+        "unsupported cooperative boundary cancel should surface as a session error, got {error:?}"
+    );
     assert_eq!(
         service.cancel_after_boundary_call_count(),
         baseline_boundary + 1,
-        "no-adapter member interrupt must request cooperative boundary cancel"
+        "no-adapter interrupt should attempt cooperative boundary cancel before failing"
     );
     assert_eq!(
         service.interrupt_call_count(),
         baseline_interrupts,
-        "no-adapter member interrupt must not use hard session interrupt"
+        "unsupported cooperative boundary cancel must not fall back to hard interrupt"
     );
 }
 

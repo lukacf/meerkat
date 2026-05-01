@@ -21,9 +21,11 @@ use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcError, RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::SessionRuntime;
+use crate::session_runtime::{
+    RuntimeTurnStartError, SessionRuntime, runtime_accept_error_to_turn_start,
+};
 use meerkat::surface::{RequestContext, request_action};
 
 // ---------------------------------------------------------------------------
@@ -478,6 +480,7 @@ pub async fn handle_create(
                 )
                 .await
             {
+                let rpc_err = rpc_err.as_rpc_error();
                 tracing::error!(
                     session_id = %sid_for_turn,
                     error = %rpc_err.code,
@@ -519,7 +522,11 @@ pub async fn handle_create(
         {
             Ok(r) => r,
             Err(rpc_err) => {
-                return RpcResponse::error(id, rpc_err.code, rpc_err.message);
+                disarm_unpublished_cleanup_after_post_admission_error(
+                    request_context.as_ref(),
+                    &rpc_err,
+                );
+                return rpc_response_from_error(id, rpc_err.into_rpc_error());
             }
         }
     };
@@ -529,6 +536,24 @@ pub async fn handle_create(
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
+}
+
+fn disarm_unpublished_cleanup_after_post_admission_error(
+    context: Option<&RequestContext>,
+    err: &RuntimeTurnStartError,
+) {
+    if err.is_post_admission_failure()
+        && let Some(context) = context
+    {
+        context.disarm_unpublished_cleanup();
+    }
+}
+
+fn rpc_response_from_error(id: Option<RpcId>, err: RpcError) -> RpcResponse {
+    match err.data {
+        Some(data) => RpcResponse::error_with_data(id, err.code, err.message, data),
+        None => RpcResponse::error(id, err.code, err.message),
+    }
 }
 
 #[cfg(feature = "comms")]
@@ -641,6 +666,16 @@ pub async fn handle_read(
 mod tests {
     use super::CreateSessionResult;
     use std::collections::BTreeMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use meerkat::surface::{
+        RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestKind, noop_request_action,
+        request_action,
+    };
+    use meerkat_runtime::{RuntimeDriverError, RuntimeDriverPostAdmissionOperation};
 
     #[test]
     fn create_session_result_preserves_skill_diagnostics() {
@@ -720,6 +755,56 @@ mod tests {
             "reserved surface metadata labels must be rejected"
         );
         assert!(result.unwrap_err().contains("meerkat.runtime_id"));
+    }
+
+    #[tokio::test]
+    async fn rpc_immediate_create_post_admission_failure_disarms_unpublished_cleanup() {
+        let executor = SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+        let context = executor
+            .try_begin_request(
+                "rpc-create-post-admission",
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
+            .expect("test request should be admitted");
+        let cleanup_runs = Arc::new(AtomicUsize::new(0));
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_runs = Arc::clone(&cleanup_runs);
+            move || {
+                let cleanup_runs = Arc::clone(&cleanup_runs);
+                async move {
+                    cleanup_runs.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        let rpc_err =
+            super::runtime_accept_error_to_turn_start(RuntimeDriverError::PostAdmissionFailure {
+                operation: RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+                reason: "canonical apply failed".to_string(),
+            });
+        super::disarm_unpublished_cleanup_after_post_admission_error(Some(&context), &rpc_err);
+        let rpc_err = rpc_err.into_rpc_error();
+
+        let terminal = context.classify_failure_terminal(super::RpcResponse::error(
+            Some(super::RpcId::Num(1)),
+            rpc_err.code,
+            rpc_err.message,
+        ));
+
+        match executor
+            .resolve_terminal(Some(context.key()), terminal)
+            .await
+        {
+            RequestTerminalResolution::Emit(_) => {}
+            other => panic!("expected failed terminal to emit response, got {other:?}"),
+        }
+
+        assert_eq!(
+            cleanup_runs.load(Ordering::SeqCst),
+            0,
+            "post-admission RPC initial-turn failures must not run pre-admission rollback cleanup"
+        );
     }
 }
 

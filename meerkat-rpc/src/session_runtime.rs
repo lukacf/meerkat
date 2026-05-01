@@ -217,6 +217,62 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     }
 }
 
+pub(crate) fn runtime_accept_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+    match err {
+        RuntimeDriverError::PostAdmissionFailure { operation, reason } => RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("runtime accept failed: {operation} failed after admission: {reason}"),
+            data: Some(serde_json::json!({
+                "code": crate::protocol::RUNTIME_POST_ADMISSION_FAILURE_CODE,
+                "operation": operation.to_string(),
+                "reason": reason,
+            })),
+        },
+        other => RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("runtime accept failed: {other}"),
+            data: None,
+        },
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeTurnStartError {
+    rpc_error: RpcError,
+    post_admission_failure: bool,
+}
+
+impl RuntimeTurnStartError {
+    pub(crate) fn is_post_admission_failure(&self) -> bool {
+        self.post_admission_failure
+    }
+
+    pub(crate) fn as_rpc_error(&self) -> &RpcError {
+        &self.rpc_error
+    }
+
+    pub(crate) fn into_rpc_error(self) -> RpcError {
+        self.rpc_error
+    }
+}
+
+impl From<RpcError> for RuntimeTurnStartError {
+    fn from(rpc_error: RpcError) -> Self {
+        Self {
+            rpc_error,
+            post_admission_failure: false,
+        }
+    }
+}
+
+pub(crate) fn runtime_accept_error_to_turn_start(err: RuntimeDriverError) -> RuntimeTurnStartError {
+    let post_admission_failure = err.is_post_admission_failure();
+    RuntimeTurnStartError {
+        rpc_error: runtime_accept_error_to_rpc(err),
+        post_admission_failure,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptNoopTarget {
     Present,
@@ -2186,7 +2242,7 @@ impl SessionRuntime {
     /// This ensures all session-driving work flows through the single runtime
     /// authority (the RuntimeLoop → CoreExecutor pipeline).
     #[allow(clippy::too_many_arguments, unused_variables)]
-    pub async fn start_turn_via_runtime(
+    pub(crate) async fn start_turn_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
         prompt: ContentInput,
@@ -2195,7 +2251,7 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
-    ) -> Result<RunResult, RpcError> {
+    ) -> Result<RunResult, RuntimeTurnStartError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
@@ -2251,7 +2307,8 @@ impl SessionRuntime {
                         rejected.join(", ")
                     ),
                     data: None,
-                });
+                }
+                .into());
             }
         }
 
@@ -2300,7 +2357,8 @@ impl SessionRuntime {
                             message: "keep_alive requires a session created with comms_name"
                                 .to_string(),
                             data: None,
-                        });
+                        }
+                        .into());
                     }
                 }
                 // Persist explicit override so subsequent inheriting calls observe it.
@@ -2348,11 +2406,7 @@ impl SessionRuntime {
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })?;
+            .map_err(runtime_accept_error_to_turn_start)?;
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
@@ -2367,10 +2421,11 @@ impl SessionRuntime {
                 code: error::DUPLICATE_INPUT,
                 message: "input already processed".to_string(),
                 data: Some(serde_json::json!({ "existing_id": existing_id })),
-            });
+            }
+            .into());
         };
 
-        completion_outcome_to_rpc_result(handle.wait().await, session_id)
+        completion_outcome_to_rpc_result(handle.wait().await, session_id).map_err(Into::into)
     }
 
     /// Admit a canonical external event through the runtime-backed path.
@@ -2425,11 +2480,7 @@ impl SessionRuntime {
         self.runtime_adapter
             .accept_input_without_wake(session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })
+            .map_err(runtime_accept_error_to_rpc)
     }
 
     /// Admit a typed correlated terminal peer response through the
@@ -2461,11 +2512,7 @@ impl SessionRuntime {
         self.runtime_adapter
             .accept_input(session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })
+            .map_err(runtime_accept_error_to_rpc)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9466,7 +9513,7 @@ mod tests {
                 result.is_err(),
                 "build-only override '{field}' must be rejected on runtime-routed turn"
             );
-            let err = result.unwrap_err();
+            let err = result.unwrap_err().into_rpc_error();
             assert_eq!(
                 err.code,
                 error::INVALID_PARAMS,
@@ -9508,7 +9555,8 @@ mod tests {
                 }),
             )
             .await
-            .expect_err("keep_alive=true must require comms_name on pending sessions");
+            .expect_err("keep_alive=true must require comms_name on pending sessions")
+            .into_rpc_error();
 
         assert_eq!(err.code, error::INVALID_PARAMS);
         assert_eq!(

@@ -45,6 +45,8 @@ pub struct RpcError {
     pub data: Option<serde_json::Value>,
 }
 
+pub(crate) const RUNTIME_POST_ADMISSION_FAILURE_CODE: &str = "runtime_post_admission_failure";
+
 /// JSON-RPC notification (server -> client, no id, no response expected).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcNotification {

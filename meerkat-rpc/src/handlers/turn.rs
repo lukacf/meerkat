@@ -291,6 +291,7 @@ pub async fn handle_start(
     {
         Ok(r) => r,
         Err(rpc_err) => {
+            let rpc_err = rpc_err.into_rpc_error();
             return RpcResponse::error(id, rpc_err.code, rpc_err.message);
         }
     };

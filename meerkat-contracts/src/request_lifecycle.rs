@@ -92,7 +92,7 @@ pub struct McpToolRequestLifecycleCatalog {
 
 pub const MCP_TOOL_REQUEST_LIFECYCLE_CATALOG: McpToolRequestLifecycleCatalog =
     McpToolRequestLifecycleCatalog {
-        default_kind: SurfaceRequestKind::InlineObservation,
+        default_kind: SurfaceRequestKind::CancellableObservation,
         tools: &[
             McpToolRequestLifecycleDescriptor {
                 name: "meerkat_run",
@@ -101,6 +101,10 @@ pub const MCP_TOOL_REQUEST_LIFECYCLE_CATALOG: McpToolRequestLifecycleCatalog =
             McpToolRequestLifecycleDescriptor {
                 name: "meerkat_resume",
                 request_kind: SurfaceRequestKind::SessionTurn,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_sessions",
+                request_kind: SurfaceRequestKind::InlineObservation,
             },
         ],
     };

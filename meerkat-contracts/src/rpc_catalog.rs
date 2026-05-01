@@ -987,6 +987,21 @@ mod tests {
     }
 
     #[test]
+    fn mcp_spawned_observation_tools_are_machine_tracked() {
+        for tool_name in [
+            "meerkat_event_stream_read",
+            "meerkat_schedule_occurrences",
+            "meerkat_mob_event_stream_read",
+        ] {
+            assert_eq!(
+                mcp_tracked_surface_request_kind(tool_name),
+                Some(SurfaceRequestKind::CancellableObservation),
+                "spawned or blocking MCP observation tool {tool_name} must remain cancellable through the request lifecycle catalog"
+            );
+        }
+    }
+
+    #[test]
     fn basic_turn_and_session_methods_advertise_required_params() {
         let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
         for name in [

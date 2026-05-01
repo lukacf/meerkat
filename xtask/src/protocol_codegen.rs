@@ -180,6 +180,7 @@ fn generate_protocol_helpers_impl(
     }
 
     let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
+    generate_feedback_input_pattern_macro(&mut out, protocol, composition, machine_by_name)?;
 
     // Primary mode first, then each declared additional mode. Stacking order
     // is deterministic: primary block leads, additional modes follow in the
@@ -207,6 +208,63 @@ fn generate_protocol_helpers_impl(
     }
 
     Ok(out)
+}
+
+fn generate_feedback_input_pattern_macro(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<()> {
+    if protocol.allowed_feedback_inputs.is_empty() {
+        return Ok(());
+    }
+
+    let Some(input_enum_path) = protocol.rust.input_enum_path.as_deref() else {
+        return Ok(());
+    };
+    let input_enum_path = macro_crate_path(input_enum_path);
+    let macro_name = format!(
+        "{}_feedback_input_patterns",
+        to_snake_case(protocol.name.as_str())
+    );
+
+    writeln!(out, "#[macro_export]")?;
+    writeln!(out, "macro_rules! {macro_name} {{")?;
+    writeln!(out, "    () => {{")?;
+    for (index, feedback) in protocol.allowed_feedback_inputs.iter().enumerate() {
+        let target_machine = machine_for_instance(
+            composition,
+            machine_by_name,
+            feedback.machine_instance.as_str(),
+        )?;
+        let target_variant = target_machine
+            .inputs
+            .variant_named(feedback.input_variant.as_str())?;
+        let separator = if index == 0 { "" } else { "| " };
+        let fields = if target_variant.fields.is_empty() {
+            ""
+        } else {
+            " { .. }"
+        };
+        writeln!(
+            out,
+            "        {separator}{input_enum_path}::{}{fields}",
+            feedback.input_variant.as_str()
+        )?;
+    }
+    writeln!(out, "    }};")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn macro_crate_path(path: &str) -> String {
+    let path = path.replace("::dsl::", "::");
+    path.strip_prefix("crate::")
+        .map(|rest| format!("$crate::{rest}"))
+        .unwrap_or(path)
 }
 
 fn emit_mode(

@@ -133,8 +133,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
-            | mob_dsl::MobMachineInput::SessionIngressDetachedForMobDestroy { .. }
-            | mob_dsl::MobMachineInput::SessionIngressDetachFailedForMobDestroy { .. }
+            | crate::mob_destroying_session_ingress_feedback_input_patterns!()
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
@@ -1200,8 +1199,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
-            | mob_dsl::MobMachineInput::SessionIngressDetachedForMobDestroy { .. }
-            | mob_dsl::MobMachineInput::SessionIngressDetachFailedForMobDestroy { .. }
+            | crate::mob_destroying_session_ingress_feedback_input_patterns!()
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }

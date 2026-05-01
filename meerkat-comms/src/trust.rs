@@ -1,6 +1,6 @@
 //! Trust management for Meerkat comms.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -404,11 +404,11 @@ impl TrustedPeers {
     }
 
     pub fn validate(&self) -> Result<(), TrustError> {
-        let mut peer_ids = BTreeMap::new();
+        let mut peer_ids = BTreeSet::new();
         for peer in &self.peers {
             peer.validate()?;
             let peer_id = peer.pubkey.to_peer_id();
-            if peer_ids.insert(peer_id, ()).is_some() {
+            if !peer_ids.insert(peer_id) {
                 return Err(TrustError::DuplicatePeerId { peer_id });
             }
         }

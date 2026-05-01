@@ -79,6 +79,8 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
+    #[error("factory policy build requires the canonical factory bridge proof")]
+    InvalidFactoryBridgeProof,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -108,12 +110,16 @@ type AgentFactoryBuildFuture = Pin<
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL"))]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
+    bridge_proof: &'static str,
     builder: AgentBuilder,
     client: Arc<dyn AgentLlmClient>,
     tools: Arc<dyn AgentToolDispatcher>,
     store: Arc<dyn AgentSessionStore>,
 ) -> AgentFactoryBuildFuture {
     Box::pin(async move {
+        if bridge_proof != env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF") {
+            return Err(AgentBuildPolicyError::InvalidFactoryBridgeProof);
+        }
         builder.validate_factory_policy()?;
         Ok(builder.build_inner(client, tools, store).await)
     })

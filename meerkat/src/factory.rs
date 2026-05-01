@@ -174,6 +174,7 @@ type CoreAgentFactoryBuildFuture =
 unsafe extern "Rust" {
     #[link_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")]
     fn core_agent_factory_policy_build(
+        bridge_proof: &'static str,
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -3899,7 +3900,14 @@ impl AgentFactory {
         // runtime, auth, session, tool, and metadata policy composition above.
         #[allow(unsafe_code)]
         let mut agent = unsafe {
-            core_agent_factory_policy_build(builder, llm_adapter, tools, store_adapter).await
+            core_agent_factory_policy_build(
+                env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
         }
         .map_err(|err| {
             BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
@@ -4041,7 +4049,14 @@ mod tests {
         // intentionally omitting required factory metadata.
         #[allow(unsafe_code)]
         let result = unsafe {
-            core_agent_factory_policy_build(builder, llm_adapter, tools, store_adapter).await
+            core_agent_factory_policy_build(
+                env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
         };
 
         assert!(

@@ -35,6 +35,7 @@ type CoreAgentFactoryBuildFuture =
 unsafe extern "Rust" {
     #[link_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")]
     fn core_agent_factory_policy_build(
+        bridge_proof: &'static str,
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -325,9 +326,15 @@ async fn build_agent(
 
     #[allow(unsafe_code)]
     unsafe {
-        core_agent_factory_policy_build(builder, client, tools, store)
-            .await
-            .expect("test builder has factory policy metadata")
+        core_agent_factory_policy_build(
+            env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+            builder,
+            client,
+            tools,
+            store,
+        )
+        .await
+        .expect("test builder has factory policy metadata")
     }
 }
 

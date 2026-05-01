@@ -417,6 +417,10 @@ meerkat-core = {{ path = "{}" }}
         .arg("--manifest-path")
         .arg(temp.path().join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .env(
+            "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL",
+            "__meerkat_agent_factory_policy_bridge_attacker_canary",
+        )
         .output()?;
     assert!(
         !output.status.success(),
@@ -426,7 +430,11 @@ meerkat-core = {{ path = "{}" }}
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("__meerkat_core_agent_factory_policy_build")
+        !stderr.contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream unsafe finalizer reached the live factory-policy bridge and constructed an agent:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("__meerkat_agent_factory_policy_bridge_attacker_canary")
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
@@ -896,6 +904,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     assert!(
         builder.contains("validate_factory_policy()?")
             && builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")
+            && builder.contains("InvalidFactoryBridgeProof")
             && !builder.contains("__meerkat_core_agent_factory_policy_build")
             && builder.contains("pub(crate) unsafe extern \"Rust\" fn")
             && !builder.contains("is_canonical_factory_authority()")
@@ -1015,6 +1025,7 @@ fn bazel_factory_authority_target_is_not_publicly_visible() {
 #[test]
 fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
     let authority_build = repo_file("meerkat-agent-build-authority/build.rs");
+    let core_build = repo_file("meerkat-core/build.rs");
     let facade_build = repo_file("meerkat/build.rs");
 
     assert!(
@@ -1031,6 +1042,20 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
          dependency metadata; direct downstream dependents can read the same \
          DEP_* values"
     );
+    for (name, build_script) in [
+        ("meerkat-core/build.rs", core_build.as_str()),
+        ("meerkat/build.rs", facade_build.as_str()),
+    ] {
+        assert!(
+            !build_script.contains("rerun-if-env-changed={SYMBOL_ENV}")
+                && !build_script.contains("env::var(SYMBOL_ENV)")
+                && !build_script
+                    .contains("env::var(\"MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL\")"),
+            "{name} must not accept caller-supplied factory bridge symbols; a \
+             downstream build can otherwise choose the exported symbol and link \
+             the core finalizer directly"
+        );
+    }
 }
 
 #[test]
@@ -1070,9 +1095,12 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     );
     assert!(
         !public_core.contains("\"internal-agent-factory-build\"")
-            && !public_core.contains("\"standalone-agent-builder\""),
+            && !public_core.contains("\"standalone-agent-builder\"")
+            && public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
-         features or internal feature selectors to Bazel consumers"
+         features or internal feature selectors, and the factory bridge must \
+         require the paired build proof in Bazel builds"
     );
 
     let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
@@ -1080,7 +1108,9 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     assert!(
         !internal_core.contains("\"standalone-agent-builder\"")
             && !internal_core.contains("meerkat_agent_build_authority")
-            && !internal_core.contains("//visibility:public"),
+            && !internal_core.contains("//visibility:public")
+            && internal_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && internal_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "Bazel AgentFactory core bridge must stay non-public and must not \
          expose standalone build features or carry the retired authority dependency"
     );

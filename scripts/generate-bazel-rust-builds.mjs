@@ -219,11 +219,14 @@ function rustTargetVisibility(key) {
 
 const agentFactoryPolicyBridgeSymbol =
   "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886";
+const agentFactoryPolicyBridgeProof =
+  "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04";
 
 function agentFactoryPolicyBridgeRustcEnv(key) {
   if (key !== "meerkat-core" && key !== "meerkat") return [];
   return [
     `        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": ${q(agentFactoryPolicyBridgeSymbol)},`,
+    `        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": ${q(agentFactoryPolicyBridgeProof)},`,
   ];
 }
 
@@ -894,7 +897,9 @@ for (const pkg of localPackages.values()) {
       const cargoManifestDir = packageRunfilesDir !== "."
         ? `./${packageRunfilesDir}`
         : packageRunfilesDir;
-      const unitDeps = [...new Set([...depsWithOptionalExternal, ...localDeps(pkg, false, true)])].sort();
+      const unitDeps = [
+        ...new Set([...depsWithOptionalExternal, ...localDeps(pkg, false, true)]),
+      ].sort();
       const unitProcDeps = [...new Set([...procMacroDeps, ...localDeps(pkg, true, true)])].sort();
       const unitDepsExpr = unitDeps.length
         ? `${listExpr(unitDeps)} + ${externalNormalWithDev}`

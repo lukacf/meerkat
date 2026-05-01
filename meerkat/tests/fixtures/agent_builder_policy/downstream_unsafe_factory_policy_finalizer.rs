@@ -79,7 +79,7 @@ type FactoryPolicyBuildFuture = BoxFuture<
 
 #[allow(improper_ctypes_definitions)]
 unsafe extern "Rust" {
-    #[link_name = "__meerkat_core_agent_factory_policy_build"]
+    #[link_name = "__meerkat_agent_factory_policy_bridge_attacker_canary"]
     fn exported_agent_factory_policy_build(
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,

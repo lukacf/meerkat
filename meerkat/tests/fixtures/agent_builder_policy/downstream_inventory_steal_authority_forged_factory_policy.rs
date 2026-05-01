@@ -18,20 +18,16 @@ fn fabricated<T>() -> T {
 #[allow(unsafe_code)]
 fn stolen_facade_source_type() -> TypeId {
     let _facade_type_check = std::mem::size_of::<meerkat::AgentBuilder>();
-    let registration = inventory::iter::<
-        meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
-    >
-    .into_iter()
-    .next()
-    .expect("facade authority registration must be linked");
+    let registration =
+        inventory::iter::<meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration>
+            .into_iter()
+            .next()
+            .expect("facade authority registration must be linked");
 
     // SAFETY: this fixture reproduces the reviewed bypass: the public
     // registration is a transparent wrapper over a source-type function, so
     // downstream unsafe code can read the existing canonical source oracle.
-    let source_type = unsafe {
-        *(registration as *const _
-            as *const fn() -> TypeId)
-    };
+    let source_type = unsafe { *(registration as *const _ as *const fn() -> TypeId) };
     source_type()
 }
 

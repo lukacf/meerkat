@@ -3283,7 +3283,7 @@ impl MobHandle {
         }
     }
 
-    /// Force-cancel a member's in-flight turn via session interrupt.
+    /// Force-cancel a member's in-flight turn via the user interrupt path.
     ///
     /// Unlike [`retire`](Self::retire), this does not archive the session or
     /// remove the member from the roster — it only cancels the current turn.

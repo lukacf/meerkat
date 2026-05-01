@@ -5486,7 +5486,9 @@ impl MobActor {
         drop(roster);
 
         self.preview_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
-        self.provisioner.interrupt_member(&member_ref).await?;
+        self.provisioner
+            .hard_cancel_member(&member_ref, "mob force-cancel member")
+            .await?;
         self.apply_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
         Ok(())
     }

@@ -70,6 +70,11 @@ pub trait MobProvisioner: Send + Sync {
     ) -> Result<(), MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
+    async fn hard_cancel_member(
+        &self,
+        member_ref: &MemberRef,
+        reason: &str,
+    ) -> Result<(), MobError>;
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -1204,6 +1209,39 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
+    async fn hard_cancel_member(
+        &self,
+        member_ref: &MemberRef,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "hard cancel")?;
+        if let Some(adapter) = &self.runtime_adapter {
+            if adapter.contains_session(&session_id).await {
+                return adapter
+                    .hard_cancel_current_run(&session_id, reason)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "runtime-backed hard cancel must resolve through MeerkatMachine for '{session_id}': {error}"
+                        ))
+                    });
+            }
+
+            self.remove_runtime_session_state(&session_id).await;
+            return Err(MobError::Internal(format!(
+                "runtime-backed hard cancel requested for unregistered runtime session '{session_id}'"
+            )));
+        }
+        MobSessionServiceInterruptHandle {
+            session_service: Arc::clone(&self.session_service),
+            bridge_session_id: session_id,
+        }
+        .hard_cancel_current_run(reason.to_string())
+        .await
+        .map_err(|error| MobError::Internal(format!("mob session hard cancel failed: {error}")))?;
+        Ok(())
+    }
+
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -1924,6 +1962,21 @@ impl MobProvisioner for MultiBackendProvisioner {
                 Ok(())
             }
             _ => self.session.interrupt_member(member_ref).await,
+        }
+    }
+
+    async fn hard_cancel_member(
+        &self,
+        member_ref: &MemberRef,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => Err(MobError::Internal(
+                "peer-only hard cancel requires an explicit hard-cancel bridge command".into(),
+            )),
+            _ => self.session.hard_cancel_member(member_ref, reason).await,
         }
     }
 

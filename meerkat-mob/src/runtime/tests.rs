@@ -3984,6 +3984,10 @@ impl SessionService for PersistedListingSessionService {
         self.inner.interrupt(id).await
     }
 
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
+    }
+
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         self.inner.read(id).await
     }
@@ -4159,6 +4163,10 @@ impl SessionService for InactiveReadSessionService {
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.interrupt(id).await
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {

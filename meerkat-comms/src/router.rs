@@ -433,28 +433,18 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    // Inproc delivery uses the trusted peer identity resolved
-                    // from `dest`; display names are not routing authority.
-                    match registry.send_to_pubkey_in_namespace_with_id(
-                        inproc_namespace,
-                        &self.keypair,
-                        &peer.pubkey,
-                        envelope.id,
-                        envelope.kind.clone(),
-                        self.require_peer_auth,
-                    ) {
-                        Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_to_pubkey_any_namespace_with_id(
-                                &self.keypair,
-                                &peer.pubkey,
-                                envelope.id,
-                                envelope.kind,
-                                self.require_peer_auth,
-                            )
-                            .map_err(|err| map_inproc_send_error(err, dest)),
-                        Err(other) => Err(map_inproc_send_error(other, dest)),
-                    }
+                    // Router sends have a typed peer identity, but not a
+                    // typed target namespace. Require the canonical pubkey to
+                    // have exactly one live inproc owner before delivery.
+                    registry
+                        .send_to_pubkey_any_namespace_with_id(
+                            &self.keypair,
+                            &peer.pubkey,
+                            envelope.id,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }
         }
@@ -467,26 +457,15 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    match registry.send_to_pubkey_in_namespace_with_id(
-                        inproc_namespace,
-                        &self.keypair,
-                        &peer.pubkey,
-                        envelope.id,
-                        envelope.kind.clone(),
-                        self.require_peer_auth,
-                    ) {
-                        Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => registry
-                            .send_to_pubkey_any_namespace_with_id(
-                                &self.keypair,
-                                &peer.pubkey,
-                                envelope.id,
-                                envelope.kind,
-                                self.require_peer_auth,
-                            )
-                            .map_err(|err| map_inproc_send_error(err, dest)),
-                        Err(other) => Err(map_inproc_send_error(other, dest)),
-                    }
+                    registry
+                        .send_to_pubkey_any_namespace_with_id(
+                            &self.keypair,
+                            &peer.pubkey,
+                            envelope.id,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }
         }

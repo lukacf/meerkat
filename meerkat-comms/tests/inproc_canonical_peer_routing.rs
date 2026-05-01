@@ -681,6 +681,67 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
     registry.clear();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_live_canonical_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let runtime_name = format!("auth-disabled-live-duplicate-directory-runtime-{suffix}");
+    let local_name = format!("auth-disabled-live-duplicate-local-{suffix}");
+    let remote_name = format!("auth-disabled-live-duplicate-remote-{suffix}");
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let runtime = CommsRuntime::new(meerkat_comms::ResolvedCommsConfig {
+        enabled: true,
+        name: runtime_name,
+        inproc_namespace: Some("realm-local".to_string()),
+        identity_dir: tmp.path().join("identity"),
+        trusted_peers_path: tmp.path().join("trusted_peers.json"),
+        listen_uds: None,
+        listen_tcp: None,
+        event_listen_tcp: None,
+        #[cfg(unix)]
+        event_listen_uds: None,
+        comms_config: CommsConfig::default(),
+        auth: meerkat_core::CommsAuthMode::Open,
+        require_peer_auth: false,
+        allow_external_unauthenticated: false,
+    })
+    .await
+    .expect("auth-disabled runtime");
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let peer_id = target_pubkey.to_peer_id();
+    let (_local_inbox, local_sender) = Inbox::new();
+    let (_remote_inbox, remote_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "realm-local",
+        &local_name,
+        target_pubkey,
+        local_sender,
+        PeerMeta::default(),
+    );
+    registry.register_with_meta_in_namespace(
+        "realm-remote",
+        &remote_name,
+        target_pubkey,
+        remote_sender,
+        PeerMeta::default(),
+    );
+
+    let peers = CoreCommsRuntime::peers(&runtime).await;
+
+    assert!(
+        peers.iter().all(|peer| peer.peer_id != peer_id),
+        "auth-disabled peer directory must not advertise duplicate live canonical inproc identities: {peers:?}"
+    );
+
+    registry.clear();
+}
+
 #[tokio::test]
 async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_display_name() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
@@ -753,6 +814,72 @@ async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_dis
     assert_eq!(envelope.from, sender_pubkey);
     assert_eq!(envelope.to, target_pubkey);
     assert!(envelope.verify(), "signed envelope should verify");
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_inproc_same_namespace_rejects_duplicate_live_canonical_peer_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let (mut local_inbox, local_sender) = Inbox::new();
+    let (mut remote_inbox, remote_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "realm-local",
+        "local-target",
+        target_pubkey,
+        local_sender,
+        PeerMeta::default(),
+    );
+    registry.register_with_meta_in_namespace(
+        "realm-remote",
+        "remote-target",
+        target_pubkey,
+        remote_sender,
+        PeerMeta::default(),
+    );
+
+    let sender_keypair = Keypair::generate();
+    let trusted_peers = TrustedPeers {
+        peers: vec![TrustedPeer {
+            name: "local-target".to_string(),
+            pubkey: target_pubkey,
+            addr: "inproc://local-target".to_string(),
+            meta: PeerMeta::default(),
+        }],
+    };
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        sender_keypair,
+        trusted_peers,
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    )
+    .with_inproc_namespace(Some("realm-local".to_string()));
+
+    let dest = meerkat_comms::router::peer_id_from_pubkey(&target_pubkey);
+    let result = router
+        .send(dest, message("same-namespace duplicate canonical route"))
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "same-namespace inproc delivery must fail closed when the canonical identity is live in another namespace: {result:?}"
+    );
+    assert!(
+        local_inbox.try_drain().is_empty(),
+        "must not deliver to the namespace-local registration before checking canonical ambiguity"
+    );
+    assert!(
+        remote_inbox.try_drain().is_empty(),
+        "must not choose the duplicate registration in another namespace"
+    );
 
     registry.clear();
 }

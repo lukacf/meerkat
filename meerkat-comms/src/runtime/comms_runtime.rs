@@ -2118,8 +2118,8 @@ impl CommsRuntime {
     where
         F: FnMut(ResolvedPeer),
     {
-        let inproc_peers =
-            InprocRegistry::global().peers_in_namespace(self.inproc_namespace().unwrap_or(""));
+        let registry = InprocRegistry::global();
+        let inproc_peers = registry.peers_in_namespace(self.inproc_namespace().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
@@ -2219,7 +2219,16 @@ impl CommsRuntime {
             if inproc.pubkey.is_zero() {
                 continue;
             }
-            if private_peer_ids.contains(&peer_id_from_pubkey(&inproc.pubkey)) {
+            let peer_id = peer_id_from_pubkey(&inproc.pubkey);
+            if registry.pubkey_registration_count_any_namespace(&inproc.pubkey) != 1 {
+                tracing::warn!(
+                    peer_name = %inproc.name,
+                    peer_id = %peer_id,
+                    "skipping duplicate inproc peer id in auth-disabled peer directory"
+                );
+                continue;
+            }
+            if private_peer_ids.contains(&peer_id) {
                 continue;
             }
             let name = match PeerName::new(inproc.name.clone()) {
@@ -2242,7 +2251,7 @@ impl CommsRuntime {
             }
             on_peer(ResolvedPeer {
                 name,
-                peer_id: peer_id_from_pubkey(&inproc.pubkey),
+                peer_id,
                 address: meerkat_core::comms::PeerAddress::new(
                     meerkat_core::comms::PeerTransport::Inproc,
                     peer_name_str.clone(),

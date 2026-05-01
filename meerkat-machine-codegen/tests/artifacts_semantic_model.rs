@@ -12,9 +12,18 @@ fn tool_filter_values_line(rendered: &str) -> &str {
         .expect("ToolFilterValues assignment")
 }
 
-fn tool_filter_domain(names: &str) -> String {
+fn tool_filter_domain(name_sets: &[&str]) -> String {
+    let structural_samples = ["Allow", "Deny"]
+        .into_iter()
+        .flat_map(|variant| {
+            name_sets
+                .iter()
+                .map(move |names| format!("[tag |-> \"{variant}\", names |-> {names}]"))
+        })
+        .collect::<Vec<_>>();
     format!(
-        "ToolFilterValues = {{\"All\", [tag |-> \"Allow\", names |-> {names}], [tag |-> \"Deny\", names |-> {names}]}}"
+        "ToolFilterValues = {{\"All\", {}}}",
+        structural_samples.join(", ")
     )
 }
 
@@ -70,8 +79,8 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
     );
     assert_eq!(
         tool_filter_values_line(&rendered),
-        tool_filter_domain(r#"{"alpha"}"#),
-        "ToolFilterValues must cover the canonical unit plus structural Allow/Deny samples"
+        tool_filter_domain(&[r#"{}"#, r#"{"alpha"}"#]),
+        "ToolFilterValues must cover the canonical unit plus structural Allow/Deny set samples"
     );
     assert!(
         !rendered.contains("toolfilter_2"),
@@ -85,8 +94,8 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
 
     assert_eq!(
         tool_filter_values_line(&rendered),
-        tool_filter_domain(r#"{"alpha", "beta"}"#),
-        "deep ToolFilterValues must cover the canonical unit plus structural Allow/Deny samples"
+        tool_filter_domain(&[r#"{}"#, r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]),
+        "deep ToolFilterValues must cover differing same-variant structural payloads"
     );
     assert!(
         !rendered.contains("toolfilter_2"),

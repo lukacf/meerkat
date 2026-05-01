@@ -2865,8 +2865,8 @@ fn type_path_enum_binding_samples(
                 .iter()
                 .map(|variant| tla_string(variant.as_str()))
                 .collect::<Vec<_>>();
-            samples.extend(structural_variants.iter().map(|variant| {
-                render_type_path_enum_structural_sample(variant, sample_cardinality)
+            samples.extend(structural_variants.iter().flat_map(|variant| {
+                render_type_path_enum_structural_samples(variant, sample_cardinality)
             }));
             Some(samples)
         }
@@ -2874,24 +2874,51 @@ fn type_path_enum_binding_samples(
     }
 }
 
-fn render_type_path_enum_structural_sample(
+fn render_type_path_enum_structural_samples(
     variant: &TypePathEnumStructuralVariant,
     sample_cardinality: usize,
-) -> String {
-    let mut fields = vec![format!("tag |-> {}", tla_string(variant.variant.as_str()))];
-    fields.extend(variant.fields.iter().map(|field| {
-        let value = match field.atom {
-            TypePathEnumPayloadAtom::StringSet => {
-                let values = generic_string_samples(sample_cardinality)
-                    .into_iter()
-                    .map(tla_string)
-                    .collect::<Vec<_>>();
-                format!("{{{}}}", values.join(", "))
-            }
+) -> Vec<String> {
+    let mut samples = vec![vec![format!(
+        "tag |-> {}",
+        tla_string(variant.variant.as_str())
+    )]];
+    for field in &variant.fields {
+        let values = match field.atom {
+            TypePathEnumPayloadAtom::StringSet => string_set_payload_samples(sample_cardinality),
         };
-        format!("{} |-> {value}", field.name)
-    }));
-    format!("[{}]", fields.join(", "))
+        let mut next_samples = Vec::new();
+        for sample in &samples {
+            for value in &values {
+                let mut next = sample.clone();
+                next.push(format!("{} |-> {value}", field.name));
+                next_samples.push(next);
+            }
+        }
+        samples = next_samples;
+    }
+    samples
+        .into_iter()
+        .map(|fields| format!("[{}]", fields.join(", ")))
+        .collect()
+}
+
+fn string_set_payload_samples(sample_cardinality: usize) -> Vec<String> {
+    let values = if sample_cardinality == 0 {
+        Vec::new()
+    } else {
+        generic_string_samples(sample_cardinality)
+            .into_iter()
+            .map(tla_string)
+            .collect::<Vec<_>>()
+    };
+    let mut samples = vec!["{}".to_owned()];
+    if let Some(first) = values.first() {
+        samples.push(format!("{{{first}}}"));
+    }
+    if values.len() >= 2 {
+        samples.push(format!("{{{}, {}}}", values[0], values[1]));
+    }
+    samples
 }
 
 fn string_enum_wire_label(name: &str, variant: &str) -> String {

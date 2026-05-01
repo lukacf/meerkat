@@ -43,9 +43,9 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec, HookRunOverrides,
-    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
-    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
+    BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
+    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
+    SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
@@ -2213,7 +2213,7 @@ impl AgentFactory {
             id: format!("{}_auth", spec.server_id),
             provider: Provider::SelfHosted,
             auth_method: "none".to_string(),
-            source: CredentialSourceSpec::PlatformDefault,
+            source: meerkat_core::CredentialSourceSpec::PlatformDefault,
             constraints: Default::default(),
             metadata_defaults: Default::default(),
         };
@@ -2269,7 +2269,6 @@ impl AgentFactory {
         })
     }
 
-    #[cfg(feature = "openai")]
     fn publish_auth_lease(
         handle: &Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
         connection_ref: &ConnectionRef,

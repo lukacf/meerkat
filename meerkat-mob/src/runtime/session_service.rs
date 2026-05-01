@@ -15,32 +15,10 @@ use meerkat_core::service::{
     SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
-use sha2::{Digest, Sha256};
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::sync::{Mutex, OnceLock, Weak};
-
-fn build_runtime_receipt(
-    run_id: RunId,
-    boundary: RunApplyBoundary,
-    contributing_input_ids: Vec<InputId>,
-    session: &Session,
-) -> Result<RunBoundaryReceipt, SessionError> {
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
-        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-            "failed to serialize session for runtime receipt digest: {err}"
-        )))
-    })?;
-    Ok(RunBoundaryReceipt {
-        run_id,
-        boundary,
-        contributing_input_ids,
-        conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
-        message_count: session.messages().len(),
-        sequence: 0,
-    })
-}
 
 fn session_control_error_to_session_error(err: SessionControlError) -> SessionError {
     match err {
@@ -345,22 +323,15 @@ where
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        let run_result =
-            meerkat_session::EphemeralSessionService::<B>::start_turn(self, session_id, req)
-                .await?;
-        let session =
-            meerkat_session::EphemeralSessionService::<B>::export_session(self, session_id).await?;
-        let receipt = build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize session snapshot for runtime commit: {err}"
-            )))
-        })?;
-        Ok(CoreApplyOutput::with_run_result(
-            receipt,
-            Some(session_snapshot),
-            run_result,
-        ))
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_turn(
+            self,
+            session_id,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
     }
 
     async fn apply_runtime_context_appends(

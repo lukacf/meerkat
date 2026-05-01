@@ -1547,6 +1547,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
         self.inner
             .apply_runtime_system_context(id, appends.clone())
             .await?;
@@ -5134,6 +5135,104 @@ mod tests {
             .expect("append should persist pending control state");
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.pending[0].text, "runtime append");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_context_append_does_not_overwrite_newer_runtime_snapshot_from_stale_live()
+    {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .apply_runtime_turn(
+                &result.session_id,
+                RunId::new(),
+                runtime_content_turn_request("runtime committed turn"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
+            .await
+            .expect("runtime-backed turn should succeed");
+        let live_before = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("live session should export");
+
+        let mut newer_runtime_session = live_before.clone();
+        newer_runtime_session.push(Message::User(UserMessage::text(
+            "newer durable runtime turn".to_string(),
+        )));
+        let newer_message_count = newer_runtime_session.messages().len();
+        assert!(
+            newer_message_count > live_before.messages().len(),
+            "test must seed a runtime snapshot that is newer than the live handle"
+        );
+        let session_snapshot =
+            serde_json::to_vec(&newer_runtime_session).expect("runtime snapshot should serialize");
+        runtime_store
+            .commit_session_boundary(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &result.session_id,
+                ),
+                SessionDelta { session_snapshot },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        let error = service
+            .apply_runtime_context_appends(
+                &result.session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "context that must wait for rematerialization".to_string(),
+                    source: Some("runtime:test".to_string()),
+                    idempotency_key: Some("stale-live-context".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("stale live handle should be discarded before context apply");
+
+        assert!(
+            error.to_string().contains("session not found"),
+            "unexpected error after stale live eviction: {error}"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should remain present");
+        assert_eq!(
+            authoritative.messages().len(),
+            newer_message_count,
+            "context-only apply must not overwrite newer runtime truth with a stale live snapshot"
+        );
+        assert!(
+            authoritative
+                .system_context_state()
+                .is_none_or(|state| state.pending.is_empty()),
+            "failed context append must not be committed before rematerialization"
+        );
     }
 
     #[tokio::test]

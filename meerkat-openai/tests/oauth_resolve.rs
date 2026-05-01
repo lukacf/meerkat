@@ -107,16 +107,21 @@ fn default_connection_ref() -> ConnectionRef {
 
 struct StaticAuthLeaseHandle {
     expires_at: Option<u64>,
+    credential_published_at_millis: Option<u64>,
 }
 
 impl StaticAuthLeaseHandle {
     fn valid() -> Arc<Self> {
-        Arc::new(Self { expires_at: None })
+        Arc::new(Self {
+            expires_at: None,
+            credential_published_at_millis: None,
+        })
     }
 
     fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
         Arc::new(Self {
             expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
+            credential_published_at_millis: Some(1_000),
         })
     }
 }
@@ -129,7 +134,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         Ok(AuthLeaseTransition {
             generation: 1,
-            credential_published_at_millis: None,
+            credential_published_at_millis: self.credential_published_at_millis,
         })
     }
 
@@ -149,7 +154,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         Ok(AuthLeaseTransition {
             generation: 1,
-            credential_published_at_millis: None,
+            credential_published_at_millis: self.credential_published_at_millis,
         })
     }
 
@@ -175,7 +180,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
             expires_at: self.expires_at,
             credential_present: true,
             generation: 1,
-            credential_published_at_millis: None,
+            credential_published_at_millis: self.credential_published_at_millis,
         }
     }
 }
@@ -425,7 +430,13 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     store
         .save(
             &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
         )
         .await
         .unwrap();

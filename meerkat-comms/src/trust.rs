@@ -1,6 +1,6 @@
 //! Trust management for Meerkat comms.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -228,6 +228,10 @@ impl TrustedPeer {
         }
         Ok(())
     }
+
+    pub(crate) fn has_raw_sendable_identity(&self) -> bool {
+        self.validate().is_ok()
+    }
 }
 
 // Custom serde to serialize pubkey as "ed25519:..." string per spec
@@ -302,6 +306,14 @@ impl TrustedPeers {
     /// Returns the number of trusted peers.
     pub fn len(&self) -> usize {
         self.peers.len()
+    }
+
+    pub(crate) fn retain_raw_sendable_identities(&mut self) {
+        // Keep duplicate non-zero identities visible to the canonical router
+        // resolver so it can fail closed as ambiguous. Dropping them here would
+        // make ambiguous trust indistinguishable from missing trust and can
+        // enable auth-disabled discovery fallback.
+        self.peers.retain(|peer| peer.validate().is_ok());
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.
@@ -385,8 +397,13 @@ impl TrustedPeers {
     }
 
     pub fn validate(&self) -> Result<(), TrustError> {
+        let mut peer_ids = BTreeSet::new();
         for peer in &self.peers {
             peer.validate()?;
+            let peer_id = peer.pubkey.to_peer_id();
+            if !peer_ids.insert(peer_id) {
+                return Err(TrustError::DuplicatePeerId { peer_id });
+            }
         }
         Ok(())
     }
@@ -411,9 +428,15 @@ impl TrustedPeers {
     /// unambiguous even when multiple entries share a [`crate::peer_meta::PeerMeta`]
     /// display name.
     pub fn find_by_peer_id(&self, peer_id: &PeerId) -> Option<&TrustedPeer> {
-        self.peers.iter().find(|p| {
+        let mut matches = self.peers.iter().filter(|p| {
             !p.pubkey.is_zero() && crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id
-        })
+        });
+        let peer = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(peer)
+        }
     }
 }
 
@@ -571,6 +594,58 @@ mod tests {
 
         let unknown = PubKey::new([99u8; 32]);
         assert!(peers.get_peer(&unknown).is_none());
+    }
+
+    #[test]
+    fn test_zero_pubkey_is_never_trusted_or_resolved() {
+        let zero = PubKey::new([0u8; 32]);
+        let peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "zero".to_string(),
+                pubkey: zero,
+                addr: "inproc://zero".to_string(),
+                meta: crate::PeerMeta::default(),
+            }],
+        };
+
+        assert!(
+            !peers.is_trusted(&zero),
+            "zero pubkey must not be trusted even if a raw peer is present"
+        );
+        assert!(
+            peers.get_peer(&zero).is_none(),
+            "zero pubkey must not resolve through raw trust lookup"
+        );
+    }
+
+    #[test]
+    fn test_trusted_peers_validate_rejects_duplicate_peer_id() {
+        let pubkey = PubKey::new([42u8; 32]);
+        let peer_id = pubkey.to_peer_id();
+        let peers = TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: "primary".to_string(),
+                    pubkey,
+                    addr: "inproc://primary".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: "stale-shadow".to_string(),
+                    pubkey,
+                    addr: "inproc://stale-shadow".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+            ],
+        };
+
+        let err = peers
+            .validate()
+            .expect_err("legacy TrustedPeers must reject duplicate canonical identities");
+        assert!(
+            matches!(err, TrustError::DuplicatePeerId { peer_id: id } if id == peer_id),
+            "expected duplicate PeerId error for raw TrustedPeers, got {err:?}"
+        );
     }
 
     #[test]

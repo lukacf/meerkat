@@ -97,12 +97,6 @@ inventory::submit! {
     )
 }
 
-inventory::submit! {
-    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
 #[allow(improper_ctypes_definitions)]
 unsafe extern "Rust" {
     #[link_name = "__meerkat_agent_factory_policy_build_v3"]

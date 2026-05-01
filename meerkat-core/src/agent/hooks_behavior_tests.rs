@@ -4,9 +4,7 @@
     clippy::unwrap_used
 )]
 
-use std::any::{Any, TypeId};
-use std::future::Future;
-use std::pin::Pin;
+use crate as meerkat_core;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -23,45 +21,6 @@ use tokio::sync::{Mutex, mpsc};
 
 type DynAgent =
     meerkat_core::Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
-
-#[cfg(not(target_arch = "wasm32"))]
-type CoreAgentFactoryBuildFuture =
-    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>> + Send>>;
-
-#[cfg(target_arch = "wasm32")]
-type CoreAgentFactoryBuildFuture =
-    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
-
-struct TestAgentFactoryPolicyBridgeToken;
-
-static TEST_AGENT_FACTORY_POLICY_BRIDGE_TOKEN: TestAgentFactoryPolicyBridgeToken =
-    TestAgentFactoryPolicyBridgeToken;
-
-fn test_agent_factory_policy_bridge_token_type_id() -> TypeId {
-    TypeId::of::<TestAgentFactoryPolicyBridgeToken>()
-}
-
-fn test_agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
-    &TEST_AGENT_FACTORY_POLICY_BRIDGE_TOKEN
-}
-
-inventory::submit! {
-    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
-        test_agent_factory_policy_bridge_token_type_id
-    )
-}
-
-#[allow(improper_ctypes_definitions, unsafe_code)]
-unsafe extern "Rust" {
-    #[link_name = "__meerkat_agent_factory_policy_build_v3"]
-    fn core_agent_factory_policy_build(
-        factory_bridge_token: &'static (dyn Any + Send + Sync),
-        builder: AgentBuilder,
-        client: Arc<dyn AgentLlmClient>,
-        tools: Arc<dyn AgentToolDispatcher>,
-        store: Arc<dyn AgentSessionStore>,
-    ) -> CoreAgentFactoryBuildFuture;
-}
 
 #[derive(Clone, Copy)]
 enum ClientMode {
@@ -333,9 +292,9 @@ async fn build_agent(
     seen_args: Arc<Mutex<Vec<Value>>>,
     seen_tokens: Arc<Mutex<Vec<u32>>>,
 ) -> DynAgent {
-    let client = Arc::new(ScenarioClient::new(mode, seen_tokens));
-    let tools = Arc::new(RecordingToolDispatcher::new(seen_args));
-    let store = Arc::new(NoopStore);
+    let client: Arc<dyn AgentLlmClient> = Arc::new(ScenarioClient::new(mode, seen_tokens));
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(RecordingToolDispatcher::new(seen_args));
+    let store: Arc<dyn AgentSessionStore> = Arc::new(NoopStore);
 
     let builder = AgentBuilder::new()
         .resume_session(factory_policy_session())
@@ -344,18 +303,7 @@ async fn build_agent(
         ))
         .with_hook_engine(Arc::new(hooks));
 
-    #[allow(unsafe_code)]
-    unsafe {
-        core_agent_factory_policy_build(
-            test_agent_factory_policy_bridge_token(),
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .expect("test builder has factory policy metadata")
-    }
+    builder.build_standalone(client, tools, store).await
 }
 
 fn test_hooks() -> TestHookEngine {

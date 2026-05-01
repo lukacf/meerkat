@@ -7,6 +7,8 @@ pub mod comms_impl;
 pub mod compact;
 mod extraction;
 mod hook_impl;
+#[cfg(test)]
+mod hooks_behavior_tests;
 mod runner;
 pub mod skills;
 mod state;

@@ -763,6 +763,9 @@ for (const pkg of localPackages.values()) {
         `    rustc_env = {\n        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},\n    },`,
       );
     }
+    if (rule === "rust_library" && key === "meerkat") {
+      attrs.splice(attrs.length - 1, 0, `    data = [":package_runfiles"],`);
+    }
     let rustTestBaseAttrs = null;
     let filteredNativeTests = [];
     if (rule === "rust_test") {

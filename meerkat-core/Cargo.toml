@@ -53,10 +53,6 @@ internal-agent-factory-build = []
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
-[[test]]
-name = "hooks_behavior"
-path = "tests/hooks_behavior.rs"
-
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "js-sys"]  # cfg(target_arch = "wasm32")
 

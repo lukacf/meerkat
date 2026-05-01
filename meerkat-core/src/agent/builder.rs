@@ -114,11 +114,9 @@ pub struct AgentFactoryPolicyBridgeRegistration {
 #[doc(hidden)]
 enum AgentFactoryPolicyBridgeRegistrationKind {
     Facade,
-    CoreHooksTest,
 }
 
 const FACADE_FACTORY_SOURCE_FINGERPRINT: u64 = 0xa9de_0aae_2b8a_98aa;
-const CORE_HOOKS_TEST_SOURCE_FINGERPRINT: u64 = 0xe115_18ab_4785_57de;
 
 impl AgentFactoryPolicyBridgeRegistration {
     #[doc(hidden)]
@@ -131,24 +129,6 @@ impl AgentFactoryPolicyBridgeRegistration {
     ) -> Self {
         Self {
             kind: AgentFactoryPolicyBridgeRegistrationKind::Facade,
-            package_name,
-            manifest_dir,
-            source_file: core::panic::Location::caller().file(),
-            source_fingerprint,
-            token_type_id,
-        }
-    }
-
-    #[doc(hidden)]
-    #[track_caller]
-    pub const fn __core_hooks_test_from_compile_env(
-        package_name: &'static str,
-        manifest_dir: &'static str,
-        source_fingerprint: u64,
-        token_type_id: fn() -> TypeId,
-    ) -> Self {
-        Self {
-            kind: AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest,
             package_name,
             manifest_dir,
             source_file: core::panic::Location::caller().file(),
@@ -169,21 +149,6 @@ macro_rules! __meerkat_agent_factory_policy_bridge_registration {
             env!("CARGO_MANIFEST_DIR"),
             $crate::agent::__meerkat_agent_factory_policy_source_fingerprint(include_bytes!(
                 concat!("factory", ".rs")
-            )),
-            $token_type_id,
-        )
-    };
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __meerkat_core_hooks_test_agent_factory_policy_bridge_registration {
-    ($token_type_id:path) => {
-        $crate::agent::AgentFactoryPolicyBridgeRegistration::__core_hooks_test_from_compile_env(
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_MANIFEST_DIR"),
-            $crate::agent::__meerkat_agent_factory_policy_source_fingerprint(include_bytes!(
-                concat!("hooks_behavior", ".rs")
             )),
             $token_type_id,
         )
@@ -276,19 +241,6 @@ impl AgentFactoryPolicyBridgeRegistration {
                     && source_file_matches(self.source_file, "meerkat", "src/factory.rs")
                     && self.source_content_fingerprint_matches(FACADE_FACTORY_SOURCE_FINGERPRINT)
             }
-            AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest => {
-                cfg!(debug_assertions)
-                    && manifest_dir_matches(
-                        self.manifest_dir,
-                        Some(normalized_path(env!("CARGO_MANIFEST_DIR"))),
-                    )
-                    && source_file_matches(
-                        self.source_file,
-                        "meerkat-core",
-                        "tests/hooks_behavior.rs",
-                    )
-                    && self.source_content_fingerprint_matches(CORE_HOOKS_TEST_SOURCE_FINGERPRINT)
-            }
         }
     }
 
@@ -296,8 +248,15 @@ impl AgentFactoryPolicyBridgeRegistration {
         if self.source_fingerprint != expected {
             return false;
         }
-        source_file_content_fingerprint(self.manifest_dir, self.source_file)
-            .is_none_or(|actual| actual == expected)
+        #[cfg(target_arch = "wasm32")]
+        {
+            true
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            source_file_content_fingerprint(self.manifest_dir, self.source_file)
+                .is_some_and(|actual| actual == expected)
+        }
     }
 }
 
@@ -344,11 +303,6 @@ fn source_file_content_fingerprint(manifest_dir: &str, source_file: &str) -> Opt
         })
 }
 
-#[cfg(target_arch = "wasm32")]
-fn source_file_content_fingerprint(_manifest_dir: &str, _source_file: &str) -> Option<u64> {
-    None
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn source_file_content_candidates(manifest_dir: &str, source_file: &str) -> Vec<PathBuf> {
     let source = Path::new(source_file);
@@ -357,13 +311,32 @@ fn source_file_content_candidates(manifest_dir: &str, source_file: &str) -> Vec<
     }
 
     let manifest = Path::new(manifest_dir);
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = Vec::with_capacity(11);
     candidates.push(manifest.join(source));
     if let Some(workspace) = manifest.parent() {
         candidates.push(workspace.join(source));
     }
     candidates.push(source.to_path_buf());
+    runfiles_source_file_content_candidates(&mut candidates, manifest, source);
     candidates
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn runfiles_source_file_content_candidates(
+    candidates: &mut Vec<PathBuf>,
+    manifest: &Path,
+    source: &Path,
+) {
+    let workspace = std::env::var_os("TEST_WORKSPACE").unwrap_or_else(|| "_main".into());
+    for variable in ["RUNFILES_DIR", "TEST_SRCDIR"] {
+        let Some(runfiles) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        candidates.push(runfiles.join(&workspace).join(source));
+        candidates.push(runfiles.join(source));
+        candidates.push(runfiles.join(&workspace).join(manifest).join(source));
+        candidates.push(runfiles.join(manifest).join(source));
+    }
 }
 
 fn normalized_path(path: &str) -> String {

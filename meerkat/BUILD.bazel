@@ -59,6 +59,7 @@ rust_library(
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat",
     },
+    data = [":package_runfiles"],
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
         proc_macro = True,

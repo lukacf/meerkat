@@ -539,17 +539,13 @@ meerkat-core = { path = "../meerkat-core" }
     )?;
     let fixture =
         include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace("fn main() {", "pub fn run() {");
-    let fixture = fixture.replace(
-        r#"inventory::submit! {
-    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
+            .replace(
+                "fn main() {",
+                r#"pub fn run() {
+    std::fs::remove_file(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/factory.rs"))
+        .expect("remove spoofed factory source before bridge validation");
 "#,
-        "",
-    );
+            );
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
@@ -642,12 +638,6 @@ meerkat-core = { path = "../meerkat-core" }
     )
 }
 
-inventory::submit! {
-    meerkat_core::__meerkat_core_hooks_test_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
 "#,
         r#"inventory::submit! {
     meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
@@ -670,19 +660,16 @@ inventory::submit! {
         .arg(project_dir.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
         .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-            "downstream direct bridge-registration fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
     assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream direct bridge-registration reached the live factory-policy bridge and constructed an agent:\n{}",
+        output.status.success(),
+        "downstream direct bridge-registration fixture must compile and run to bridge rejection; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+        "downstream direct bridge-registration fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
@@ -1155,16 +1142,21 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && builder.contains("InvalidFactoryBridgeToken")
             && builder.contains("ForgedFactoryBridgeTokenRegistration")
             && builder.contains("FACADE_FACTORY_SOURCE_FINGERPRINT")
-            && builder.contains("CORE_HOOKS_TEST_SOURCE_FINGERPRINT")
             && builder.contains("__facade_from_compile_env")
-            && builder.contains("__core_hooks_test_from_compile_env")
             && builder.contains("__meerkat_agent_factory_policy_source_fingerprint")
             && builder.contains("source_content_fingerprint_matches")
             && builder.contains("source_file_content_fingerprint")
+            && builder.contains("core::panic::Location::caller")
+            && builder.contains("source_file_matches")
             && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
             && !builder.contains("AgentFactoryPolicyBridgeRegistration::new")
             && !builder.contains("pub const fn new(")
             && !builder.contains("pub const fn __from_compile_env")
+            && !builder.contains("CoreHooksTest")
+            && !builder.contains("__core_hooks_test_from_compile_env")
+            && !builder
+                .contains("__meerkat_core_hooks_test_agent_factory_policy_bridge_registration")
+            && !builder.contains(".is_none_or(")
             && !builder.contains("pub enum AgentFactoryPolicyBridgeRegistrationKind")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")

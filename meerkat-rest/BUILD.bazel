@@ -44,6 +44,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -96,6 +97,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -163,6 +165,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -220,6 +223,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -294,6 +298,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -366,6 +371,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -444,6 +450,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -516,6 +523,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -587,6 +595,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -658,6 +667,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -729,6 +739,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -802,6 +813,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -874,6 +886,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -942,6 +955,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -987,6 +1001,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1039,6 +1054,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1086,6 +1102,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/lib.rs",
+        "src/schedule_host.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

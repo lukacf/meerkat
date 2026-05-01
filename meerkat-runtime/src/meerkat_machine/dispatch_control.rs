@@ -47,7 +47,7 @@ impl MeerkatMachine {
                     }
                 };
 
-                let (outcome, signal, runtime_effect_fact) = {
+                let (outcome, signal, runtime_effect) = {
                     let mut drv = driver.lock().await;
                     let runtime_idle = self
                         .existing_session_runtime_state(&session_id)
@@ -100,11 +100,13 @@ impl MeerkatMachine {
                                 .await
                                 .map_err(RuntimeControlPlaneError::Internal)?;
                             let signal = Self::post_admission_signal_from_effects(&effects);
-                            let runtime_effect_fact =
-                                crate::effect::runtime_effect_fact_optional_from_effects(&effects)
-                                    .map_err(RuntimeControlPlaneError::Internal)?;
+                            let runtime_effect =
+                                crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                                    &effects,
+                                )
+                                .map_err(RuntimeControlPlaneError::Internal)?;
                             drv.absorb_post_admission_effects(&effects);
-                            (signal, runtime_effect_fact)
+                            (signal, runtime_effect)
                         }
                         AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
                             (crate::driver::ephemeral::PostAdmissionSignal::None, None)
@@ -125,16 +127,16 @@ impl MeerkatMachine {
                     let _ = tx.try_send(());
                 }
                 if signal.should_interrupt_yielding()
-                    && let (Some(tx), Some(fact)) = (&effect_tx, runtime_effect_fact.clone())
+                    && let (Some(tx), Some(projected_effect)) = (&effect_tx, runtime_effect.clone())
                 {
-                    let _ = tx.try_send(crate::effect::RuntimeEffect::from_fact(fact));
+                    let _ = tx.try_send(projected_effect.into_effect());
                 }
                 if signal.should_interrupt_yielding()
-                    && let (Some(boundary_handle), Some(fact)) =
-                        (boundary_handle, runtime_effect_fact)
+                    && let (Some(boundary_handle), Some(projected_effect)) =
+                        (boundary_handle, runtime_effect)
                 {
                     let result = boundary_handle
-                        .cancel_after_boundary(fact.reason().to_string())
+                        .cancel_after_boundary(projected_effect.reason().to_string())
                         .await;
                     if let Err(err) = result {
                         tracing::trace!(

@@ -25,8 +25,9 @@ impl MeerkatMachine {
                 });
             }
         };
-        let fact = crate::effect::runtime_effect_fact_from_effects(&staged.effects)
-            .map_err(RuntimeDriverError::Internal)?;
+        let projected_effect =
+            crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                .map_err(RuntimeDriverError::Internal)?;
 
         let (effect_tx, boundary_handle) = {
             let sessions = self.sessions.read().await;
@@ -48,11 +49,8 @@ impl MeerkatMachine {
             return Err(RuntimeDriverError::NotReady { state });
         };
 
-        let reason = fact.reason().to_string();
-        if let Err(err) = effect_tx
-            .send(crate::effect::RuntimeEffect::from_fact(fact))
-            .await
-        {
+        let reason = projected_effect.reason().to_string();
+        if let Err(err) = effect_tx.send(projected_effect.into_effect()).await {
             self.restore_session_dsl_state(session_id, staged.previous_state)
                 .await;
             return Err(RuntimeDriverError::Internal(format!(
@@ -107,8 +105,9 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        let fact = crate::effect::runtime_effect_fact_from_effects(&staged.effects)
-            .map_err(RuntimeDriverError::Internal)?;
+        let projected_effect =
+            crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                .map_err(RuntimeDriverError::Internal)?;
 
         let (driver, completions, effect_tx) = {
             let sessions = self.sessions.read().await;
@@ -129,7 +128,7 @@ impl MeerkatMachine {
             .await
             .unwrap_or(RuntimeState::Destroyed);
 
-        let effect = crate::effect::RuntimeEffect::from_fact(fact);
+        let effect = projected_effect.into_effect();
         if let Some(effect_tx) = effect_tx
             && effect_tx.send(effect).await.is_ok()
         {

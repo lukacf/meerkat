@@ -210,6 +210,40 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
+fn bad(fact: RuntimeEffectFact) {
+    let _ = RuntimeEffect::from_fact(fact);
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: RuntimeEffect::from_fact fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/effect.rs" <<'EOF'
+pub(crate) enum RuntimeEffectFact {
+    CancelAfterBoundary { reason: String },
+}
+
+impl RuntimeEffect {
+    pub(crate) fn from_fact(fact: RuntimeEffectFact) -> Self {
+        todo!()
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: visible RuntimeEffectFact/from_fact fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
 fn bad(reason: String) {
     let _ = RuntimeEffectFact::CancelAfterBoundary { reason };
 }
@@ -338,6 +372,20 @@ async fn bad(machine: Machine, session_id: SessionId) {
 EOF
   if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: comms-drain hard-cancel fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-mob/src/runtime"
+  cat >"$tmpdir/meerkat-mob/src/runtime/local_bridge.rs" <<'EOF'
+async fn bad(machine: Machine, session_id: SessionId) {
+    let _ = machine.hard_cancel_current_run(&session_id, "bad").await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: local bridge hard-cancel fixture passed" >&2
     exit 1
   fi
 
@@ -940,8 +988,18 @@ report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"
 
 runtime_effect_assoc="$(run_rg 'RuntimeEffect::[A-Za-z_][A-Za-z0-9_]*' --glob '!**/effect.rs')"
-runtime_effect_assoc="$(filter_rg "$runtime_effect_assoc" -v 'RuntimeEffect::from_fact')"
-report_matches "RuntimeEffect associated constructors must go through from_fact" "$runtime_effect_assoc"
+report_matches "RuntimeEffect associated constructors must stay inside the sealed effect module" "$runtime_effect_assoc"
+
+if [[ -f "$root/meerkat-runtime/src/effect.rs" ]]; then
+  visible_runtime_effect_fact="$(capture_rg -n 'pub(\([^)]*\))?[[:space:]]+enum[[:space:]]+RuntimeEffectFact|pub(\([^)]*\))?[[:space:]]+fn[[:space:]]+from_fact[[:space:]]*\(' "$root/meerkat-runtime/src/effect.rs")"
+  report_matches "RuntimeEffectFact and RuntimeEffect::from_fact must not be crate-visible" "$visible_runtime_effect_fact"
+fi
+
+if [[ -f "$root/meerkat-mob/src/runtime/local_bridge.rs" ]]; then
+  local_bridge_hard_cancel="$(strip_cfg_test_modules <"$root/meerkat-mob/src/runtime/local_bridge.rs")"
+  local_bridge_hard_cancel="$(filter_rg "$local_bridge_hard_cancel" -n '\bhard_cancel_current_run[[:space:]]*\(')"
+  report_matches "local mob bridge interrupt must not hard-cancel member sessions" "$local_bridge_hard_cancel"
+fi
 
 fact_literals=""
 if [[ -d "$root/meerkat-runtime/src" ]]; then

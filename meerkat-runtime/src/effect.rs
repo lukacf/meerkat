@@ -3,17 +3,17 @@
 //! The DSL emits neutral facts. This module is the only place that turns those
 //! facts into executable runtime-loop effects.
 
-use crate::meerkat_machine::dsl;
+use crate::meerkat_machine::{DslTransitionEffects, dsl};
 
 /// Neutral fact projected from a committed MeerkatMachine DSL transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeEffectFact {
+enum RuntimeEffectFact {
     CancelAfterBoundary { reason: String },
     StopRuntimeExecutor { reason: String },
 }
 
 impl RuntimeEffectFact {
-    pub(crate) fn reason(&self) -> &str {
+    fn reason(&self) -> &str {
         match self {
             Self::CancelAfterBoundary { reason } | Self::StopRuntimeExecutor { reason } => reason,
         }
@@ -34,7 +34,7 @@ pub(crate) enum RuntimeEffectInner {
 }
 
 impl RuntimeEffect {
-    pub(crate) fn from_fact(fact: RuntimeEffectFact) -> Self {
+    fn from_fact(fact: RuntimeEffectFact) -> Self {
         let inner = match fact {
             RuntimeEffectFact::CancelAfterBoundary { reason } => {
                 RuntimeEffectInner::CancelAfterBoundary { reason }
@@ -51,7 +51,31 @@ impl RuntimeEffect {
     }
 }
 
-pub(crate) fn runtime_effect_facts_from_effects(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectedRuntimeEffect {
+    effect: RuntimeEffect,
+    reason: String,
+}
+
+impl ProjectedRuntimeEffect {
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub(crate) fn into_effect(self) -> RuntimeEffect {
+        self.effect
+    }
+}
+
+fn project_runtime_effect_fact(fact: RuntimeEffectFact) -> ProjectedRuntimeEffect {
+    let reason = fact.reason().to_string();
+    ProjectedRuntimeEffect {
+        effect: RuntimeEffect::from_fact(fact),
+        reason,
+    }
+}
+
+fn runtime_effect_facts_from_raw_effects(
     effects: &[dsl::MeerkatMachineEffect],
 ) -> Vec<RuntimeEffectFact> {
     effects
@@ -74,19 +98,19 @@ pub(crate) fn runtime_effect_facts_from_effects(
         .collect()
 }
 
-pub(crate) fn runtime_effect_fact_from_effects(
+fn runtime_effect_fact_from_raw_effects(
     effects: &[dsl::MeerkatMachineEffect],
 ) -> Result<RuntimeEffectFact, String> {
-    let Some(first) = runtime_effect_fact_optional_from_effects(effects)? else {
+    let Some(first) = runtime_effect_fact_optional_from_raw_effects(effects)? else {
         return Err("DSL transition did not emit a RuntimeEffectFact".to_string());
     };
     Ok(first)
 }
 
-pub(crate) fn runtime_effect_fact_optional_from_effects(
+fn runtime_effect_fact_optional_from_raw_effects(
     effects: &[dsl::MeerkatMachineEffect],
 ) -> Result<Option<RuntimeEffectFact>, String> {
-    let mut facts = runtime_effect_facts_from_effects(effects).into_iter();
+    let mut facts = runtime_effect_facts_from_raw_effects(effects).into_iter();
     let Some(first) = facts.next() else {
         return Ok(None);
     };
@@ -94,6 +118,32 @@ pub(crate) fn runtime_effect_fact_optional_from_effects(
         return Err("DSL transition emitted multiple RuntimeEffectFacts".to_string());
     }
     Ok(Some(first))
+}
+
+pub(crate) fn runtime_effect_projection_from_dsl_effects(
+    effects: &DslTransitionEffects,
+) -> Result<ProjectedRuntimeEffect, String> {
+    runtime_effect_fact_from_raw_effects(effects.as_slice()).map(project_runtime_effect_fact)
+}
+
+pub(crate) fn runtime_effect_projection_optional_from_dsl_effects(
+    effects: &DslTransitionEffects,
+) -> Result<Option<ProjectedRuntimeEffect>, String> {
+    runtime_effect_fact_optional_from_raw_effects(effects.as_slice())
+        .map(|fact| fact.map(project_runtime_effect_fact))
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_effect_for_test(kind: dsl::RuntimeEffectKind, reason: &str) -> RuntimeEffect {
+    let fact = match kind {
+        dsl::RuntimeEffectKind::CancelAfterBoundary => RuntimeEffectFact::CancelAfterBoundary {
+            reason: reason.to_string(),
+        },
+        dsl::RuntimeEffectKind::StopRuntimeExecutor => RuntimeEffectFact::StopRuntimeExecutor {
+            reason: reason.to_string(),
+        },
+    };
+    RuntimeEffect::from_fact(fact)
 }
 
 #[cfg(test)]
@@ -136,7 +186,7 @@ mod tests {
         }];
 
         assert_eq!(
-            runtime_effect_fact_from_effects(&effects).expect("fact"),
+            runtime_effect_fact_from_raw_effects(&effects).expect("fact"),
             RuntimeEffectFact::CancelAfterBoundary {
                 reason: "from dsl".to_string()
             }

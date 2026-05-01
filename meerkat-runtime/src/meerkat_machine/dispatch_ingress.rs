@@ -155,7 +155,7 @@ impl MeerkatMachine {
                         }
                     }
                 };
-                let (signal, runtime_effect_fact) = if let Some(input_id) = accepted_input_id {
+                let (signal, runtime_effect) = if let Some(input_id) = accepted_input_id {
                     let (_, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
@@ -182,14 +182,16 @@ impl MeerkatMachine {
                         driver.absorb_post_admission_effects(&effects);
                     }
                     let signal = Self::post_admission_signal_from_effects(&effects);
-                    let runtime_effect_fact =
-                        crate::effect::runtime_effect_fact_optional_from_effects(&effects)
-                            .map_err(|reason| {
-                                RuntimeDriverError::Internal(format!(
-                                    "canonical AcceptWithCompletion emitted invalid runtime effect facts: {reason}"
-                                ))
-                            })?;
-                    (signal, runtime_effect_fact)
+                    let runtime_effect =
+                        crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                            &effects,
+                        )
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "canonical AcceptWithCompletion emitted invalid runtime effect facts: {reason}"
+                            ))
+                        })?;
+                    (signal, runtime_effect)
                 } else {
                     (signal, None)
                 };
@@ -200,16 +202,16 @@ impl MeerkatMachine {
                     let _ = wake_tx.try_send(());
                 }
                 if signal.should_interrupt_yielding()
-                    && let (Some(tx), Some(fact)) = (&effect_tx, runtime_effect_fact.clone())
+                    && let (Some(tx), Some(projected_effect)) = (&effect_tx, runtime_effect.clone())
                 {
-                    let _ = tx.try_send(crate::effect::RuntimeEffect::from_fact(fact));
+                    let _ = tx.try_send(projected_effect.into_effect());
                 }
                 if signal.should_interrupt_yielding()
-                    && let (Some(boundary_handle), Some(fact)) =
-                        (boundary_handle, runtime_effect_fact)
+                    && let (Some(boundary_handle), Some(projected_effect)) =
+                        (boundary_handle, runtime_effect)
                 {
                     let result = boundary_handle
-                        .cancel_after_boundary(fact.reason().to_string())
+                        .cancel_after_boundary(projected_effect.reason().to_string())
                         .await;
                     if let Err(err) = result {
                         tracing::trace!(

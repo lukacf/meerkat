@@ -91,10 +91,10 @@ pub(crate) async fn drain_ready_executor_effects(
 mod tests {
     use super::*;
     use crate::driver::ephemeral::EphemeralRuntimeDriver;
-    use crate::effect::{RuntimeEffect, runtime_effect_fact_from_effects};
+    use crate::effect::{RuntimeEffect, runtime_effect_for_test};
     use crate::identifiers::LogicalRuntimeId;
     use crate::meerkat_machine::driver::DriverEntry;
-    use crate::meerkat_machine::dsl::{MeerkatMachineEffect, RuntimeEffectKind};
+    use crate::meerkat_machine::dsl::RuntimeEffectKind;
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
@@ -109,11 +109,7 @@ mod tests {
     }
 
     fn runtime_effect(kind: RuntimeEffectKind, reason: &str) -> RuntimeEffect {
-        let effects = vec![MeerkatMachineEffect::RuntimeEffectFact {
-            kind,
-            reason: reason.to_string(),
-        }];
-        RuntimeEffect::from_fact(runtime_effect_fact_from_effects(&effects).expect("effect fact"))
+        runtime_effect_for_test(kind, reason)
     }
 
     struct RecordingExecutor {

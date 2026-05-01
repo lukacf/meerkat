@@ -130,7 +130,9 @@ async fn inner_test_rest_resume_metadata() {
     let app = router(state_run);
     let run_payload = json!({
         "prompt": "Say the word 'ok' and nothing else.",
-        "model": config.agent.model,
+        "turn_metadata": {
+            "model": config.agent.model,
+        },
         "max_tokens": config.agent.max_tokens_per_turn
     });
     let request = Request::builder()

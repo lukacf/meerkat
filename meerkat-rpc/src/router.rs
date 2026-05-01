@@ -6952,13 +6952,14 @@ mod tests {
             "session/create",
             serde_json::json!({
                 "prompt": "Say hello",
-                "skill_refs": [
-                    {
-                        "kind": "structured",
-                        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-                        "skill_name": "email-extractor"
-                    }
-                ]
+                "turn_metadata": {
+                    "skill_references": [
+                        {
+                            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                            "skill_name": "email-extractor"
+                        }
+                    ]
+                }
             }),
         );
 
@@ -6983,7 +6984,7 @@ mod tests {
         let resp = router.dispatch(req).await.unwrap();
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
         assert!(
-            error_message(&resp).contains("skill_references is retired"),
+            error_message(&resp).contains("unknown field `skill_references`"),
             "unexpected error: {:?}",
             resp.error
         );
@@ -7031,13 +7032,14 @@ mod tests {
             "session/create",
             serde_json::json!({
                 "prompt": "Say hello",
-                "skill_refs": [
-                    {
-                        "kind": "structured",
-                        "source_uuid": "not-a-uuid",
-                        "skill_name": "email-extractor"
-                    }
-                ]
+                "turn_metadata": {
+                    "skill_references": [
+                        {
+                            "source_uuid": "not-a-uuid",
+                            "skill_name": "email-extractor"
+                        }
+                    ]
+                }
             }),
         );
 
@@ -7060,7 +7062,7 @@ mod tests {
         let resp = router.dispatch(req).await.unwrap();
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
         assert!(
-            error_message(&resp).contains("skill_references is retired"),
+            error_message(&resp).contains("unknown field `skill_references`"),
             "unexpected error: {:?}",
             resp.error
         );
@@ -7279,7 +7281,7 @@ mod tests {
         let rejected_after_resp = router.dispatch(rejected_after).await.unwrap();
         assert_eq!(error_code(&rejected_after_resp), error::INVALID_PARAMS);
         assert!(
-            error_message(&rejected_after_resp).contains("skill_references is retired"),
+            error_message(&rejected_after_resp).contains("unknown field `skill_references`"),
             "unexpected error: {:?}",
             rejected_after_resp.error
         );

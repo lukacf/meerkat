@@ -442,7 +442,11 @@ async fn deferred_inline_external_tools_accept_explicit_keep_alive_false_turn() 
                 "enable_shell": false,
                 "enable_memory": false,
                 "enable_mob": false,
-                "keep_alive": false,
+                "turn_metadata": {
+                    "keep_alive": {
+                        "action": "clear"
+                    }
+                },
                 "external_tools": [{
                     "name": "linear_graphql",
                     "description": "Execute GraphQL",

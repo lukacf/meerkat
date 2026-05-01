@@ -3426,8 +3426,8 @@ mod tests {
                 "action": "set",
                 "value": {
                     "provider_tag": {
-                        "provider": "unknown",
-                        "bag": { "effort": "xhigh" }
+                        "provider": "anthropic",
+                        "effort": "xhigh"
                     }
                 }
             },
@@ -3477,6 +3477,15 @@ mod tests {
             skill_references: Some(vec![skill.clone()]),
             model: Some("gpt-5.4".to_string()),
             provider: Some(meerkat_core::Provider::OpenAI),
+            provider_params: Some(
+                serde_json::from_value(serde_json::json!({
+                    "action": "set",
+                    "value": {
+                        "temperature": 0.2
+                    }
+                }))
+                .expect("provider params override"),
+            ),
             connection_ref: Some(
                 serde_json::from_value(serde_json::json!({
                     "action": "set",
@@ -4731,7 +4740,15 @@ mod tests {
         let input: MeerkatResumeInput = serde_json::from_value(json!({
             "session_id": session_id.to_string(),
             "prompt": "resume after restart",
-            "keep_alive": true
+            "turn_metadata": {
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                }
+            }
         }))
         .expect("valid resume input");
         let result = Box::pin(handle_meerkat_resume(&state, input, None, None)).await;

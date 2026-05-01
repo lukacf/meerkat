@@ -464,7 +464,9 @@ async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
         "session/create",
         json!({
             "prompt": "Create a shared sqlite session.",
-            "model": "claude-sonnet-4-5",
+            "turn_metadata": {
+                "model": "claude-sonnet-4-5"
+            },
         }),
         SHARED_REALM_RPC_STEP_TIMEOUT_SECS,
     )

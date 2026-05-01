@@ -672,18 +672,12 @@
         "title": "CommsCommandRequest"
       },
       "CommsParams": {
+        "additionalProperties": false,
         "description": "Comms parameters.",
         "properties": {
           "comms_name": {
             "type": [
               "string",
-              "null"
-            ]
-          },
-          "keep_alive": {
-            "description": "None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.",
-            "type": [
-              "boolean",
               "null"
             ]
           },
@@ -1270,29 +1264,10 @@
         "type": "object"
       },
       "CoreCreateParams": {
+        "additionalProperties": false,
         "description": "Core session creation parameters.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "app_context": true,
-          "connection_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireConnectionRef"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Phase 4c — realm-scoped binding reference. When set, the session\nis built through the realm connection set; when omitted, the\nlegacy flat `provider + api_key` path is used."
-          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -1310,24 +1285,8 @@
               "null"
             ]
           },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "prompt": {
             "type": "string"
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provider"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "shell_env": {
             "additionalProperties": {
@@ -1343,6 +1302,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -10341,24 +10310,17 @@
         "type": "object"
       },
       "SkillsParams": {
-        "description": "Skills parameters for session/turn requests.\n\n`preload_skills` carries typed `SkillKey`s\n(`{\"source_uuid\":\"…\",\"skill_name\":\"…\"}`); first-turn `skill_refs` carries\ntagged `SkillRef`s\n(`{\"kind\":\"structured\",\"source_uuid\":\"…\",\"skill_name\":\"…\"}`). There is no\nlegacy string path, and malformed input is a typed ingress error, not a\nlegacy-upgrade.\n\n`Some([])` is normalized to `None` to prevent silent misconfiguration.",
+        "additionalProperties": false,
+        "description": "Skills parameters for session/turn requests.\n\nSkill references flow through the canonical runtime turn metadata carrier.\nLegacy top-level `preload_skills` and `skill_refs` are retired.",
         "properties": {
-          "preload_skills": {
-            "items": {
-              "$ref": "#/components/schemas/SkillKey"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "skill_refs": {
-            "items": {
-              "$ref": "#/components/schemas/SkillRef"
-            },
-            "type": [
-              "array",
-              "null"
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },

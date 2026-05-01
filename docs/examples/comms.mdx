@@ -24,7 +24,12 @@ Keep-alive sessions stay resident so later comms or external events can wake the
       "method": "session/create",
       "params": {
         "prompt": "You are a coordinator.",
-        "keep_alive": true,
+        "turn_metadata": {
+          "keep_alive": {
+            "action": "set",
+            "value": { "ttl_secs": 30, "policy": "pinned" }
+          }
+        },
         "comms_name": "agent-a"
       }
     }
@@ -36,7 +41,12 @@ Keep-alive sessions stay resident so later comms or external events can wake the
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "You are a coordinator.",
-        "keep_alive": true,
+        "turn_metadata": {
+          "keep_alive": {
+            "action": "set",
+            "value": { "ttl_secs": 30, "policy": "pinned" }
+          }
+        },
         "comms_name": "agent-a"
       }'
     ```

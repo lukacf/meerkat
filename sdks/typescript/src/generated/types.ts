@@ -78,14 +78,12 @@ export interface CapabilitiesResponse {
 }
 
 export interface CommsParams {
-  keep_alive?: boolean | null;
   comms_name?: string;
   peer_meta?: Record<string, unknown>;
 }
 
 export interface SkillsParams {
-  preload_skills?: Array<{ source_uuid: string; skill_name: string }>;
-  skill_refs?: Array<{ kind: "structured"; source_uuid: string; skill_name: string }>;
+  turn_metadata?: Record<string, unknown>;
 }
 
 export interface McpAddParams {

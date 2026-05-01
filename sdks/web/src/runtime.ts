@@ -44,11 +44,10 @@ function metadataOverrideToWasm<T>(
 }
 
 function turnMetadataToWasm(
-  metadata: RuntimeTurnMetadata | undefined,
-  defaultModel: string,
+  metadata: RuntimeTurnMetadata,
 ): Record<string, unknown> {
   return {
-    model: metadata?.model ?? defaultModel,
+    model: metadata.model,
     provider: metadata?.provider,
     provider_params: metadataOverrideToWasm(metadata?.providerParams),
     connection_ref: metadataOverrideToWasm(metadata?.connectionRef),
@@ -66,8 +65,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
   // deleted. Credentials come from bootstrap-populated config.realm or
   // the host's registered external-auth resolver.
   return {
-    model: config.model,
-    turn_metadata: turnMetadataToWasm(config.turnMetadata, config.model),
+    turn_metadata: turnMetadataToWasm(config.turnMetadata),
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
     comms_name: config.commsName,

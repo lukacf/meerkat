@@ -461,13 +461,14 @@ Inject skills into a specific turn on an existing session. The skill content is 
       "arguments": {
         "session_id": "019467d9-7e3a-7000-8000-000000000000",
         "prompt": "Now format the output",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```

@@ -58,8 +58,8 @@ const fullConfig: RuntimeConfig = {
 // ─── SessionConfig ──────────────────────────────────────────────
 
 const sessionConfig: SessionConfig = {
-  model: 'claude-sonnet-4-5',
   turnMetadata: {
+    model: 'claude-sonnet-4-5',
     connectionRef: {
       action: 'set',
       value: { realm: 'default', binding: 'anthropic' },

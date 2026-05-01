@@ -160,12 +160,11 @@ struct MobDefinitionHeader {
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionConfig {
-    model: String,
     /// Canonical first-turn runtime metadata. When set, overrides model,
     /// provider, auth binding, keep-alive, and first-turn instructions.
-    #[serde(default)]
-    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
+    turn_metadata: meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
@@ -1183,43 +1182,38 @@ fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
     handle
 }
 
+fn session_config_model(config: &SessionConfig) -> Result<&str, JsValue> {
+    let Some(model) = config.turn_metadata.model.as_deref() else {
+        return Err(err_js(
+            "invalid_config",
+            "turn_metadata.model is required for session creation",
+        ));
+    };
+    if model.trim().is_empty() {
+        return Err(err_js(
+            "invalid_config",
+            "turn_metadata.model must not be empty",
+        ));
+    }
+    Ok(model)
+}
+
 fn build_session_request(
-    model: &str,
     config: &SessionConfig,
     system_prompt: Option<String>,
 ) -> Result<meerkat_core::service::CreateSessionRequest, JsValue> {
     // Credentials flow through bootstrap-populated
     // `config.realm` (populate_realm_from_api_keys) or the host's
     // registered external-auth resolver. No per-session api_key.
-    if model.trim().is_empty() {
-        return Err(err_js("invalid_config", "model must not be empty"));
-    }
+    let model = session_config_model(config)?;
 
     // Reject reserved mob labels in caller-supplied labels map.
     meerkat::surface::validate_raw_labels(config.labels.as_ref())
         .map_err(|e| err_js("invalid_config", &e))?;
 
     let mut build_config = AgentBuildConfig::new(model);
-    let mut initial_turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
-        config
-            .turn_metadata
-            .clone()
-            .map(Into::into)
-            .unwrap_or_default();
-    match initial_turn_metadata.model.as_ref() {
-        Some(metadata_model) if metadata_model.as_str() != model => {
-            return Err(err_js(
-                "invalid_config",
-                "turn_metadata.model must match session model",
-            ));
-        }
-        Some(_) => {}
-        None => {
-            initial_turn_metadata.model = Some(
-                meerkat_core::lifecycle::run_primitive::ModelId::new(model.to_string()),
-            );
-        }
-    }
+    let initial_turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        config.turn_metadata.clone().into();
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
     }
@@ -1228,7 +1222,7 @@ fn build_session_request(
     build_config.app_context = config.app_context.clone();
 
     Ok(meerkat_core::service::CreateSessionRequest {
-        model: config.model.clone(),
+        model: model.to_string(),
         prompt: "".into(),
         system_prompt,
         max_tokens: Some(config.max_tokens),
@@ -1242,10 +1236,7 @@ fn build_session_request(
 
 fn session_config_requests_keep_alive(config: &SessionConfig) -> bool {
     matches!(
-        config
-            .turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.keep_alive.as_ref()),
+        config.turn_metadata.keep_alive.as_ref(),
         Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(_))
     )
 }
@@ -1257,8 +1248,8 @@ fn create_runtime_backed_session(
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
     let keep_alive = config.comms_name.is_some() && session_config_requests_keep_alive(&config);
-    let model = config.model.clone();
-    let request = build_session_request(&model, &config, system_prompt)?;
+    let model = session_config_model(&config)?.to_string();
+    let request = build_session_request(&config, system_prompt)?;
 
     let created = futures::executor::block_on(session_service.create_session(request))
         .map_err(err_session)?;
@@ -1280,7 +1271,7 @@ fn create_runtime_backed_session(
             RuntimeHandleSession {
                 session_id,
                 mob_id,
-                model: config.model,
+                model,
                 keep_alive,
                 run_counter: 0,
                 event_rx,
@@ -2571,9 +2562,9 @@ capabilities = [{capability_values}]
     #[test]
     fn direct_session_config_uses_canonical_initial_turn_metadata() {
         let config: SessionConfig = serde_json::from_value(json!({
-            "model": "claude-sonnet-4-5",
             "comms_name": "browser-agent",
             "turn_metadata": {
+                "model": "claude-sonnet-4-5",
                 "connection_ref": {
                     "action": "set",
                     "value": { "realm": "default", "binding": "default_anthropic" }
@@ -2589,8 +2580,7 @@ capabilities = [{capability_values}]
         }))
         .expect("session config with turn metadata");
 
-        let request =
-            build_session_request("claude-sonnet-4-5", &config, None).expect("build request");
+        let request = build_session_request(&config, None).expect("build request");
         let build = request.build.expect("session build options");
 
         assert!(build.provider.is_none());
@@ -2621,6 +2611,21 @@ capabilities = [{capability_values}]
                 .and_then(|instructions| instructions.first())
                 .map(|instruction| instruction.body.as_str()),
             Some("Use browser context.")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_session_config_rejects_top_level_model_carrier() {
+        let parsed: Result<SessionConfig, _> = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-5",
+            "turn_metadata": {
+                "model": "claude-opus-4-6"
+            }
+        }));
+        assert!(
+            parsed.is_err(),
+            "session config must reject top-level model split from turn_metadata"
         );
     }
 
@@ -2973,8 +2978,9 @@ capabilities = [{capability_values}]
         init_test_runtime();
         let handle = create_session_simple(
             &json!({
-                "model": "claude-sonnet-4-5",
-                "api_key": "sk-test"
+                "turn_metadata": {
+                    "model": "claude-sonnet-4-5"
+                }
             })
             .to_string(),
         )
@@ -3005,8 +3011,9 @@ capabilities = [{capability_values}]
         init_test_runtime();
         let handle = create_session_simple(
             &json!({
-                "model": "claude-sonnet-4-5",
-                "api_key": "sk-test"
+                "turn_metadata": {
+                    "model": "claude-sonnet-4-5"
+                }
             })
             .to_string(),
         )

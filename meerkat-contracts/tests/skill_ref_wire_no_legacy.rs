@@ -4,7 +4,7 @@
 //! refuses every legacy string encoding. Round-trip asserts the shape is
 //! a tagged object with the `kind: "structured"` discriminator.
 
-use meerkat_contracts::SkillsParams;
+use meerkat_contracts::{SkillsParams, wire::runtime::WireRuntimeTurnMetadata};
 use meerkat_core::skills::{SkillKey, SkillName, SkillRef, SourceUuid};
 
 fn test_key(slug: &str) -> SkillKey {
@@ -52,8 +52,10 @@ fn skills_params_rejects_legacy_string_skill_refs() {
 fn skills_params_round_trips_typed_key() {
     let key = test_key("email-extractor");
     let params = SkillsParams {
-        preload_skills: Some(vec![key.clone()]),
-        skill_refs: Some(vec![SkillRef::Structured(key.clone())]),
+        turn_metadata: Some(WireRuntimeTurnMetadata {
+            skill_references: Some(vec![key.clone()]),
+            ..Default::default()
+        }),
     };
     let json = serde_json::to_string(&params).expect("serialize");
     let parsed: SkillsParams = serde_json::from_str(&json).expect("deserialize");

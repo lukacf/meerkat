@@ -1031,9 +1031,18 @@ async fn canonical_skill_keys_for_state(
     state: &AppState,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, ApiError> {
+    let skill_references = skill_refs
+        .map(|refs| {
+            refs.into_iter()
+                .map(|reference| reference.key().clone())
+                .collect::<Vec<_>>()
+        })
+        .filter(|refs| !refs.is_empty());
     let params = SkillsParams {
-        preload_skills: None,
-        skill_refs,
+        turn_metadata: skill_references.map(|skill_references| WireRuntimeTurnMetadata {
+            skill_references: Some(skill_references),
+            ..Default::default()
+        }),
     };
 
     // Validate the registry builds: invalid source-identity config is

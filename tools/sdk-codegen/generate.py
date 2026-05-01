@@ -642,15 +642,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     if has_comms:
         types_content += "\n@dataclass\nclass CommsParams:\n"
         types_content += '    """Comms parameters (available because comms capability is compiled)."""\n'
-        types_content += "    keep_alive: Optional[bool] = None\n"
         types_content += "    comms_name: Optional[str] = None\n\n"
         types_content += "    peer_meta: Optional[dict[str, Any]] = None\n\n"
 
     if has_skills:
         types_content += "\n@dataclass\nclass SkillsParams:\n"
         types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
-        types_content += "    preload_skills: list[dict[str, str]] = field(default_factory=list)\n"
-        types_content += "    skill_refs: list[dict[str, str]] = field(default_factory=list)\n\n"
+        types_content += "    turn_metadata: Optional[dict[str, Any]] = None\n\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
     wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
@@ -1016,15 +1014,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # Conditional params based on available capabilities
     if has_comms:
         types_content += "\nexport interface CommsParams {\n"
-        types_content += "  keep_alive?: boolean | null;\n"
         types_content += "  comms_name?: string;\n"
         types_content += "  peer_meta?: Record<string, unknown>;\n"
         types_content += "}\n"
 
     if has_skills:
         types_content += "\nexport interface SkillsParams {\n"
-        types_content += "  preload_skills?: Array<{ source_uuid: string; skill_name: string }>;\n"
-        types_content += "  skill_refs?: Array<{ kind: \"structured\"; source_uuid: string; skill_name: string }>;\n"
+        types_content += "  turn_metadata?: Record<string, unknown>;\n"
         types_content += "}\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))

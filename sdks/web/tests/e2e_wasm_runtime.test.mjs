@@ -58,8 +58,9 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
   });
   try {
     const session = runtime.createSession({
-      model: "claude-sonnet-4-5",
-      apiKey: "sk-test",
+      turnMetadata: {
+        model: "claude-sonnet-4-5",
+      },
     });
     const staged = await session.appendSystemContext({
       text: "Remember the browser-side coordinator.",

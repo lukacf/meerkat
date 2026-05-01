@@ -1889,9 +1889,18 @@ fn canonical_skill_keys(
                 .to_string(),
         );
     }
+    let skill_references = skill_refs
+        .map(|refs| {
+            refs.into_iter()
+                .map(|reference| reference.key().clone())
+                .collect::<Vec<_>>()
+        })
+        .filter(|refs| !refs.is_empty());
     let params = SkillsParams {
-        preload_skills: None,
-        skill_refs,
+        turn_metadata: skill_references.map(|skill_references| WireRuntimeTurnMetadata {
+            skill_references: Some(skill_references),
+            ..Default::default()
+        }),
     };
     Ok(params.canonical_skill_keys())
 }

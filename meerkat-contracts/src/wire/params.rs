@@ -6,20 +6,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::runtime::WireRuntimeTurnMetadata;
 use meerkat_core::{
-    HookRunOverrides, OutputSchema, PeerMeta, Provider, SurfaceMetadata, SurfaceMetadataError,
-    skills::{SkillKey, SkillRef},
+    HookRunOverrides, OutputSchema, PeerMeta, SurfaceMetadata, SurfaceMetadataError,
 };
 
 /// Core session creation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CoreCreateParams {
     pub prompt: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,17 +26,10 @@ pub struct CoreCreateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Phase 4c — realm-scoped binding reference. When set, the session
-    /// is built through the realm connection set; when omitted, the
-    /// legacy flat `provider + api_key` path is used.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<super::connection::WireConnectionRef>,
 }
 
 impl CoreCreateParams {
@@ -66,10 +58,8 @@ pub struct StructuredOutputParams {
 /// Comms parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CommsParams {
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.
@@ -87,50 +77,42 @@ pub struct HookParams {
 
 /// Skills parameters for session/turn requests.
 ///
-/// `preload_skills` carries typed `SkillKey`s
-/// (`{"source_uuid":"…","skill_name":"…"}`); first-turn `skill_refs` carries
-/// tagged `SkillRef`s
-/// (`{"kind":"structured","source_uuid":"…","skill_name":"…"}`). There is no
-/// legacy string path, and malformed input is a typed ingress error, not a
-/// legacy-upgrade.
-///
-/// `Some([])` is normalized to `None` to prevent silent misconfiguration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// Skill references flow through the canonical runtime turn metadata carrier.
+/// Legacy top-level `preload_skills` and `skill_refs` are retired.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SkillsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preload_skills: Option<Vec<SkillKey>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill_refs: Option<Vec<SkillRef>>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 impl SkillsParams {
-    /// Normalize: `Some([])` → `None` for both fields.
+    /// Normalize: empty metadata carriers become `None`.
     pub fn normalize(&mut self) {
-        if let Some(ref v) = self.preload_skills
-            && v.is_empty()
+        if let Some(metadata) = self.turn_metadata.as_mut()
+            && metadata
+                .skill_references
+                .as_ref()
+                .is_some_and(Vec::is_empty)
         {
-            self.preload_skills = None;
+            metadata.skill_references = None;
         }
-        if let Some(ref v) = self.skill_refs
-            && v.is_empty()
+        if self
+            .turn_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata == &WireRuntimeTurnMetadata::default())
         {
-            self.skill_refs = None;
+            self.turn_metadata = None;
         }
     }
 
-    /// Flatten all ingress refs into a single typed `Vec<SkillKey>`.
-    ///
-    /// No legacy string path, no `SourceIdentityRegistry` round-trip at the
-    /// wire boundary — the registry applies remaps at resolution time, not
-    /// here. Callers that need registry canonicalization call
-    /// `SourceIdentityRegistry::canonical_skill_key` directly.
-    pub fn canonical_skill_keys(&self) -> Option<Vec<SkillKey>> {
-        let mut keys: Vec<SkillKey> = Vec::new();
-        if let Some(refs) = &self.skill_refs {
-            keys.extend(refs.iter().map(|r| r.key().clone()));
-        }
-        if keys.is_empty() { None } else { Some(keys) }
+    /// Return canonical skill keys from the runtime turn metadata carrier.
+    pub fn canonical_skill_keys(&self) -> Option<Vec<meerkat_core::skills::SkillKey>> {
+        self.turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.skill_references.clone())
+            .filter(|keys| !keys.is_empty())
     }
 }
 
@@ -151,60 +133,65 @@ mod tests {
     #[test]
     fn test_skills_params_none_serde() -> Result<(), serde_json::Error> {
         let params = SkillsParams {
-            preload_skills: None,
-            skill_refs: None,
+            turn_metadata: None,
         };
         let json = serde_json::to_string(&params)?;
         assert_eq!(json, "{}");
 
         let parsed: SkillsParams = serde_json::from_str("{}")?;
-        assert!(parsed.preload_skills.is_none());
-        assert!(parsed.skill_refs.is_none());
+        assert!(parsed.turn_metadata.is_none());
         Ok(())
     }
 
     #[test]
     fn test_skills_params_empty_normalizes() {
         let mut params = SkillsParams {
-            preload_skills: Some(vec![]),
-            skill_refs: Some(vec![]),
+            turn_metadata: Some(WireRuntimeTurnMetadata {
+                skill_references: Some(vec![]),
+                ..Default::default()
+            }),
         };
         params.normalize();
-        assert!(params.preload_skills.is_none());
-        assert!(params.skill_refs.is_none());
+        assert!(params.turn_metadata.is_none());
     }
 
     #[test]
     fn test_skills_params_with_keys_roundtrip() -> Result<(), serde_json::Error> {
         let key = test_key("email-extractor");
         let params = SkillsParams {
-            preload_skills: Some(vec![key.clone()]),
-            skill_refs: Some(vec![SkillRef::Structured(key.clone())]),
+            turn_metadata: Some(WireRuntimeTurnMetadata {
+                skill_references: Some(vec![key.clone()]),
+                ..Default::default()
+            }),
         };
         let json = serde_json::to_string(&params)?;
         let parsed: SkillsParams = serde_json::from_str(&json)?;
         assert_eq!(parsed, params);
+        assert_eq!(parsed.canonical_skill_keys(), Some(vec![key]));
         Ok(())
     }
 
     #[test]
-    fn test_skill_refs_rejects_legacy_string_form() {
-        // The legacy slash-delimited string shape ("uuid/skill-name") is no
-        // longer accepted at the wire boundary.
-        let legacy_json =
-            r#"{"skill_refs":["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]}"#;
-        let parsed: Result<SkillsParams, _> = serde_json::from_str(legacy_json);
-        assert!(parsed.is_err(), "legacy string form must be rejected");
+    fn test_skill_refs_rejects_legacy_split_fields() {
+        for legacy_json in [
+            r#"{"preload_skills":[{"source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f","skill_name":"email-extractor"}]}"#,
+            r#"{"skill_refs":[{"kind":"structured","source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f","skill_name":"email-extractor"}]}"#,
+            r#"{"skill_refs":["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]}"#,
+        ] {
+            let parsed: Result<SkillsParams, _> = serde_json::from_str(legacy_json);
+            assert!(parsed.is_err(), "legacy split skill field must be rejected");
+        }
     }
 
     #[test]
-    fn test_skill_refs_parses_structured_only() -> Result<(), serde_json::Error> {
+    fn test_skill_refs_parse_from_turn_metadata_only() -> Result<(), serde_json::Error> {
         let structured_json = r#"{
-            "skill_refs":[{
-                "kind":"structured",
-                "source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f",
-                "skill_name":"email-extractor"
-            }]
+            "turn_metadata": {
+                "skill_references":[{
+                    "source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f",
+                    "skill_name":"email-extractor"
+                }]
+            }
         }"#;
         let parsed: SkillsParams = serde_json::from_str(structured_json)?;
         let canonical = parsed.canonical_skill_keys().expect("keys");
@@ -214,35 +201,44 @@ mod tests {
 
     #[test]
     fn test_core_create_params_all_fields_roundtrip() -> Result<(), serde_json::Error> {
+        use super::super::runtime::{WireTurnInstruction, WireTurnInstructionKind};
+
         let mut labels = std::collections::BTreeMap::new();
         labels.insert("env".to_string(), "prod".to_string());
         labels.insert("team".to_string(), "infra".to_string());
 
         let params = CoreCreateParams {
             prompt: "hello".to_string(),
-            model: Some("claude-opus-4-6".to_string()),
-            provider: Some(Provider::Anthropic),
+            turn_metadata: Some(WireRuntimeTurnMetadata {
+                model: Some("claude-opus-4-6".to_string()),
+                additional_instructions: Some(vec![
+                    WireTurnInstruction {
+                        kind: WireTurnInstructionKind::Host,
+                        body: "Be concise.".to_string(),
+                    },
+                    WireTurnInstruction {
+                        kind: WireTurnInstructionKind::Host,
+                        body: "Use JSON output.".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            }),
             max_tokens: Some(1024),
             system_prompt: Some("You are helpful.".to_string()),
             labels: Some(labels.clone()),
-            additional_instructions: Some(vec![
-                "Be concise.".to_string(),
-                "Use JSON output.".to_string(),
-            ]),
             app_context: Some(serde_json::json!({"org_id": "acme", "tier": "premium"})),
             shell_env: None,
-            connection_ref: None,
         };
         let json = serde_json::to_string(&params)?;
         let parsed: CoreCreateParams = serde_json::from_str(&json)?;
         assert_eq!(parsed.prompt, "hello");
         assert_eq!(parsed.labels, Some(labels));
         assert_eq!(
-            parsed.additional_instructions,
-            Some(vec![
-                "Be concise.".to_string(),
-                "Use JSON output.".to_string()
-            ])
+            parsed
+                .turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.model.as_deref()),
+            Some("claude-opus-4-6")
         );
         assert!(parsed.app_context.is_some());
         assert_eq!(
@@ -264,18 +260,15 @@ mod tests {
     fn test_core_create_params_surface_metadata_rejects_reserved_keys() {
         let params = CoreCreateParams {
             prompt: "hello".to_string(),
-            model: None,
-            provider: None,
+            turn_metadata: None,
             max_tokens: None,
             system_prompt: None,
             labels: Some(std::collections::BTreeMap::from([(
                 "meerkat.runtime_id".to_string(),
                 "spoof".to_string(),
             )])),
-            additional_instructions: None,
             app_context: None,
             shell_env: None,
-            connection_ref: None,
         };
 
         assert!(params.validate_public_surface_metadata().is_err());
@@ -286,9 +279,8 @@ mod tests {
         let json = r#"{"prompt": "hello"}"#;
         let parsed: CoreCreateParams = serde_json::from_str(json)?;
         assert_eq!(parsed.prompt, "hello");
-        assert!(parsed.model.is_none());
+        assert!(parsed.turn_metadata.is_none());
         assert!(parsed.labels.is_none());
-        assert!(parsed.additional_instructions.is_none());
         assert!(parsed.app_context.is_none());
         Ok(())
     }
@@ -297,52 +289,50 @@ mod tests {
     fn test_core_create_params_none_fields_omitted() -> Result<(), serde_json::Error> {
         let params = CoreCreateParams {
             prompt: "hello".to_string(),
-            model: None,
-            provider: None,
+            turn_metadata: None,
             max_tokens: None,
             system_prompt: None,
             labels: None,
-            additional_instructions: None,
             app_context: None,
             shell_env: None,
-            connection_ref: None,
         };
         let json = serde_json::to_string(&params)?;
         assert!(!json.contains("\"labels\""));
-        assert!(!json.contains("\"additional_instructions\""));
+        assert!(!json.contains("\"turn_metadata\""));
         assert!(!json.contains("\"app_context\""));
         assert!(!json.contains("\"shell_env\""));
-        assert!(!json.contains("\"connection_ref\""));
         Ok(())
     }
 
     #[test]
-    fn test_core_create_params_with_connection_ref() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::wire::WireConnectionRef;
-        let params = CoreCreateParams {
-            prompt: "hello".to_string(),
-            model: None,
-            provider: None,
-            max_tokens: None,
-            system_prompt: None,
-            labels: None,
-            additional_instructions: None,
-            app_context: None,
-            shell_env: None,
-            connection_ref: Some(WireConnectionRef {
-                realm: meerkat_core::connection::RealmId::parse("dev")?,
-                binding: meerkat_core::connection::BindingId::parse("default_openai")?,
-                profile: None,
-            }),
-        };
-        let json = serde_json::to_string(&params)?;
-        assert!(json.contains("\"connection_ref\""));
-        assert!(json.contains("\"realm\":\"dev\""));
-        let parsed: CoreCreateParams = serde_json::from_str(&json)?;
-        assert_eq!(
-            parsed.connection_ref.map(|r| r.binding.as_str().to_owned()),
-            Some("default_openai".to_string())
-        );
-        Ok(())
+    fn test_core_create_params_rejects_split_metadata_fields() {
+        for (field, value) in [
+            ("model", serde_json::json!("claude-opus-4-6")),
+            ("provider", serde_json::json!("anthropic")),
+            (
+                "additional_instructions",
+                serde_json::json!(["Be concise."]),
+            ),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default_openai" }),
+            ),
+        ] {
+            let parsed: Result<CoreCreateParams, _> = serde_json::from_value(serde_json::json!({
+                "prompt": "hello",
+                field: value
+            }));
+            assert!(
+                parsed.is_err(),
+                "CoreCreateParams must reject split field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_comms_params_rejects_split_keep_alive() {
+        let parsed: Result<CommsParams, _> =
+            serde_json::from_str(r#"{"comms_name":"agent-a","keep_alive":true}"#);
+        assert!(parsed.is_err(), "CommsParams must reject split keep_alive");
     }
 }

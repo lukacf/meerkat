@@ -80,10 +80,8 @@ export interface RuntimeTurnMetadata {
  * resolver (`register_external_auth_resolver`).
  */
 export interface SessionConfig {
-  /** LLM model identifier. */
-  model: string;
   /** Canonical first-turn runtime metadata. */
-  turnMetadata?: RuntimeTurnMetadata;
+  turnMetadata: RuntimeTurnMetadata & { model: string };
   /** System prompt. */
   systemPrompt?: string;
   /** Max tokens per response. Default: 4096. */

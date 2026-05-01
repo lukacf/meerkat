@@ -182,11 +182,11 @@ test(
   "Scenario 45: live WASM direct-session lifecycle and recall",
   { skip: !hasAnthropicKey() },
   async () => {
-    await withLiveRuntime({}, async (runtime, baseUrls) => {
+    await withLiveRuntime({}, async (runtime) => {
       const session = runtime.createSession({
-        model: anthropicModel(),
-        apiKey: "proxy",
-        anthropicBaseUrl: baseUrls.anthropicBaseUrl,
+        turnMetadata: {
+          model: anthropicModel(),
+        },
       });
 
       const first = await session.turn(
@@ -214,11 +214,11 @@ test(
   "Scenario 46: live WASM system-context append and session event subscription",
   { skip: !hasAnthropicKey() },
   async () => {
-    await withLiveRuntime({}, async (runtime, baseUrls) => {
+    await withLiveRuntime({}, async (runtime) => {
       const session = runtime.createSession({
-        model: anthropicModel(),
-        apiKey: "proxy",
-        anthropicBaseUrl: baseUrls.anthropicBaseUrl,
+        turnMetadata: {
+          model: anthropicModel(),
+        },
       });
 
       const staged = await session.appendSystemContext({

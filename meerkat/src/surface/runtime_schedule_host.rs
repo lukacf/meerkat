@@ -221,7 +221,7 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
         let request = self.build_materialized_request(create, prompt_system_prompt)?;
-        let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
+        let keep_alive = create.requests_keep_alive();
         let result = Box::pin(materialize_session(
             &self.service,
             &self.runtime_adapter,
@@ -283,8 +283,11 @@ fn schedule_internal(error: impl std::fmt::Display) -> ScheduleDomainError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+    use meerkat_core::lifecycle::run_primitive::{
+        KeepAliveMode, KeepAlivePolicy, ModelId, RuntimeTurnMetadata, TurnMetadataOverride,
+    };
     use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+    use std::time::Duration;
 
     fn fixture_skill_key(name: &str) -> SkillKey {
         let skill_name = match SkillName::parse(name) {
@@ -326,5 +329,26 @@ mod tests {
                 .and_then(|metadata| metadata.skill_references),
             Some(vec![key])
         );
+    }
+
+    #[test]
+    fn materialized_keep_alive_comes_from_canonical_turn_metadata() {
+        let create = SessionMaterializationSpec {
+            turn_metadata: RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
+                keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: Duration::from_secs(30),
+                    policy: KeepAliveMode::Pinned,
+                })),
+                ..Default::default()
+            },
+            comms_name: Some("scheduled-agent".to_string()),
+            ..Default::default()
+        };
+
+        let build = materialized_build_options(&SessionBuildOptions::default(), &create);
+
+        assert!(!build.keep_alive);
+        assert!(create.requests_keep_alive());
     }
 }

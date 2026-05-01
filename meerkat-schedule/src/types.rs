@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::ops::ToolAccessPolicy;
 use meerkat_core::types::RenderMetadata;
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, SessionId};
@@ -491,6 +491,13 @@ impl SessionMaterializationSpec {
 
     pub fn initial_turn_metadata(&self) -> Option<RuntimeTurnMetadata> {
         (!self.turn_metadata.is_empty()).then(|| self.turn_metadata.clone())
+    }
+
+    pub fn requests_keep_alive(&self) -> bool {
+        matches!(
+            self.turn_metadata.keep_alive,
+            Some(TurnMetadataOverride::Set(_))
+        )
     }
 }
 

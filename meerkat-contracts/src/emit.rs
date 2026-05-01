@@ -1542,6 +1542,88 @@ mod tests {
     }
 
     #[test]
+    fn emitted_contract_params_do_not_publish_split_turn_metadata_carriers() {
+        let output_dir = temp_output_dir("contract-param-turn-metadata");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let params: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("params.json")).unwrap()).unwrap();
+        let core = params
+            .get("CoreCreateParams")
+            .expect("CoreCreateParams schema must be emitted");
+        let core_properties = core
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("CoreCreateParams schema must expose properties");
+        assert!(
+            core_properties.contains_key("turn_metadata"),
+            "CoreCreateParams must expose the single turn_metadata carrier"
+        );
+        assert_eq!(
+            core.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "CoreCreateParams must reject stale split carrier fields"
+        );
+        for split_field in [
+            "model",
+            "provider",
+            "provider_params",
+            "additional_instructions",
+            "connection_ref",
+            "keep_alive",
+            "preload_skills",
+            "skill_refs",
+        ] {
+            assert!(
+                !core_properties.contains_key(split_field),
+                "CoreCreateParams must not expose split turn metadata field {split_field}"
+            );
+        }
+
+        let comms = params
+            .get("CommsParams")
+            .expect("CommsParams schema must be emitted");
+        let comms_properties = comms
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("CommsParams schema must expose properties");
+        assert!(
+            !comms_properties.contains_key("keep_alive"),
+            "CommsParams must not expose split keep_alive"
+        );
+        assert_eq!(
+            comms.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "CommsParams must reject stale split carrier fields"
+        );
+
+        let skills = params
+            .get("SkillsParams")
+            .expect("SkillsParams schema must be emitted");
+        let skills_properties = skills
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("SkillsParams schema must expose properties");
+        assert!(
+            skills_properties.contains_key("turn_metadata"),
+            "SkillsParams must expose canonical turn_metadata for skill references"
+        );
+        for split_field in ["preload_skills", "skill_refs"] {
+            assert!(
+                !skills_properties.contains_key(split_field),
+                "SkillsParams must not expose split skill field {split_field}"
+            );
+        }
+        assert_eq!(
+            skills.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "SkillsParams must reject stale split skill fields"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
     fn emitted_rest_openapi_contains_wire_contracts_not_only_paths() {
         let output_dir = temp_output_dir("rest-openapi-contracts");
         emit_all_schemas(&output_dir).expect("emit schemas");

@@ -584,8 +584,10 @@ mod tests {
 
         let (transport, mut output) = tokio::io::duplex(4096);
         let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
-        let request_executor =
-            SurfaceRequestExecutor::new_standalone(tokio::time::Duration::from_millis(1));
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &meerkat_runtime::MeerkatMachine::ephemeral(),
+        );
         let request_id = json!(22);
         let request_key = request_key(&request_id);
         let kind = mcp_tracked_surface_request_kind("meerkat_event_stream_read")
@@ -645,6 +647,73 @@ mod tests {
             ErrorCode::RequestCancelled.jsonrpc_code()
         );
         assert!(response.get("result").is_none());
+    }
+
+    #[tokio::test]
+    async fn spawned_mcp_observation_completion_uses_machine_lifecycle_authority() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &meerkat_runtime::MeerkatMachine::ephemeral(),
+        );
+        let request_id = json!(23);
+        let request_key = request_key(&request_id);
+        let kind = mcp_tracked_surface_request_kind("meerkat_schedule_occurrences")
+            .expect("spawned schedule observation tools must be tracked");
+        let context = begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
+            .expect("tracked MCP observation request should begin");
+        let (completion_tx, mut completion_rx) = mpsc::channel(1);
+
+        let handle = spawn_mcp_tool_completion_with_dispatch(
+            completion_tx,
+            request_key.clone(),
+            request_id,
+            "meerkat_schedule_occurrences".to_string(),
+            Some(context),
+            |tool_name, context| async move {
+                assert_eq!(tool_name, "meerkat_schedule_occurrences");
+                assert!(context.is_some());
+                Ok(json!({"occurrences": []}))
+            },
+        );
+
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+                .await
+                .expect("tool completion should arrive")
+                .expect("tool completion channel should stay open");
+        handle.await.expect("synthetic tool task should complete");
+        assert_eq!(
+            completion.request_key.as_deref(),
+            Some(request_key.as_str())
+        );
+        assert!(
+            write_tool_completion(&writer, &request_executor, completion).await,
+            "tracked observation completion should write successfully"
+        );
+
+        assert_eq!(request_executor.phase(&request_key), None);
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 23);
+        assert_eq!(response["result"]["occurrences"], json!([]));
+        assert!(
+            response.get("error").is_none(),
+            "tracked observation success must not produce lifecycle authority errors"
+        );
     }
 
     #[tokio::test]

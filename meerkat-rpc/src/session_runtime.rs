@@ -239,12 +239,19 @@ pub(crate) fn runtime_accept_error_to_rpc(err: RuntimeDriverError) -> RpcError {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTurnStartError {
     rpc_error: RpcError,
-    post_admission_failure: bool,
+    admission_committed: bool,
 }
 
 impl RuntimeTurnStartError {
-    pub(crate) fn is_post_admission_failure(&self) -> bool {
-        self.post_admission_failure
+    pub(crate) fn after_admission(rpc_error: RpcError) -> Self {
+        Self {
+            rpc_error,
+            admission_committed: true,
+        }
+    }
+
+    pub(crate) fn admission_committed(&self) -> bool {
+        self.admission_committed
     }
 
     pub(crate) fn as_rpc_error(&self) -> &RpcError {
@@ -260,16 +267,16 @@ impl From<RpcError> for RuntimeTurnStartError {
     fn from(rpc_error: RpcError) -> Self {
         Self {
             rpc_error,
-            post_admission_failure: false,
+            admission_committed: false,
         }
     }
 }
 
 pub(crate) fn runtime_accept_error_to_turn_start(err: RuntimeDriverError) -> RuntimeTurnStartError {
-    let post_admission_failure = err.is_post_admission_failure();
+    let admission_committed = err.is_post_admission_failure();
     RuntimeTurnStartError {
         rpc_error: runtime_accept_error_to_rpc(err),
-        post_admission_failure,
+        admission_committed,
     }
 }
 
@@ -2425,7 +2432,8 @@ impl SessionRuntime {
             .into());
         };
 
-        completion_outcome_to_rpc_result(handle.wait().await, session_id).map_err(Into::into)
+        completion_outcome_to_rpc_result(handle.wait().await, session_id)
+            .map_err(RuntimeTurnStartError::after_admission)
     }
 
     /// Admit a canonical external event through the runtime-backed path.

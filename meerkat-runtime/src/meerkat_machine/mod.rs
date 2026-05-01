@@ -759,6 +759,9 @@ pub struct MeerkatMachine {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
+    /// Runtime-owned lifecycle authority for surface requests that are not
+    /// scoped to a registered session, such as stdio MCP observation tools.
+    surface_request_lifecycle: Arc<dyn meerkat_core::handles::SurfaceRequestLifecycleHandle>,
     /// Optional typed signal dispatcher for MeerkatMachine lifecycle
     /// effects routed by `meerkat_mob_seam` into MobMachine observation
     /// signals.
@@ -795,6 +798,8 @@ impl MeerkatMachine {
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            surface_request_lifecycle: crate::handles::standalone_surface_request_lifecycle_handle(
+            ),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
@@ -822,6 +827,8 @@ impl MeerkatMachine {
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            surface_request_lifecycle: crate::handles::standalone_surface_request_lifecycle_handle(
+            ),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
@@ -853,6 +860,8 @@ impl MeerkatMachine {
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+            surface_request_lifecycle: crate::handles::standalone_surface_request_lifecycle_handle(
+            ),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
     }
@@ -980,6 +989,14 @@ impl MeerkatMachine {
     /// machine instance so tests / parallel runtimes do not collide.
     pub fn session_claim_handle(&self) -> Arc<dyn meerkat_core::handles::SessionClaimHandle> {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
+    }
+
+    /// Surface-scoped lifecycle authority for requests that are not owned by a
+    /// session authority.
+    pub fn surface_request_lifecycle_handle(
+        &self,
+    ) -> Arc<dyn meerkat_core::handles::SurfaceRequestLifecycleHandle> {
+        Arc::clone(&self.surface_request_lifecycle)
     }
 
     /// Attach the typed composition signal dispatcher used for

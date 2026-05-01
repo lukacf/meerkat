@@ -748,6 +748,118 @@ mod tests {
         assert_eq!(error.message, "missing session_id");
     }
 
+    #[tokio::test]
+    async fn rpc_session_create_turn_failure_preserves_admitted_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime_with_llm(&temp, Arc::new(ErrorLlmClient));
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(31);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "this turn will fail after runtime admission"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        let response = tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("session/create task should complete");
+
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "failed initial turn after runtime admission must not run create rollback cleanup"
+        );
+
+        let bytes = output.lock().expect("output should be readable").clone();
+        let line = String::from_utf8(bytes).expect("response should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        assert!(response.result.is_none());
+        assert!(response.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn rpc_session_create_pre_admission_turn_failure_archives_pending_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(32);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": [
+                    {"type": "text", "text": "inspect this clip"},
+                    {
+                        "type": "video",
+                        "media_type": "video/mp4",
+                        "duration_ms": 1000,
+                        "source": "inline",
+                        "data": "AAAA"
+                    }
+                ]
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        let response = tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("session/create task should complete");
+
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert!(
+            sessions.is_empty(),
+            "pre-admission initial-turn failures must still run create rollback cleanup"
+        );
+
+        let bytes = output.lock().expect("output should be readable").clone();
+        let line = String::from_utf8(bytes).expect("response should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        let error = response.error.expect("expected validation error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+    }
+
     #[cfg(not(feature = "mob"))]
     #[tokio::test]
     async fn rpc_tracking_uses_router_feature_surface_for_mob_methods() {
@@ -995,6 +1107,30 @@ mod tests {
         }
     }
 
+    struct ErrorLlmClient;
+
+    #[async_trait]
+    impl LlmClient for ErrorLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            Box::pin(stream::iter(vec![Err(LlmError::InvalidRequest {
+                message: "forced turn failure".to_string(),
+            })]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
         Arc::new(meerkat_store::MemoryBlobStore::new())
     }
@@ -1002,6 +1138,13 @@ mod tests {
     /// Build a `SessionRuntime` + `ConfigStore` pair for TCP tests.
     fn build_test_runtime(
         temp: &tempfile::TempDir,
+    ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_core::ConfigStore>) {
+        build_test_runtime_with_llm(temp, Arc::new(MockLlmClient))
+    }
+
+    fn build_test_runtime_with_llm(
+        temp: &tempfile::TempDir,
+        llm: Arc<dyn LlmClient>,
     ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_core::ConfigStore>) {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
@@ -1015,7 +1158,7 @@ mod tests {
         );
         let config_store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_default_llm_client(Some(llm));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),

@@ -696,14 +696,26 @@ pub struct SurfaceRequestExecutor {
     mechanics: SurfaceRequestMechanics,
     shutdown_grace: Duration,
     default_lifecycle: Option<Arc<dyn SurfaceRequestLifecycleHandle>>,
+    default_lifecycle_binding: DefaultLifecycleBinding,
+}
+
+#[derive(Clone, Copy)]
+enum DefaultLifecycleBinding {
+    All,
+    CancellableObservations,
 }
 
 impl SurfaceRequestExecutor {
     pub fn new_with_machine(
         shutdown_grace: Duration,
-        _runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
     ) -> Self {
-        Self::without_default_lifecycle(shutdown_grace)
+        Self {
+            mechanics: SurfaceRequestMechanics::new(),
+            shutdown_grace,
+            default_lifecycle: Some(runtime_adapter.surface_request_lifecycle_handle()),
+            default_lifecycle_binding: DefaultLifecycleBinding::CancellableObservations,
+        }
     }
 
     /// Construct an explicitly standalone executor.
@@ -719,14 +731,6 @@ impl SurfaceRequestExecutor {
         )
     }
 
-    fn without_default_lifecycle(shutdown_grace: Duration) -> Self {
-        Self {
-            mechanics: SurfaceRequestMechanics::new(),
-            shutdown_grace,
-            default_lifecycle: None,
-        }
-    }
-
     fn from_lifecycle(
         shutdown_grace: Duration,
         lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
@@ -735,6 +739,16 @@ impl SurfaceRequestExecutor {
             mechanics: SurfaceRequestMechanics::new(),
             shutdown_grace,
             default_lifecycle: Some(lifecycle),
+            default_lifecycle_binding: DefaultLifecycleBinding::All,
+        }
+    }
+
+    fn should_bind_default_lifecycle(&self, kind: SurfaceRequestKind) -> bool {
+        match self.default_lifecycle_binding {
+            DefaultLifecycleBinding::All => true,
+            DefaultLifecycleBinding::CancellableObservations => {
+                kind == SurfaceRequestKind::CancellableObservation
+            }
         }
     }
 
@@ -752,7 +766,9 @@ impl SurfaceRequestExecutor {
         let context = self
             .mechanics
             .try_begin_request(key, kind, initial_cancel)?;
-        if let Some(lifecycle) = self.default_lifecycle.as_ref() {
+        if let Some(lifecycle) = self.default_lifecycle.as_ref()
+            && self.should_bind_default_lifecycle(kind)
+        {
             lifecycle.try_begin_request(context.entry.lifecycle_key.clone(), kind)?;
             *lock_or_recover(&context.entry.lifecycle) = Some(Arc::clone(lifecycle));
         }
@@ -1406,6 +1422,29 @@ mod tests {
                 .is_ok(),
             "lifecycle-error terminals must remove the local request entry so request ids can retry"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_executor_tracks_unbound_cancellable_observations_with_surface_authority() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let context = begin_test_request_with_kind(
+            &executor,
+            "unbound-observation",
+            SurfaceRequestKind::CancellableObservation,
+            noop_request_action(),
+        );
+
+        let terminal = context.classify_success_terminal("observation");
+        assert!(terminal.is_respond_without_publish());
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(context.key()), terminal)
+                .await,
+            RequestTerminalResolution::Emit("observation")
+        );
+        assert_eq!(executor.phase(context.key()), None);
     }
 
     #[tokio::test]

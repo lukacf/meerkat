@@ -522,7 +522,7 @@ pub async fn handle_create(
         {
             Ok(r) => r,
             Err(rpc_err) => {
-                disarm_unpublished_cleanup_after_post_admission_error(
+                disarm_unpublished_cleanup_after_admitted_turn_error(
                     request_context.as_ref(),
                     &rpc_err,
                 );
@@ -538,11 +538,11 @@ pub async fn handle_create(
     RpcResponse::success(id, response)
 }
 
-fn disarm_unpublished_cleanup_after_post_admission_error(
+fn disarm_unpublished_cleanup_after_admitted_turn_error(
     context: Option<&RequestContext>,
     err: &RuntimeTurnStartError,
 ) {
-    if err.is_post_admission_failure()
+    if err.admission_committed()
         && let Some(context) = context
     {
         context.disarm_unpublished_cleanup();
@@ -758,11 +758,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_immediate_create_post_admission_failure_disarms_unpublished_cleanup() {
+    async fn rpc_immediate_create_admitted_turn_failure_disarms_unpublished_cleanup() {
         let executor = SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
         let context = executor
             .try_begin_request(
-                "rpc-create-post-admission",
+                "rpc-create-admitted-turn-failure",
                 SurfaceRequestKind::SessionCreateWithTurn,
                 noop_request_action(),
             )
@@ -783,7 +783,7 @@ mod tests {
                 operation: RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
                 reason: "canonical apply failed".to_string(),
             });
-        super::disarm_unpublished_cleanup_after_post_admission_error(Some(&context), &rpc_err);
+        super::disarm_unpublished_cleanup_after_admitted_turn_error(Some(&context), &rpc_err);
         let rpc_err = rpc_err.into_rpc_error();
 
         let terminal = context.classify_failure_terminal(super::RpcResponse::error(
@@ -803,7 +803,7 @@ mod tests {
         assert_eq!(
             cleanup_runs.load(Ordering::SeqCst),
             0,
-            "post-admission RPC initial-turn failures must not run pre-admission rollback cleanup"
+            "admitted RPC initial-turn failures must not run pre-admission rollback cleanup"
         );
     }
 }

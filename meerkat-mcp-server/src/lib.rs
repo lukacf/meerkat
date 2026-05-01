@@ -1265,6 +1265,16 @@ where
     }
 }
 
+async fn unregister_prepared_runtime_if_new(
+    state: &MeerkatMcpState,
+    session_id: &meerkat::SessionId,
+    existed_before_prepare: bool,
+) {
+    if !existed_before_prepare {
+        state.runtime_adapter.unregister_session(session_id).await;
+    }
+}
+
 #[cfg(test)]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
 #[cfg(not(test))]
@@ -2725,19 +2735,32 @@ async fn handle_meerkat_run(
     let session = prepared_session.session;
     let session_id = prepared_session.session_id;
     let bindings = prepared_session.bindings;
-    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
-        .await
-        .map_err(|e| {
-            ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}"
-            ))
-        })?;
+    if let Err(err) = install_prepared_runtime_interrupt_handle(
+        &state.service,
+        &state.runtime_adapter,
+        &session_id,
+    )
+    .await
+    {
+        state.runtime_adapter.unregister_session(&session_id).await;
+        ingress.clear_session(&session_id).await;
+        return Err(ToolCallError::internal(format!(
+            "failed to install prepared interrupt handle for session {session_id}: {err}"
+        )));
+    }
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
         McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
     ));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
-        .map_err(ToolCallError::internal)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools)) {
+            Ok(external_tools) => external_tools,
+            Err(err) => {
+                state.runtime_adapter.unregister_session(&session_id).await;
+                ingress.clear_session(&session_id).await;
+                return Err(ToolCallError::internal(err));
+            }
+        };
 
     if let Some(context) = request_context.as_ref() {
         if let Err(err) = context
@@ -3032,23 +3055,39 @@ async fn handle_meerkat_resume(
                 "failed to prepare bindings for session {session_id}: {e}"
             ))
         })?;
-    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
-        .await
-        .map_err(|e| {
-            ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}"
-            ))
-        })?;
+    if let Err(err) = install_prepared_runtime_interrupt_handle(
+        &state.service,
+        &state.runtime_adapter,
+        &session_id,
+    )
+    .await
+    {
+        unregister_prepared_runtime_if_new(
+            state,
+            &session_id,
+            runtime_entry_existed_before_prepare,
+        )
+        .await;
+        return Err(ToolCallError::internal(format!(
+            "failed to install prepared interrupt handle for session {session_id}: {err}"
+        )));
+    }
 
     if let Some(context) = request_context.as_ref() {
-        context
+        if let Err(err) = context
             .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
             .await
-            .map_err(|err| {
-                ToolCallError::internal(format!(
-                    "request lifecycle rejected session binding: {err}"
-                ))
-            })?;
+        {
+            unregister_prepared_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
+            return Err(ToolCallError::internal(format!(
+                "request lifecycle rejected session binding: {err}"
+            )));
+        }
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -3063,6 +3102,13 @@ async fn handle_meerkat_resume(
             }))
             .await;
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+            unregister_prepared_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
+            ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
         }
     }
@@ -3084,8 +3130,19 @@ async fn handle_meerkat_resume(
         ))
     });
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
-        .map_err(ToolCallError::internal)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools)) {
+            Ok(external_tools) => external_tools,
+            Err(err) => {
+                unregister_prepared_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
+                return Err(ToolCallError::internal(err));
+            }
+        };
 
     // Decide the branch before moving any owned request fields.
     let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
@@ -3101,8 +3158,19 @@ async fn handle_meerkat_resume(
         &config,
         input.skill_refs.clone(),
         input.skill_references.clone(),
-    )
-    .map_err(ToolCallError::invalid_params)?;
+    );
+    let skill_references = match skill_references {
+        Ok(skill_references) => skill_references,
+        Err(err) => {
+            unregister_prepared_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
+            return Err(ToolCallError::invalid_params(err));
+        }
+    };
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -3112,13 +3180,23 @@ async fn handle_meerkat_resume(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let output_schema =
-        match input.output_schema.clone() {
-            Some(schema) => Some(OutputSchema::from_json_value(schema).map_err(|e| {
-                ToolCallError::invalid_params(format!("Invalid output_schema: {e}"))
-            })?),
-            None => None,
-        };
+    let output_schema = match input.output_schema.clone() {
+        Some(schema) => match OutputSchema::from_json_value(schema) {
+            Ok(schema) => Some(schema),
+            Err(err) => {
+                unregister_prepared_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
+                return Err(ToolCallError::invalid_params(format!(
+                    "Invalid output_schema: {err}"
+                )));
+            }
+        },
+        None => None,
+    };
     let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
         stored_metadata
             .as_ref()
@@ -3225,18 +3303,32 @@ async fn handle_meerkat_resume(
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
+                unregister_prepared_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 ingress.clear_session(&session_id).await;
                 return Err(ToolCallError::invalid_params(
                     "keep_alive requires a session created with comms_name",
                 ));
             }
-            state
+            if let Err(err) = state
                 .service
                 .update_session_keep_alive(&session_id, keep_alive)
                 .await
-                .map_err(|e| {
-                    ToolCallError::internal(format!("failed to persist keep_alive: {e}"))
-                })?;
+            {
+                unregister_prepared_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
+                return Err(ToolCallError::internal(format!(
+                    "failed to persist keep_alive: {err}"
+                )));
+            }
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
@@ -3281,6 +3373,12 @@ async fn handle_meerkat_resume(
     };
     let session_exists = state.service.read(&session_id).await.is_ok();
     if result.is_err() && !session_exists {
+        unregister_prepared_runtime_if_new(
+            state,
+            &session_id,
+            runtime_entry_existed_before_prepare,
+        )
+        .await;
         ingress.clear_session(&session_id).await;
     }
 
@@ -4382,7 +4480,7 @@ mod tests {
         let result = Box::pin(handle_meerkat_resume(
             &state,
             MeerkatResumeInput {
-                session_id,
+                session_id: session_id.clone(),
                 prompt: "Resume".to_string(),
                 system_prompt: None,
                 model: None,
@@ -4419,6 +4517,15 @@ mod tests {
         assert_eq!(
             err.code,
             meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        let parsed_session_id =
+            meerkat::SessionId::parse(&session_id).expect("test session id should parse");
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&parsed_session_id)
+                .await,
+            "pre-admission cancelled resume must unregister a newly prepared runtime entry"
         );
     }
 

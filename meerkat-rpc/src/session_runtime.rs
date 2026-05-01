@@ -67,9 +67,7 @@ use meerkat::{
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
 
-pub(crate) use meerkat_runtime::RuntimeAdmissionCommittedHook;
-
-pub(crate) type RuntimePreAdmissionCancelCheck = Box<dyn FnOnce() -> bool + Send + 'static>;
+pub(crate) use meerkat_runtime::{RuntimeAdmissionCommittedHook, RuntimePreAdmissionCancelCheck};
 
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
@@ -223,6 +221,11 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
 
 pub(crate) fn runtime_accept_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     match err {
+        RuntimeDriverError::RequestCancelled => RpcError {
+            code: error::REQUEST_CANCELLED,
+            message: "request cancelled before start".to_string(),
+            data: None,
+        },
         RuntimeDriverError::PostAdmissionFailure { operation, reason } => RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime accept failed: {operation} failed after admission: {reason}"),
@@ -2472,21 +2475,13 @@ impl SessionRuntime {
             }
         }
 
-        if pre_admission_cancelled.is_some_and(|check| check()) {
-            return Err(RpcError {
-                code: error::REQUEST_CANCELLED,
-                message: "request cancelled before start".to_string(),
-                data: None,
-            }
-            .into());
-        }
-
         let (outcome, handle) = self
             .runtime_adapter
-            .accept_input_with_completion_and_admission_hook(
+            .accept_input_with_completion_and_admission_controls(
                 session_id,
                 input,
                 on_admission_committed,
+                pre_admission_cancelled,
             )
             .await
             .map_err(runtime_accept_error_to_turn_start)?;

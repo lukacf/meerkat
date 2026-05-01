@@ -264,7 +264,7 @@ impl MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        self.accept_input_with_completion_and_admission_hook(session_id, input, None)
+        self.accept_input_with_completion_and_admission_controls(session_id, input, None, None)
             .await
     }
 
@@ -278,6 +278,26 @@ impl MeerkatMachine {
         on_admission_committed: Option<crate::RuntimeAdmissionCommittedHook>,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
+        self.accept_input_with_completion_and_admission_controls(
+            session_id,
+            input,
+            on_admission_committed,
+            None,
+        )
+        .await
+    }
+
+    /// Accept an input with lifecycle controls bound into the runtime admission
+    /// path. The cancellation predicate is checked by the machine immediately
+    /// before driver admission can commit.
+    pub async fn accept_input_with_completion_and_admission_controls(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        on_admission_committed: Option<crate::RuntimeAdmissionCommittedHook>,
+        pre_admission_cancel_check: Option<crate::RuntimePreAdmissionCancelCheck>,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
         match self
             .execute_meerkat_machine_command(
                 None,
@@ -285,6 +305,7 @@ impl MeerkatMachine {
                     session_id: session_id.clone(),
                     input,
                     admission_committed_hook: on_admission_committed,
+                    pre_admission_cancel_check,
                 },
             )
             .await

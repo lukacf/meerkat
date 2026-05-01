@@ -36,6 +36,10 @@ pub enum RuntimeDriverError {
         reason: String,
     },
 
+    /// Request cancellation won before runtime admission could commit.
+    #[error("Request cancelled before runtime admission")]
+    RequestCancelled,
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

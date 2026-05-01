@@ -52,6 +52,12 @@ use crate::traits::{
 /// lifecycle decisions in the hook.
 pub type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
 
+/// Fast, non-blocking predicate invoked inside the runtime admission path
+/// immediately before an input can commit. Surfaces use this to project a
+/// machine-tracked cancellation decision into the same critical path that owns
+/// admission.
+pub type RuntimePreAdmissionCancelCheck = Box<dyn FnOnce() -> bool + Send + 'static>;
+
 pub(crate) struct RuntimeAdmissionCommitSignal {
     hook: Option<RuntimeAdmissionCommittedHook>,
     committed: bool,
@@ -543,6 +549,7 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input: Input,
         admission_committed_hook: Option<RuntimeAdmissionCommittedHook>,
+        pre_admission_cancel_check: Option<RuntimePreAdmissionCancelCheck>,
     },
     AcceptWithoutWake {
         session_id: SessionId,

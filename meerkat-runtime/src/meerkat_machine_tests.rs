@@ -2181,6 +2181,54 @@ async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
 }
 
 #[tokio::test]
+async fn accept_with_completion_checks_cancellation_inside_admission_path() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let input = make_prompt("cancel at runtime admission boundary");
+    let input_id = input.id().clone();
+    let cancel_check_called = Arc::new(AtomicBool::new(false));
+    let cancel_check_called_for_hook = Arc::clone(&cancel_check_called);
+
+    let result = adapter
+        .accept_input_with_completion_and_admission_controls(
+            &session_id,
+            input,
+            None,
+            Some(Box::new(move || {
+                cancel_check_called_for_hook.store(true, Ordering::SeqCst);
+                true
+            })),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(RuntimeDriverError::RequestCancelled)),
+        "runtime admission must reject cancellation before input commits"
+    );
+    assert!(
+        cancel_check_called.load(Ordering::SeqCst),
+        "runtime admission path should evaluate the cancellation predicate"
+    );
+
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist for registered session");
+    assert!(
+        snapshot.inputs.admission_order.is_empty(),
+        "cancelled input must not enter admission order"
+    );
+    assert!(
+        !snapshot.inputs.queue.contains(&input_id),
+        "cancelled input must not be queued"
+    );
+    assert_eq!(snapshot.completion_waiters.input_count, 0);
+}
+
+#[tokio::test]
 async fn realtime_attachment_status_defaults_to_unattached() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -3156,6 +3204,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 session_id: session_id.clone(),
                 input: first,
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -3185,6 +3234,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 session_id: session_id.clone(),
                 input: duplicate,
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -17855,6 +17905,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 session_id: session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled attached steer"),
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -17946,6 +17997,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
                 session_id: session_id.clone(),
                 input: runtime_parity_prompt("modeled idle queued admission"),
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -18147,6 +18199,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -18259,6 +18312,7 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_peer_message("modeled running interrupt admission"),
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -18727,6 +18781,7 @@ fn runtime_parity_probe_command(
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_prompt("runtime parity accept with completion"),
                 admission_committed_hook: None,
+                pre_admission_cancel_check: None,
             }
         }
         RuntimeParityProbeInput::AcceptWithoutWake => MeerkatMachineCommand::AcceptWithoutWake {
@@ -18877,6 +18932,7 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::PostAdmissionFailure { operation, reason } => {
             format!("post_admission:{operation}:{reason}")
         }
+        RuntimeDriverError::RequestCancelled => "request_cancelled".to_string(),
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }
 }

@@ -28,6 +28,7 @@ impl MeerkatMachine {
                 session_id,
                 input,
                 mut admission_committed_hook,
+                pre_admission_cancel_check,
             } => {
                 let (driver, completions, wake_tx, effect_tx, boundary_handle) = {
                     let sessions = self.sessions.read().await;
@@ -92,6 +93,9 @@ impl MeerkatMachine {
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
+                    if pre_admission_cancel_check.is_some_and(|check| check()) {
+                        return Err(RuntimeDriverError::RequestCancelled);
+                    }
                     let result = match driver
                         .accept_resolved_input(input, resolved.clone(), Some(&mut admission_signal))
                         .await

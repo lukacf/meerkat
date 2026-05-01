@@ -1195,6 +1195,25 @@ fn turn_metadata_keep_alive_for_create(
     )
 }
 
+async fn mcp_persisted_session_has_comms_name(
+    state: &MeerkatMcpState,
+    session_id: &meerkat::SessionId,
+) -> Result<bool, ToolCallError> {
+    state
+        .service
+        .load_authoritative_session(session_id)
+        .await
+        .map(|session| {
+            session
+                .and_then(|session| session.session_metadata())
+                .and_then(|metadata| metadata.comms_name)
+                .is_some_and(|name| !name.trim().is_empty())
+        })
+        .map_err(|error| {
+            ToolCallError::internal(format!("failed to inspect persisted comms_name: {error}"))
+        })
+}
+
 async fn apply_mcp_resume_keep_alive_override(
     state: &MeerkatMcpState,
     ingress: &runtime_ingress::McpRuntimeIngressContext,
@@ -1203,10 +1222,14 @@ async fn apply_mcp_resume_keep_alive_override(
 ) -> Result<(), ToolCallError> {
     let comms_rt = state.service.comms_runtime(session_id).await;
     if keep_alive && comms_rt.is_none() {
-        ingress.clear_session(session_id).await;
-        return Err(ToolCallError::invalid_params(
-            "keep_alive requires a session created with comms_name",
-        ));
+        let adapter_has_comms = state.runtime_adapter.session_has_comms(session_id).await;
+        let persisted_has_comms = mcp_persisted_session_has_comms_name(state, session_id).await?;
+        if !adapter_has_comms && !persisted_has_comms {
+            ingress.clear_session(session_id).await;
+            return Err(ToolCallError::invalid_params(
+                "keep_alive requires a session created with comms_name",
+            ));
+        }
     }
     state
         .service
@@ -3434,7 +3457,10 @@ mod tests {
         context
     }
 
-    fn test_session_metadata(keep_alive: bool) -> meerkat_core::SessionMetadata {
+    fn test_session_metadata(
+        keep_alive: bool,
+        comms_name: Option<String>,
+    ) -> meerkat_core::SessionMetadata {
         meerkat_core::SessionMetadata {
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
@@ -3445,7 +3471,7 @@ mod tests {
             provider_params: None,
             tooling: meerkat_core::SessionTooling::default(),
             keep_alive,
-            comms_name: None,
+            comms_name,
             peer_meta: None,
             realm_id: None,
             instance_id: None,
@@ -3457,13 +3483,14 @@ mod tests {
 
     async fn state_with_persisted_session_metadata(
         keep_alive: bool,
+        comms_name: Option<String>,
     ) -> (MeerkatMcpState, meerkat::SessionId) {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store.clone()).await;
         let mut session = Session::new();
         let session_id = session.id().clone();
         session
-            .set_session_metadata(test_session_metadata(keep_alive))
+            .set_session_metadata(test_session_metadata(keep_alive, comms_name))
             .expect("session metadata serializes");
         store.save(&session).await.expect("persisted session");
         (state, session_id)
@@ -4584,7 +4611,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_resume_keep_alive_override_persists_without_rebuild() {
-        let (state, session_id) = state_with_persisted_session_metadata(true).await;
+        let (state, session_id) = state_with_persisted_session_metadata(true, None).await;
         let ingress = state.runtime_ingress_context();
 
         apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, false)
@@ -4603,6 +4630,51 @@ mod tests {
                 .expect("session metadata")
                 .keep_alive,
             "MCP live/no-rebuild keep_alive override must persist to durable metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_resume_keep_alive_enable_uses_persisted_comms_name_without_live_runtime() {
+        let (state, session_id) =
+            state_with_persisted_session_metadata(false, Some("persisted-agent".to_string())).await;
+        let ingress = state.runtime_ingress_context();
+        assert!(
+            state.service.comms_runtime(&session_id).await.is_none(),
+            "fixture must cover no live comms runtime"
+        );
+
+        apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, true)
+            .await
+            .expect("persisted comms_name should authorize keep-alive before rematerialization");
+
+        let session = state
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load succeeds")
+            .expect("session exists");
+        assert!(
+            session
+                .session_metadata()
+                .expect("session metadata")
+                .keep_alive,
+            "MCP keep_alive=true override must persist even before live rematerialization"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_resume_keep_alive_enable_requires_comms_identity() {
+        let (state, session_id) = state_with_persisted_session_metadata(false, None).await;
+        let ingress = state.runtime_ingress_context();
+
+        let err = apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, true)
+            .await
+            .expect_err("keep-alive without live or persisted comms identity should fail");
+
+        assert!(
+            err.message.contains("comms_name"),
+            "unexpected error: {}",
+            err.message
         );
     }
 

@@ -354,6 +354,39 @@ pub enum RustTypeAtom {
     },
 }
 
+impl RustTypeAtom {
+    /// Returns whether two named-type bindings project to the same composition
+    /// model domain shape.
+    ///
+    /// Machine-local `TypePath` owners can differ by Rust module path while
+    /// still sharing a composition-level TLA domain through the named slug.
+    /// `TypePathEnum` owners are likewise path-agnostic here, but their unit
+    /// and structural variant payload shapes must agree because those variants
+    /// define the generated finite domain.
+    pub fn has_same_composition_domain_shape(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+
+        match (self, other) {
+            (Self::TypePath(_), Self::TypePath(_)) => true,
+            (
+                Self::TypePathEnum {
+                    unit_variants: left_units,
+                    structural_variants: left_structural,
+                    ..
+                },
+                Self::TypePathEnum {
+                    unit_variants: right_units,
+                    structural_variants: right_structural,
+                    ..
+                },
+            ) => left_units == right_units && left_structural == right_structural,
+            _ => false,
+        }
+    }
+}
+
 /// Authoritative binding from a DSL-declared named type to its Rust atom.
 ///
 /// Consumed by codegen (B-2) to replace the hard-coded allow-list. The mapping

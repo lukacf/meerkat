@@ -2963,19 +2963,69 @@ fn collect_machine_named_bindings(
 }
 
 /// Merge every machine's named-type bindings into one map for
-/// composition-level TLA rendering. Duplicate names must agree on Rust
-/// atom across machines (validation enforces this by construction).
+/// composition-level TLA rendering. Duplicate names must agree on generated
+/// domain shape across machines (validation enforces this by construction).
 fn collect_composition_named_bindings<'a>(
     machines_by_instance: impl IntoIterator<Item = &'a MachineSchema>,
 ) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
-    let mut merged = BTreeMap::new();
+    let mut merged: BTreeMap<String, meerkat_machine_schema::RustTypeAtom> = BTreeMap::new();
     for machine in machines_by_instance {
         for binding in &machine.named_types {
             let slug = binding.name.as_str().to_owned();
-            merged.entry(slug).or_insert_with(|| binding.rust.clone());
+            if let Some(existing) = merged.get(&slug) {
+                assert!(
+                    existing.has_same_composition_domain_shape(&binding.rust),
+                    "composition named-type `{slug}` binding must agree across machine schemas"
+                );
+            } else {
+                merged.insert(slug, binding.rust.clone());
+            }
         }
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_machine_schema::RustTypeAtom;
+    use meerkat_machine_schema::catalog::dsl::{
+        dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    };
+
+    #[test]
+    #[should_panic(
+        expected = "composition named-type `AgentRuntimeId` binding must agree across machine schemas"
+    )]
+    fn composition_named_binding_merge_rejects_divergent_domain_shapes() {
+        let meerkat = meerkat_machine();
+        let mut mob = mob_machine();
+        let binding = mob
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "AgentRuntimeId")
+            .expect("MobMachine AgentRuntimeId binding");
+        binding.rust = RustTypeAtom::U64;
+
+        let _ = collect_composition_named_bindings([&meerkat, &mob]);
+    }
+
+    #[test]
+    fn composition_named_binding_merge_allows_machine_local_type_path_twins() {
+        let meerkat = meerkat_machine();
+        let mob = mob_machine();
+
+        let bindings = collect_composition_named_bindings([&meerkat, &mob]);
+
+        assert!(
+            matches!(
+                bindings.get("PeerAddress"),
+                Some(RustTypeAtom::TypePath(path))
+                    if path == "crate::catalog::dsl::meerkat_machine::PeerAddress"
+            ),
+            "path-only TypePath twins should not block composition-domain binding merge"
+        );
+    }
 }
 
 fn render_sequence_domain_definition(inner: &TypeRef) -> String {

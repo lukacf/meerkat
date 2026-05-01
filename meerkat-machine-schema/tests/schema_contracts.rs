@@ -264,6 +264,40 @@ fn kernel_seam_rejects_zero_named_domain_override() {
 }
 
 #[test]
+fn composition_schema_rejects_divergent_named_type_bindings_across_machines() {
+    let meerkat = meerkat_machine();
+    let mut mob = mob_machine();
+    let binding_name = NamedTypeId::parse("AgentRuntimeId").expect("named type");
+    let binding = mob
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name == binding_name)
+        .expect("MobMachine AgentRuntimeId binding");
+    binding.rust = RustTypeAtom::U64;
+
+    let result = meerkat_mob_seam_composition().validate_against(&[&meerkat, &mob]);
+
+    match result {
+        Err(CompositionSchemaError::ConflictingNamedTypeBinding {
+            name,
+            first_machine,
+            first_rust,
+            second_machine,
+            second_rust,
+        }) => {
+            assert_eq!(name, "AgentRuntimeId");
+            assert_eq!(first_machine, "MeerkatMachine");
+            assert_eq!(first_rust, RustTypeAtom::String);
+            assert_eq!(second_machine, "MobMachine");
+            assert_eq!(second_rust, RustTypeAtom::U64);
+        }
+        other => panic!(
+            "composition validation must reject divergent machine-owned named-type bindings, got {other:?}"
+        ),
+    }
+}
+
+#[test]
 fn schedule_and_occurrence_machines_stay_in_canonical_coverage_manifests() {
     let machine_names = canonical_machine_schemas()
         .into_iter()

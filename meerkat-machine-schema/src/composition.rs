@@ -1076,6 +1076,7 @@ impl CompositionSchema {
                 });
             }
         }
+        self.validate_named_type_bindings_across_machines(schemas)?;
 
         for route in &self.routes {
             let from_schema = schemas
@@ -1724,6 +1725,42 @@ impl CompositionSchema {
 
         Ok(())
     }
+
+    fn validate_named_type_bindings_across_machines(
+        &self,
+        schemas: &[&MachineSchema],
+    ) -> Result<(), CompositionSchemaError> {
+        let referenced_schema_names = self
+            .machines
+            .iter()
+            .map(|instance| instance.machine_name.as_str())
+            .collect::<IndexSet<_>>();
+        let mut bindings_by_name = BTreeMap::<&str, (&str, &RustTypeAtom)>::new();
+
+        for schema in schemas {
+            if !referenced_schema_names.contains(schema.machine.as_str()) {
+                continue;
+            }
+            for binding in &schema.named_types {
+                let name = binding.name.as_str();
+                if let Some((first_machine, first_rust)) = bindings_by_name.get(name) {
+                    if !first_rust.has_same_composition_domain_shape(&binding.rust) {
+                        return Err(CompositionSchemaError::ConflictingNamedTypeBinding {
+                            name: name.to_owned(),
+                            first_machine: (*first_machine).to_owned(),
+                            first_rust: (*first_rust).clone(),
+                            second_machine: schema.machine.as_str().to_owned(),
+                            second_rust: binding.rust.clone(),
+                        });
+                    }
+                } else {
+                    bindings_by_name.insert(name, (schema.machine.as_str(), &binding.rust));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2143,6 +2180,13 @@ pub enum CompositionSchemaError {
         to_field: String,
         to_ty: TypeRef,
     },
+    ConflictingNamedTypeBinding {
+        name: String,
+        first_machine: String,
+        first_rust: RustTypeAtom,
+        second_machine: String,
+        second_rust: RustTypeAtom,
+    },
     RouteLiteralTypeMismatch {
         route: String,
         to_machine: String,
@@ -2450,6 +2494,16 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
+            ),
+            Self::ConflictingNamedTypeBinding {
+                name,
+                first_machine,
+                first_rust,
+                second_machine,
+                second_rust,
+            } => write!(
+                f,
+                "named type `{name}` has conflicting Rust bindings across composition machines: {first_machine} declares {first_rust:?}, {second_machine} declares {second_rust:?}"
             ),
             Self::RouteLiteralTypeMismatch {
                 route,

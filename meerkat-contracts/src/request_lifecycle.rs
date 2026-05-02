@@ -17,7 +17,7 @@ impl RpcRequestLifecycleRule {
             Self::SessionCreateInitialTurn if session_create_runs_immediately(params_json) => {
                 SurfaceRequestKind::SessionCreateWithTurn
             }
-            Self::SessionCreateInitialTurn => SurfaceRequestKind::InlineObservation,
+            Self::SessionCreateInitialTurn => SurfaceRequestKind::CommittedMutation,
         }
     }
 }
@@ -164,6 +164,70 @@ pub const MCP_TOOL_REQUEST_LIFECYCLE_CATALOG: McpToolRequestLifecycleCatalog =
             },
             McpToolRequestLifecycleDescriptor {
                 name: "meerkat_mob_event_stream_close",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_create",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_lifecycle",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_spawn",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_spawn_many",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_retire",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_respawn",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_wire",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_unwire",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_member_send",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_append_system_context",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_flow_run",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_flow_cancel",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_force_cancel",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_profile_create",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_profile_update",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_profile_delete",
                 request_kind: SurfaceRequestKind::CommittedMutation,
             },
             McpToolRequestLifecycleDescriptor {

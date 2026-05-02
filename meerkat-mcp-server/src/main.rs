@@ -1182,4 +1182,47 @@ mod tests {
         assert_eq!(response["result"]["generation"], 2);
         assert!(response.get("error").is_none());
     }
+
+    #[tokio::test]
+    async fn production_mcp_committed_mutation_binds_machine_lifecycle_at_admission() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &runtime_adapter,
+        );
+        let request_id = json!(44);
+        let request_key = request_key(&request_id);
+        let kind = mcp_tracked_surface_request_kind("meerkat_config")
+            .expect("committed mutation tools must be lifecycle tracked");
+        let context = begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
+            .expect("test request key should be unique");
+
+        let terminal = mcp_tool_terminal_from_result(
+            request_id,
+            Some(&context),
+            Ok(json!({
+                "generation": 3,
+                "config": {}
+            })),
+        );
+
+        assert!(
+            terminal.is_publish(),
+            "production MCP committed mutations must bind to machine lifecycle authority at admission"
+        );
+        assert_eq!(
+            request_executor
+                .resolve_terminal(Some(&request_key), terminal)
+                .await,
+            meerkat::surface::RequestTerminalResolution::Emit(json!({
+                "jsonrpc": "2.0",
+                "id": 44,
+                "result": {
+                    "generation": 3,
+                    "config": {}
+                }
+            }))
+        );
+        assert_eq!(request_executor.phase(&request_key), None);
+    }
 }

@@ -702,6 +702,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_rpc_session_create_is_machine_tracked_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request_id = RpcId::Num(2);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "stage without an initial turn",
+                "initial_turn": "deferred"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request_with_dispatch(&request, |request, _context| async move {
+                Some(RpcTerminalResponse::success(RpcResponse::success(
+                    request.id.clone(),
+                    serde_json::json!({"ok": true}),
+                )))
+            })
+            .expect("deferred session/create must be admitted into RPC lifecycle tracking");
+        let SpawnedTrackedRequest::Tracked {
+            request_key: tracked_key,
+            task,
+        } = spawned
+        else {
+            panic!("deferred session/create should be tracked, not handled as an inline request");
+        };
+        assert_eq!(tracked_key, request_key);
+
+        let response = tokio::time::timeout(Duration::from_secs(2), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("synthetic dispatch task should complete");
+
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+        let written = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(written.trim()).expect("RPC response should be JSON");
+        assert!(
+            payload.get("result").is_some() && payload.get("error").is_none(),
+            "deferred session/create success must publish through machine-owned lifecycle: {payload}"
+        );
+    }
+
+    #[tokio::test]
     async fn pre_binding_rpc_failure_preserves_protocol_error() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);

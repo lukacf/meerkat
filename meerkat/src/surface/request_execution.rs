@@ -750,7 +750,7 @@ pub struct SurfaceRequestExecutor {
 #[derive(Clone, Copy)]
 enum DefaultLifecycleBinding {
     All,
-    CancellableObservations,
+    SurfaceOwnedRequests,
 }
 
 impl SurfaceRequestExecutor {
@@ -762,7 +762,7 @@ impl SurfaceRequestExecutor {
             mechanics: SurfaceRequestMechanics::new(),
             shutdown_grace,
             default_lifecycle: Some(runtime_adapter.surface_request_lifecycle_handle()),
-            default_lifecycle_binding: DefaultLifecycleBinding::CancellableObservations,
+            default_lifecycle_binding: DefaultLifecycleBinding::SurfaceOwnedRequests,
         }
     }
 
@@ -794,9 +794,10 @@ impl SurfaceRequestExecutor {
     fn should_bind_default_lifecycle(&self, kind: SurfaceRequestKind) -> bool {
         match self.default_lifecycle_binding {
             DefaultLifecycleBinding::All => true,
-            DefaultLifecycleBinding::CancellableObservations => {
-                kind == SurfaceRequestKind::CancellableObservation
-            }
+            DefaultLifecycleBinding::SurfaceOwnedRequests => matches!(
+                kind,
+                SurfaceRequestKind::CancellableObservation | SurfaceRequestKind::CommittedMutation
+            ),
         }
     }
 

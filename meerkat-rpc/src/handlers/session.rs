@@ -956,6 +956,68 @@ mod tests {
             "RPC create must bind the request lifecycle before cancellation cleanup can return"
         );
     }
+
+    #[tokio::test]
+    async fn rpc_deferred_create_pre_cancel_is_tracked_and_cleaned_before_staging() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = Arc::new(make_test_runtime(&temp));
+        let runtime_adapter = runtime.runtime_adapter();
+        let executor = SurfaceRequestExecutor::new_with_machine(
+            std::time::Duration::from_millis(1),
+            runtime_adapter.as_ref(),
+        );
+        let params = serde_json::value::to_raw_value(&json!({
+            "prompt": "defer this session",
+            "initial_turn": "deferred"
+        }))
+        .expect("params should serialize");
+        let kind = meerkat_contracts::rpc_tracked_surface_request_kind(
+            "session/create",
+            Some(params.get()),
+        )
+        .expect("deferred session/create must be lifecycle tracked");
+        let context = executor
+            .try_begin_request(
+                "rpc-deferred-create-cancel-before-stage",
+                kind,
+                noop_request_action(),
+            )
+            .expect("test request should be admitted");
+
+        assert_eq!(
+            executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+
+        let response = super::handle_create_terminal(
+            Some(super::RpcId::Num(42)),
+            Some(params.as_ref()),
+            Arc::clone(&runtime),
+            &crate::router::NotificationSink::noop(),
+            &runtime_adapter,
+            Some(context.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            response.error.as_ref().map(|err| err.code),
+            Some(crate::error::REQUEST_CANCELLED)
+        );
+        assert!(
+            context
+                .classify_failure_terminal(())
+                .is_respond_without_publish(),
+            "deferred RPC create cancellation must be classified by machine-owned lifecycle authority"
+        );
+        assert!(
+            runtime
+                .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+                .await
+                .is_empty(),
+            "pre-cancelled deferred create must not leave a staged session behind"
+        );
+    }
 }
 
 /// Handle `session/archive`.

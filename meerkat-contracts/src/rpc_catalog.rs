@@ -921,7 +921,15 @@ mod tests {
             descriptor("session/create")
                 .request_lifecycle
                 .resolve(Some(r#"{"initial_turn":"deferred"}"#)),
-            SurfaceRequestKind::InlineObservation
+            SurfaceRequestKind::CommittedMutation
+        );
+        assert_eq!(
+            rpc_tracked_surface_request_kind(
+                "session/create",
+                Some(r#"{"initial_turn":"deferred"}"#),
+            ),
+            Some(SurfaceRequestKind::CommittedMutation),
+            "deferred session/create still mutates session state and must be tracked"
         );
         assert_eq!(
             rpc_surface_request_kind(
@@ -995,6 +1003,22 @@ mod tests {
             "meerkat_schedule_delete",
             "meerkat_mob_event_stream_open",
             "meerkat_mob_event_stream_close",
+            "meerkat_mob_create",
+            "meerkat_mob_lifecycle",
+            "meerkat_mob_spawn",
+            "meerkat_mob_spawn_many",
+            "meerkat_mob_retire",
+            "meerkat_mob_respawn",
+            "meerkat_mob_wire",
+            "meerkat_mob_unwire",
+            "meerkat_mob_member_send",
+            "meerkat_mob_append_system_context",
+            "meerkat_mob_flow_run",
+            "meerkat_mob_flow_cancel",
+            "meerkat_mob_force_cancel",
+            "meerkat_mob_profile_create",
+            "meerkat_mob_profile_update",
+            "meerkat_mob_profile_delete",
             "meerkat_comms_send",
         ] {
             assert_eq!(

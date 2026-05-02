@@ -55,9 +55,14 @@ impl TokenStoreBackend {
     pub fn default_auto() -> Result<Self, TokenStoreError> {
         let base = dirs::config_dir()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
+        let service_name = std::env::var("MEERKAT_AUTH_KEYRING_SERVICE")
+            .ok()
+            .map(|service| service.trim().to_owned())
+            .filter(|service| !service.is_empty())
+            .unwrap_or_else(|| "meerkat-auth".into());
         Ok(Self::Auto {
             root: base.join("meerkat").join("credentials"),
-            service_name: "meerkat-auth".into(),
+            service_name,
         })
     }
 

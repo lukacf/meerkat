@@ -1036,20 +1036,18 @@ pub async fn handle_auth_status_get(
     };
     let auth_lease = runtime.auth_lease_handle();
     let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+    let token_key = TokenKey::from_connection_ref(&connection_ref);
     let now = chrono::Utc::now();
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
         None
     } else if let Some(store) = runtime.token_store() {
-        store
-            .load(&TokenKey::from_connection_ref(&connection_ref))
-            .await
-            .ok()
-            .flatten()
+        store.load(&token_key).await.ok().flatten()
     } else {
         None
     };
-    let projection = meerkat_core::project_published_auth_status(now, stored.as_ref(), &snapshot);
+    let projection =
+        meerkat_core::project_published_auth_status(now, &token_key, stored.as_ref(), &snapshot);
     let tokens = projection.tokens;
     RpcResponse::success(
         id,
@@ -1480,6 +1478,28 @@ mod tests {
             _tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            Err(meerkat_providers::auth_store::TokenStoreError::Serde(
+                "malformed token fixture".into(),
+            ))
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            _expected: Option<&PersistedTokens>,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            Err(meerkat_providers::auth_store::TokenStoreError::Serde(
+                "malformed token fixture".into(),
+            ))
         }
 
         async fn clear(

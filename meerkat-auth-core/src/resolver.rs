@@ -979,11 +979,16 @@ async fn bootstrap_lease_bound_stored_tokens(
     match store.save_if_current(token_key, &stored, &rebound).await {
         Ok(true) => {}
         Ok(false) => {
-            if !stored_auth_tokens_match_lease_snapshot(env, token_key, &snapshot, expected_mode)
-                .await?
+            if !stored_auth_tokens_match_or_mark_reauth(
+                env,
+                handle,
+                lease_key,
+                token_key,
+                &snapshot,
+                expected_mode,
+            )
+            .await?
             {
-                let _ =
-                    mark_managed_oauth_reauth_required_for_snapshot(handle, lease_key, &snapshot);
                 return Err(ProviderAuthError::SourceResolutionFailed(
                     "TokenStore material changed before restart AuthMachine lease binding could be finalized"
                         .into(),
@@ -991,15 +996,18 @@ async fn bootstrap_lease_bound_stored_tokens(
             }
         }
         Err(save_error) => {
-            if !stored_auth_tokens_match_lease_snapshot(env, token_key, &snapshot, expected_mode)
-                .await?
-            {
-                let _ =
-                    mark_managed_oauth_reauth_required_for_snapshot(handle, lease_key, &snapshot);
-                return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                    "TokenStore save_if_current failed during restart AuthMachine lease binding: {save_error}"
-                )));
-            }
+            let reauth_result =
+                mark_managed_oauth_reauth_required_for_snapshot(handle, lease_key, &snapshot);
+            let stale_token_cleared =
+                clear_stored_auth_tokens_if_current(store, token_key, &rebound).await?;
+            let reauth_marked = match reauth_result {
+                Ok(marked) => marked.to_string(),
+                Err(mark_error) => format!("error: {mark_error}"),
+            };
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "TokenStore save_if_current failed during restart AuthMachine lease binding; \
+                 reauth_marked={reauth_marked}; stale_token_cleared={stale_token_cleared}: {save_error}"
+            )));
         }
     }
 
@@ -1112,7 +1120,8 @@ pub async fn save_and_complete_managed_oauth_refresh(
         )));
     }
 
-    let refreshed_expires_at = managed_oauth_token_expires_at_epoch_secs(refreshed);
+    let refreshed = refreshed.clone().canonicalize_for_persistence();
+    let refreshed_expires_at = managed_oauth_token_expires_at_epoch_secs(&refreshed);
     let pending_refreshed = refreshed
         .clone()
         .with_auth_pending_owner_binding(token_key.clone(), refreshing_snapshot.generation);
@@ -1202,14 +1211,16 @@ pub async fn save_and_complete_managed_oauth_refresh(
     {
         Ok(true) => {}
         Ok(false) => {
-            if !stored_auth_tokens_match_lease_snapshot(env, token_key, &snapshot, &expected_mode)
-                .await?
+            if !stored_auth_tokens_match_or_mark_reauth(
+                env,
+                handle.as_ref(),
+                &lease_key,
+                token_key,
+                &snapshot,
+                &expected_mode,
+            )
+            .await?
             {
-                let _ = mark_managed_oauth_reauth_required_for_snapshot(
-                    handle.as_ref(),
-                    &lease_key,
-                    &snapshot,
-                );
                 return Err(ProviderAuthError::SourceResolutionFailed(
                     "TokenStore material changed before managed OAuth refresh could finalize its AuthMachine lease binding"
                         .into(),
@@ -1217,18 +1228,17 @@ pub async fn save_and_complete_managed_oauth_refresh(
             }
         }
         Err(save_error) => {
-            if !stored_auth_tokens_match_lease_snapshot(env, token_key, &snapshot, &expected_mode)
-                .await?
-            {
-                let _ = mark_managed_oauth_reauth_required_for_snapshot(
-                    handle.as_ref(),
-                    &lease_key,
-                    &snapshot,
-                );
-                return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                    "TokenStore save_if_current failed after AuthMachine refresh completion: {save_error}"
-                )));
-            }
+            let _ = mark_managed_oauth_reauth_required_for_snapshot(
+                handle.as_ref(),
+                &lease_key,
+                &snapshot,
+            );
+            let stale_token_cleared =
+                clear_stored_auth_tokens_if_current(store, token_key, &bound_refreshed).await?;
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "TokenStore save_if_current failed after AuthMachine refresh completion; \
+                 stale_token_cleared={stale_token_cleared}: {save_error}"
+            )));
         }
     }
 
@@ -1284,6 +1294,28 @@ async fn stored_auth_tokens_match_lease_snapshot(
             observed.auth_mode == *expected_mode
                 && managed_oauth_tokens_match_lease_snapshot(observed, snapshot, token_key)
         }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn stored_auth_tokens_match_or_mark_reauth(
+    env: &ResolverEnvironment,
+    handle: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &LeaseKey,
+    token_key: &TokenKey,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    expected_mode: &PersistedAuthMode,
+) -> Result<bool, ProviderAuthError> {
+    match stored_auth_tokens_match_lease_snapshot(env, token_key, snapshot, expected_mode).await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let _ = mark_managed_oauth_reauth_required_for_snapshot(handle, lease_key, snapshot);
+            Ok(false)
+        }
+        Err(err) => {
+            let _ = mark_managed_oauth_reauth_required_for_snapshot(handle, lease_key, snapshot);
+            Err(err)
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1366,15 +1398,9 @@ fn managed_oauth_tokens_match_lease_snapshot(
     let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
     managed_oauth_token_expires_at_epoch_secs(tokens) == snapshot_expires_at
         && tokens.auth_lease.as_ref().is_some_and(|binding| {
-            if binding.token_key != *token_key {
-                return false;
-            }
-            if let Some(owner_generation) = binding.pending_owner_generation {
-                return owner_generation
-                    .checked_add(1)
-                    .is_some_and(|generation| generation == snapshot.generation);
-            }
-            binding.generation == snapshot.generation
+            binding.token_key == *token_key
+                && binding.pending_owner_generation.is_none()
+                && binding.generation == snapshot.generation
         })
 }
 
@@ -1595,7 +1621,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use crate::EphemeralTokenStore;
     #[cfg(not(target_arch = "wasm32"))]
-    use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
+    use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseTransition, DslTransitionError};
     use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
@@ -1611,6 +1637,25 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    struct RefreshCompletingAuthLeaseHandle {
+        snapshot: Mutex<AuthLeaseSnapshot>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct RestartAcquiringAuthLeaseHandle {
+        snapshot: Mutex<AuthLeaseSnapshot>,
+        fail_reauth: bool,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ManagedOauthFinalizeRaceTokenStore {
+        stored: Mutex<Option<PersistedTokens>>,
+        fail_load_after_final_save_attempt: bool,
+        fail_final_save_after_writing: bool,
+        fail_load: Mutex<bool>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     impl TestAuthLeaseHandle {
         fn valid_non_expiring(generation: u64) -> Self {
             Self {
@@ -1619,6 +1664,74 @@ mod tests {
                     expires_at: None,
                     generation,
                 }),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RefreshCompletingAuthLeaseHandle {
+        fn refreshing(generation: u64, expires_at: Option<u64>) -> Self {
+            Self {
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::Refreshing),
+                    expires_at,
+                    generation,
+                }),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RestartAcquiringAuthLeaseHandle {
+        fn empty(generation: u64) -> Self {
+            Self {
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    generation,
+                }),
+                fail_reauth: false,
+            }
+        }
+
+        fn empty_with_reauth_error(generation: u64) -> Self {
+            Self {
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    generation,
+                }),
+                fail_reauth: true,
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ManagedOauthFinalizeRaceTokenStore {
+        fn new(stored: PersistedTokens) -> Self {
+            Self {
+                stored: Mutex::new(Some(stored)),
+                fail_load_after_final_save_attempt: false,
+                fail_final_save_after_writing: false,
+                fail_load: Mutex::new(false),
+            }
+        }
+
+        fn new_with_finalize_load_error(stored: PersistedTokens) -> Self {
+            Self {
+                stored: Mutex::new(Some(stored)),
+                fail_load_after_final_save_attempt: true,
+                fail_final_save_after_writing: false,
+                fail_load: Mutex::new(false),
+            }
+        }
+
+        fn new_with_final_save_error_after_write(stored: PersistedTokens) -> Self {
+            Self {
+                stored: Mutex::new(Some(stored)),
+                fail_load_after_final_save_attempt: false,
+                fail_final_save_after_writing: true,
+                fail_load: Mutex::new(false),
             }
         }
     }
@@ -1722,6 +1835,334 @@ mod tests {
 
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
             self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl AuthLeaseHandle for RefreshCompletingAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            _lease_key: &LeaseKey,
+            _expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            panic!("test handle should not acquire")
+        }
+
+        fn acquire_lease_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _expires_at: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            panic!("test handle should not conditionally acquire")
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            panic!("test handle should not mark expiring")
+        }
+
+        fn begin_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            panic!("test handle should not begin refresh")
+        }
+
+        fn begin_refresh_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            panic!("test handle should not conditionally begin refresh")
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if snapshot.phase != Some(AuthLeasePhase::Refreshing) {
+                return Err(DslTransitionError::new(
+                    "complete_refresh",
+                    "lease is not refreshing",
+                ));
+            }
+            snapshot.phase = Some(AuthLeasePhase::Valid);
+            snapshot.expires_at = lease_expires_at_snapshot_arg(new_expires_at);
+            snapshot.generation += 1;
+            Ok(AuthLeaseTransition {
+                generation: snapshot.generation,
+            })
+        }
+
+        fn complete_refresh_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+            new_expires_at: u64,
+            now: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(None);
+            }
+            self.complete_refresh(lease_key, new_expires_at, now)
+                .map(Some)
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            panic!("test handle should not fail refresh")
+        }
+
+        fn refresh_failed_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _permanent: bool,
+        ) -> Result<bool, DslTransitionError> {
+            panic!("test handle should not conditionally fail refresh")
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
+            snapshot.generation += 1;
+            Ok(())
+        }
+
+        fn mark_reauth_required_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(false);
+            }
+            self.mark_reauth_required(lease_key)?;
+            Ok(true)
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            panic!("test handle should not release")
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl AuthLeaseHandle for RestartAcquiringAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            lease_key: &LeaseKey,
+            expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            self.acquire_lease_if_snapshot(lease_key, &self.snapshot(lease_key), expires_at)?
+                .ok_or_else(|| DslTransitionError::new("acquire_lease", "snapshot changed"))
+        }
+
+        fn acquire_lease_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+            expires_at: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if *snapshot != *expected {
+                return Ok(None);
+            }
+            snapshot.phase = Some(AuthLeasePhase::Valid);
+            snapshot.expires_at = lease_expires_at_snapshot_arg(expires_at);
+            snapshot.generation += 1;
+            let _ = lease_key;
+            Ok(Some(AuthLeaseTransition {
+                generation: snapshot.generation,
+            }))
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            panic!("test handle should not mark expiring")
+        }
+
+        fn begin_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            panic!("test handle should not begin refresh")
+        }
+
+        fn begin_refresh_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            panic!("test handle should not conditionally begin refresh")
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            panic!("test handle should not complete refresh")
+        }
+
+        fn complete_refresh_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            panic!("test handle should not conditionally complete refresh")
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            panic!("test handle should not fail refresh")
+        }
+
+        fn refresh_failed_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _permanent: bool,
+        ) -> Result<bool, DslTransitionError> {
+            panic!("test handle should not conditionally fail refresh")
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            if self.fail_reauth {
+                return Err(DslTransitionError::new(
+                    "mark_reauth_required",
+                    "injected reauth failure",
+                ));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
+            snapshot.generation += 1;
+            Ok(())
+        }
+
+        fn mark_reauth_required_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(false);
+            }
+            self.mark_reauth_required(lease_key)?;
+            Ok(true)
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            panic!("test handle should not release")
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl TokenStore for ManagedOauthFinalizeRaceTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            if *self.fail_load.lock().unwrap() {
+                return Err(TokenStoreError::Serde("corrupt token".into()));
+            }
+            Ok(self.stored.lock().unwrap().clone())
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            *self.stored.lock().unwrap() = Some(tokens.clone());
+            Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut stored = self.stored.lock().unwrap();
+            if stored.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            if replacement
+                .auth_lease
+                .as_ref()
+                .and_then(|binding| binding.pending_owner_generation)
+                .is_none()
+            {
+                if self.fail_final_save_after_writing {
+                    *stored = Some(replacement.clone());
+                    return Err(TokenStoreError::Unavailable(
+                        "finalize write reported failure".into(),
+                    ));
+                }
+                if self.fail_load_after_final_save_attempt {
+                    *self.fail_load.lock().unwrap() = true;
+                }
+                return Ok(false);
+            }
+            *stored = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut stored = self.stored.lock().unwrap();
+            if stored.as_ref() != expected {
+                return Ok(false);
+            }
+            *stored = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            *self.stored.lock().unwrap() = None;
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut stored = self.stored.lock().unwrap();
+            if stored.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *stored = None;
+            Ok(true)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "managed-oauth-finalize-race"
         }
     }
 
@@ -1938,6 +2379,372 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ProviderAuthError::Auth(AuthError::Expired)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_oauth_refresh_rejects_pending_material_when_final_binding_is_not_persisted() {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let expected = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("old-access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let refreshed = PersistedTokens {
+            primary_secret: Some("new-access".into()),
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()),
+            ..expected.clone()
+        };
+        let store = Arc::new(ManagedOauthFinalizeRaceTokenStore::new(expected.clone()));
+        let handle = Arc::new(RefreshCompletingAuthLeaseHandle::refreshing(
+            12,
+            Some(1_700_000_000),
+        ));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store.clone())
+            .with_auth_lease_handle(handle.clone());
+        let lifecycle = ManagedOauthRefreshLifecycle::AuthMachine(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Refreshing),
+            expires_at: Some(1_700_000_000),
+            generation: 12,
+        });
+
+        let err = save_and_complete_managed_oauth_refresh(
+            &env, &binding, &token_key, lifecycle, &expected, &refreshed,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "pending refreshed material must not be accepted as a finalized lease binding"
+        );
+        let stored = store.load(&token_key).await.unwrap().unwrap();
+        assert_eq!(
+            stored
+                .auth_lease
+                .expect("pending refreshed material remains stored")
+                .pending_owner_generation,
+            Some(12)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_oauth_refresh_marks_reauth_when_final_binding_verification_load_fails() {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let expected = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("old-access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let refreshed = PersistedTokens {
+            primary_secret: Some("new-access".into()),
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()),
+            ..expected.clone()
+        };
+        let store = Arc::new(
+            ManagedOauthFinalizeRaceTokenStore::new_with_finalize_load_error(expected.clone()),
+        );
+        let handle = Arc::new(RefreshCompletingAuthLeaseHandle::refreshing(
+            12,
+            Some(1_700_000_000),
+        ));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(handle.clone());
+        let lifecycle = ManagedOauthRefreshLifecycle::AuthMachine(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Refreshing),
+            expires_at: Some(1_700_000_000),
+            generation: 12,
+        });
+
+        let err = save_and_complete_managed_oauth_refresh(
+            &env, &binding, &token_key, lifecycle, &expected, &refreshed,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "unverifiable refreshed material must invalidate the AuthMachine lease"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_oauth_refresh_marks_reauth_when_final_save_errors_after_bound_material_is_visible()
+     {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let expected = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("old-access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let refreshed = PersistedTokens {
+            primary_secret: Some("new-access".into()),
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()),
+            ..expected.clone()
+        };
+        let store = Arc::new(
+            ManagedOauthFinalizeRaceTokenStore::new_with_final_save_error_after_write(
+                expected.clone(),
+            ),
+        );
+        let handle = Arc::new(RefreshCompletingAuthLeaseHandle::refreshing(
+            12,
+            Some(1_700_000_000),
+        ));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store.clone())
+            .with_auth_lease_handle(handle.clone());
+        let lifecycle = ManagedOauthRefreshLifecycle::AuthMachine(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Refreshing),
+            expires_at: Some(1_700_000_000),
+            generation: 12,
+        });
+
+        let err = save_and_complete_managed_oauth_refresh(
+            &env, &binding, &token_key, lifecycle, &expected, &refreshed,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "reported finalization errors must not be forgiven by reloading visible bound material"
+        );
+        assert_eq!(
+            store.load(&token_key).await.unwrap(),
+            None,
+            "visible refreshed material from a reported finalization error must be cleared so restart cannot bootstrap it"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn restart_bootstrap_marks_reauth_when_rebound_binding_verification_load_fails() {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let stored = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let store = Arc::new(
+            ManagedOauthFinalizeRaceTokenStore::new_with_finalize_load_error(stored.clone()),
+        );
+        let handle = Arc::new(RestartAcquiringAuthLeaseHandle::empty(11));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(handle.clone());
+
+        let err = bootstrap_lease_bound_stored_tokens(
+            &env,
+            handle.as_ref(),
+            &token_key,
+            &lease_key,
+            &PersistedAuthMode::ChatgptOauth,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "unverifiable restart rebound material must invalidate the AuthMachine lease"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn restart_bootstrap_marks_reauth_when_rebound_save_errors_after_bound_material_is_visible()
+     {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let stored = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let store = Arc::new(
+            ManagedOauthFinalizeRaceTokenStore::new_with_final_save_error_after_write(
+                stored.clone(),
+            ),
+        );
+        let handle = Arc::new(RestartAcquiringAuthLeaseHandle::empty(11));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store.clone())
+            .with_auth_lease_handle(handle.clone());
+
+        let err = bootstrap_lease_bound_stored_tokens(
+            &env,
+            handle.as_ref(),
+            &token_key,
+            &lease_key,
+            &PersistedAuthMode::ChatgptOauth,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "reported restart rebound save errors must not be forgiven by reloading visible bound material"
+        );
+        assert_eq!(
+            store.load(&token_key).await.unwrap(),
+            None,
+            "visible rebound material from a reported save error must be cleared so a later restart cannot bootstrap it"
+        );
+        let next_handle = Arc::new(RestartAcquiringAuthLeaseHandle::empty(11));
+        let next_env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(next_handle.clone());
+        let bootstrapped = bootstrap_lease_bound_stored_tokens(
+            &next_env,
+            next_handle.as_ref(),
+            &token_key,
+            &lease_key,
+            &PersistedAuthMode::ChatgptOauth,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !bootstrapped,
+            "a fresh process must not bootstrap material that was reported failed and cleared"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn restart_bootstrap_clears_rebound_material_when_reauth_mark_fails_after_save_error() {
+        let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+        let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let stored = PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: Some(DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()),
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+            auth_lease: None,
+        }
+        .with_auth_lease_binding(token_key.clone(), 11);
+        let store = Arc::new(
+            ManagedOauthFinalizeRaceTokenStore::new_with_final_save_error_after_write(
+                stored.clone(),
+            ),
+        );
+        let handle = Arc::new(RestartAcquiringAuthLeaseHandle::empty_with_reauth_error(11));
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store.clone())
+            .with_auth_lease_handle(handle.clone());
+
+        let err = bootstrap_lease_bound_stored_tokens(
+            &env,
+            handle.as_ref(),
+            &token_key,
+            &lease_key,
+            &PersistedAuthMode::ChatgptOauth,
+        )
+        .await
+        .unwrap_err();
+
+        let ProviderAuthError::SourceResolutionFailed(message) = err else {
+            panic!("expected SourceResolutionFailed");
+        };
+        assert!(
+            message.contains("reauth_marked=error:"),
+            "reauth mark failure must be reported in the resolver error"
+        );
+        assert!(
+            message.contains("stale_token_cleared=true"),
+            "reported save failure cleanup must run even when reauth marking fails"
+        );
+        assert_eq!(
+            store.load(&token_key).await.unwrap(),
+            None,
+            "visible rebound material from a reported save error must be cleared even when reauth marking fails"
+        );
+
+        let next_handle = Arc::new(RestartAcquiringAuthLeaseHandle::empty(11));
+        let next_env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(next_handle.clone());
+        let bootstrapped = bootstrap_lease_bound_stored_tokens(
+            &next_env,
+            next_handle.as_ref(),
+            &token_key,
+            &lease_key,
+            &PersistedAuthMode::ChatgptOauth,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !bootstrapped,
+            "a fresh process must not bootstrap material that was reported failed and cleared"
+        );
     }
 
     #[test]

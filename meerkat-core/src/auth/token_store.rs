@@ -235,6 +235,16 @@ impl PersistedTokens {
         self.bind_auth_pending_owner(token_key, generation);
         self
     }
+
+    pub fn canonicalize_for_persistence(mut self) -> Self {
+        self.expires_at = self.expires_at.map(canonicalize_datetime_for_persistence);
+        self.last_refresh = self.last_refresh.map(canonicalize_datetime_for_persistence);
+        self
+    }
+}
+
+fn canonicalize_datetime_for_persistence(ts: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp(ts.timestamp(), 0).unwrap_or(ts)
 }
 
 /// Errors from the token-store layer.
@@ -282,25 +292,13 @@ pub trait TokenStore: Send + Sync {
         key: &TokenKey,
         expected: &PersistedTokens,
         replacement: &PersistedTokens,
-    ) -> Result<bool, TokenStoreError> {
-        if self.load(key).await?.as_ref() != Some(expected) {
-            return Ok(false);
-        }
-        self.save(key, replacement).await?;
-        Ok(true)
-    }
+    ) -> Result<bool, TokenStoreError>;
     async fn save_if_current_optional(
         &self,
         key: &TokenKey,
         expected: Option<&PersistedTokens>,
         replacement: &PersistedTokens,
-    ) -> Result<bool, TokenStoreError> {
-        if self.load(key).await?.as_ref() != expected {
-            return Ok(false);
-        }
-        self.save(key, replacement).await?;
-        Ok(true)
-    }
+    ) -> Result<bool, TokenStoreError>;
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError>;
     async fn clear_if_unreadable(&self, _key: &TokenKey) -> Result<bool, TokenStoreError> {
         Ok(false)

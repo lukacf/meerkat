@@ -1044,19 +1044,16 @@ pub async fn get_auth_status(
     let snapshot = state
         .auth_lease
         .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+    let token_key = TokenKey::from_connection_ref(&connection_ref);
     let now = chrono::Utc::now();
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
         None
     } else {
-        state
-            .token_store
-            .load(&TokenKey::from_connection_ref(&connection_ref))
-            .await
-            .ok()
-            .flatten()
+        state.token_store.load(&token_key).await.ok().flatten()
     };
-    let projection = meerkat_core::project_published_auth_status(now, stored.as_ref(), &snapshot);
+    let projection =
+        meerkat_core::project_published_auth_status(now, &token_key, stored.as_ref(), &snapshot);
     let tokens = projection.tokens;
     (
         StatusCode::OK,
@@ -1392,6 +1389,28 @@ mod tests {
             _tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            Err(meerkat_providers::auth_store::TokenStoreError::Serde(
+                "malformed token fixture".into(),
+            ))
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            _expected: Option<&PersistedTokens>,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            Err(meerkat_providers::auth_store::TokenStoreError::Serde(
+                "malformed token fixture".into(),
+            ))
         }
 
         async fn clear(

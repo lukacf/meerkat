@@ -100,12 +100,14 @@ pub async fn save_tokens_and_publish_lifecycle_acquired(
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
 ) -> Result<(), TokenLifecycleSaveError> {
+    let tokens = tokens.clone().canonicalize_for_persistence();
     let key = TokenKey::from_connection_ref(connection_ref);
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    let previous = store
-        .load(&key)
-        .await
-        .map_err(TokenLifecycleSaveError::TokenStoreLoad)?;
+    let previous = match store.load(&key).await {
+        Ok(previous) => previous,
+        Err(TokenStoreError::KeyringUnavailable(_)) => None,
+        Err(err) => return Err(TokenLifecycleSaveError::TokenStoreLoad(err)),
+    };
     let previous_lifecycle = handle.snapshot(&lease_key);
     if matches!(
         previous_lifecycle.phase,
@@ -118,7 +120,7 @@ pub async fn save_tokens_and_publish_lifecycle_acquired(
             &lease_key,
             previous.as_ref(),
             &previous_lifecycle,
-            tokens,
+            &tokens,
         )
         .await;
     }
@@ -133,7 +135,7 @@ pub async fn save_tokens_and_publish_lifecycle_acquired(
         &lease_key,
         previous.as_ref(),
         &previous_lifecycle,
-        tokens,
+        &tokens,
     )
     .await
 }
@@ -304,16 +306,19 @@ async fn finalize_saved_tokens_for_snapshot(
     {
         Ok(true) => {}
         Ok(false) => {
-            if !stored_tokens_match_lifecycle_snapshot(store, key, acquired_snapshot).await? {
-                let _ = handle.mark_reauth_required_if_snapshot(lease_key, acquired_snapshot);
+            if !stored_tokens_match_or_mark_reauth(store, handle, key, lease_key, acquired_snapshot)
+                .await?
+            {
                 return Err(TokenLifecycleSaveError::TokenStoreFinalizeRace);
             }
         }
         Err(err) => {
-            if !stored_tokens_match_lifecycle_snapshot(store, key, acquired_snapshot).await? {
-                let _ = handle.mark_reauth_required_if_snapshot(lease_key, acquired_snapshot);
-                return Err(TokenLifecycleSaveError::TokenStoreFinalize(err));
-            }
+            let _ = handle.mark_reauth_required_if_snapshot(lease_key, acquired_snapshot);
+            store
+                .clear_if_current(key, bound_tokens)
+                .await
+                .map_err(TokenLifecycleSaveError::TokenStoreCleanup)?;
+            return Err(TokenLifecycleSaveError::TokenStoreFinalize(err));
         }
     }
 
@@ -373,6 +378,26 @@ async fn stored_tokens_match_lifecycle_snapshot(
         .is_some_and(|tokens| persisted_tokens_match_lifecycle_snapshot(tokens, key, snapshot)))
 }
 
+async fn stored_tokens_match_or_mark_reauth(
+    store: &dyn TokenStore,
+    handle: &dyn AuthLeaseHandle,
+    key: &TokenKey,
+    lease_key: &LeaseKey,
+    snapshot: &AuthLeaseSnapshot,
+) -> Result<bool, TokenLifecycleSaveError> {
+    match stored_tokens_match_lifecycle_snapshot(store, key, snapshot).await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let _ = handle.mark_reauth_required_if_snapshot(lease_key, snapshot);
+            Ok(false)
+        }
+        Err(err) => {
+            let _ = handle.mark_reauth_required_if_snapshot(lease_key, snapshot);
+            Err(err)
+        }
+    }
+}
+
 pub fn persisted_tokens_match_lifecycle_snapshot(
     tokens: &PersistedTokens,
     key: &TokenKey,
@@ -380,15 +405,9 @@ pub fn persisted_tokens_match_lifecycle_snapshot(
 ) -> bool {
     persisted_token_expires_at_epoch_secs(tokens) == snapshot.expires_at.unwrap_or(u64::MAX)
         && tokens.auth_lease.as_ref().is_some_and(|binding| {
-            if binding.token_key != *key {
-                return false;
-            }
-            if let Some(owner_generation) = binding.pending_owner_generation {
-                return owner_generation
-                    .checked_add(1)
-                    .is_some_and(|generation| generation == snapshot.generation);
-            }
-            binding.generation == snapshot.generation
+            binding.token_key == *key
+                && binding.pending_owner_generation.is_none()
+                && binding.generation == snapshot.generation
         })
 }
 
@@ -647,6 +666,7 @@ pub struct PublishedAuthStatus<'a> {
 
 pub fn project_published_auth_status<'a>(
     now: DateTime<Utc>,
+    key: &TokenKey,
     stored: Option<&'a PersistedTokens>,
     snapshot: &AuthLeaseSnapshot,
 ) -> PublishedAuthStatus<'a> {
@@ -658,11 +678,18 @@ pub fn project_published_auth_status<'a>(
             tokens: None,
         };
     }
+    let tokens = if matches!(
+        snapshot.phase,
+        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+    ) {
+        stored.filter(|tokens| persisted_tokens_match_lifecycle_snapshot(tokens, key, snapshot))
+    } else {
+        None
+    };
     PublishedAuthStatus {
         phase,
-        expires_at: lease_snapshot_expires_at_datetime(snapshot)
-            .or_else(|| stored.and_then(|tokens| tokens.expires_at)),
-        tokens: stored,
+        expires_at: lease_snapshot_expires_at_datetime(snapshot),
+        tokens,
     }
 }
 
@@ -1089,6 +1116,17 @@ mod tests {
         on_save: Mutex<Option<SaveObserver>>,
     }
 
+    struct LoadUnavailableInitialSaveTokenStore {
+        tokens: Mutex<Option<PersistedTokens>>,
+    }
+
+    struct FinalizeRaceTokenStore {
+        tokens: Mutex<Option<PersistedTokens>>,
+        fail_load_after_final_save_attempt: bool,
+        fail_final_save_after_writing: bool,
+        fail_load: Mutex<bool>,
+    }
+
     impl LoadFailingTokenStore {
         fn new() -> Self {
             Self {
@@ -1193,6 +1231,50 @@ mod tests {
         }
     }
 
+    impl LoadUnavailableInitialSaveTokenStore {
+        fn new() -> Self {
+            Self {
+                tokens: Mutex::new(None),
+            }
+        }
+
+        fn stored(&self) -> Option<PersistedTokens> {
+            self.tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl FinalizeRaceTokenStore {
+        fn new() -> Self {
+            Self {
+                tokens: Mutex::new(None),
+                fail_load_after_final_save_attempt: false,
+                fail_final_save_after_writing: false,
+                fail_load: Mutex::new(false),
+            }
+        }
+
+        fn new_with_finalize_load_error() -> Self {
+            Self {
+                tokens: Mutex::new(None),
+                fail_load_after_final_save_attempt: true,
+                fail_final_save_after_writing: false,
+                fail_load: Mutex::new(false),
+            }
+        }
+
+        fn new_with_final_save_error_after_write() -> Self {
+            Self {
+                tokens: Mutex::new(None),
+                fail_load_after_final_save_attempt: false,
+                fail_final_save_after_writing: true,
+                fail_load: Mutex::new(false),
+            }
+        }
+    }
+
     #[async_trait]
     impl TokenStore for LoadFailingTokenStore {
         async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
@@ -1205,6 +1287,24 @@ mod tests {
             _tokens: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Err(TokenStoreError::Serde("corrupt token".into()))
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            _expected: Option<&PersistedTokens>,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Err(TokenStoreError::Serde("corrupt token".into()))
         }
 
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -1259,6 +1359,24 @@ mod tests {
             Ok(())
         }
 
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Ok(false)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            _expected: Option<&PersistedTokens>,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Ok(false)
+        }
+
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
             Ok(())
         }
@@ -1299,6 +1417,24 @@ mod tests {
             _tokens: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Err(TokenStoreError::Serde("corrupt token".into()))
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            _expected: Option<&PersistedTokens>,
+            _replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Err(TokenStoreError::Serde("corrupt token".into()))
         }
 
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -1359,6 +1495,40 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
         }
 
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -1422,6 +1592,40 @@ mod tests {
             Ok(())
         }
 
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
             *self
                 .tokens
@@ -1476,6 +1680,40 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
             Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
         }
 
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -1570,6 +1808,40 @@ mod tests {
             Ok(())
         }
 
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
             *self
                 .tokens
@@ -1633,6 +1905,32 @@ mod tests {
             Ok(())
         }
 
+        async fn save_if_current(
+            &self,
+            key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            if self.load(key).await?.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            self.save(key, replacement).await?;
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            if self.load(key).await?.as_ref() != expected {
+                return Ok(false);
+            }
+            self.save(key, replacement).await?;
+            Ok(true)
+        }
+
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
             *self
                 .tokens
@@ -1663,6 +1961,209 @@ mod tests {
 
         fn backend_name(&self) -> &'static str {
             "save_observing"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for LoadUnavailableInitialSaveTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            Err(TokenStoreError::KeyringUnavailable(
+                "keyring unavailable and no file fallback material is present".into(),
+            ))
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
+            Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = None;
+            Ok(true)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "load_unavailable_initial_save"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for FinalizeRaceTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            if *self
+                .fail_load
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err(TokenStoreError::Serde("corrupt token".into()));
+            }
+            Ok(self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
+            Ok(())
+        }
+
+        async fn save_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            if replacement
+                .auth_lease
+                .as_ref()
+                .and_then(|binding| binding.pending_owner_generation)
+                .is_none()
+            {
+                if self.fail_final_save_after_writing {
+                    *tokens = Some(replacement.clone());
+                    return Err(TokenStoreError::Unavailable(
+                        "finalize write reported failure".into(),
+                    ));
+                }
+                if self.fail_load_after_final_save_attempt {
+                    *self
+                        .fail_load
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                }
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            _key: &TokenKey,
+            expected: Option<&PersistedTokens>,
+            replacement: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != expected {
+                return Ok(false);
+            }
+            *tokens = Some(replacement.clone());
+            Ok(true)
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = None;
+            Ok(true)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "finalize_race"
         }
     }
 
@@ -1728,6 +2229,157 @@ mod tests {
             &stored, &key, &snapshot
         ));
         assert_eq!(stored.auth_lease.unwrap().pending_owner_generation, None);
+    }
+
+    #[tokio::test]
+    async fn save_boundary_uses_initial_cas_when_preload_keyring_is_unavailable() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let store = LoadUnavailableInitialSaveTokenStore::new();
+        let tokens = tokens_with_expiry(None);
+
+        save_tokens_and_publish_lifecycle_acquired(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = handle.snapshot(&lease_key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        let stored = store.stored().expect("stored finalized tokens");
+        assert!(persisted_tokens_match_lifecycle_snapshot(
+            &stored, &key, &snapshot
+        ));
+        assert_eq!(
+            stored.auth_lease.unwrap().pending_owner_generation,
+            None,
+            "preload keyring outage must still finalize through store CAS, not leave pending material"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_boundary_rejects_pending_material_when_final_binding_is_not_persisted() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let store = FinalizeRaceTokenStore::new();
+        let tokens = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ));
+
+        let err = save_tokens_and_publish_lifecycle_acquired(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TokenLifecycleSaveError::TokenStoreFinalizeRace
+        ));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "unfinalized durable material must invalidate the AuthMachine lease"
+        );
+        let stored = store.load(&key).await.unwrap().unwrap();
+        let binding = stored.auth_lease.expect("pending material remains stored");
+        assert_eq!(binding.pending_owner_generation, Some(0));
+    }
+
+    #[tokio::test]
+    async fn save_boundary_marks_reauth_when_final_binding_verification_load_fails() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let store = FinalizeRaceTokenStore::new_with_finalize_load_error();
+        let tokens = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ));
+
+        let err = save_tokens_and_publish_lifecycle_acquired(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TokenLifecycleSaveError::TokenStoreFinalizeLoad(_)
+        ));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "unverifiable durable material must invalidate the AuthMachine lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_boundary_marks_reauth_when_final_save_errors_after_bound_material_is_visible() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let store = FinalizeRaceTokenStore::new_with_final_save_error_after_write();
+        let tokens = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ));
+
+        let err = save_tokens_and_publish_lifecycle_acquired(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+            &tokens,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TokenLifecycleSaveError::TokenStoreFinalize(_)
+        ));
+        assert_eq!(
+            handle.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired),
+            "reported finalization errors must not be forgiven by reloading visible bound material"
+        );
+        assert_eq!(
+            store.load(&key).await.unwrap(),
+            None,
+            "visible bound material from a reported finalization error must be cleared so restart cannot bootstrap it"
+        );
     }
 
     #[tokio::test]
@@ -2273,10 +2925,30 @@ mod tests {
             generation: 1,
         };
 
-        let status = project_published_auth_status(now, None, &snapshot);
+        let key = TokenKey::parse("dev", "default_openai").unwrap();
+
+        let status = project_published_auth_status(now, &key, None, &snapshot);
 
         assert_eq!(status.phase, AuthStatusPhase::Valid);
         assert!(status.expires_at.is_some());
+        assert!(status.tokens.is_none());
+    }
+
+    #[test]
+    fn published_status_rejects_stale_token_store_material() {
+        let now = Utc::now();
+        let snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: None,
+            generation: 7,
+        };
+        let key = TokenKey::parse("dev", "default_openai").unwrap();
+        let stale = tokens_with_expiry(Some(now + chrono::Duration::hours(1)));
+
+        let status = project_published_auth_status(now, &key, Some(&stale), &snapshot);
+
+        assert_eq!(status.phase, AuthStatusPhase::Valid);
+        assert!(status.expires_at.is_none());
         assert!(status.tokens.is_none());
     }
 }

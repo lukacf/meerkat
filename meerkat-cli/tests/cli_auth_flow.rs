@@ -95,8 +95,54 @@ fn seed_token_file_for_binding(root: &std::path::Path, binding_id: &str, body: &
     std::fs::write(token_file, body).expect("write token file");
 }
 
+fn seed_unmarked_auth_lease_token_file(root: &std::path::Path) {
+    seed_unmarked_auth_lease_token_file_for_binding(root, "default_openai");
+}
+
+fn seed_unmarked_auth_lease_token_file_for_binding(root: &std::path::Path, binding_id: &str) {
+    let body = format!(
+        r#"{{
+  "auth_mode": "api_key",
+  "primary_secret": "sk-fail-closed",
+  "scopes": [],
+  "metadata": null,
+  "auth_lease": {{
+    "token_key": {{
+      "realm": "dev",
+      "binding": "{binding_id}"
+    }},
+    "generation": 1
+  }}
+}}"#
+    );
+    seed_token_file_for_binding(root, binding_id, &body);
+
+    let marker = format!(
+        r#"{{
+  "auth_mode": "api_key",
+  "auth_lease": {{
+    "token_key": {{
+      "realm": "dev",
+      "binding": "{binding_id}"
+    }},
+    "generation": 2
+  }}
+}}"#
+    );
+    let marker_path = token_file_path_for_binding(root, binding_id).with_extension("json.fallback");
+    std::fs::write(marker_path, marker).expect("write mismatched fallback marker");
+}
+
 fn token_file_exists(root: &std::path::Path) -> bool {
     token_file_path(root).exists()
+}
+
+fn isolated_keyring_service(root: &std::path::Path) -> String {
+    let suffix = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tmp");
+    format!("meerkat-auth-cli-test-{}-{suffix}", std::process::id())
 }
 
 fn rkat_binary() -> Option<PathBuf> {
@@ -164,12 +210,14 @@ fn rkat_auth_logout_clears_malformed_token_file() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_token_file(tmp.path(), "{ malformed token json");
 
     let logout = Command::new(&rkat)
         .args(["auth", "logout", "default_openai"])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth logout must spawn");
@@ -189,6 +237,43 @@ fn rkat_auth_logout_clears_malformed_token_file() {
 }
 
 #[test]
+fn rkat_auth_logout_clears_fail_closed_auth_lease_token_file() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
+    seed_unmarked_auth_lease_token_file(tmp.path());
+
+    let logout = Command::new(&rkat)
+        .args(["auth", "logout", "default_openai"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth logout must spawn");
+    if !logout.status.success() {
+        let stderr = String::from_utf8_lossy(&logout.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        assert!(
+            logout.status.success(),
+            "logout must clear fail-closed auth-lease token file; stderr={stderr}"
+        );
+    }
+
+    assert!(
+        !token_file_exists(tmp.path()),
+        "logout must remove untrusted auth-lease persisted credentials"
+    );
+}
+
+#[test]
 fn rkat_auth_profile_delete_clears_malformed_token_file() {
     let Some(rkat) = rkat_binary() else {
         eprintln!("SKIP: rkat binary unavailable");
@@ -196,6 +281,7 @@ fn rkat_auth_profile_delete_clears_malformed_token_file() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_managed_openai_realm_config(tmp.path());
     seed_token_file(tmp.path(), "{ malformed token json");
 
@@ -214,6 +300,7 @@ fn rkat_auth_profile_delete_clears_malformed_token_file() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth profile-delete must spawn");
@@ -233,6 +320,55 @@ fn rkat_auth_profile_delete_clears_malformed_token_file() {
 }
 
 #[test]
+fn rkat_auth_profile_delete_clears_fail_closed_auth_lease_token_file() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
+    seed_managed_openai_realm_config(tmp.path());
+    seed_unmarked_auth_lease_token_file(tmp.path());
+
+    let delete = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "profile-delete",
+            "--realm",
+            "dev",
+            "default_openai",
+            "--yes",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth profile-delete must spawn");
+    if !delete.status.success() {
+        let stderr = String::from_utf8_lossy(&delete.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        assert!(
+            delete.status.success(),
+            "profile delete must clear fail-closed auth-lease token file; stderr={stderr}"
+        );
+    }
+
+    assert!(
+        !token_file_exists(tmp.path()),
+        "profile delete must remove untrusted auth-lease persisted credentials"
+    );
+}
+
+#[test]
 fn rkat_auth_profile_delete_clears_binding_scoped_token_when_profile_id_differs() {
     let Some(rkat) = rkat_binary() else {
         eprintln!("SKIP: rkat binary unavailable");
@@ -240,6 +376,7 @@ fn rkat_auth_profile_delete_clears_binding_scoped_token_when_profile_id_differs(
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_managed_openai_realm_config_with_ids(tmp.path(), "openai_managed", "default_openai");
     seed_token_file_for_binding(tmp.path(), "default_openai", "{ malformed token json");
 
@@ -258,6 +395,7 @@ fn rkat_auth_profile_delete_clears_binding_scoped_token_when_profile_id_differs(
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth profile-delete must spawn");
@@ -289,6 +427,7 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_managed_openai_realm_config(tmp.path());
     seed_token_file(
         tmp.path(),
@@ -317,6 +456,7 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth status must spawn");
@@ -360,6 +500,7 @@ fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_managed_openai_realm_config(tmp.path());
     seed_token_file(tmp.path(), "{ malformed token json");
 
@@ -377,6 +518,7 @@ fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth status must spawn");
@@ -408,6 +550,7 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_openai_realm_config_with_ids_and_method(
         tmp.path(),
         "openai_managed",
@@ -441,6 +584,7 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth refresh must spawn");
@@ -475,6 +619,7 @@ fn rkat_auth_status_resolves_binding_that_references_auth_profile() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     seed_managed_openai_realm_config_with_ids(tmp.path(), "openai_managed", "default_openai");
 
     let status = Command::new(&rkat)
@@ -491,6 +636,7 @@ fn rkat_auth_status_resolves_binding_that_references_auth_profile() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth status must spawn");
@@ -522,10 +668,12 @@ fn rkat_auth_profile_list_returns_cleanly_for_empty_realm() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     let out = Command::new(&rkat)
         .args(["auth", "profile", "list", "--realm", "nonexistent-realm"])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth profile list must spawn");
@@ -560,6 +708,7 @@ fn rkat_run_connection_ref_flag_is_registered_and_routes() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     // Seed a minimal .rkat so `rkat run` doesn't refuse on missing config.
     std::fs::create_dir_all(tmp.path().join(".rkat")).expect("mkdir .rkat");
 
@@ -568,6 +717,7 @@ fn rkat_run_connection_ref_flag_is_registered_and_routes() {
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .env("RKAT_TEST_CLIENT", "1") // short-circuit LLM client
         .stdin(Stdio::null())
         .output()
@@ -599,6 +749,7 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
     let login = Command::new(&rkat)
         .args([
             "auth",
@@ -610,6 +761,7 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth login must spawn");
@@ -626,6 +778,7 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         .args(["auth", "logout", "default_openai"])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth logout must spawn");
@@ -639,6 +792,7 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         .args(["auth", "logout", "default_openai"])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
         .stdin(Stdio::null())
         .output()
         .expect("repeat rkat auth logout must spawn");

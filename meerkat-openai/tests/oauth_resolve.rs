@@ -676,6 +676,15 @@ impl TokenStore for SequencedLoadTokenStore {
         Ok(self.load(key).await?.as_ref() == Some(expected))
     }
 
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        _replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        Ok(self.load(key).await?.as_ref() == expected)
+    }
+
     async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
         Ok(())
     }
@@ -717,6 +726,24 @@ impl TokenStore for MissingAfterFirstLoadTokenStore {
         Ok(())
     }
 
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        _replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        Ok(self.load(key).await?.as_ref() == Some(expected))
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        _replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        Ok(self.load(key).await?.as_ref() == expected)
+    }
+
     async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
         Ok(())
     }
@@ -752,6 +779,32 @@ impl TokenStore for FailingSaveTokenStore {
         Err(TokenStoreError::Unavailable(
             "programmed save failure".into(),
         ))
+    }
+
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != expected {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
     }
 
     async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
@@ -793,6 +846,32 @@ impl TokenStore for SaveRaceTokenStore {
             on_save();
         }
         Ok(())
+    }
+
+    async fn save_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
+    }
+
+    async fn save_if_current_optional(
+        &self,
+        key: &TokenKey,
+        expected: Option<&PersistedTokens>,
+        replacement: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        if self.load(key).await?.as_ref() != expected {
+            return Ok(false);
+        }
+        self.save(key, replacement).await?;
+        Ok(true)
     }
 
     async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {

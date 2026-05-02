@@ -2948,8 +2948,13 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             let snapshot = scope
                 .auth_lease
                 .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-            let projection =
-                meerkat_core::project_published_auth_status(chrono::Utc::now(), None, &snapshot);
+            let token_key = meerkat_core::auth::TokenKey::from_connection_ref(&connection_ref);
+            let projection = meerkat_core::project_published_auth_status(
+                chrono::Utc::now(),
+                &token_key,
+                None,
+                &snapshot,
+            );
             println!("state:       {}", projection.phase.as_public_str());
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
@@ -3899,7 +3904,11 @@ async fn interactive_login(
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn token_store_load_error_allows_clear(e: &meerkat_providers::auth_store::TokenStoreError) -> bool {
-    matches!(e, meerkat_providers::auth_store::TokenStoreError::Serde(_))
+    matches!(
+        e,
+        meerkat_providers::auth_store::TokenStoreError::Serde(_)
+            | meerkat_providers::auth_store::TokenStoreError::Unavailable(_)
+    )
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3930,13 +3939,17 @@ async fn clear_cli_tokens_and_publish_lifecycle(
             Ok(true)
         }
         TokenClearPlan::Unreadable => {
-            meerkat_core::clear_unreadable_tokens_and_publish_lifecycle_released(
+            let cleared = meerkat_core::clear_unreadable_tokens_and_publish_lifecycle_released(
                 store,
                 auth_lease,
                 connection_ref,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("Unreadable token lifecycle clear failed: {e}"))?;
+            if !cleared {
+                anyhow::bail!("TokenStore material changed before unreadable credential clear");
+            }
+            Ok(true)
         }
     }
 }

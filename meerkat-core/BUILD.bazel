@@ -38,13 +38,80 @@ rust_library(
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_core_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-core"),
+    crate_name = "meerkat_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat-anthropic:__pkg__",
+        "//meerkat-auth-core:__pkg__",
+        "//meerkat-cli:__pkg__",
+        "//meerkat-client:__pkg__",
+        "//meerkat-comms:__pkg__",
+        "//meerkat-contracts:__pkg__",
+        "//meerkat-core:__pkg__",
+        "//meerkat-gemini:__pkg__",
+        "//meerkat-hooks:__pkg__",
+        "//meerkat-llm-core:__pkg__",
+        "//meerkat-machine-codegen:__pkg__",
+        "//meerkat-machine-derive:__pkg__",
+        "//meerkat-machine-dsl-core:__pkg__",
+        "//meerkat-machine-dsl:__pkg__",
+        "//meerkat-machine-kernels:__pkg__",
+        "//meerkat-machine-schema:__pkg__",
+        "//meerkat-mcp-server:__pkg__",
+        "//meerkat-mcp:__pkg__",
+        "//meerkat-memory:__pkg__",
+        "//meerkat-mob-mcp:__pkg__",
+        "//meerkat-mob-pack:__pkg__",
+        "//meerkat-mob:__pkg__",
+        "//meerkat-models:__pkg__",
+        "//meerkat-openai:__pkg__",
+        "//meerkat-providers:__pkg__",
+        "//meerkat-rest:__pkg__",
+        "//meerkat-rpc:__pkg__",
+        "//meerkat-runtime:__pkg__",
+        "//meerkat-schedule:__pkg__",
+        "//meerkat-session:__pkg__",
+        "//meerkat-skills:__pkg__",
+        "//meerkat-store:__pkg__",
+        "//meerkat-tools:__pkg__",
+        "//meerkat-web-runtime:__pkg__",
+        "//meerkat:__pkg__",
+        "//test-fixtures/surface-build-fixtures:__pkg__",
+        "//tests/integration:__pkg__",
+    ],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat-core",
     },
@@ -70,6 +137,7 @@ rust_test(
     crate_name = "meerkat_core",
     crate_root = "src/lib.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -118,11 +186,11 @@ rust_test(
     crate_name = "connection_ref_no_string_form",
     crate_root = "tests/connection_ref_no_string_form.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -169,11 +237,11 @@ rust_test(
     crate_name = "fork_at_rotates_session_id",
     crate_root = "tests/fork_at_rotates_session_id.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -222,11 +290,11 @@ rust_test(
     crate_name = "hooks_contracts",
     crate_root = "tests/hooks_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -279,11 +347,11 @@ rust_test(
     crate_name = "image_generation_contracts",
     crate_root = "tests/image_generation_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -330,11 +398,11 @@ rust_test(
     crate_name = "ops_lifecycle_integration",
     crate_root = "tests/ops_lifecycle_integration.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -380,11 +448,11 @@ rust_test(
     crate_name = "rct_contracts",
     crate_root = "tests/rct_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -433,11 +501,11 @@ rust_test(
     crate_name = "realm_connection_config",
     crate_root = "tests/realm_connection_config.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -484,11 +552,11 @@ rust_test(
     crate_name = "runtime_turn_metadata_typed_round_trip",
     crate_root = "tests/runtime_turn_metadata_typed_round_trip.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -535,11 +603,11 @@ rust_test(
     crate_name = "source_identity_resolve_enforces_lifecycle",
     crate_root = "tests/source_identity_resolve_enforces_lifecycle.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
@@ -586,11 +654,11 @@ rust_test(
     crate_name = "tool_notice_projection",
     crate_root = "tests/tool_notice_projection.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
     edition = "2024",
-    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",

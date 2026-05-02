@@ -55,7 +55,7 @@ icon: "wrench"
 | `enable_comms` | `.comms(bool)` | `false` | All comms tools (requires `comms` feature) |
 | `enable_mob` | `.mob(bool)` | `false` | Mob orchestration tools (`mob_*`, `meerkat_*`) |
 
-`AgentFactory` is the only place tool categories are composed. The public `meerkat::AgentBuilder` delegates to the factory path with explicit client/tool/store overrides. The lower-level `meerkat_core::AgentBuilder` is not re-exported by the facade and is only for standalone core embeddings that opt into the standalone core feature. See [AgentBuilder vs AgentFactory](/rust/advanced#agentbuilder-vs-agentfactory).
+`AgentFactory` is the only place tool categories are composed. The public `meerkat::AgentBuilder` delegates to the factory path with explicit client/tool/store overrides. The lower-level `meerkat_core::AgentBuilder` is not re-exported by the facade and is not a public standalone embedding API. See [AgentBuilder vs AgentFactory](/rust/advanced#agentbuilder-vs-agentfactory).
 
 **Source:** `meerkat/src/factory.rs` -- `AgentFactory` struct and builder methods.
 </Accordion>

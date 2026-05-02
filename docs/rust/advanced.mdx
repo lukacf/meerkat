@@ -24,7 +24,7 @@ recovery-safe background completion handling.
 
 `AgentFactory` (in the `meerkat` facade) is the opinionated composition layer. It knows about tool categories, runtime resources, comms, memory, mobs, and skills, and wires them into the dispatcher before passing them to `AgentBuilder`. All public surfaces go through the runtime-backed session path built on top of `AgentFactory`.
 
-The lower-level `meerkat_core::AgentBuilder` is not re-exported by the facade. Its standalone build path is an explicit unsafe core-level escape hatch for tests or embeddings that own every primitive directly.
+The lower-level `meerkat_core::AgentBuilder` is not re-exported by the facade. Its standalone build path is reserved for core tests; public embedding code should use the facade builder or `AgentFactory`.
 
 **Use `AgentFactory` via `build_persistent_service()` (main path), `build_ephemeral_service()` (substrate/testing path), or the public `meerkat::AgentBuilder` facade unless you explicitly need to bypass session lifecycle orchestration.** Direct core builder usage means you own composition, persistence, event handling, and any drift from the standard runtime-backed path.
 
@@ -37,12 +37,12 @@ binding seam above so the runtime/session owner stays canonical.
 <Note>
 For most use cases, prefer `SessionService` via the runtime-backed persistent path (see
 [overview](/rust/overview)). The public `AgentBuilder` delegates to the factory
-pipeline. Use the core builder only when bypassing the session service and
-facade composition entirely under the standalone core feature.
+pipeline. Use the core builder only inside core-owned tests that bypass the
+session service and facade composition entirely.
 </Note>
 
 <Warning>
-If you are embedding Meerkat into an application, start with `SessionService`. Reach for the core builder only when you deliberately want an expert-only execution API with no runtime-managed session identity. Facade `AgentBuilder` rejects direct `provider_tool_defaults`, `compactor`, `memory_store`, and `with_turn_state_handle` injection so those standalone-only behaviors cannot be silently dropped.
+If you are embedding Meerkat into an application, start with `SessionService`. Use the facade builder or `AgentFactory` when you need direct Rust construction. Facade `AgentBuilder` rejects direct `provider_tool_defaults`, `compactor`, `memory_store`, and `with_turn_state_handle` injection so those standalone-only behaviors cannot be silently dropped.
 </Warning>
 
 ```rust

@@ -49,9 +49,9 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
-        "//meerkat-runtime:meerkat_runtime",
-        "//meerkat-store:meerkat_store",
+        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
+        "//meerkat-store:meerkat_store_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "test-fixtures/surface-build-fixtures",
@@ -80,9 +80,9 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
-        "//meerkat-runtime:meerkat_runtime",
-        "//meerkat-store:meerkat_store",
+        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
+        "//meerkat-store:meerkat_store_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "test-fixtures/surface-build-fixtures",
@@ -128,9 +128,9 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
-        "//meerkat-runtime:meerkat_runtime",
-        "//meerkat-store:meerkat_store",
+        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
+        "//meerkat-store:meerkat_store_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "test-fixtures/surface-build-fixtures",

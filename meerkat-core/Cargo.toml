@@ -44,6 +44,7 @@ uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
 default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
+__meerkat-facade-agent-factory-build = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

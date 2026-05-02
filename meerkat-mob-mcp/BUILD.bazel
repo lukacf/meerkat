@@ -45,11 +45,11 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-client:meerkat_client",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-client:meerkat_client_agent_factory_build",
+        "//meerkat-contracts:meerkat_contracts_agent_factory_build",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob:meerkat_mob",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
@@ -95,11 +95,11 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-client:meerkat_client",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-client:meerkat_client_agent_factory_build",
+        "//meerkat-contracts:meerkat_contracts_agent_factory_build",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob:meerkat_mob",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
@@ -129,12 +129,12 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-client:meerkat_client",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-client:meerkat_client_agent_factory_build",
+        "//meerkat-contracts:meerkat_contracts_agent_factory_build",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob:meerkat_mob",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",

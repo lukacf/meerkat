@@ -1016,6 +1016,69 @@ meerkat-core = {{ path = "{}", features = ["internal-agent-factory-build"] }}
 }
 
 #[test]
+fn downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-public-facade-smoke"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = downstream_cargo_command(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "public downstream facade AgentBuilder build must compile, link, and \
+         construct through AgentFactory without repo-injected rustflags; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("public facade AgentBuilder constructed an agent"),
+        "public downstream facade AgentBuilder smoke passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer() -> std::io::Result<()>
 {
     if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
@@ -1716,26 +1779,39 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     assert!(
         !public_core.contains("\"standalone-agent-builder\"")
             && !public_core.contains("\"internal-agent-factory-build\"")
+            && !public_core.contains("meerkat_internal_agent_factory_build")
+            && !public_core.contains("rustc_flags")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
-         features, public factory-build features, or recoverable factory \
-         bridge proof material in Bazel builds"
+         features, public factory-build features, internal factory cfg, or \
+         recoverable factory bridge proof material in Bazel builds"
     );
 
+    let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
+        .expect("Bazel must provide a facade-private core target for AgentFactory builds");
     assert!(
-        bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build").is_none(),
-        "Bazel must not publish a second core crate graph for AgentFactory; \
-         split core graphs make public API types diverge"
+        internal_core.contains("meerkat_internal_agent_factory_build")
+            && internal_core.contains("rustc_flags")
+            && internal_core.contains("\"//meerkat:__pkg__\"")
+            && !internal_core.contains("//visibility:public"),
+        "the Bazel AgentFactory core variant must carry the internal factory \
+         cfg but be visible only to the facade package"
     );
+
+    if let Some(facade_bazel) = try_repo_file("meerkat/BUILD.bazel") {
+        assert!(
+            !facade_bazel.contains("//meerkat:meerkat_agent_factory_build"),
+            "the facade package must not rewrite self-dependencies to a \
+             nonexistent private facade variant"
+        );
+    }
 }
 
 #[test]
 fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
     for (build_file, target) in [
         ("meerkat-comms/BUILD.bazel", "meerkat_comms"),
-        ("meerkat-rest/BUILD.bazel", "meerkat_rest"),
-        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
         ("meerkat-runtime/BUILD.bazel", "meerkat_runtime"),
     ] {
         let Some(bazel) = try_repo_file(build_file) else {
@@ -1754,6 +1830,37 @@ fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
             !library.contains("meerkat_core_agent_factory_build"),
             "{target} must not expose the internal AgentFactory core variant \
              through an ordinary public production target"
+        );
+    }
+}
+
+#[test]
+fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
+    for (build_file, target) in [
+        ("meerkat-cli/BUILD.bazel", "rkat"),
+        ("meerkat-mob/BUILD.bazel", "meerkat_mob"),
+        ("meerkat-rest/BUILD.bazel", "meerkat_rest"),
+        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
+    ] {
+        let Some(bazel) = try_repo_file(build_file) else {
+            // Cargo-only source layouts may not include generated Bazel files.
+            continue;
+        };
+        let build_target = bazel_target_block(&bazel, target)
+            .unwrap_or_else(|| panic!("{build_file} must contain {target} target"));
+        if !build_target.contains("\"//meerkat:meerkat\"") {
+            continue;
+        }
+
+        assert!(
+            build_target.contains("\"//meerkat-core:meerkat_core_agent_factory_build\""),
+            "{target} consumes the facade and must use the same private core \
+             variant as the facade to avoid duplicate meerkat_core types"
+        );
+        assert!(
+            !build_target.contains("\"//meerkat-core:meerkat_core\","),
+            "{target} must not mix the public core target with the facade's \
+             private factory dependency graph"
         );
     }
 }

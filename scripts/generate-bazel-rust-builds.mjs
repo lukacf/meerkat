@@ -152,6 +152,7 @@ function publicCoreCrateFeatures(key, pkg) {
   const features = new Set(crateFeaturesFor(key, pkg));
   if (key === "meerkat-core") {
     features.delete("standalone-agent-builder");
+    features.delete("__meerkat-facade-agent-factory-build");
   }
   return [...features].sort();
 }
@@ -207,6 +208,141 @@ function rustTargetVisibility(key) {
     ]);
   }
   return `["//visibility:public"]`;
+}
+
+function localNormalDependencyPackages(pkg) {
+  return pkg.dependencies
+    .filter((dep) => dep.source === null && dep.kind !== "dev")
+    .map((dep) => byName.get(dep.name))
+    .filter(Boolean);
+}
+
+function hasRustLibraryTarget(pkg) {
+  return pkg.targets.some((target) =>
+    target.kind.includes("lib") || target.kind.includes("rlib") || target.kind.includes("cdylib")
+  );
+}
+
+const agentFactoryGraphKeys = new Set();
+const agentFactoryStack = byName.has("meerkat") ? [byName.get("meerkat")] : [];
+while (agentFactoryStack.length) {
+  const pkg = agentFactoryStack.pop();
+  const key = packageKey(pkg);
+  if (agentFactoryGraphKeys.has(key)) continue;
+  agentFactoryGraphKeys.add(key);
+  for (const dep of localNormalDependencyPackages(pkg)) {
+    agentFactoryStack.push(dep);
+  }
+}
+
+function reverseDependencyKeys(includeDev) {
+  const reverse = new Map(
+    [...localPackages.values()].map((pkg) => [packageKey(pkg), new Set()]),
+  );
+  for (const pkg of localPackages.values()) {
+    const key = packageKey(pkg);
+    for (const dep of pkg.dependencies) {
+      if (dep.source !== null) continue;
+      if (!includeDev && dep.kind === "dev") continue;
+      const local = byName.get(dep.name);
+      if (!local) continue;
+      reverse.get(packageKey(local))?.add(key);
+    }
+  }
+  return reverse;
+}
+
+const localNormalReverseDependencyKeys = reverseDependencyKeys(false);
+const agentFactoryConsumerKeys = new Set();
+const agentFactoryConsumerStack = ["meerkat"];
+while (agentFactoryConsumerStack.length) {
+  const key = agentFactoryConsumerStack.pop();
+  if (agentFactoryConsumerKeys.has(key)) continue;
+  agentFactoryConsumerKeys.add(key);
+  for (const consumerKey of localNormalReverseDependencyKeys.get(key) ?? []) {
+    agentFactoryConsumerStack.push(consumerKey);
+  }
+}
+
+const agentFactoryDevTestConsumerKeys = new Set();
+for (const pkg of localPackages.values()) {
+  const key = packageKey(pkg);
+  for (const dep of pkg.dependencies) {
+    if (dep.source !== null || dep.kind !== "dev") continue;
+    const local = byName.get(dep.name);
+    if (local && agentFactoryConsumerKeys.has(packageKey(local))) {
+      agentFactoryDevTestConsumerKeys.add(key);
+    }
+  }
+}
+
+const agentFactoryTestConsumerKeys = new Set([
+  ...agentFactoryConsumerKeys,
+  ...agentFactoryDevTestConsumerKeys,
+]);
+
+const agentFactoryConsumerDependencyKeys = new Set();
+const agentFactoryConsumerDependencyStack = [];
+for (const pkg of localPackages.values()) {
+  if (!agentFactoryConsumerKeys.has(packageKey(pkg))) continue;
+  agentFactoryConsumerDependencyStack.push(...localNormalDependencyPackages(pkg));
+}
+while (agentFactoryConsumerDependencyStack.length) {
+  const pkg = agentFactoryConsumerDependencyStack.pop();
+  const key = packageKey(pkg);
+  if (agentFactoryConsumerDependencyKeys.has(key)) continue;
+  agentFactoryConsumerDependencyKeys.add(key);
+  agentFactoryConsumerDependencyStack.push(...localNormalDependencyPackages(pkg));
+}
+
+const agentFactoryVariantKeys = new Set([
+  ...agentFactoryGraphKeys,
+  ...agentFactoryConsumerDependencyKeys,
+  ...agentFactoryDevTestConsumerKeys,
+]);
+
+function shouldGenerateAgentFactoryVariantForKey(key) {
+  return key !== "meerkat"
+    && !agentFactoryConsumerKeys.has(key)
+    && agentFactoryVariantKeys.has(key);
+}
+
+function agentFactoryVariantName(pkg) {
+  return `${crateName(pkg.name)}_agent_factory_build`;
+}
+
+function agentFactoryVariantLabel(pkg) {
+  return `//${relative(root, packageDir(pkg))}:${agentFactoryVariantName(pkg)}`;
+}
+
+const agentFactoryVariantByPublicLabel = new Map(
+  [...localPackages.values()]
+    .filter((pkg) =>
+      shouldGenerateAgentFactoryVariantForKey(packageKey(pkg))
+      && hasRustLibraryTarget(pkg)
+    )
+    .map((pkg) => [packageLabel(pkg), agentFactoryVariantLabel(pkg)]),
+);
+
+const agentFactoryVariantVisibility = listExpr(
+  [...new Set([
+    ...agentFactoryGraphKeys,
+    ...agentFactoryConsumerKeys,
+    ...agentFactoryConsumerDependencyKeys,
+    ...agentFactoryTestConsumerKeys,
+  ])]
+    .filter((key) => key !== ".")
+    .map((key) => `//${key}:__pkg__`)
+    .sort(),
+);
+
+function rewriteAgentFactoryDeps(deps) {
+  return deps.map((dep) => agentFactoryVariantByPublicLabel.get(dep) ?? dep);
+}
+
+function shouldRewriteAgentFactoryDepsFor(key, testOnlyDeps = false) {
+  return agentFactoryConsumerKeys.has(key)
+    || (testOnlyDeps && agentFactoryTestConsumerKeys.has(key));
 }
 
 const nativeE2eSystemTests = [
@@ -679,21 +815,28 @@ for (const pkg of localPackages.values()) {
         : crateName(pkg.name);
     const optionalExternal = optionalExternalDeps(pkg);
     const selfLibraryLabel = packageLabel(pkg);
-    const deps = isTest
+    const rawDeps = isTest
       ? [...new Set([...(libOrMacro ? [selfLibraryLabel] : []), ...localDeps(pkg, false, true)])].sort()
       : target.kind.includes("bin") && libOrMacro
       ? [...new Set([selfLibraryLabel, ...localDeps(pkg, false, true)])].sort()
       : target.kind.includes("bin")
       ? localDeps(pkg, false, true)
       : localDeps(pkg, false);
+    const deps = shouldRewriteAgentFactoryDepsFor(key, isTest)
+      ? rewriteAgentFactoryDeps(rawDeps)
+      : rawDeps;
     const procMacroDeps = localDeps(pkg, true, isTest);
     const isCorePublicLibrary = key === "meerkat-core" && rule === "rust_library";
     const targetSourceText = isTest ? readFileSync(target.src_path, "utf8") : "";
     let targetDeps = deps;
     if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
+      const scheduleMachineSchemaExports = shouldRewriteAgentFactoryDepsFor(key, isTest)
+        ? "//meerkat-schedule:meerkat_schedule_machine_schema_exports_agent_factory_build"
+        : "//meerkat-schedule:meerkat_schedule_machine_schema_exports";
       targetDeps = deps
         .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule")
-        .concat("//meerkat-schedule:meerkat_schedule_machine_schema_exports")
+        .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule_agent_factory_build")
+        .concat(scheduleMachineSchemaExports)
         .sort();
     }
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
@@ -731,9 +874,6 @@ for (const pkg of localPackages.values()) {
       `    crate_root = ${q(relative(dir, target.src_path))},`,
       `    crate_features = ${listExpr(isCorePublicLibrary ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg))},`,
       `    edition = "2024",`,
-      ...(key === "meerkat-core"
-        ? [`    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],`]
-        : []),
       `    compile_data = ${compileDataExpr},`,
       `    srcs = ${srcsExpr},`,
       `    visibility = ${rustTargetVisibility(key)},`,
@@ -853,14 +993,56 @@ for (const pkg of localPackages.values()) {
     }
     attrs.splice(attrs.length - 1, 0, `    proc_macro_deps = ${procExpr},`);
     rules.push(`${rule}(\n${attrs.join("\n")}\n)`);
+    const shouldGenerateAgentFactoryVariant =
+      rule === "rust_library"
+      && shouldGenerateAgentFactoryVariantForKey(key)
+      && hasRustLibraryTarget(pkg);
+    if (shouldGenerateAgentFactoryVariant) {
+      const internalDepsWithOptionalExternal = [
+        ...new Set([...rewriteAgentFactoryDeps(targetDeps), ...optionalExternal]),
+      ].sort();
+      const internalDepsExpr = internalDepsWithOptionalExternal.length
+        ? `${listExpr(internalDepsWithOptionalExternal)} + ${externalNormal}`
+        : externalNormal;
+      const internalAttrs = attrs.map((line) => {
+        if (line === `    name = ${q(name)},`) {
+          return `    name = ${q(agentFactoryVariantName(pkg))},`;
+        }
+        if (line === `    visibility = ${rustTargetVisibility(key)},`) {
+          return `    visibility = ${agentFactoryVariantVisibility},`;
+        }
+        if (line === `    deps = ${depsExpr},`) {
+          return `    deps = ${internalDepsExpr},`;
+        }
+        return line;
+      });
+      if (key === "meerkat-core") {
+        const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
+        internalAttrs.splice(
+          editionIndex + 1,
+          0,
+          `    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],`,
+        );
+      }
+      rules.push(`rust_library(\n${internalAttrs.join("\n")}\n)`);
+    }
     if (rule === "rust_library") {
       const unitName = `${crateName(target.name)}_unit_test`;
       const packageRunfilesDir = relative(root, dir) || ".";
       const cargoManifestDir = packageRunfilesDir !== "."
         ? `./${packageRunfilesDir}`
         : packageRunfilesDir;
+      const unitLocalDeps = shouldRewriteAgentFactoryDepsFor(key, true)
+        ? rewriteAgentFactoryDeps(localDeps(pkg, false, true))
+        : localDeps(pkg, false, true);
+      const unitBaseDeps = shouldRewriteAgentFactoryDepsFor(key, true)
+        ? rewriteAgentFactoryDeps(depsWithOptionalExternal)
+        : depsWithOptionalExternal;
       const unitDeps = [
-        ...new Set([...depsWithOptionalExternal, ...localDeps(pkg, false, true)]),
+        ...new Set([
+          ...unitBaseDeps,
+          ...unitLocalDeps,
+        ]),
       ].sort();
       const unitProcDeps = [...new Set([...procMacroDeps, ...localDeps(pkg, true, true)])].sort();
       const unitDepsExpr = unitDeps.length
@@ -1027,6 +1209,32 @@ for (const pkg of localPackages.values()) {
     deps = [
         "${packageLabel(byName.get("meerkat-core"))}",
         "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-schedule",
+        normal = True,
+    ),
+)`);
+    rules.push(`rust_library(
+    name = "meerkat_schedule_machine_schema_exports_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-schedule"),
+    crate_name = "meerkat_schedule",
+    crate_root = "src/lib.rs",
+    crate_features = ${listExpr(crateFeaturesFor(key, pkg, ["machine-schema-exports"]))},
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//meerkat-machine-codegen:__pkg__"],
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-schedule",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-machine-schema:meerkat_machine_schema_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,

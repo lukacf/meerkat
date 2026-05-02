@@ -64,6 +64,7 @@ pub struct AgentBuilder {
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) runtime_execution_kind_required: bool,
+    #[allow(dead_code)]
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
@@ -341,6 +342,7 @@ impl AgentBuilder {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn build_inner<C, T, S>(
         self,
         client: Arc<C>,

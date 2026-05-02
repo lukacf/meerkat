@@ -1796,10 +1796,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 else {
                     unreachable!("only StartTurn command was sent")
                 };
-                if restore_staged_capacity_on_pre_run_failure {
-                    if let Some(admission) = active_admission {
-                        admission.restore_staged_capacity();
-                    }
+                if restore_staged_capacity_on_pre_run_failure
+                    && let Some(admission) = active_admission
+                {
+                    admission.restore_staged_capacity();
                 }
                 Self::try_abort_admitted_turn(handle);
                 return Err((
@@ -3259,10 +3259,10 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
-                    if restore_staged_capacity_on_pre_run_failure {
-                        if let Some(admission) = active_admission.take() {
-                            admission.restore_staged_capacity();
-                        }
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
                     }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
@@ -3277,10 +3277,10 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
-                    if restore_staged_capacity_on_pre_run_failure {
-                        if let Some(admission) = active_admission.take() {
-                            admission.restore_staged_capacity();
-                        }
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
                     }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
@@ -3294,10 +3294,10 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
-                    if restore_staged_capacity_on_pre_run_failure {
-                        if let Some(admission) = active_admission.take() {
-                            admission.restore_staged_capacity();
-                        }
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
                     }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
@@ -3321,10 +3321,10 @@ async fn session_task<A: SessionAgent>(
                             pending_initial_prompt,
                             pending_tool_results,
                         );
-                        if restore_staged_capacity_on_pre_run_failure {
-                            if let Some(admission) = active_admission.take() {
-                                admission.restore_staged_capacity();
-                            }
+                        if restore_staged_capacity_on_pre_run_failure
+                            && let Some(admission) = active_admission.take()
+                        {
+                            admission.restore_staged_capacity();
                         }
                         let _ =
                             result_tx.send(Err(meerkat_core::error::AgentError::InternalError(

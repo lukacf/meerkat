@@ -57,6 +57,37 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_comms_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-comms"),
+    crate_name = "meerkat_comms",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/multi-agent-comms/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-comms",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_skills_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-comms",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_comms_unit_test",
     aliases = aliases(

@@ -149,7 +149,7 @@ impl McpScheduleContext {
         let output_schema = create.output_schema.clone();
 
         let mcp_adapter = match self
-            .seed_realm_mcp_adapter(Arc::clone(&runtime_bindings.external_tool_surface))
+            .seed_realm_mcp_adapter(Arc::clone(runtime_bindings.external_tool_surface()))
             .await
         {
             Ok(adapter) => adapter,

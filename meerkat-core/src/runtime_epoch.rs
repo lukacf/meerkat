@@ -6,6 +6,7 @@
 //!
 //! Design rule: one build consumes bindings, it does not create them.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -144,58 +145,59 @@ pub struct EpochCursorSnapshot {
 /// Created by the runtime epoch owner, consumed by the factory. The factory
 /// never creates competing registries when it receives this bundle.
 ///
-/// The `session_id` field acts as an identity witness: the factory validates
-/// that `bindings.session_id == session.id()` to catch cross-wired bindings.
+/// `SessionRuntimeBindings` is opaque so downstream callers cannot assemble a
+/// fake machine-owned binding bundle. The factory validates both the session id
+/// and the runtime-private authority witness before consuming the handles.
 pub struct SessionRuntimeBindings {
     /// Session this binding was prepared for. Factory validates this matches
     /// the session being built.
-    pub session_id: SessionId,
+    session_id: SessionId,
     /// Epoch identity — stable across rebuilds within the same epoch,
     /// rotated on reset/restart-without-recovery.
-    pub epoch_id: RuntimeEpochId,
+    epoch_id: RuntimeEpochId,
     /// Canonical ops lifecycle registry for this epoch.
-    pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
+    ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
     /// Shared consumer cursor state for this epoch.
-    pub cursor_state: Arc<EpochCursorState>,
+    cursor_state: Arc<EpochCursorState>,
     /// Canonical durable tool-visibility owner for this session/runtime binding.
-    pub tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
+    tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
     /// Turn-execution DSL handle (Phase 5F/0 addition).
-    pub turn_state: Arc<dyn TurnStateHandle>,
+    turn_state: Arc<dyn TurnStateHandle>,
     /// Comms drain lifecycle DSL handle (Phase 5F/0 addition).
-    pub comms_drain: Arc<dyn CommsDrainHandle>,
+    comms_drain: Arc<dyn CommsDrainHandle>,
     /// External tool surface DSL handle (Phase 5F/0 addition).
-    pub external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
+    external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
     /// Peer comms classification DSL handle (Phase 5F/0 addition).
-    pub peer_comms: Arc<dyn PeerCommsHandle>,
+    peer_comms: Arc<dyn PeerCommsHandle>,
     /// Session turn-admission DSL handle (Phase 5F/0 addition).
-    pub session_admission: Arc<dyn SessionAdmissionHandle>,
+    session_admission: Arc<dyn SessionAdmissionHandle>,
     /// Session model-routing baseline DSL handle.
     ///
     /// The factory sets this after resolving the concrete LLM identity so
     /// runtime-backed tool resolution observes a machine-owned baseline.
-    pub model_routing: Arc<dyn ModelRoutingHandle>,
+    model_routing: Arc<dyn ModelRoutingHandle>,
     /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
-    pub auth_lease: Arc<dyn AuthLeaseHandle>,
+    auth_lease: Arc<dyn AuthLeaseHandle>,
     /// MCP server lifecycle DSL handle (Phase 5G / T5g addition).
     ///
     /// Routes per-server MCP handshake events into the session's MeerkatMachine
     /// DSL (`mcp_server_states` substate) and exposes the `PendingConnect` set
     /// to the agent loop for the `[MCP_PENDING]` system-notice toggle.
-    pub mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
+    mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
     /// Peer interaction lifecycle DSL handle (W1-A / issue #264).
     ///
     /// Any session-owned runtime binding that can emit semantic peer
     /// request/response receipts carries this handle. Standalone/embedded
     /// builds without bindings are transport-only unless they explicitly
     /// prepare an ephemeral machine authority and use `SessionOwned`.
-    pub peer_interaction: Arc<dyn PeerInteractionHandle>,
+    peer_interaction: Arc<dyn PeerInteractionHandle>,
     /// Session-context advancement DSL handle (W2-E / issue #264).
     ///
     /// Fires `AdvanceSessionContext` at every canonical session-truth
     /// mutation site so the realtime projection consumer can subscribe to
     /// a typed `SessionContextAdvanced` effect instead of polling a watch
     /// channel. Shares the same `HandleDslAuthority` as the other handles.
-    pub session_context: Arc<dyn SessionContextHandle>,
+    session_context: Arc<dyn SessionContextHandle>,
     /// Session-identity claim handle owned by the runtime (dogma #2).
     ///
     /// Comms runtimes built for this session acquire their typed
@@ -204,12 +206,12 @@ pub struct SessionRuntimeBindings {
     /// runtime, not by process-global shell statics.
     ///
     /// [`SessionClaim`]: crate::handles::SessionClaim
-    pub session_claim_handle: Arc<dyn SessionClaimHandle>,
+    session_claim_handle: Arc<dyn SessionClaimHandle>,
     /// Interaction stream lifecycle DSL handle (U6 / dogma #5).
     ///
     /// Required with session-owned peer request/response semantics so stream
     /// reservations remain a projection of machine state.
-    pub interaction_stream: Arc<dyn InteractionStreamHandle>,
+    interaction_stream: Arc<dyn InteractionStreamHandle>,
     /// Realtime product-turn lifecycle DSL handle (U9 / dogma #4).
     ///
     /// Replaces the shell-local `product_turn_in_flight` /
@@ -217,7 +219,138 @@ pub struct SessionRuntimeBindings {
     /// realtime-WS dispatcher with a canonical typed phase owned by the
     /// session's MeerkatMachine. Shares the same `HandleDslAuthority` as
     /// the other handles.
-    pub realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>,
+    realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>,
+    runtime_authority: Arc<dyn Any + Send + Sync>,
+}
+
+impl SessionRuntimeBindings {
+    /// Construct bindings from the runtime crate after `MeerkatMachine` has
+    /// prepared the session epoch and minted its private authority witness.
+    ///
+    /// Public callers can name this function, but cannot satisfy the factory's
+    /// runtime authority check without a witness minted by `meerkat-runtime`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __from_runtime_authority(
+        session_id: SessionId,
+        epoch_id: RuntimeEpochId,
+        ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
+        cursor_state: Arc<EpochCursorState>,
+        tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
+        turn_state: Arc<dyn TurnStateHandle>,
+        comms_drain: Arc<dyn CommsDrainHandle>,
+        external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
+        peer_comms: Arc<dyn PeerCommsHandle>,
+        session_admission: Arc<dyn SessionAdmissionHandle>,
+        model_routing: Arc<dyn ModelRoutingHandle>,
+        auth_lease: Arc<dyn AuthLeaseHandle>,
+        mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
+        peer_interaction: Arc<dyn PeerInteractionHandle>,
+        session_context: Arc<dyn SessionContextHandle>,
+        session_claim_handle: Arc<dyn SessionClaimHandle>,
+        interaction_stream: Arc<dyn InteractionStreamHandle>,
+        realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>,
+        runtime_authority: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            session_id,
+            epoch_id,
+            ops_lifecycle,
+            cursor_state,
+            tool_visibility_owner,
+            turn_state,
+            comms_drain,
+            external_tool_surface,
+            peer_comms,
+            session_admission,
+            model_routing,
+            auth_lease,
+            mcp_server_lifecycle,
+            peer_interaction,
+            session_context,
+            session_claim_handle,
+            interaction_stream,
+            realtime_product_turn,
+            runtime_authority,
+        }
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn epoch_id(&self) -> &RuntimeEpochId {
+        &self.epoch_id
+    }
+
+    pub fn ops_lifecycle(&self) -> &Arc<dyn OpsLifecycleRegistry> {
+        &self.ops_lifecycle
+    }
+
+    pub fn cursor_state(&self) -> &Arc<EpochCursorState> {
+        &self.cursor_state
+    }
+
+    pub fn tool_visibility_owner(&self) -> &Arc<dyn ToolVisibilityOwner> {
+        &self.tool_visibility_owner
+    }
+
+    pub fn turn_state(&self) -> &Arc<dyn TurnStateHandle> {
+        &self.turn_state
+    }
+
+    pub fn comms_drain(&self) -> &Arc<dyn CommsDrainHandle> {
+        &self.comms_drain
+    }
+
+    pub fn external_tool_surface(&self) -> &Arc<dyn ExternalToolSurfaceHandle> {
+        &self.external_tool_surface
+    }
+
+    pub fn peer_comms(&self) -> &Arc<dyn PeerCommsHandle> {
+        &self.peer_comms
+    }
+
+    pub fn session_admission(&self) -> &Arc<dyn SessionAdmissionHandle> {
+        &self.session_admission
+    }
+
+    pub fn model_routing(&self) -> &Arc<dyn ModelRoutingHandle> {
+        &self.model_routing
+    }
+
+    pub fn auth_lease(&self) -> &Arc<dyn AuthLeaseHandle> {
+        &self.auth_lease
+    }
+
+    pub fn mcp_server_lifecycle(&self) -> &Arc<dyn McpServerLifecycleHandle> {
+        &self.mcp_server_lifecycle
+    }
+
+    pub fn peer_interaction(&self) -> &Arc<dyn PeerInteractionHandle> {
+        &self.peer_interaction
+    }
+
+    pub fn session_context(&self) -> &Arc<dyn SessionContextHandle> {
+        &self.session_context
+    }
+
+    pub fn session_claim_handle(&self) -> &Arc<dyn SessionClaimHandle> {
+        &self.session_claim_handle
+    }
+
+    pub fn interaction_stream(&self) -> &Arc<dyn InteractionStreamHandle> {
+        &self.interaction_stream
+    }
+
+    pub fn realtime_product_turn(&self) -> &Arc<dyn RealtimeProductTurnHandle> {
+        &self.realtime_product_turn
+    }
+
+    #[doc(hidden)]
+    pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
+        self.runtime_authority.as_ref()
+    }
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -241,6 +374,7 @@ impl Clone for SessionRuntimeBindings {
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: Arc::clone(&self.interaction_stream),
             realtime_product_turn: Arc::clone(&self.realtime_product_turn),
+            runtime_authority: Arc::clone(&self.runtime_authority),
         }
     }
 }

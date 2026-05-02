@@ -3731,7 +3731,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
@@ -3785,7 +3785,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
@@ -3853,7 +3853,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
@@ -3917,7 +3917,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
@@ -3967,7 +3967,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
@@ -4029,7 +4029,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let detail = auth_status_detail(
@@ -4043,7 +4043,7 @@ mod tests {
             .prepare_bindings(meerkat_core::SessionId::new())
             .await
             .unwrap();
-        bindings.auth_lease.begin_refresh(&lease_key).unwrap();
+        bindings.auth_lease().begin_refresh(&lease_key).unwrap();
         let detail = auth_status_detail(
             get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
         )
@@ -4051,11 +4051,11 @@ mod tests {
         assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Expiring);
 
         bindings
-            .auth_lease
+            .auth_lease()
             .complete_refresh(&lease_key, now + 7200, now)
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .mark_reauth_required(&lease_key)
             .unwrap();
         let detail = auth_status_detail(

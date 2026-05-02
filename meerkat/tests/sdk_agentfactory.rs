@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
     AgentBuildConfig, AgentBuilder, AgentFactory, AgentLlmClient, AgentToolDispatcher,
-    BuildAgentError, Config, CoreAgentBuilder, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef,
-    ToolError, ToolResult,
+    BuildAgentError, Config, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef, ToolError, ToolResult,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::ToolDispatchOutcome;
@@ -632,8 +631,8 @@ fn assert_unsupported_builder_injection(error: BuildAgentError, method: &str) {
         "error should name unsupported method {method}: {message}"
     );
     assert!(
-        message.contains("CoreAgentBuilder"),
-        "error should point callers to the standalone builder: {message}"
+        message.contains("AgentFactory/AgentBuildConfig"),
+        "error should point callers to factory-owned settings: {message}"
     );
 }
 
@@ -706,31 +705,23 @@ async fn public_agentbuilder_rejects_standalone_core_injections_loudly() {
     assert_unsupported_builder_injection(turn_state_error, "with_turn_state_handle");
 }
 
-#[tokio::test]
-async fn core_agentbuilder_remains_explicit_standalone_escape_hatch() {
-    let factory = AgentFactory::new(".rkat/sessions");
-    let llm_client = Arc::new(MockLlmClient {
-        calls: Arc::new(AtomicUsize::new(1)),
-    });
-    let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(RecordingDispatcher {
-        called: Arc::new(AtomicBool::new(false)),
-    });
-    let store = Arc::new(TestSessionStore::new());
-    let store_adapter = Arc::new(factory.build_store_adapter(store).await);
-
-    let agent = CoreAgentBuilder::new()
-        .model("mock-model")
-        .max_tokens_per_turn(64)
-        .with_turn_state_handle(Arc::new(
-            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ))
-        .build(llm_adapter, tools, store_adapter)
-        .await;
+#[test]
+fn public_agentfactory_value_is_not_core_policy_authority() {
+    let mut builder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    builder.pop();
+    builder.push("meerkat-core/src/agent/builder.rs");
+    let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
     assert!(
-        agent.session().session_metadata().is_none(),
-        "CoreAgentBuilder intentionally remains a standalone primitive builder; \
-         facade metadata is owned by meerkat::AgentBuilder/AgentFactory"
+        builder.contains("validate_factory_policy()?")
+            && !builder.contains("std::panic::Location::caller")
+            && !builder.contains("validate_factory_policy_caller")
+            && !builder.contains("canonical_factory_source_path")
+            && !builder.contains("pub struct AgentFactoryPolicyAuthority")
+            && !builder.contains("pub fn from_registered_source<A: 'static>")
+            && !builder.contains("pub fn agent_factory_policy_authority"),
+        "core factory-policy build must validate factory-composed policy state \
+         without trusting runtime source paths or exposing a public core \
+         authority type or minting helper"
     );
 }

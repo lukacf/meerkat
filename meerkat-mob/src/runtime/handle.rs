@@ -937,7 +937,8 @@ pub struct SpawnMemberSpec {
     /// Pre-resolved inherited tool filter from spawn tooling resolution.
     ///
     /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the child
-    /// session metadata so `AgentBuilder::build()` recovers it as a base filter.
+    /// session metadata so the factory-backed core build recovers it as a base
+    /// filter.
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
     /// Override profile resolved from `SpawnTooling::Profile` source.
     ///

@@ -12,7 +12,7 @@ This page is a quick-lookup index. For current session/runtime semantics, see [S
 |------|--------|---------|
 | `Agent` | `meerkat_core` | Main agent execution engine |
 | `AgentBuilder` | `meerkat` | Public facade builder that routes through `AgentFactory` |
-| `CoreAgentBuilder` | `meerkat_core` | Low-level primitive builder for explicit standalone construction |
+| `meerkat_core::AgentBuilder` | `meerkat_core` | Low-level primitive builder used internally by the facade; standalone public construction is not a supported embedding API |
 | `Session` | `meerkat_core` | Conversation state container |
 | `SessionId` | `meerkat_core` | Unique session identifier (UUIDv7) |
 | `Message` | `meerkat_core` | Conversation message enum (`System`, `SystemNotice`, `User`, `Assistant`, `BlockAssistant`, `ToolResults`, with runtime notices carried through `SystemNotice`) |

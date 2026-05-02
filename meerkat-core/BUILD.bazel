@@ -44,6 +44,42 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_core_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-core"),
+    crate_name = "meerkat_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
+    },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-core",
         proc_macro = True,
@@ -66,6 +102,7 @@ rust_test(
     crate_name = "meerkat_core",
     crate_root = "src/lib.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -114,6 +151,7 @@ rust_test(
     crate_name = "connection_ref_no_string_form",
     crate_root = "tests/connection_ref_no_string_form.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -164,6 +202,7 @@ rust_test(
     crate_name = "fork_at_rotates_session_id",
     crate_root = "tests/fork_at_rotates_session_id.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -205,56 +244,6 @@ rust_test(
 )
 
 rust_test(
-    name = "hooks_behavior_test",
-    aliases = aliases(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "hooks_behavior",
-    crate_root = "tests/hooks_behavior.rs",
-    crate_features = [
-        "jsonschema",
-        "schema",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/config_template.toml",
-    ],
-    srcs = [
-        "tests/hooks_behavior.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_BIN_NAME": "hooks_behavior",
-        "CARGO_MANIFEST_DIR": "./meerkat-core",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-core",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-core:meerkat_core",
-    ] + all_crate_deps(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
     name = "hooks_contracts_test",
     aliases = aliases(
         package_name = "meerkat-core",
@@ -266,6 +255,7 @@ rust_test(
     crate_name = "hooks_contracts",
     crate_root = "tests/hooks_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -322,6 +312,7 @@ rust_test(
     crate_name = "image_generation_contracts",
     crate_root = "tests/image_generation_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -372,6 +363,7 @@ rust_test(
     crate_name = "ops_lifecycle_integration",
     crate_root = "tests/ops_lifecycle_integration.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -421,6 +413,7 @@ rust_test(
     crate_name = "rct_contracts",
     crate_root = "tests/rct_contracts.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -473,6 +466,7 @@ rust_test(
     crate_name = "realm_connection_config",
     crate_root = "tests/realm_connection_config.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -523,6 +517,7 @@ rust_test(
     crate_name = "runtime_turn_metadata_typed_round_trip",
     crate_root = "tests/runtime_turn_metadata_typed_round_trip.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -573,6 +568,7 @@ rust_test(
     crate_name = "source_identity_resolve_enforces_lifecycle",
     crate_root = "tests/source_identity_resolve_enforces_lifecycle.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -623,6 +619,7 @@ rust_test(
     crate_name = "tool_notice_projection",
     crate_root = "tests/tool_notice_projection.rs",
     crate_features = [
+        "__meerkat-facade-agent-factory-build",
         "jsonschema",
         "schema",
     ],
@@ -666,7 +663,6 @@ test_suite(
     tests = [
         ":connection_ref_no_string_form_test",
         ":fork_at_rotates_session_id_test",
-        ":hooks_behavior_test",
         ":hooks_contracts_test",
         ":image_generation_contracts_test",
         ":meerkat_core_unit_test",

@@ -2,17 +2,22 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
+use std::any::Any;
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
+#[cfg(feature = "openai")]
+use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
@@ -43,9 +48,9 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec, HookRunOverrides,
-    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
-    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
+    BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
+    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
+    SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
@@ -157,6 +162,50 @@ impl SessionStore for EphemeralSessionStore {
 
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>> + Send>>;
+
+#[cfg(target_arch = "wasm32")]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
+
+struct AgentFactoryPolicyBridgeToken;
+
+static AGENT_FACTORY_POLICY_BRIDGE_TOKEN: AgentFactoryPolicyBridgeToken =
+    AgentFactoryPolicyBridgeToken;
+
+fn agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
+    &AGENT_FACTORY_POLICY_BRIDGE_TOKEN
+}
+
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_",
+    env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn agent_factory_policy_bridge_token_is_valid(
+    factory_bridge_token: &(dyn Any + Send + Sync),
+) -> bool {
+    factory_bridge_token.is::<AgentFactoryPolicyBridgeToken>()
+}
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_agent_factory_policy_build_v3_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn core_agent_factory_policy_build(
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> CoreAgentFactoryBuildFuture;
+}
 
 #[derive(Clone)]
 struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
@@ -348,8 +397,9 @@ pub struct AgentBuildConfig {
     pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
     /// Pre-resolved metadata entries to inject into the session before agent build.
     ///
-    /// These are set on the session's internal metadata map before `AgentBuilder::build()`
-    /// runs, so they are available for early-stage recovery (e.g. inherited tool filter).
+    /// These are set on the session's internal metadata map before the core
+    /// `AgentBuilder` factory-policy seam runs, so they are available for
+    /// early-stage recovery (e.g. inherited tool filter).
     /// Entries here take precedence over any resumed session metadata for the same key.
     pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -1670,7 +1720,7 @@ impl AgentFactory {
     ///
     /// When set, `build_agent()` uses this store instead of the feature-flag-based
     /// default (jsonl, memory, or ephemeral). The store is wrapped in `StoreAdapter`
-    /// and passed to `AgentBuilder::build()`.
+    /// and passed to the core `AgentBuilder` factory-policy seam.
     pub fn session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.custom_store = Some(store);
         self
@@ -2643,7 +2693,7 @@ impl AgentFactory {
                         let auth_lease_handle = if let RuntimeBuildMode::SessionOwned(bindings) =
                             &build_config.runtime_build_mode
                         {
-                            Some(Arc::clone(&bindings.auth_lease))
+                            Some(Arc::clone(bindings.auth_lease()))
                         } else {
                             None
                         };
@@ -2707,7 +2757,7 @@ impl AgentFactory {
                             &build_config.runtime_build_mode
                             && lease_connection_ref.is_some()
                         {
-                            env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+                            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                         }
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2727,7 +2777,7 @@ impl AgentFactory {
                             && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
                         {
                             Self::publish_auth_lease(
-                                &bindings.auth_lease,
+                                bindings.auth_lease(),
                                 lease_connection_ref,
                                 &connection,
                             )
@@ -2837,7 +2887,7 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !connection_ref.is_env_default()
                 {
-                    env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+                    env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                 }
                 for (handle, resolver) in &self.external_auth_resolvers {
                     env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2852,7 +2902,7 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !connection_ref.is_env_default()
                 {
-                    Self::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+                    Self::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
                         .map_err(BuildAgentError::LlmClient)?;
                 }
                 let Ok(Some(executor)) = self
@@ -2878,7 +2928,7 @@ impl AgentFactory {
             &build_config.runtime_build_mode
         {
             bindings
-                .model_routing
+                .model_routing()
                 .set_baseline(
                     meerkat_core::lifecycle::run_primitive::ModelId::new(model.clone()),
                     model_profile
@@ -3052,7 +3102,7 @@ impl AgentFactory {
             let session_claim_handle: Arc<dyn meerkat_core::handles::SessionClaimHandle> =
                 match &build_config.runtime_build_mode {
                     meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
-                        Arc::clone(&bindings.session_claim_handle)
+                        Arc::clone(bindings.session_claim_handle())
                     }
                     meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
                         meerkat_core::handles::DefaultSessionClaimRegistry::global()
@@ -3151,15 +3201,22 @@ impl AgentFactory {
             Option<Arc<RuntimeOpsLifecycleRegistry>>,
         ) = match &resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
-                if bindings.session_id != *session.id() {
+                if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
+                    return Err(BuildAgentError::Config(
+                        "SessionRuntimeBindings were not prepared by MeerkatMachine; \
+                         session-owned runtime builds must use MeerkatMachine::prepare_bindings"
+                            .to_string(),
+                    ));
+                }
+                if bindings.session_id() != session.id() {
                     return Err(BuildAgentError::Config(format!(
                         "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
                          bindings may have been prepared for a different session",
-                        bindings.session_id,
+                        bindings.session_id(),
                         session.id(),
                     )));
                 }
-                (Arc::clone(&bindings.ops_lifecycle), None)
+                (Arc::clone(bindings.ops_lifecycle()), None)
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 let concrete = Arc::new(RuntimeOpsLifecycleRegistry::new());
@@ -3232,14 +3289,14 @@ impl AgentFactory {
         // connection state into MeerkatMachine's `mcp_server_states`. Others
         // are no-ops.
         if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
-            tools.bind_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
-            tools.bind_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+            tools.bind_external_tool_surface_handle(Arc::clone(bindings.external_tool_surface()));
+            tools.bind_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             // LUC-104: classified comms ingress must hand raw external/plain
             // ingress through the session's MeerkatMachine before the comms
             // shell computes compatibility auth/routing projections.
             #[cfg(feature = "comms")]
             if let Some(runtime) = &comms_runtime {
-                runtime.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
+                runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
             }
             // W1-A/U6: install the typed machine authority required before
             // comms can emit semantic peer request/response receipts.
@@ -3247,8 +3304,8 @@ impl AgentFactory {
             if let Some(runtime) = &comms_runtime {
                 runtime.install_peer_request_response_authority(
                     meerkat_comms::PeerRequestResponseAuthority::new(
-                        Arc::clone(&bindings.peer_interaction),
-                        Arc::clone(&bindings.interaction_stream),
+                        Arc::clone(bindings.peer_interaction()),
+                        Arc::clone(bindings.interaction_stream()),
                     ),
                 );
             }
@@ -3679,6 +3736,63 @@ impl AgentFactory {
             call_timeout_override: build_config.call_timeout_override.clone(),
         };
 
+        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
+        // effective bool. This ensures Inherit survives across save/resume cycles so
+        // the session continues to follow future runtime defaults.
+        let factory_metadata = if let Some(mut metadata) = resumed_session_metadata {
+            metadata.model = model.clone();
+            metadata.max_tokens = max_tokens;
+            metadata.structured_output_retries = build_config.structured_output_retries;
+            metadata.provider = provider;
+            metadata.self_hosted_server_id = self_hosted_server_id.clone();
+            metadata.provider_params = build_config.provider_params.clone();
+            metadata.tooling.builtins = build_config.override_builtins;
+            metadata.tooling.shell = build_config.override_shell;
+            // No override_comms field in AgentBuildConfig — preserve the existing
+            // metadata value so explicit Enable/Disable survives across resumes.
+            // (metadata.tooling.comms is left unchanged)
+            metadata.tooling.mob = build_config.override_mob;
+            metadata.tooling.memory = build_config.override_memory;
+            if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
+                metadata.tooling.active_skills = active_skill_ids.clone();
+            }
+            metadata.keep_alive = build_config.keep_alive;
+            metadata.comms_name = build_config.comms_name.clone();
+            metadata.peer_meta = build_config.peer_meta.clone();
+            metadata.realm_id = build_config.realm_id.clone();
+            metadata.instance_id = build_config.instance_id.clone();
+            metadata.backend = build_config.backend.clone();
+            metadata.config_generation = build_config.config_generation;
+            metadata.connection_ref = build_config.connection_ref.clone();
+            metadata
+        } else {
+            SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: model.clone(),
+                max_tokens,
+                structured_output_retries: build_config.structured_output_retries,
+                provider,
+                self_hosted_server_id: self_hosted_server_id.clone(),
+                provider_params: build_config.provider_params.clone(),
+                tooling: SessionTooling {
+                    builtins: build_config.override_builtins,
+                    shell: build_config.override_shell,
+                    comms: ToolCategoryOverride::Inherit,
+                    mob: build_config.override_mob,
+                    memory: build_config.override_memory,
+                    active_skills: active_skill_ids.clone(),
+                },
+                keep_alive: build_config.keep_alive,
+                comms_name: build_config.comms_name.clone(),
+                peer_meta: build_config.peer_meta.clone(),
+                realm_id: build_config.realm_id.clone(),
+                instance_id: build_config.instance_id.clone(),
+                backend: build_config.backend.clone(),
+                config_generation: build_config.config_generation,
+                connection_ref: build_config.connection_ref.clone(),
+            }
+        };
+
         // 12. Build AgentBuilder
         let budget_limits = build_config
             .budget_limits
@@ -3727,6 +3841,20 @@ impl AgentFactory {
         let _is_resumed = build_config.resume_session.is_some();
         #[cfg(feature = "memory-store-session")]
         let session_id = session.id().clone();
+        session
+            .set_session_metadata(factory_metadata)
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Failed to store session metadata before core build: {err}"
+                ))
+            })?;
+        session
+            .set_build_state(persisted_build_state)
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Failed to store session build state before core build: {err}"
+                ))
+            })?;
         builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
@@ -3813,16 +3941,17 @@ impl AgentFactory {
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
         match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
-                builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
-                builder =
-                    builder.with_tool_visibility_owner(Arc::clone(&bindings.tool_visibility_owner));
-                builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
+                builder = builder.with_epoch_cursor_state(Arc::clone(bindings.cursor_state()));
+                builder = builder
+                    .with_tool_visibility_owner(Arc::clone(bindings.tool_visibility_owner()));
+                builder = builder.with_turn_state_handle(Arc::clone(bindings.turn_state()));
                 builder = builder.require_runtime_execution_kind_stamp();
+                builder = builder.with_external_tool_surface_handle(Arc::clone(
+                    bindings.external_tool_surface(),
+                ));
+                builder = builder.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                 builder = builder
-                    .with_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
-                builder = builder.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
-                builder = builder
-                    .with_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+                    .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 builder =
@@ -3854,8 +3983,25 @@ impl AgentFactory {
             hoisted_control_visibility_provider = Some(visibility_provider);
         }
 
-        // 13. Build agent
-        let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
+        // 13. Build agent. AgentFactory owns the policy composition above; core
+        // validates that the durable policy metadata/runtime handle exists
+        // before constructing the agent.
+        // SAFETY: this is the canonical facade factory after provider,
+        // runtime, auth, session, tool, and metadata policy composition above.
+        #[allow(unsafe_code)]
+        let mut agent = unsafe {
+            core_agent_factory_policy_build(
+                agent_factory_policy_bridge_token(),
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
+        }
+        .map_err(|err| {
+            BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
+        })?;
 
         if let Some(provider) = hoisted_control_visibility_provider {
             provider.set_scope(agent.tool_scope().clone());
@@ -3864,71 +4010,6 @@ impl AgentFactory {
         // Wire mob authority handle into agent for session-effect application.
         if let Some(handle) = hoisted_mob_authority_handle {
             agent.set_mob_authority_handle(handle);
-        }
-
-        // 14. Set SessionMetadata
-        //
-        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
-        // effective bool. This ensures Inherit survives across save/resume cycles so
-        // the session continues to follow future runtime defaults.
-        let metadata = if let Some(mut metadata) = resumed_session_metadata {
-            metadata.model = model;
-            metadata.max_tokens = max_tokens;
-            metadata.structured_output_retries = build_config.structured_output_retries;
-            metadata.provider = provider;
-            metadata.self_hosted_server_id = self_hosted_server_id.clone();
-            metadata.provider_params = build_config.provider_params;
-            metadata.tooling.builtins = build_config.override_builtins;
-            metadata.tooling.shell = build_config.override_shell;
-            // No override_comms field in AgentBuildConfig — preserve the existing
-            // metadata value so explicit Enable/Disable survives across resumes.
-            // (metadata.tooling.comms is left unchanged)
-            metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = build_config.override_memory;
-            if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
-                metadata.tooling.active_skills = active_skill_ids;
-            }
-            metadata.keep_alive = build_config.keep_alive;
-            metadata.comms_name = build_config.comms_name;
-            metadata.peer_meta = build_config.peer_meta;
-            metadata.realm_id = build_config.realm_id;
-            metadata.instance_id = build_config.instance_id;
-            metadata.backend = build_config.backend;
-            metadata.config_generation = build_config.config_generation;
-            metadata.connection_ref = build_config.connection_ref.clone();
-            metadata
-        } else {
-            SessionMetadata {
-                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model,
-                max_tokens,
-                structured_output_retries: build_config.structured_output_retries,
-                provider,
-                self_hosted_server_id,
-                provider_params: build_config.provider_params,
-                tooling: SessionTooling {
-                    builtins: build_config.override_builtins,
-                    shell: build_config.override_shell,
-                    comms: ToolCategoryOverride::Inherit,
-                    mob: build_config.override_mob,
-                    memory: build_config.override_memory,
-                    active_skills: active_skill_ids,
-                },
-                keep_alive: build_config.keep_alive,
-                comms_name: build_config.comms_name,
-                peer_meta: build_config.peer_meta,
-                realm_id: build_config.realm_id,
-                instance_id: build_config.instance_id,
-                backend: build_config.backend,
-                config_generation: build_config.config_generation,
-                connection_ref: build_config.connection_ref.clone(),
-            }
-        };
-        if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
-            tracing::warn!("Failed to store session metadata: {}", err);
-        }
-        if let Err(err) = agent.session_mut().set_build_state(persisted_build_state) {
-            tracing::warn!("Failed to store session build state: {}", err);
         }
 
         Ok(agent)
@@ -3940,6 +4021,7 @@ impl AgentFactory {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     #[cfg(feature = "skills")]
     use meerkat_core::skills::{
         SkillDocument, SkillKey, SkillKeyRemap, SkillName, SkillRuntime, SourceIdentityLineage,
@@ -3951,6 +4033,63 @@ mod tests {
         RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
         SelfHostedTransport,
     };
+
+    struct NeverLlmClient;
+
+    #[async_trait]
+    impl LlmClient for NeverLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    struct TestSessionStore;
+
+    #[async_trait]
+    impl SessionStore for TestSessionStore {
+        async fn save(&self, _session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn registry_backed_defaults_resolver_respects_provider_identity() {
@@ -3973,6 +4112,49 @@ mod tests {
             ),
             None,
             "provider-aware default lookup must not reuse OpenAI defaults for Anthropic"
+        );
+    }
+
+    #[tokio::test]
+    async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let llm_adapter = Arc::new(
+            factory
+                .build_llm_adapter(Arc::new(NeverLlmClient), "mock-model")
+                .await,
+        );
+        let tools = Arc::new(EmptyToolDispatcher);
+        let store_adapter = Arc::new(
+            factory
+                .build_store_adapter(Arc::new(TestSessionStore))
+                .await,
+        );
+
+        let builder = AgentBuilder::new()
+            .model("mock-model")
+            .max_tokens_per_turn(64)
+            .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
+        // SAFETY: this test exercises the canonical facade/core bridge after
+        // intentionally omitting required factory metadata.
+        #[allow(unsafe_code)]
+        let result = unsafe {
+            core_agent_factory_policy_build(
+                agent_factory_policy_bridge_token(),
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
+        };
+
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_core::AgentBuildPolicyError::MissingSession)
+            ),
+            "core factory-policy build must reject missing factory metadata"
         );
     }
 
@@ -4329,7 +4511,7 @@ mod tests {
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default identity must not be admitted to AuthMachine lease truth"
@@ -4434,7 +4616,7 @@ mod tests {
             .build_llm_client_for_identity_with_auth_lease(
                 &Config::default(),
                 &identity,
-                Some(Arc::clone(&bindings.auth_lease)),
+                Some(Arc::clone(bindings.auth_lease())),
             )
             .await
             .expect("env-default hot-swap client should still build");
@@ -4450,7 +4632,7 @@ mod tests {
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default hot-swap identity must not be admitted to AuthMachine lease truth"
@@ -4682,14 +4864,14 @@ mod tests {
             )),
         };
 
-        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
             .expect("first publication");
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
-        let first_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let first_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
-        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
             .expect("second matching publication should be idempotent");
-        let second_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let second_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
         assert_eq!(
             second_snapshot, first_snapshot,
@@ -5323,7 +5505,7 @@ mod tests {
         );
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
@@ -5379,7 +5561,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(snapshot.phase, None);
         assert!(!snapshot.credential_present);
         assert_eq!(snapshot.generation, 0);
@@ -6171,7 +6353,7 @@ mod tests {
         };
         let snapshot =
             bindings
-                .auth_lease
+                .auth_lease()
                 .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
                     &connection_ref,
                 ));
@@ -6313,7 +6495,7 @@ mod tests {
         };
         let snapshot =
             bindings
-                .auth_lease
+                .auth_lease()
                 .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
                     &connection_ref,
                 ));

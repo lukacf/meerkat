@@ -168,7 +168,8 @@ pub fn create_default_hook_engine(hooks_config: HooksConfig) -> Option<Arc<dyn H
 /// * `session_id` - Optional session ID for tracking tool usage
 ///
 /// # Returns
-/// An `Arc<dyn AgentToolDispatcher>` ready to use with `AgentBuilder::build()`.
+/// An `Arc<dyn AgentToolDispatcher>` ready to use with `AgentBuilder::tools(...)`
+/// before building through the facade factory pipeline.
 ///
 /// For built-in async tools that must participate in a shared canonical ops
 /// registry, use [`create_dispatcher_with_builtins_with_ops_lifecycle`] and pass

@@ -36,12 +36,10 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, HandlingMode, Message, RunResult, SessionId, StopReason, ToolCallView, ToolDef,
-    ToolResult, Usage,
+    HandlingMode, Message, RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage,
 };
 use meerkat_core::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AppendSystemContextStatus, EventInjector, EventInjectorError, LlmStreamResult,
+    AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
     PeerCorrelationId, PendingSystemContextAppend, PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
@@ -73,6 +71,37 @@ fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     SupervisorAuthorityRecord::generate(
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),
     )
+}
+
+fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) -> Session {
+    if session.session_metadata().is_none() {
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model,
+                max_tokens,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("test metadata serializes");
+    }
+    if session.build_state().is_none() {
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("test build state serializes");
+    }
+    session
 }
 
 fn install_ephemeral_peer_request_response_authority(
@@ -136,8 +165,8 @@ async fn install_machine_peer_request_response_authority(
         })?;
     runtime.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            bindings.peer_interaction,
-            bindings.interaction_stream,
+            Arc::clone(bindings.peer_interaction()),
+            Arc::clone(bindings.interaction_stream()),
         ),
     );
     Ok(())
@@ -4479,131 +4508,63 @@ async fn persistent_mob_session_service_hides_archived_persisted_sessions() {
     );
 }
 
-#[derive(Default)]
-struct OverlayProbeSessionStore;
+fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<String> {
+    let blocked = overlay
+        .and_then(|overlay| overlay.blocked_tools.as_ref())
+        .map(|tools| tools.iter().map(String::as_str).collect::<HashSet<_>>())
+        .unwrap_or_default();
+    let candidates = overlay
+        .and_then(|overlay| overlay.allowed_tools.clone())
+        .unwrap_or_else(|| vec!["alpha".to_string(), "beta".to_string()]);
 
-#[async_trait]
-impl AgentSessionStore for OverlayProbeSessionStore {
-    async fn save(&self, _session: &Session) -> Result<(), meerkat_core::error::AgentError> {
-        Ok(())
-    }
-
-    async fn load(&self, _id: &str) -> Result<Option<Session>, meerkat_core::error::AgentError> {
-        Ok(None)
-    }
+    candidates
+        .into_iter()
+        .filter(|tool| !blocked.contains(tool.as_str()))
+        .collect()
 }
-
-struct OverlayProbeDispatcher {
-    tools: Arc<[Arc<ToolDef>]>,
-}
-
-impl OverlayProbeDispatcher {
-    fn new() -> Self {
-        let tools: Vec<Arc<ToolDef>> = ["alpha", "beta"]
-            .iter()
-            .map(|name| {
-                let input_schema = serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                });
-                Arc::new(ToolDef {
-                    name: (*name).into(),
-                    description: format!("{name} tool"),
-                    input_schema,
-                    provenance: None,
-                })
-            })
-            .collect();
-        Self {
-            tools: tools.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl AgentToolDispatcher for OverlayProbeDispatcher {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        Arc::clone(&self.tools)
-    }
-
-    async fn dispatch(
-        &self,
-        call: ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        Err(ToolError::not_found(call.name))
-    }
-}
-
-struct OverlayProbeLlmClient {
-    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
-}
-
-#[async_trait]
-impl AgentLlmClient for OverlayProbeLlmClient {
-    async fn stream_response(
-        &self,
-        _messages: &[meerkat_core::types::Message],
-        tools: &[Arc<ToolDef>],
-        _max_tokens: u32,
-        _temperature: Option<f32>,
-        _provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
-    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
-        self.provider_visible_tools
-            .lock()
-            .expect("provider_visible_tools lock poisoned")
-            .push(tools.iter().map(|tool| tool.name.to_string()).collect());
-        Ok(LlmStreamResult::new(
-            vec![AssistantBlock::Text {
-                text: "{}".to_string(),
-                meta: None,
-            }],
-            StopReason::EndTurn,
-            Usage::default(),
-        ))
-    }
-
-    fn provider(&self) -> &'static str {
-        "overlay-probe"
-    }
-
-    fn model(&self) -> &'static str {
-        "mock-model"
-    }
-}
-
-type OverlayProbeInnerAgent =
-    Agent<OverlayProbeLlmClient, OverlayProbeDispatcher, OverlayProbeSessionStore>;
 
 struct OverlayProbeSessionAgent {
-    agent: OverlayProbeInnerAgent,
+    session: Session,
+    provider_visible_tools: Arc<Mutex<Vec<Vec<String>>>>,
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    system_context_state: Arc<Mutex<SessionSystemContextState>>,
 }
 
 #[async_trait]
 impl SessionAgent for OverlayProbeSessionAgent {
     async fn run_with_events(
         &mut self,
-        prompt: meerkat_core::types::ContentInput,
+        _prompt: meerkat_core::types::ContentInput,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_with_events(prompt, event_tx).await
+        let visible_tools = overlay_probe_visible_tools(self.flow_tool_overlay.as_ref());
+        self.provider_visible_tools
+            .lock()
+            .expect("provider_visible_tools lock poisoned")
+            .push(visible_tools);
+        let session_id = self.session.id().clone();
+        let result = mock_run_result(session_id.clone(), "{}".to_string());
+        let _ = event_tx
+            .send(AgentEvent::RunCompleted {
+                session_id,
+                result: result.text.clone(),
+                usage: result.usage.clone(),
+            })
+            .await;
+        Ok(result)
     }
 
-    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
-        self.agent.pending_skill_references = refs;
-    }
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
     fn set_flow_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.agent
-            .set_flow_tool_overlay(overlay)
-            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+        self.flow_tool_overlay = overlay;
+        Ok(())
     }
 
-    fn cancel(&mut self) {
-        self.agent.cancel();
-    }
+    fn cancel(&mut self) {}
 
     fn hot_swap_llm_identity(
         &mut self,
@@ -4615,36 +4576,33 @@ impl SessionAgent for OverlayProbeSessionAgent {
     }
 
     fn session_id(&self) -> SessionId {
-        self.agent.session().id().clone()
+        self.session.id().clone()
     }
 
     fn snapshot(&self) -> SessionSnapshot {
-        let session = self.agent.session();
         SessionSnapshot {
-            created_at: session.created_at(),
-            updated_at: session.updated_at(),
-            message_count: session.messages().len(),
-            total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
-            last_assistant_text: session.last_assistant_text(),
+            created_at: self.session.created_at(),
+            updated_at: self.session.updated_at(),
+            message_count: self.session.messages().len(),
+            total_tokens: self.session.total_tokens(),
+            usage: self.session.total_usage(),
+            last_assistant_text: self.session.last_assistant_text(),
         }
     }
 
     fn session_clone(&self) -> Session {
-        self.agent.session_with_system_context_state()
+        self.session.clone()
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        self.agent
-            .session_mut()
-            .append_system_context_blocks(appends);
+        self.session.append_system_context_blocks(appends);
     }
 
     fn system_context_state(&self) -> Arc<std::sync::Mutex<SessionSystemContextState>> {
-        self.agent.system_context_state()
+        Arc::clone(&self.system_context_state)
     }
 }
 
@@ -4661,41 +4619,19 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
-        let mut builder = AgentBuilder::new().model(req.model.clone());
-        if let Some(max_tokens) = req.max_tokens {
-            builder = builder.max_tokens_per_turn(max_tokens);
-        }
-        if let Some(system_prompt) = &req.system_prompt {
-            builder = builder.system_prompt(system_prompt.clone());
-        }
-        if let Some(session) = req
+        let session = req
             .build
             .as_ref()
             .and_then(|build| build.resume_session.clone())
-        {
-            builder = builder.resume_session(session);
-        }
-        if let Some(build) = &req.build {
-            match &build.runtime_build_mode {
-                meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings) => {
-                    builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
-                }
-                meerkat_core::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral => {
-                    builder = builder.with_turn_state_handle(Arc::new(
-                        meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-                    ));
-                }
-            }
-        }
-
-        let client = Arc::new(OverlayProbeLlmClient {
+            .unwrap_or_default();
+        let session =
+            factory_policy_session(session, req.model.clone(), req.max_tokens.unwrap_or(1024));
+        Ok(OverlayProbeSessionAgent {
+            session,
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
-        });
-        let tools = Arc::new(OverlayProbeDispatcher::new());
-        let store = Arc::new(OverlayProbeSessionStore);
-        let agent = builder.build(client, tools, store).await;
-
-        Ok(OverlayProbeSessionAgent { agent })
+            flow_tool_overlay: None,
+            system_context_state: Arc::new(Mutex::new(SessionSystemContextState::default())),
+        })
     }
 }
 

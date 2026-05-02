@@ -5,8 +5,11 @@ use std::sync::Arc;
 use meerkat::surface::{
     build_runtime_backed_service, default_persistent_executor, materialize_session,
 };
-use meerkat::{AgentFactory, Config, FactoryAgentBuilder, PersistenceBundle, SessionStore};
-use meerkat_store::MemoryStore;
+use meerkat::{
+    AgentFactory, Config, CreateSessionRequest, DeferredPromptPolicy, FactoryAgentBuilder,
+    InitialTurnPolicy, Input, MemoryBlobStore, MemoryStore, PersistenceBundle, PromptInput,
+    SessionBuildOptions, SessionStore,
+};
 use serde_json::json;
 
 fn fixture_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -27,11 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let config = fixture_config()?;
     let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let persistence = PersistenceBundle::new(
-        session_store,
-        None,
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    let persistence = PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
@@ -40,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &service,
         &runtime_adapter,
         meerkat::Session::new(),
-        meerkat_core::service::CreateSessionRequest {
+        CreateSessionRequest {
             model: config.agent.model.clone(),
             prompt: "".to_string().into(),
             render_metadata: None,
@@ -48,9 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: None,
             event_tx: None,
             skill_references: None,
-            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-            build: Some(meerkat_core::service::SessionBuildOptions::default()),
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
             labels: None,
         },
         {
@@ -64,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_outcome, handle) = runtime_adapter
         .accept_input_with_completion(
             &result.session_id,
-            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new("Say ok", None)),
+            Input::Prompt(PromptInput::new("Say ok", None)),
         )
         .await?;
     let completion = handle.ok_or("missing completion handle")?.wait().await;

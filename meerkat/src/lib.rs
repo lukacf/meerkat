@@ -144,8 +144,6 @@ pub use meerkat_core::{
 
 mod agent_builder;
 pub use agent_builder::AgentBuilder;
-pub use meerkat_core::AgentBuilder as CoreAgentBuilder;
-pub use meerkat_core::AgentBuilder as StandaloneAgentBuilder;
 
 // Config store types (filesystem-dependent — not available on wasm32)
 #[cfg(not(target_arch = "wasm32"))]
@@ -223,12 +221,15 @@ pub use staged_sessions::{
 };
 
 // Session service
+pub use meerkat_core::service::InitialTurnPolicy;
 pub use meerkat_core::{
-    AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, MobToolsBuildArgs, MobToolsFactory, SessionControlError, SessionError,
-    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
-    SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus, BlobStore,
+    CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
+    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
+    SessionView, StartTurnRequest,
 };
+pub use meerkat_runtime::{Input, PromptInput};
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
 // PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).
@@ -250,7 +251,9 @@ pub use meerkat_client::OpenAiClient;
 pub use meerkat_client::GeminiClient;
 
 // Re-export store types (trait + filter + error from core, backend error from meerkat-store)
-pub use meerkat_store::{SessionFilter, SessionStore, SessionStoreError, StoreError};
+pub use meerkat_store::{
+    MemoryBlobStore, SessionFilter, SessionStore, SessionStoreError, StoreError,
+};
 
 #[cfg(feature = "jsonl-store")]
 pub use meerkat_store::JsonlStore;

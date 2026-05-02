@@ -592,14 +592,14 @@ async fn terminal_transition_surfaces_store_write_failure_after_persistence_requ
 
     let spec = bg_spec("durable-store-rejection");
     let op_id = spec.id.clone();
-    bindings.ops_lifecycle.register_operation(spec).unwrap();
+    bindings.ops_lifecycle().register_operation(spec).unwrap();
     bindings
-        .ops_lifecycle
+        .ops_lifecycle()
         .provisioning_succeeded(&op_id)
         .unwrap();
 
     let err = bindings
-        .ops_lifecycle
+        .ops_lifecycle()
         .complete_operation(&op_id, op_result(&op_id))
         .expect_err("terminal transition must fail when the durable store rejects the snapshot");
     assert!(
@@ -667,12 +667,12 @@ async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
         .await
         .expect("session should be registered after cold attach");
 
-    assert_eq!(bindings.session_id, session_id);
+    assert_eq!(bindings.session_id(), &session_id);
 
     // Register an op — it should be visible through the same registry.
     let spec = bg_spec("cold-attach-verify");
     let op_id = spec.id.clone();
-    bindings.ops_lifecycle.register_operation(spec).unwrap();
+    bindings.ops_lifecycle().register_operation(spec).unwrap();
 
     let direct = adapter
         .ops_lifecycle_registry(&session_id)
@@ -722,11 +722,12 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
-        bindings.epoch_id, epoch_id,
+        bindings.epoch_id(),
+        &epoch_id,
         "register_session must recover the persisted epoch_id"
     );
 
-    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let feed = bindings.ops_lifecycle().completion_feed().unwrap();
     let batch = feed.list_since(0);
     assert_eq!(
         batch.entries.len(),
@@ -779,10 +780,11 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
-        bindings.epoch_id, canonical_snapshot.epoch_id,
+        bindings.epoch_id(),
+        &canonical_snapshot.epoch_id,
         "register_session must keep canonical ops lifecycle authority over legacy alias snapshots"
     );
-    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let feed = bindings.ops_lifecycle().completion_feed().unwrap();
     let batch = feed.list_since(0);
     assert!(
         batch.entries.is_empty(),
@@ -823,10 +825,11 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
-        bindings.epoch_id, canonical_epoch,
+        bindings.epoch_id(),
+        &canonical_epoch,
         "legacy ops alias load failure must not rotate away from a valid canonical snapshot"
     );
-    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let feed = bindings.ops_lifecycle().completion_feed().unwrap();
     let batch = feed.list_since(0);
     assert_eq!(batch.entries.len(), 1);
     assert_eq!(batch.entries[0].operation_id, op_id);
@@ -871,11 +874,12 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
     // Verify epoch recovered
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
-        bindings.epoch_id, epoch_id,
+        bindings.epoch_id(),
+        &epoch_id,
         "cold ensure_session_with_executor must recover the persisted epoch_id"
     );
 
-    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let feed = bindings.ops_lifecycle().completion_feed().unwrap();
     let batch = feed.list_since(0);
     assert!(
         !batch.entries.is_empty(),

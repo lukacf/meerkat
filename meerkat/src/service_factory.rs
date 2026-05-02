@@ -592,7 +592,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         // `AdvanceSessionContext` on every session-truth mutation (W2-E).
         let session_context = match req.build.as_ref().map(|opts| &opts.runtime_build_mode) {
             Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)) => {
-                Some(Arc::clone(&bindings.session_context))
+                Some(Arc::clone(bindings.session_context()))
             }
             _ => None,
         };
@@ -956,7 +956,7 @@ mod tests {
             .prepare_bindings(session_id.clone())
             .await
             .map_err(|err| format!("prepare bindings: {err}"))?;
-        let expected_registry = Arc::clone(&bindings.ops_lifecycle);
+        let expected_registry = Arc::clone(bindings.ops_lifecycle());
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -1305,7 +1305,7 @@ mod tests {
             .await
             .map_err(|err| format!("prepare bindings: {err}"))?;
         let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(Arc::clone(
-            &bindings.external_tool_surface,
+            bindings.external_tool_surface(),
         ));
         router
             .stage_add(meerkat_core::McpServerConfig::stdio(

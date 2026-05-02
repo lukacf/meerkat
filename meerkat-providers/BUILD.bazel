@@ -58,6 +58,38 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_providers_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-providers"),
+    crate_name = "meerkat_providers",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "anthropic",
+        "gemini",
+        "oauth",
+        "openai",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-providers",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-providers",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_providers_unit_test",
     aliases = aliases(

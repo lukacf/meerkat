@@ -55,6 +55,35 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_contracts_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-contracts"),
+    crate_name = "meerkat_contracts",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "schema",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-contracts",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_schedule_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-contracts",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_contracts_unit_test",
     aliases = aliases(

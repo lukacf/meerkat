@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use meerkat::{AgentEvent, AgentFactory, AnthropicClient, CoreAgentBuilder, DefaultCompactor};
+use meerkat::{AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, Config};
 use meerkat_core::compact::CompactionConfig;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
 
-    // ── Configure the compactor ────────────────────────────────────────────
+    // ── Configure compaction through the factory config ────────────────────
     //
     // We set a LOW token threshold (2000) so compaction triggers during this
     // short demo. In production you'd use a much higher value (e.g. 100_000).
@@ -50,14 +50,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_summary_tokens: 1024,
         min_turns_between_compactions: 2,
     };
-    let compactor = Arc::new(DefaultCompactor::new(compaction_config));
+    let mut config = Config::default();
+    config.compaction.auto_compact_threshold = compaction_config.auto_compact_threshold;
+    config.compaction.recent_turn_budget = compaction_config.recent_turn_budget;
+    config.compaction.max_summary_tokens = compaction_config.max_summary_tokens;
+    config.compaction.min_turns_between_compactions =
+        compaction_config.min_turns_between_compactions;
 
     println!("=== Context Compaction Demo ===");
     println!("Compaction threshold: 2000 tokens (low for demo purposes)");
     println!("Recent turns preserved: 2\n");
 
-    // Build a low-level core agent with the compactor wired in directly.
-    let mut agent = CoreAgentBuilder::new()
+    let mut session = meerkat_core::Session::new();
+    session.set_session_metadata(meerkat_core::SessionMetadata {
+        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+        model: "claude-sonnet-4-6".to_string(),
+        max_tokens: 1024,
+        structured_output_retries: 2,
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        tooling: meerkat_core::SessionTooling::default(),
+        keep_alive: false,
+        comms_name: None,
+        peer_meta: None,
+        realm_id: None,
+        instance_id: None,
+        backend: None,
+        config_generation: None,
+        connection_ref: None,
+    })?;
+    session.set_build_state(meerkat_core::SessionBuildState::default())?;
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
+
+    // Build through the facade factory so compaction runs with the same
+    // session metadata and runtime bindings as production-facing surfaces.
+    let mut agent = AgentBuilder::new()
+        .with_factory(factory)
+        .with_config(config)
         .model("claude-sonnet-4-6")
         .system_prompt(
             "You are a patient tutor. Build on previous conversation context. \
@@ -65,12 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              detailed explanations with code examples.",
         )
         .max_tokens_per_turn(1024)
-        .compactor(compactor)
-        .with_turn_state_handle(Arc::new(
-            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ))
+        .resume_session(session)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
-        .await;
+        .await?;
 
     // Simulate a long conversation that will trigger compaction.
     // Each prompt asks for detailed explanations to accumulate tokens quickly.
@@ -81,8 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Give me a practical example combining ownership, lifetimes, and Arc.",
         "Summarize everything we've discussed about Rust's memory model.",
     ];
-
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
     // Monitor for compaction events — these will fire when the compactor
     // detects that accumulated tokens exceed our 2000-token threshold.

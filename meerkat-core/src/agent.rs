@@ -7,6 +7,8 @@ pub mod comms_impl;
 pub mod compact;
 mod extraction;
 mod hook_impl;
+#[cfg(test)]
+mod hooks_behavior_tests;
 mod runner;
 pub mod skills;
 mod state;
@@ -50,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-pub use builder::AgentBuilder;
+pub use builder::{AgentBuildPolicyError, AgentBuilder};
 pub use runner::AgentRunner;
 
 /// Trait for LLM clients that can be used with the agent

@@ -2,9 +2,8 @@
 //!
 //! The facade builder routes through [`AgentFactory::build_agent`] so public
 //! construction observes the same provider, session metadata, runtime-handle,
-//! hook, and tool/store override semantics as the factory path. The lower-level
-//! core builder remains available as [`crate::CoreAgentBuilder`] for tests and
-//! embeddings that intentionally own all agent loop primitives themselves.
+//! hook, and tool/store override semantics as the factory path. Low-level core
+//! loop construction is not part of the default facade API.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -211,7 +210,7 @@ impl AgentBuilder {
     ///
     /// This is intentionally a builder-only core escape hatch. Facade builds
     /// route compaction through the factory/config pipeline; use
-    /// [`crate::CoreAgentBuilder`] when a test or embedding must inject a
+    /// a dedicated factory extension when a test or embedding must inject a
     /// bespoke compactor directly into the core agent loop. Calling this on the
     /// facade builder makes `try_build` return a configuration error.
     pub fn compactor(mut self, _compactor: Arc<dyn meerkat_core::compact::Compactor>) -> Self {
@@ -223,8 +222,8 @@ impl AgentBuilder {
     ///
     /// This direct core-loop injection is intentionally not a facade authority;
     /// the factory owns memory tool/session composition. Use
-    /// [`crate::CoreAgentBuilder`] for low-level standalone tests. Calling this
-    /// on the facade builder makes `try_build` return a configuration error.
+    /// a dedicated factory extension for low-level tests. Calling this on the
+    /// facade builder makes `try_build` return a configuration error.
     pub fn memory_store(mut self, _store: Arc<dyn meerkat_core::memory::MemoryStore>) -> Self {
         self.unsupported_core_injections.push("memory_store");
         self
@@ -272,8 +271,7 @@ impl AgentBuilder {
             return Err(BuildAgentError::Config(format!(
                 "public AgentBuilder cannot accept standalone core injection method(s): {}. \
                  Facade builds route through AgentFactory-owned provider/session/runtime \
-                 composition; use AgentFactory/AgentBuildConfig for facade-owned settings or \
-                 CoreAgentBuilder for explicit standalone construction.",
+                 composition; use AgentFactory/AgentBuildConfig for facade-owned settings.",
                 self.unsupported_core_injections.join(", ")
             )));
         }

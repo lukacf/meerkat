@@ -1013,7 +1013,7 @@ async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
         .prepare_bindings(session_id.clone())
         .await
         .expect("prepare bindings commits");
-    assert_eq!(bindings.session_id, session_id);
+    assert_eq!(bindings.session_id(), &session_id);
 
     let log = signal_surface.log.lock().await;
     assert_eq!(log.len(), 1);
@@ -4913,7 +4913,7 @@ async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_e
         .expect("install prepared interrupt handle");
 
     bindings
-        .turn_state
+        .turn_state()
         .start_conversation_run(
             RunId::new(),
             meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
@@ -13744,7 +13744,7 @@ async fn publish_committed_visible_set_succeeds_for_registered_session() {
     );
     assert_eq!(
         bindings
-            .tool_visibility_owner
+            .tool_visibility_owner()
             .visibility_state()
             .expect("owner state should be readable"),
         state,
@@ -13776,7 +13776,7 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
         .await
         .expect("stage should succeed");
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert_eq!(state.staged_filter, filter);
@@ -13821,7 +13821,7 @@ fn seed_deferred_tool_authority_catalog(
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
-        Arc::clone(&bindings.tool_visibility_owner),
+        Arc::clone(bindings.tool_visibility_owner()),
     );
 }
 
@@ -13852,7 +13852,7 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
         .await
         .expect("request should succeed");
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert!(
@@ -13941,7 +13941,7 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
         .await
         .expect("first request should succeed");
     bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .stage_requested_deferred_names(BTreeSet::new())
         .expect("empty legacy staging should clear staged routing names");
 
@@ -14007,7 +14007,7 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
         "missing-witness error should name the requested tool: {err}"
     );
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert!(
@@ -14031,7 +14031,7 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
         "empty-witness error should name the requested tool: {err}"
     );
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert!(
@@ -14092,7 +14092,7 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
     );
 
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert!(
@@ -14193,7 +14193,7 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
         .await
         .expect("stage should succeed");
     let promoted = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .boundary_applied()
         .expect("boundary promotion should succeed");
     assert_eq!(promoted.active_filter, filter);
@@ -14228,7 +14228,7 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
         .await
         .expect("request should succeed");
     let promoted = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .boundary_applied()
         .expect("boundary promotion should succeed");
     assert!(
@@ -14271,7 +14271,7 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
     };
 
     let err = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .replace_visibility_state(replacement)
         .expect_err("replacement must not install deferred names without typed authority");
 
@@ -14280,7 +14280,7 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         "rejection should name the missing deferred authority: {err}"
     );
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should still be readable");
     assert!(
@@ -14310,7 +14310,7 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
     };
 
     let err = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .replace_visibility_state(replacement)
         .expect_err("replacement must not install deferred names with empty typed authority");
 
@@ -14319,7 +14319,7 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
         "rejection should name the empty deferred authority: {err}"
     );
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should still be readable");
     assert!(
@@ -14356,7 +14356,7 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
     };
 
     let err = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .replace_visibility_state(replacement)
         .expect_err("replacement must reject forged deferred provenance authority");
 
@@ -14365,7 +14365,7 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
         "rejection should name the mismatched deferred authority: {err}"
     );
     let state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should still be readable");
     assert!(
@@ -14521,7 +14521,7 @@ async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_wit
     );
 
     let owner_state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should still be readable");
     assert!(
@@ -14565,7 +14565,7 @@ async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
     );
     assert_eq!(
         bindings
-            .tool_visibility_owner
+            .tool_visibility_owner()
             .visibility_state()
             .expect("owner state should be readable"),
         state,
@@ -14999,7 +14999,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         "capability-owned view_image removal should change the committed visible set"
     );
     let owner_state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable");
     assert_eq!(
@@ -15144,7 +15144,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
     assert_eq!(report.new_identity.model, "gpt-5.2");
 
     let owner_state = bindings
-        .tool_visibility_owner
+        .tool_visibility_owner()
         .visibility_state()
         .expect("owner state should be readable while running");
     assert_eq!(
@@ -15278,7 +15278,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
     );
     assert_eq!(
         bindings
-            .tool_visibility_owner
+            .tool_visibility_owner()
             .visibility_state()
             .expect("owner state should be readable")
             .capability_base_filter,
@@ -15475,7 +15475,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
     );
     assert_eq!(
         bindings
-            .tool_visibility_owner
+            .tool_visibility_owner()
             .visibility_state()
             .expect("owner state should remain readable")
             .capability_base_filter,

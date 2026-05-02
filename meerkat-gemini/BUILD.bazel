@@ -57,6 +57,37 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_gemini_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-gemini"),
+    crate_name = "meerkat_gemini",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "adc",
+        "oauth",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_gemini_unit_test",
     aliases = aliases(

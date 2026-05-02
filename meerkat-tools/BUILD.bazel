@@ -65,6 +65,45 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_tools_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-tools"),
+    crate_name = "meerkat_tools",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "comms",
+        "mcp",
+        "skills",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/shell-patterns/SKILL.md",
+        "skills/task-workflow/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-tools",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+        "//meerkat:meerkat_mcp_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build",
+        "//meerkat:meerkat_skills_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-tools",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_tools_unit_test",
     aliases = aliases(

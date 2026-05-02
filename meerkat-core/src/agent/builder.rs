@@ -18,6 +18,12 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
+#[cfg(meerkat_internal_agent_factory_build)]
+use std::any::Any;
+#[cfg(meerkat_internal_agent_factory_build)]
+use std::future::Future;
+#[cfg(meerkat_internal_agent_factory_build)]
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -58,11 +64,103 @@ pub struct AgentBuilder {
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) runtime_execution_kind_required: bool,
+    #[allow(dead_code)]
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
+}
+
+/// Error returned when the canonical factory has not composed the policy state
+/// required before crossing into core agent construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AgentBuildPolicyError {
+    #[error("factory policy build requires an explicit session")]
+    MissingSession,
+    #[error("factory policy build requires session metadata")]
+    MissingSessionMetadata,
+    #[error("factory policy build requires session build state metadata")]
+    MissingSessionBuildState,
+    #[error("factory policy build requires a runtime turn-state handle")]
+    MissingTurnStateHandle,
+    #[error("factory policy build requires the canonical factory bridge token")]
+    InvalidFactoryBridgeToken,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(meerkat_internal_agent_factory_build)]
+type AgentFactoryBuildFuture = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>,
+                    AgentBuildPolicyError,
+                >,
+            > + Send,
+    >,
+>;
+
+#[cfg(target_arch = "wasm32")]
+#[cfg(meerkat_internal_agent_factory_build)]
+type AgentFactoryBuildFuture = Pin<
+    Box<
+        dyn Future<
+            Output = Result<
+                Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>,
+                AgentBuildPolicyError,
+            >,
+        >,
+    >,
+>;
+
+#[cfg(meerkat_internal_agent_factory_build)]
+#[allow(improper_ctypes, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn facade_agent_factory_policy_bridge_token_is_valid(
+        factory_bridge_token: &(dyn Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(meerkat_internal_agent_factory_build)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_agent_factory_policy_build_v3_",
+    env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
+    factory_bridge_token: &'static (dyn Any + Send + Sync),
+    builder: AgentBuilder,
+    client: Arc<dyn AgentLlmClient>,
+    tools: Arc<dyn AgentToolDispatcher>,
+    store: Arc<dyn AgentSessionStore>,
+) -> AgentFactoryBuildFuture {
+    Box::pin(async move {
+        validate_factory_bridge_token(factory_bridge_token)?;
+        builder.validate_factory_policy()?;
+        Ok(builder.build_inner(client, tools, store).await)
+    })
+}
+
+#[cfg(meerkat_internal_agent_factory_build)]
+fn validate_factory_bridge_token(
+    token: &(dyn Any + Send + Sync),
+) -> Result<(), AgentBuildPolicyError> {
+    // The only authority core accepts is a positive check from the linked
+    // facade crate. Public inventory/source metadata is intentionally not part
+    // of this proof because downstream crates can spoof package names, source
+    // paths, and fingerprints.
+    #[allow(unsafe_code)]
+    let is_valid = unsafe { facade_agent_factory_policy_bridge_token_is_valid(token) };
+    if is_valid {
+        Ok(())
+    } else {
+        Err(AgentBuildPolicyError::InvalidFactoryBridgeToken)
+    }
 }
 
 impl AgentBuilder {
@@ -212,8 +310,46 @@ impl AgentBuilder {
         self
     }
 
-    /// Build the agent
-    pub async fn build<C, T, S>(
+    /// Build a standalone low-level agent without facade/factory policy.
+    ///
+    /// This is an explicit escape hatch for core tests that own every loop
+    /// primitive themselves. Production-facing Meerkat surfaces route through
+    /// `AgentFactory::build_agent`.
+    #[cfg(test)]
+    pub async fn build_standalone<C, T, S>(
+        self,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Agent<C, T, S>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        self.build_inner(client, tools, store).await
+    }
+
+    #[cfg(meerkat_internal_agent_factory_build)]
+    fn validate_factory_policy(&self) -> Result<(), AgentBuildPolicyError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(AgentBuildPolicyError::MissingSession)?;
+        if session.session_metadata().is_none() {
+            return Err(AgentBuildPolicyError::MissingSessionMetadata);
+        }
+        if session.build_state().is_none() {
+            return Err(AgentBuildPolicyError::MissingSessionBuildState);
+        }
+        if self.turn_state_handle.is_none() {
+            return Err(AgentBuildPolicyError::MissingTurnStateHandle);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    async fn build_inner<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,
@@ -804,7 +940,7 @@ mod tests {
         );
         let agent = AgentBuilder::new()
             .with_auth_lease_handle(auth_lease.clone())
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         agent
@@ -826,7 +962,7 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .system_prompt("Custom system prompt")
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Check that the system prompt was applied
@@ -858,7 +994,7 @@ mod tests {
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             .system_prompt("Updated system prompt")
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Check that the system prompt was UPDATED
@@ -900,7 +1036,7 @@ mod tests {
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             // Note: no .system_prompt() call
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Original system prompt should be preserved
@@ -927,7 +1063,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         assert_eq!(agent.runtime_execution_kind, None);
@@ -945,7 +1081,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         let err = agent
@@ -974,7 +1110,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         let err = agent
@@ -999,7 +1135,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
@@ -1030,7 +1166,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
@@ -1068,7 +1204,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .with_event_tap(tap)
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
@@ -1104,7 +1240,7 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .with_completion_feed(feed)
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         assert_eq!(
@@ -1120,7 +1256,9 @@ mod tests {
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
 
-        let agent = AgentBuilder::new().build(client, tools, store).await;
+        let agent = AgentBuilder::new()
+            .build_standalone(client, tools, store)
+            .await;
 
         assert_eq!(agent.applied_cursor, 0);
     }

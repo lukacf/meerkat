@@ -929,10 +929,14 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
         1,
         "recycle should wake the existing loop exactly once for preserved queued work"
     );
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
-    );
+    let runtime_state = wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Attached,
+        "attached recycle should return the existing loop to Attached",
+    )
+    .await;
+    assert_eq!(runtime_state, RuntimeState::Attached);
 }
 
 #[tokio::test]
@@ -1163,11 +1167,11 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .prepare_bindings(sid.clone())
         .await
         .expect("prepare runtime bindings");
-    requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
+    requester_comms.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
     requester_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::clone(&bindings.peer_interaction),
-            Arc::clone(&bindings.interaction_stream),
+            Arc::clone(bindings.peer_interaction()),
+            Arc::clone(bindings.interaction_stream()),
         ),
     );
     let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -1178,8 +1182,8 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .expect("prepare responder runtime bindings");
     responder_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::clone(&responder_bindings.peer_interaction),
-            Arc::clone(&responder_bindings.interaction_stream),
+            Arc::clone(responder_bindings.peer_interaction()),
+            Arc::clone(responder_bindings.interaction_stream()),
         ),
     );
 
@@ -1243,7 +1247,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         InteractionContent::Request { .. }
     ));
     responder_bindings
-        .peer_interaction
+        .peer_interaction()
         .request_received(PeerCorrelationId::from_uuid(request_id))
         .expect("seed responder inbound request state");
 
@@ -2225,10 +2229,10 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     .await;
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
+        RuntimeState::Stopped
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
+    assert_eq!(state.seed.phase, InputLifecycleState::Abandoned);
 }
 
 #[tokio::test]

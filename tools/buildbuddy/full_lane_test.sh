@@ -34,6 +34,25 @@ prepend_path() {
   fi
 }
 
+append_rust_cfg() {
+  local cfg="$1"
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    local unit_separator
+    unit_separator=$'\x1f'
+    case "${CARGO_ENCODED_RUSTFLAGS}" in
+      *"${cfg}"*) ;;
+      *)
+        export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${unit_separator}--cfg${unit_separator}${cfg}"
+        ;;
+    esac
+  else
+    case " ${RUSTFLAGS:-} " in
+      *" --cfg ${cfg} "* | *" --cfg=${cfg} "*) ;;
+      *) export RUSTFLAGS="${RUSTFLAGS:-} --cfg ${cfg}" ;;
+    esac
+  fi
+}
+
 configure_rust() {
   local toolchain="$1"
   local cargo_bin rustc_bin rustdoc_bin rustfmt_bin rust_objcopy_bin rust_lld_bin
@@ -176,7 +195,7 @@ case "${lane}" in
     ;;
   wasm-check)
     configure_rust_with_wasm_target
-    export RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
+    append_rust_cfg 'getrandom_backend="wasm_js"'
     "${CARGO}" check -p meerkat-web-runtime --target wasm32-unknown-unknown
     "${CARGO}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
     ;;
@@ -184,7 +203,7 @@ case "${lane}" in
     configure_rust_with_wasm_target
     configure_node
     configure_wasm_pack
-    export RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
+    append_rust_cfg 'getrandom_backend="wasm_js"'
     "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
     "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run
     "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test wasm_external_resolver --no-run

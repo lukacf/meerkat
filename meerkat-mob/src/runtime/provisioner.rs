@@ -978,8 +978,8 @@ impl MobProvisioner for SessionBackend {
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
             .map(|session| session.id().clone());
-        // Pre-register with the runtime adapter so the factory receives
-        // epoch-local bindings instead of creating a competing registry.
+        // Prepare authoritative bindings through the runtime adapter so the
+        // factory receives the session resources it is allowed to consume.
         let pre_registered_bridge_session_id = if let Some(adapter) = &self.runtime_adapter {
             if req.create_session.build.is_none() {
                 req.create_session.build =
@@ -1000,11 +1000,9 @@ impl MobProvisioner for SessionBackend {
                     id
                 });
             let bindings = adapter
-                .prepare_local_session_bindings(member_bridge_session_id.clone())
+                .prepare_bindings(member_bridge_session_id.clone())
                 .await
-                .map_err(|e| {
-                    MobError::Internal(format!("prepare_local_session_bindings failed: {e}"))
-                })?;
+                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);

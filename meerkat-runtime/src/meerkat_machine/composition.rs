@@ -767,7 +767,7 @@ mod tests {
             .await
             .expect("local bindings prepare");
 
-        assert_eq!(bindings.session_id, session_id);
+        assert_eq!(bindings.session_id(), &session_id);
         assert!(
             signal_surface.log.lock().await.is_empty(),
             "local resource preparation must not publish cross-machine runtime readiness"

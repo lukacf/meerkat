@@ -1,0 +1,114 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_agent_build_authority",
+    aliases = aliases(package_name = "meerkat-agent-build-authority"),
+    crate_name = "meerkat_agent_build_authority",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//:__pkg__",
+        "//meerkat-core:__pkg__",
+        "//meerkat-mob:__pkg__",
+        "//meerkat-session:__pkg__",
+        "//meerkat:__pkg__",
+    ],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-agent-build-authority",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "meerkat-agent-build-authority",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_agent_build_authority_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-agent-build-authority",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_agent_build_authority",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//:__pkg__",
+        "//meerkat-core:__pkg__",
+        "//meerkat-mob:__pkg__",
+        "//meerkat-session:__pkg__",
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "./meerkat-agent-build-authority",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-agent-build-authority",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "meerkat-agent-build-authority",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":meerkat_agent_build_authority_unit_test",
+    ],
+)

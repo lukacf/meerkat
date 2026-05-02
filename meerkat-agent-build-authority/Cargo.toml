@@ -1,0 +1,17 @@
+[package]
+name = "meerkat-agent-build-authority"
+description = "Internal typed build authority for Meerkat agent construction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+links = "meerkat_agent_build_authority"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true

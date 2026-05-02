@@ -3409,8 +3409,8 @@ mod tests {
         let authority_for_hook = Arc::clone(&authority);
         let target_for_hook = target.clone();
         let lease_key_for_hook = lease_key.clone();
-        crate::handles::auth_lease::set_release_after_accept_hook_for_test(Some(Arc::new(
-            move |released_key| {
+        let _hook_guard = crate::handles::auth_lease::install_release_after_accept_hook_for_test(
+            Arc::new(move |released_key| {
                 if released_key != &lease_key_for_hook {
                     return;
                 }
@@ -3425,13 +3425,12 @@ mod tests {
                 *new_state_for_hook
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admitted);
-            },
-        )));
+            }),
+        );
 
         lifecycle
             .release_lease(&lease_key)
             .expect("credential lifecycle release succeeds");
-        crate::handles::auth_lease::set_release_after_accept_hook_for_test(None);
 
         let new_state = new_state
             .lock()

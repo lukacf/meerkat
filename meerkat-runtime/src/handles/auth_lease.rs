@@ -181,14 +181,42 @@ pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
 }
 
 #[cfg(test)]
-type ReleaseAfterAcceptHook = Arc<dyn Fn(&LeaseKey) + Send + Sync>;
+pub(crate) type ReleaseAfterAcceptHook = Arc<dyn Fn(&LeaseKey) + Send + Sync>;
 
 #[cfg(test)]
 static RELEASE_AFTER_ACCEPT_HOOK: std::sync::OnceLock<Mutex<Option<ReleaseAfterAcceptHook>>> =
     std::sync::OnceLock::new();
 
 #[cfg(test)]
-pub(crate) fn set_release_after_accept_hook_for_test(hook: Option<ReleaseAfterAcceptHook>) {
+static RELEASE_AFTER_ACCEPT_HOOK_SERIAL: std::sync::OnceLock<Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ReleaseAfterAcceptHookGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for ReleaseAfterAcceptHookGuard {
+    fn drop(&mut self) {
+        set_release_after_accept_hook_for_test(None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_release_after_accept_hook_for_test(
+    hook: ReleaseAfterAcceptHook,
+) -> ReleaseAfterAcceptHookGuard {
+    let serial = RELEASE_AFTER_ACCEPT_HOOK_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_release_after_accept_hook_for_test(Some(hook));
+    ReleaseAfterAcceptHookGuard { _serial: serial }
+}
+
+#[cfg(test)]
+fn set_release_after_accept_hook_for_test(hook: Option<ReleaseAfterAcceptHook>) {
     *RELEASE_AFTER_ACCEPT_HOOK
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -1197,19 +1225,19 @@ mod tests {
         let hook_key = key.clone();
         let acquired_generation = Arc::new(Mutex::new(None));
         let hook_generation = Arc::clone(&acquired_generation);
-        set_release_after_accept_hook_for_test(Some(Arc::new(move |released_key| {
-            if released_key != &hook_key {
-                return;
-            }
-            let generation = acquire_handle
-                .acquire_lease(&acquire_key, 1_800_000_000)
-                .unwrap()
-                .generation;
-            *hook_generation.lock().unwrap() = Some(generation);
-        })));
+        let _hook_guard =
+            install_release_after_accept_hook_for_test(Arc::new(move |released_key| {
+                if released_key != &hook_key {
+                    return;
+                }
+                let generation = acquire_handle
+                    .acquire_lease(&acquire_key, 1_800_000_000)
+                    .unwrap()
+                    .generation;
+                *hook_generation.lock().unwrap() = Some(generation);
+            }));
 
         h.release_lease(&key).unwrap();
-        set_release_after_accept_hook_for_test(None);
 
         let acquired_generation = acquired_generation
             .lock()
@@ -1257,18 +1285,18 @@ mod tests {
         let hook_key = key.clone();
         let acquired_transition = Arc::new(Mutex::new(None));
         let hook_transition = Arc::clone(&acquired_transition);
-        set_release_after_accept_hook_for_test(Some(Arc::new(move |released_key| {
-            if released_key != &hook_key {
-                return;
-            }
-            let transition = acquire_handle
-                .acquire_lease(&acquire_key, 1_900_000_000)
-                .unwrap();
-            *hook_transition.lock().unwrap() = Some(transition);
-        })));
+        let _hook_guard =
+            install_release_after_accept_hook_for_test(Arc::new(move |released_key| {
+                if released_key != &hook_key {
+                    return;
+                }
+                let transition = acquire_handle
+                    .acquire_lease(&acquire_key, 1_900_000_000)
+                    .unwrap();
+                *hook_transition.lock().unwrap() = Some(transition);
+            }));
 
         assert!(h.release_lease(&key).is_err());
-        set_release_after_accept_hook_for_test(None);
 
         let acquired_transition = acquired_transition
             .lock()
@@ -1303,21 +1331,21 @@ mod tests {
         let hook_key = key.clone();
         let acquired_transition = Arc::new(Mutex::new(None));
         let hook_transition = Arc::clone(&acquired_transition);
-        set_release_after_accept_hook_for_test(Some(Arc::new(move |released_key| {
-            if released_key != &hook_key {
-                return;
-            }
-            let transition = lifecycle_handle
-                .acquire_lease(&lifecycle_key, 1_900_000_000)
-                .unwrap();
-            lifecycle_handle
-                .release_credential_lifecycle(&lifecycle_key)
-                .unwrap();
-            *hook_transition.lock().unwrap() = Some(transition);
-        })));
+        let _hook_guard =
+            install_release_after_accept_hook_for_test(Arc::new(move |released_key| {
+                if released_key != &hook_key {
+                    return;
+                }
+                let transition = lifecycle_handle
+                    .acquire_lease(&lifecycle_key, 1_900_000_000)
+                    .unwrap();
+                lifecycle_handle
+                    .release_credential_lifecycle(&lifecycle_key)
+                    .unwrap();
+                *hook_transition.lock().unwrap() = Some(transition);
+            }));
 
         assert!(h.release_lease(&key).is_err());
-        set_release_after_accept_hook_for_test(None);
 
         let acquired_transition = acquired_transition
             .lock()

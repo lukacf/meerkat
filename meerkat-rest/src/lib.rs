@@ -3457,6 +3457,13 @@ async fn create_session_inner(
         }
     };
 
+    // The service commit made the session live. A later cancellation may still
+    // win the HTTP response race, but it must not archive or unregister the
+    // committed session state.
+    if let Some(ctx) = req_ctx.as_ref() {
+        ctx.set_unpublished_cleanup(noop_request_action());
+    }
+
     ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
 
     // Update peer-ingress context so live sessions always get attached ingress
@@ -4225,21 +4232,11 @@ async fn continue_session_inner(
             }
         };
 
-        // Rebuilt session now exists — install cleanup to archive it if cancel
-        // fires before the turn starts, and interrupt as the running cancel action.
+        // Rebuild committed a live session. Cancellation may still interrupt a
+        // running turn or win the response race, but unpublished cleanup must
+        // not tear down the committed replacement.
         if let Some(ctx) = req_ctx.as_ref() {
-            let cleanup_svc = state.session_service.clone();
-            let cleanup_adapter = state.runtime_adapter.clone();
-            let cleanup_sid = session_id.clone();
-            ctx.set_unpublished_cleanup(request_action(move || {
-                let svc = cleanup_svc.clone();
-                let adapter = cleanup_adapter.clone();
-                let sid = cleanup_sid.clone();
-                async move {
-                    let _ = svc.archive(&sid).await;
-                    adapter.unregister_session(&sid).await;
-                }
-            }));
+            ctx.set_unpublished_cleanup(noop_request_action());
 
             let cancel_adapter = state.runtime_adapter.clone();
             let cancel_sid = session_id.clone();
@@ -5195,6 +5192,13 @@ mod tests {
         fail_save: TestAtomicBool,
     }
 
+    struct CancellingSaveSessionStore {
+        inner: meerkat::MemoryStore,
+        executor: Arc<SurfaceRequestExecutor>,
+        request_id: String,
+        cancel_on_save: TestAtomicBool,
+    }
+
     impl FailingSaveSessionStore {
         fn new() -> Self {
             Self {
@@ -5205,6 +5209,21 @@ mod tests {
 
         fn set_fail_save(&self, fail: bool) {
             self.fail_save.store(fail, TestOrdering::Release);
+        }
+    }
+
+    impl CancellingSaveSessionStore {
+        fn new(executor: Arc<SurfaceRequestExecutor>, request_id: &str) -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                executor,
+                request_id: request_id.to_string(),
+                cancel_on_save: TestAtomicBool::new(false),
+            }
+        }
+
+        fn arm_cancel_on_save(&self) {
+            self.cancel_on_save.store(true, TestOrdering::Release);
         }
     }
 
@@ -5235,6 +5254,78 @@ mod tests {
 
         async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
             self.inner.delete(id).await
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for CancellingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.save(session).await?;
+            if self.cancel_on_save.swap(false, TestOrdering::AcqRel) {
+                let _ = self.executor.cancel_request(&self.request_id).await;
+            }
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
+        }
+    }
+
+    fn install_runtime_backed_test_service(
+        state: &mut AppState,
+        temp: &TempDir,
+        store: Arc<dyn meerkat::SessionStore>,
+        llm_client: Arc<dyn LlmClient>,
+    ) {
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::clone(&store),
+            None,
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let factory = AgentFactory::new(temp.path().join("runtime-sessions")).session_store(store);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(llm_client);
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
+        state.session_service = Arc::new(service);
+        state.runtime_adapter = runtime_adapter;
+    }
+
+    fn basic_create_session_request(prompt: &str) -> CreateSessionRequest {
+        CreateSessionRequest {
+            prompt: prompt.to_string().into(),
+            system_prompt: None,
+            turn_metadata: None,
+            max_tokens: None,
+            output_schema: None,
+            structured_output_retries: None,
+            verbose: false,
+            comms_name: None,
+            peer_meta: None,
+            hooks_override: None,
+            enable_builtins: None,
+            enable_shell: None,
+            enable_memory: None,
+            enable_mob: None,
+            budget_limits: None,
+            labels: None,
+            app_context: None,
+            shell_env: None,
         }
     }
 
@@ -7450,6 +7541,235 @@ mod tests {
         assert!(
             state.mcp_sessions.read().await.contains_key(&session_id),
             "tracked REST create post-commit errors must not clear committed MCP adapter state"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_tracked_create_cancel_after_service_commit_preserves_runtime_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let request_id = "tracked-create-cancel-after-service-commit";
+        let cancel_store = Arc::new(CancellingSaveSessionStore::new(
+            Arc::clone(&state.request_executor),
+            request_id,
+        ));
+        cancel_store.arm_cancel_on_save();
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&cancel_store) as Arc<dyn meerkat::SessionStore>;
+        install_runtime_backed_test_service(&mut state, &temp, store, Arc::new(MockLlmClient));
+
+        let ctx = state
+            .request_executor
+            .begin_request(request_id, noop_request_action());
+        let outcome = Box::pin(create_session_inner(
+            &state,
+            basic_create_session_request("Trigger tracked cancel after service commit"),
+            Some(ctx.clone()),
+        ))
+        .await;
+        assert!(
+            matches!(
+                &outcome,
+                RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled { .. }))
+            ),
+            "expected cancel gate to win after service commit, got {outcome:?}"
+        );
+
+        let api_error = with_request_lifecycle(&state.request_executor, Some(ctx), outcome)
+            .await
+            .expect_err("cancel after service commit should surface as request cancellation");
+        assert!(
+            matches!(api_error, ApiError::RequestCancelled { .. }),
+            "unexpected error: {api_error:?}"
+        );
+
+        assert_eq!(
+            state.request_executor.phase(request_id),
+            None,
+            "tracked request entry should be cleared after cancellation"
+        );
+        let summaries = state
+            .session_service
+            .list(Default::default())
+            .await
+            .expect("committed session should remain listable after cancel");
+        assert_eq!(summaries.len(), 1, "committed session should remain");
+        let session_id = summaries[0].session_id.clone();
+        state
+            .session_service
+            .export_live_session(&session_id)
+            .await
+            .expect("committed live session must remain after cancel");
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "tracked cancel after REST create commit must not clear runtime registration"
+        );
+        #[cfg(feature = "mcp")]
+        assert!(
+            state.mcp_sessions.read().await.contains_key(&session_id),
+            "tracked cancel after REST create commit must not clear MCP adapter state"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_tracked_create_publish_race_after_commit_preserves_runtime_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        install_runtime_backed_test_service(&mut state, &temp, store, Arc::new(ErrorLlmClient));
+
+        let request_id = "tracked-create-publish-race-after-commit";
+        let ctx = state
+            .request_executor
+            .begin_request(request_id, noop_request_action());
+        let outcome = Box::pin(create_session_inner(
+            &state,
+            basic_create_session_request("Trigger committed turn failure"),
+            Some(ctx.clone()),
+        ))
+        .await;
+        assert!(
+            matches!(
+                &outcome,
+                RequestTerminal::Publish(Err(ApiError::InternalWithData { code, .. }))
+                    if code == "SESSION_CREATED_WITH_TURN_FAILURE"
+            ),
+            "expected committed create turn failure, got {outcome:?}"
+        );
+
+        let _ = state.request_executor.cancel_request(request_id).await;
+        let api_error = with_request_lifecycle(&state.request_executor, Some(ctx), outcome)
+            .await
+            .expect_err("cancel should win the publish race");
+        assert!(
+            matches!(api_error, ApiError::RequestCancelled { .. }),
+            "unexpected error: {api_error:?}"
+        );
+
+        assert_eq!(
+            state.request_executor.phase(request_id),
+            None,
+            "tracked request entry should be cleared after publish race"
+        );
+        let summaries = state
+            .session_service
+            .list(Default::default())
+            .await
+            .expect("committed session should remain listable after publish race");
+        assert_eq!(summaries.len(), 1, "committed session should remain");
+        let session_id = summaries[0].session_id.clone();
+        state
+            .session_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("committed session load should succeed")
+            .expect("committed resumable session must remain after publish race");
+    }
+
+    #[tokio::test]
+    async fn rest_tracked_continue_rebuild_cancel_after_commit_preserves_runtime_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let request_id = "tracked-continue-rebuild-cancel-after-commit";
+        let cancel_store = Arc::new(CancellingSaveSessionStore::new(
+            Arc::clone(&state.request_executor),
+            request_id,
+        ));
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&cancel_store) as Arc<dyn meerkat::SessionStore>;
+        install_runtime_backed_test_service(&mut state, &temp, store, Arc::new(MockLlmClient));
+        let adapter = state.runtime_adapter.clone();
+        let pre_session = Session::new();
+        let bindings = adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "test precondition: runtime should already be registered"
+        );
+
+        cancel_store.arm_cancel_on_save();
+        let ctx = state
+            .request_executor
+            .begin_request(request_id, noop_request_action());
+        let session_id = created.session_id.to_string();
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id,
+            ContinueSessionRequest {
+                session_id: session_id.clone(),
+                prompt: "Continue after rebuild".to_string().into(),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                max_tokens: None,
+                comms_name: None,
+                peer_meta: None,
+                hooks_override: None,
+                verbose: false,
+                turn_metadata: Some(WireRuntimeTurnMetadata {
+                    model: Some("gpt-5.4-mini".to_string()),
+                    ..Default::default()
+                }),
+            },
+            Some(ctx.clone()),
+        ))
+        .await;
+        assert!(
+            matches!(
+                &outcome,
+                RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled { .. }))
+            ),
+            "expected cancel gate to win after rebuild commit, got {outcome:?}"
+        );
+
+        let api_error = with_request_lifecycle(&state.request_executor, Some(ctx), outcome)
+            .await
+            .expect_err("cancel after rebuild commit should surface as request cancellation");
+        assert!(
+            matches!(api_error, ApiError::RequestCancelled { .. }),
+            "unexpected error: {api_error:?}"
+        );
+
+        assert_eq!(
+            state.request_executor.phase(request_id),
+            None,
+            "tracked request entry should be cleared after rebuild cancellation"
+        );
+        state
+            .session_service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("committed rebuild live session must remain after cancel");
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "tracked cancel after REST continue rebuild commit must not clear runtime registration"
         );
     }
 

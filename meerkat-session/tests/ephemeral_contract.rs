@@ -813,6 +813,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         flow_tool_overlay: None,
         pre_turn_context_appends: Vec::new(),
         turn_metadata: None,
+        pre_admission_cancel_check: None,
     }
 }
 

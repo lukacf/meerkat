@@ -1174,6 +1174,7 @@ fn start_turn_request_from_primitive(
         flow_tool_overlay: metadata.and_then(|meta| meta.flow_tool_overlay.clone()),
         pre_turn_context_appends,
         turn_metadata: metadata.cloned(),
+        pre_admission_cancel_check: None,
     })
 }
 
@@ -2698,6 +2699,7 @@ mod tests {
                     flow_tool_overlay: None,
                     pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
+                    pre_admission_cancel_check: None,
                 },
             )
             .await

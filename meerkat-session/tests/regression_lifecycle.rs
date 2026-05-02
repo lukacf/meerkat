@@ -604,6 +604,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         flow_tool_overlay: None,
         pre_turn_context_appends: Vec::new(),
         turn_metadata: None,
+        pre_admission_cancel_check: None,
     }
 }
 
@@ -1183,6 +1184,7 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await

@@ -1828,7 +1828,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
-            Self::request_start_turn(id, handle, None)?;
+            Self::request_start_turn(id, handle, req.pre_admission_cancel_check.as_ref())?;
 
             if let Some(system_prompt) = req.system_prompt {
                 let allows_override = {
@@ -3348,6 +3348,7 @@ mod runtime_turn_metadata_tests {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         ..Default::default()
                     }),
+                    pre_admission_cancel_check: None,
                 },
             )
             .await
@@ -3424,6 +3425,7 @@ mod runtime_turn_metadata_tests {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         ..Default::default()
                     }),
+                    pre_admission_cancel_check: None,
                 },
             )
             .await
@@ -3618,6 +3620,7 @@ mod admission_window_tests {
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
+            pre_admission_cancel_check: None,
         }
     }
 
@@ -3810,6 +3813,51 @@ mod admission_window_tests {
             service.sessions.read().await.is_empty(),
             "cancelled eager create must remove the pre-registered session handle"
         );
+    }
+
+    #[tokio::test]
+    async fn start_turn_checks_cancel_inside_turn_admission_slot() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let service = EphemeralSessionService::new(
+            probe_builder(
+                Arc::clone(&run_calls),
+                Arc::clone(&cancel_calls),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            1,
+        );
+        let result = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled_for_check = Arc::clone(&cancelled);
+        let mut request = start_turn_request();
+        request.pre_admission_cancel_check =
+            Some(Arc::new(move || cancelled_for_check.load(Ordering::SeqCst)));
+
+        let err = service
+            .start_turn(&result.session_id, request)
+            .await
+            .expect_err("cancelled start_turn should reject before turn admission");
+
+        assert!(
+            matches!(err, SessionError::RequestCancelled { .. }),
+            "expected request-cancelled service error, got {err:?}"
+        );
+        assert_eq!(
+            run_calls.load(Ordering::SeqCst),
+            0,
+            "cancelled start_turn must not reach the agent"
+        );
+
+        cancelled.store(false, Ordering::SeqCst);
+        service
+            .start_turn(&result.session_id, start_turn_request())
+            .await
+            .expect("cancelled admission must not leave the turn slot busy");
+        assert_eq!(run_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -4055,6 +4103,7 @@ mod inline_video_admission_tests {
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
+            pre_admission_cancel_check: None,
         }
     }
 

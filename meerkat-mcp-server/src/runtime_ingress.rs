@@ -579,6 +579,7 @@ async fn apply_runtime_turn(
             .and_then(|meta| meta.flow_tool_overlay.clone()),
         pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
+        pre_admission_cancel_check: None,
     };
 
     match context
@@ -616,6 +617,7 @@ async fn apply_runtime_turn(
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
                         pre_turn_context_appends,
                         turn_metadata: primitive.turn_metadata().cloned(),
+                        pre_admission_cancel_check: None,
                     },
                     boundary,
                     contributing_input_ids,

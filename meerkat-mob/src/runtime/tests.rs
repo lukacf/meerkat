@@ -7862,6 +7862,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await

@@ -1423,6 +1423,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await;

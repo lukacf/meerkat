@@ -698,6 +698,7 @@ async fn apply_runtime_turn(
             .and_then(|meta| meta.flow_tool_overlay.clone()),
         pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
+        pre_admission_cancel_check: None,
     };
 
     let session_identity = context
@@ -813,6 +814,7 @@ async fn apply_runtime_turn(
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
                         pre_turn_context_appends,
                         turn_metadata: primitive.turn_metadata().cloned(),
+                        pre_admission_cancel_check: None,
                     },
                     boundary,
                     contributing_input_ids,
@@ -3231,30 +3233,52 @@ async fn create_session_inner(
         );
     }
 
+    let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
+        Box::new(move || ctx.cancel_already_requested())
+            as meerkat_runtime::RuntimePreAdmissionCancelCheck
+    });
     let (outcome, handle) = match adapter
-        .accept_input_with_completion(&create_result.session_id, input)
+        .accept_input_with_completion_and_admission_controls(
+            &create_result.session_id,
+            input,
+            None,
+            pre_admission_cancel_check,
+        )
         .await
     {
         Ok(pair) => pair,
+        Err(meerkat_runtime::RuntimeDriverError::RequestCancelled) => {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::RequestCancelled { details: None },
+            );
+        }
         Err(err) => {
-            if let Some(ctx) = req_ctx.as_ref() {
+            if err.is_post_admission_failure()
+                && let Some(ctx) = req_ctx.as_ref()
+            {
                 ctx.disarm_unpublished_cleanup();
             }
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return committed_terminal(
-                req_ctx.as_ref(),
-                Err(ApiError::InternalWithData {
-                    message: err.to_string(),
-                    code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
-                    details: json!({
-                        "session_id": session_id.to_string(),
-                        "session_ref": format_session_ref(&state.realm, &session_id),
-                        "session_created": true,
-                        "resumable": true,
+            if err.is_post_admission_failure() {
+                return committed_terminal(
+                    req_ctx.as_ref(),
+                    Err(ApiError::InternalWithData {
+                        message: err.to_string(),
+                        code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+                        details: json!({
+                            "session_id": session_id.to_string(),
+                            "session_ref": format_session_ref(&state.realm, &session_id),
+                            "session_created": true,
+                            "resumable": true,
+                        }),
                     }),
-                }),
-            );
+                );
+            }
+            return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
         }
     };
     if let Some(ctx) = req_ctx.as_ref() {
@@ -4123,11 +4147,28 @@ async fn continue_session_inner(
                 ApiError::RequestCancelled { details: None },
             );
         }
+        let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
+            Box::new(move || ctx.cancel_already_requested())
+                as meerkat_runtime::RuntimePreAdmissionCancelCheck
+        });
         let (_outcome, handle) = match adapter
-            .accept_input_with_completion(&create_result.session_id, input)
+            .accept_input_with_completion_and_admission_controls(
+                &create_result.session_id,
+                input,
+                None,
+                pre_admission_cancel_check,
+            )
             .await
         {
             Ok(pair) => pair,
+            Err(meerkat_runtime::RuntimeDriverError::RequestCancelled) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::RequestCancelled { details: None },
+                );
+            }
             Err(err) => {
                 if err.is_post_admission_failure()
                     && let Some(ctx) = req_ctx.as_ref()
@@ -4235,11 +4276,28 @@ async fn continue_session_inner(
                 ApiError::RequestCancelled { details: None },
             );
         }
+        let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
+            Box::new(move || ctx.cancel_already_requested())
+                as meerkat_runtime::RuntimePreAdmissionCancelCheck
+        });
         let (outcome, handle) = match adapter
-            .accept_input_with_completion(&session_id, input)
+            .accept_input_with_completion_and_admission_controls(
+                &session_id,
+                input,
+                None,
+                pre_admission_cancel_check,
+            )
             .await
         {
             Ok(pair) => pair,
+            Err(meerkat_runtime::RuntimeDriverError::RequestCancelled) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::RequestCancelled { details: None },
+                );
+            }
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
@@ -6481,6 +6539,7 @@ mod tests {
                     flow_tool_overlay: None,
                     pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
+                    pre_admission_cancel_check: None,
                 },
             )
             .await
@@ -6768,13 +6827,17 @@ mod tests {
                     .find("    } else {\n        #[cfg(feature = \"comms\")]")
                     .expect("rebuild path should end before live continue path")];
         let submit = body
-            .find(".accept_input_with_completion(&create_result.session_id, input)")
-            .expect("rebuild continue should submit input to rebuilt runtime");
-        let branch = &body[submit
+            .find(".accept_input_with_completion_and_admission_controls(")
+            .expect("rebuild continue should submit input through runtime admission controls");
+        let accept_block = &body[submit
             ..submit
                 + body[submit..]
                     .find("match handle")
                     .expect("rebuild continue should handle completion after submission")];
+        let err_branch_start = accept_block
+            .find("Err(err) =>")
+            .expect("accept block should have a non-cancellation error branch");
+        let branch = &accept_block[err_branch_start..];
         let classify = branch
             .find("err.is_post_admission_failure()")
             .expect("post-admission accept failures should be machine-classified");

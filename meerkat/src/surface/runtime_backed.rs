@@ -259,6 +259,7 @@ fn start_turn_request_from_primitive(
         flow_tool_overlay: metadata.and_then(|metadata| metadata.flow_tool_overlay.clone()),
         pre_turn_context_appends,
         turn_metadata: metadata.cloned(),
+        pre_admission_cancel_check: None,
     })
 }
 

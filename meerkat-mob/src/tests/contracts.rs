@@ -1126,6 +1126,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await
@@ -1201,6 +1202,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             },
         )
         .await;

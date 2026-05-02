@@ -744,7 +744,6 @@ impl std::fmt::Debug for SessionBuildOptions {
 }
 
 /// Request to start a new turn on an existing session.
-#[derive(Debug)]
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
@@ -777,6 +776,29 @@ pub struct StartTurnRequest {
     /// the session layer derives per-turn policy from this typed carrier
     /// instead of re-inferring or dropping fields.
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+    /// Request lifecycle cancellation gate checked inside service-owned turn
+    /// admission immediately before the turn slot is claimed.
+    pub pre_admission_cancel_check: Option<Arc<dyn Fn() -> bool + Send + Sync + 'static>>,
+}
+
+impl std::fmt::Debug for StartTurnRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartTurnRequest")
+            .field("prompt", &self.prompt)
+            .field("system_prompt", &self.system_prompt)
+            .field("render_metadata", &self.render_metadata)
+            .field("handling_mode", &self.handling_mode)
+            .field("event_tx", &self.event_tx)
+            .field("skill_references", &self.skill_references)
+            .field("flow_tool_overlay", &self.flow_tool_overlay)
+            .field("pre_turn_context_appends", &self.pre_turn_context_appends)
+            .field("turn_metadata", &self.turn_metadata)
+            .field(
+                "pre_admission_cancel_check",
+                &self.pre_admission_cancel_check.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// Request to append runtime system context to an existing session.

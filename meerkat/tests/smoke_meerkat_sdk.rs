@@ -1225,6 +1225,7 @@ mod scenario_09_session_service {
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
+            pre_admission_cancel_check: None,
         };
 
         let turn_result = service
@@ -1697,6 +1698,7 @@ mod scenario_22_runtime_host_comms {
                 flow_tool_overlay: None,
                 pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
+                pre_admission_cancel_check: None,
             };
 
             let result = self

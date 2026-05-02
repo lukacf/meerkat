@@ -3312,6 +3312,8 @@ async fn handle_meerkat_resume(
         };
         state.service.create_session(req).await
     } else {
+        #[cfg(feature = "comms")]
+        let mut post_admission_keep_alive_update = None;
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
@@ -3326,25 +3328,10 @@ async fn handle_meerkat_resume(
                     "keep_alive requires a session created with comms_name",
                 ));
             }
-            if let Err(err) = state
-                .service
-                .update_session_keep_alive(&session_id, keep_alive)
-                .await
+            #[cfg(feature = "comms")]
             {
-                unregister_prepared_runtime_if_new(
-                    state,
-                    &session_id,
-                    runtime_entry_existed_before_prepare,
-                )
-                .await;
-                return Err(ToolCallError::internal(format!(
-                    "failed to persist keep_alive: {err}"
-                )));
+                post_admission_keep_alive_update = Some(comms_rt);
             }
-            state
-                .runtime_adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
         }
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
@@ -3359,9 +3346,31 @@ async fn handle_meerkat_resume(
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
             pre_turn_context_appends: Vec::new(),
             turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
+            pre_admission_cancel_check: request_context.clone().map(|context| {
+                Arc::new(move || context.cancel_already_requested())
+                    as Arc<dyn Fn() -> bool + Send + Sync + 'static>
+            }),
         };
         match state.service.start_turn(&session_id, turn_req).await {
-            Ok(run_result) => Ok(run_result),
+            Ok(run_result) => {
+                #[cfg(feature = "comms")]
+                if let Some(comms_rt) = post_admission_keep_alive_update {
+                    if let Err(err) = state
+                        .service
+                        .update_session_keep_alive(&session_id, keep_alive)
+                        .await
+                    {
+                        return Err(ToolCallError::internal(format!(
+                            "failed to persist keep_alive: {err}"
+                        )));
+                    }
+                    state
+                        .runtime_adapter
+                        .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+                        .await;
+                }
+                Ok(run_result)
+            }
             Err(SessionError::NotFound { .. }) => {
                 let req = CreateSessionRequest {
                     model,
@@ -3383,7 +3392,18 @@ async fn handle_meerkat_resume(
             Err(other) => Err(other),
         }
     };
-    let session_exists = state.service.read(&session_id).await.is_ok();
+    let service_admission_cancelled = matches!(result, Err(SessionError::RequestCancelled { .. }));
+    if service_admission_cancelled {
+        unregister_prepared_runtime_if_new(
+            state,
+            &session_id,
+            runtime_entry_existed_before_prepare,
+        )
+        .await;
+        ingress.clear_session(&session_id).await;
+    }
+    let session_exists =
+        !service_admission_cancelled && state.service.read(&session_id).await.is_ok();
     if result.is_err() && !session_exists {
         unregister_prepared_runtime_if_new(
             state,

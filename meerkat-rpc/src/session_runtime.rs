@@ -2409,17 +2409,12 @@ impl SessionRuntime {
             .into());
         }
 
-        // Manage comms drain lifecycle based on keep_alive override.
+        // Validate and capture keep_alive/comms intent before admission, but
+        // do not persist or reconfigure anything until runtime admission has
+        // committed. Cancellation may still win at the machine gate below.
         #[cfg(feature = "comms")]
-        {
+        let runtime_keep_alive_plan = {
             let keep_alive_override = overrides.as_ref().and_then(|ov| ov.keep_alive);
-            let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
-            {
-                self.apply_pending_keep_alive_override(session_id, keep_alive)
-                    .await?
-            } else {
-                false
-            };
             let keep_alive = match keep_alive_override {
                 Some(val) => val,
                 None => self
@@ -2428,7 +2423,9 @@ impl SessionRuntime {
                     .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
                     .unwrap_or(false),
             };
-            if !pending_keep_alive_override_applied {
+            let staged_keep_alive_override =
+                keep_alive_override.is_some() && self.staged_sessions.contains(session_id).await;
+            if !staged_keep_alive_override {
                 let comms_rt = self.service.comms_runtime(session_id).await;
                 if keep_alive && comms_rt.is_none() {
                     // Check if the runtime adapter already has comms configured
@@ -2446,12 +2443,43 @@ impl SessionRuntime {
                         .into());
                     }
                 }
+            }
+            (keep_alive_override, keep_alive)
+        };
+
+        let (outcome, handle) = self
+            .runtime_adapter
+            .accept_input_with_completion_and_admission_controls(
+                session_id,
+                input,
+                on_admission_committed,
+                pre_admission_cancelled,
+            )
+            .await
+            .map_err(runtime_accept_error_to_turn_start)?;
+        let admission_committed = outcome.is_accepted();
+
+        // Commit keep_alive/comms side effects only after runtime admission.
+        #[cfg(feature = "comms")]
+        if admission_committed {
+            let (keep_alive_override, keep_alive) = runtime_keep_alive_plan;
+            let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
+            {
+                self.apply_pending_keep_alive_override(session_id, keep_alive)
+                    .await
+                    .map_err(RuntimeTurnStartError::after_admission)?
+            } else {
+                false
+            };
+            if !pending_keep_alive_override_applied {
+                let comms_rt = self.service.comms_runtime(session_id).await;
                 // Persist explicit override so subsequent inheriting calls observe it.
                 if keep_alive_override.is_some() {
                     self.service
                         .apply_runtime_session_keep_alive(session_id, keep_alive)
                         .await
-                        .map_err(session_error_to_rpc)?;
+                        .map_err(session_error_to_rpc)
+                        .map_err(RuntimeTurnStartError::after_admission)?;
                 }
                 // W2-G: never reconfigure a mob-owned drain from the session-runtime
                 // turn-start path. The mob provisioner owns peer-ingress for its
@@ -2486,18 +2514,6 @@ impl SessionRuntime {
                 }
             }
         }
-
-        let (outcome, handle) = self
-            .runtime_adapter
-            .accept_input_with_completion_and_admission_controls(
-                session_id,
-                input,
-                on_admission_committed,
-                pre_admission_cancelled,
-            )
-            .await
-            .map_err(runtime_accept_error_to_turn_start)?;
-        let admission_committed = outcome.is_accepted();
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
@@ -2735,6 +2751,7 @@ impl SessionRuntime {
                 flow_tool_overlay: flow_tool_overlay.clone(),
                 pre_turn_context_appends: pre_turn_context_appends.clone(),
                 turn_metadata: primitive.turn_metadata().cloned(),
+                pre_admission_cancel_check: None,
             };
 
             match self
@@ -2964,6 +2981,7 @@ impl SessionRuntime {
                         flow_tool_overlay,
                         pre_turn_context_appends: pre_turn_context_appends.clone(),
                         turn_metadata: primitive.turn_metadata().cloned(),
+                        pre_admission_cancel_check: None,
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -3025,6 +3043,7 @@ impl SessionRuntime {
                     flow_tool_overlay,
                     pre_turn_context_appends,
                     turn_metadata: primitive.turn_metadata().cloned(),
+                    pre_admission_cancel_check: None,
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -3457,6 +3476,7 @@ impl SessionRuntime {
             flow_tool_overlay: flow_tool_overlay.clone(),
             pre_turn_context_appends: Vec::new(),
             turn_metadata,
+            pre_admission_cancel_check: None,
         };
 
         if self.live_session_is_stale(session_id).await? {
@@ -8532,6 +8552,8 @@ mod tests {
             .await
             .unwrap();
 
+        let cancel_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel_checks_for_gate = Arc::clone(&cancel_checks);
         let (event_tx, _rx) = mpsc::channel(100);
         let err = runtime
             .start_turn_via_runtime_with_admission_controls(
@@ -8546,11 +8568,17 @@ mod tests {
                     ..Default::default()
                 }),
                 None,
-                Some(Box::new(|| true)),
+                Some(Box::new(move || {
+                    cancel_checks_for_gate.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+                })),
             )
             .await
-            .expect_err("pre-admission cancellation should reject before keep_alive mutation");
+            .expect_err("runtime admission cancellation should reject before keep_alive mutation");
         assert_eq!(err.as_rpc_error().code, error::REQUEST_CANCELLED);
+        assert!(
+            cancel_checks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "test must exercise cancellation after the early check and before runtime admission"
+        );
 
         let persisted = runtime
             .load_persisted_session(&session_id)

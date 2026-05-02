@@ -370,6 +370,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
             pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
+            pre_admission_cancel_check: None,
         };
 
         let result = self

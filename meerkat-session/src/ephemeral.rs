@@ -23,13 +23,15 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
-    InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
+    DeferredFirstTurnPhase, InputId, PendingDeferredPrompt, PendingSystemContextAppend,
+    PendingToolResultsMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
+    SessionSystemContextState,
 };
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex as StdMutex, PoisonError};
 
 // Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
 #[cfg(target_arch = "wasm32")]
@@ -84,6 +86,8 @@ enum SessionCommand {
         handling_mode: meerkat_core::types::HandlingMode,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<SessionTurnResult>,
+        active_admission: Option<RuntimeContextAdmissionGuard>,
+        restore_staged_capacity_on_pre_run_failure: bool,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
         pre_turn_context_appends: Vec<PendingSystemContextAppend>,
@@ -217,7 +221,6 @@ struct SessionHandle {
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
     /// Canonical owner for session turn admission lifecycle.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
-    _capacity_permit: OwnedSemaphorePermit,
     created_at: SystemTime,
     /// Key-value labels attached at session creation.
     labels: BTreeMap<String, String>,
@@ -232,12 +235,124 @@ struct SessionHandle {
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+    /// Capacity reserved for a deferred first turn while the session is staged.
+    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
+    /// Capacity currently held by live work for this session. Additional
+    /// runtime-routed inputs for the same running session join this lease
+    /// instead of consuming another global slot.
+    active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
     /// Wakes the running turn loop when an interrupt is requested.
     interrupt_notify: Arc<tokio::sync::Notify>,
     /// Shared live flag for cancel-after-boundary requests.
     cancel_after_boundary_handle: Option<Arc<AtomicBool>>,
     /// Broadcast channel for session-wide event subscription.
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+}
+
+pub struct RuntimeContextAdmissionGuard {
+    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    active_capacity_lease: Option<Arc<std::sync::Mutex<SessionActiveCapacityLease>>>,
+    active_permit: Option<OwnedSemaphorePermit>,
+    restore_staged_capacity_on_drop: bool,
+}
+
+#[derive(Default)]
+struct SessionActiveCapacityLease {
+    permit: Option<OwnedSemaphorePermit>,
+    leases: usize,
+    restore_staged_capacity_on_final_release: bool,
+    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+}
+
+#[derive(Default)]
+struct ActiveCapacityLeaseRelease {
+    permit: Option<OwnedSemaphorePermit>,
+    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct ReservedCreateAdmissionRegistration {
+    reserved_create_admissions: Arc<StdMutex<HashMap<SessionId, RuntimeContextAdmissionGuard>>>,
+    session_id: SessionId,
+    release_on_drop: bool,
+}
+
+impl Drop for RuntimeContextAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
+            if self.restore_staged_capacity_on_drop
+                && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
+            {
+                mark_active_capacity_lease_restore_staged(
+                    &active_capacity_lease,
+                    staged_capacity_permit,
+                );
+            }
+            let released = release_active_capacity_lease(&active_capacity_lease);
+            if let Some(staged_capacity_permit) = released.staged_capacity_permit {
+                restore_staged_capacity_permit(&staged_capacity_permit, released.permit);
+            }
+            return;
+        }
+        if self.restore_staged_capacity_on_drop
+            && let Some(staged_capacity_permit) = self.staged_capacity_permit.take()
+        {
+            restore_staged_capacity_permit(&staged_capacity_permit, self.active_permit.take());
+        }
+    }
+}
+
+impl RuntimeContextAdmissionGuard {
+    fn into_start_turn_parts(mut self) -> (Self, bool) {
+        let restore_staged_capacity_on_pre_run_failure = self.restore_staged_capacity_on_drop;
+        self.restore_staged_capacity_on_drop = false;
+        (self, restore_staged_capacity_on_pre_run_failure)
+    }
+
+    pub(crate) fn into_create_session_permit(mut self) -> Option<OwnedSemaphorePermit> {
+        self.restore_staged_capacity_on_drop = false;
+        self.staged_capacity_permit.take();
+        if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
+            return release_active_capacity_lease(&active_capacity_lease).permit;
+        }
+        self.active_permit.take()
+    }
+
+    fn restore_staged_capacity(mut self) {
+        if let Some(active_capacity_lease) = self.active_capacity_lease.as_ref()
+            && let Some(staged_capacity_permit) = self.staged_capacity_permit.as_ref()
+        {
+            mark_active_capacity_lease_restore_staged(
+                active_capacity_lease,
+                Arc::clone(staged_capacity_permit),
+            );
+            self.restore_staged_capacity_on_drop = false;
+            return;
+        }
+        self.restore_staged_capacity_on_drop = true;
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl ReservedCreateAdmissionRegistration {
+    pub(crate) fn discard(mut self) {
+        self.reserved_create_admissions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.session_id);
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for ReservedCreateAdmissionRegistration {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.reserved_create_admissions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.session_id);
+        }
+    }
 }
 
 struct SessionTaskControl {
@@ -649,9 +764,10 @@ fn clear_cancel_after_boundary_request(handle: &Option<Arc<AtomicBool>>) {
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
+    reserved_create_admissions: Arc<StdMutex<HashMap<SessionId, RuntimeContextAdmissionGuard>>>,
     builder: B,
-    max_sessions: usize,
-    session_capacity: Arc<Semaphore>,
+    max_sessions: Option<usize>,
+    active_session_capacity: Option<Arc<Semaphore>>,
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
     session_registered: tokio::sync::Notify,
@@ -787,11 +903,100 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Self {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
+            reserved_create_admissions: Arc::new(StdMutex::new(HashMap::new())),
             builder,
-            max_sessions,
-            session_capacity: Arc::new(Semaphore::new(max_sessions)),
+            max_sessions: Some(max_sessions),
+            active_session_capacity: Some(Arc::new(Semaphore::new(max_sessions))),
             session_registered: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Create an ephemeral service whose active-turn admission is enforced by
+    /// an outer runtime boundary.
+    pub fn new_unbounded_active_capacity(builder: B) -> Self {
+        Self {
+            sessions: RwLock::new(IndexMap::new()),
+            archived_views: RwLock::new(IndexMap::new()),
+            reserved_create_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            builder,
+            max_sessions: None,
+            active_session_capacity: None,
+            session_registered: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn try_acquire_active_permit(&self) -> Result<Option<OwnedSemaphorePermit>, SessionError> {
+        let Some(capacity) = self.active_session_capacity.as_ref() else {
+            return Ok(None);
+        };
+        match capacity.clone().try_acquire_owned() {
+            Ok(permit) => Ok(Some(permit)),
+            Err(_) => {
+                let max_sessions = self.max_sessions.unwrap_or(0);
+                let active = max_sessions.saturating_sub(capacity.available_permits());
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "Max sessions reached ({active}/{max_sessions})"
+                    )),
+                ))
+            }
+        }
+    }
+
+    fn acquire_runtime_context_admission_for_handle(
+        &self,
+        handle: &SessionHandle,
+    ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
+        if let Some(permit) = take_staged_capacity_permit(&handle.staged_capacity_permit) {
+            let restore_staged_capacity_on_drop = {
+                let state = lock_deferred_turn_state(&handle.deferred_turn_state);
+                matches!(state.first_turn_phase, DeferredFirstTurnPhase::Pending)
+            };
+            return Ok(acquire_active_capacity_lease(
+                Arc::clone(&handle.active_capacity_lease),
+                Some(permit),
+                Some(Arc::clone(&handle.staged_capacity_permit)),
+                restore_staged_capacity_on_drop,
+            ));
+        }
+        if let Some(admission) =
+            try_join_active_capacity_lease(Arc::clone(&handle.active_capacity_lease))
+        {
+            return Ok(admission);
+        }
+        match self.try_acquire_active_permit() {
+            Ok(permit) => Ok(acquire_active_capacity_lease(
+                Arc::clone(&handle.active_capacity_lease),
+                permit,
+                None,
+                false,
+            )),
+            Err(err) => {
+                if let Some(admission) =
+                    try_join_active_capacity_lease(Arc::clone(&handle.active_capacity_lease))
+                {
+                    Ok(admission)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    pub fn ensure_active_capacity_available(&self) -> Result<(), SessionError> {
+        let Some(capacity) = self.active_session_capacity.as_ref() else {
+            return Ok(());
+        };
+        if capacity.available_permits() > 0 {
+            return Ok(());
+        }
+        let max_sessions = self.max_sessions.unwrap_or(0);
+        let active = max_sessions.saturating_sub(capacity.available_permits());
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "Max sessions reached ({active}/{max_sessions})"
+            )),
+        ))
     }
 
     fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
@@ -1083,6 +1288,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
+        release_staged_capacity_permit(&handle.staged_capacity_permit);
         let phase = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             slot.request_shutdown().ok()
@@ -1330,9 +1536,323 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        self.apply_runtime_system_context(id, appends).await?;
+        self.apply_runtime_context_appends_with_admission(
+            id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn apply_runtime_context_appends_with_admission(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_context_appends_with_admission_recovering_not_found(
+            id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+            admission,
+        )
+        .await
+        .map_err(|(error, _admission)| error)
+    }
+
+    pub(crate) async fn apply_runtime_context_appends_with_admission_recovering_not_found(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<CoreApplyOutput, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
+        let preserve_reserved_admission = admission.is_some();
+        let active_guard = match admission {
+            Some(admission) => admission,
+            None => self
+                .acquire_runtime_context_admission(id)
+                .await
+                .map_err(|error| (error, None))?,
+        };
+        if let Err(error) = self.apply_runtime_system_context(id, appends).await {
+            let admission =
+                if preserve_reserved_admission && matches!(error, SessionError::NotFound { .. }) {
+                    Some(active_guard)
+                } else {
+                    None
+                };
+            return Err((error, admission));
+        }
         self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
             .await
+            .map_err(|error| (error, None))
+    }
+
+    pub async fn acquire_runtime_context_admission(
+        &self,
+        id: &SessionId,
+    ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        self.acquire_runtime_context_admission_for_handle(handle)
+    }
+
+    pub async fn join_active_runtime_context_admission(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<RuntimeContextAdmissionGuard>, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        Ok(try_join_active_capacity_lease(Arc::clone(
+            &handle.active_capacity_lease,
+        )))
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn acquire_runtime_capacity_admission(
+        &self,
+    ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
+        let active_permit = self.try_acquire_active_permit()?;
+        Ok(RuntimeContextAdmissionGuard {
+            staged_capacity_permit: None,
+            active_capacity_lease: None,
+            active_permit,
+            restore_staged_capacity_on_drop: false,
+        })
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn insert_reserved_create_admission(
+        &self,
+        session_id: SessionId,
+        admission: RuntimeContextAdmissionGuard,
+    ) -> Result<ReservedCreateAdmissionRegistration, SessionError> {
+        let mut reserved = self
+            .reserved_create_admissions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if reserved.contains_key(&session_id) {
+            return Err(SessionError::Busy { id: session_id });
+        }
+        reserved.insert(session_id.clone(), admission);
+        Ok(ReservedCreateAdmissionRegistration {
+            reserved_create_admissions: Arc::clone(&self.reserved_create_admissions),
+            session_id,
+            release_on_drop: true,
+        })
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn start_turn_with_runtime_context_admission(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission: RuntimeContextAdmissionGuard,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn_with_admission_recovering_not_found(id, req, Some(admission))
+            .await
+            .map_err(|(error, _admission)| error)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) async fn start_turn_with_runtime_context_admission_recovering_not_found(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission: RuntimeContextAdmissionGuard,
+    ) -> Result<RunResult, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
+        self.start_turn_with_admission_recovering_not_found(id, req, Some(admission))
+            .await
+    }
+
+    async fn start_turn_with_admission(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        reserved_admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn_with_admission_recovering_not_found(id, req, reserved_admission)
+            .await
+            .map_err(|(error, _admission)| error)
+    }
+
+    async fn start_turn_with_admission_recovering_not_found(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<RunResult, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
+
+        {
+            let sessions = self.sessions.read().await;
+            let handle = match sessions.get(id) {
+                Some(handle) => handle,
+                None => {
+                    return Err((
+                        SessionError::NotFound { id: id.clone() },
+                        reserved_admission.take(),
+                    ));
+                }
+            };
+            let identity = handle.llm_identity_rx.borrow().clone();
+            self.validate_prompt_video_input(&prompt, &identity)
+                .await
+                .map_err(|error| (error, None))?;
+
+            // Atomic busy check via compare-and-swap. This is the single
+            // point of admission — if two callers race, exactly one wins.
+            Self::request_start_turn(id, handle, req.pre_admission_cancel_check.as_ref())
+                .map_err(|error| (error, None))?;
+
+            if let Some(system_prompt) = req.system_prompt {
+                let allows_override = {
+                    let guard = lock_deferred_turn_state(&handle.deferred_turn_state);
+                    guard.allows_initial_turn_overrides()
+                };
+                if !allows_override {
+                    Self::try_abort_admitted_turn(handle);
+                    return Err((
+                        SessionError::Unsupported(
+                            "system_prompt override is only allowed on a deferred session's first turn"
+                                .to_string(),
+                        ),
+                        None,
+                    ));
+                }
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .command_tx
+                    .send(SessionCommand::UpdateSystemPrompt {
+                        system_prompt,
+                        reply_tx,
+                    })
+                    .await
+                    .map_err(|_| {
+                        Self::try_abort_admitted_turn(handle);
+                        (
+                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                                "Session task has exited".to_string(),
+                            )),
+                            None,
+                        )
+                    })?;
+                let update_result = reply_rx.await.map_err(|_| {
+                    Self::try_abort_admitted_turn(handle);
+                    (
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            "Session task dropped reply channel".to_string(),
+                        )),
+                        None,
+                    )
+                })?;
+                update_result.map_err(|error| {
+                    Self::try_abort_admitted_turn(handle);
+                    (SessionError::Agent(error), None)
+                })?;
+            }
+
+            let metadata = req.turn_metadata;
+            let render_metadata = req.render_metadata.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.render_metadata.clone())
+            });
+            let handling_mode = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.handling_mode)
+                .unwrap_or(req.handling_mode);
+            let skill_references = req.skill_references.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.skill_references.clone())
+            });
+            let flow_tool_overlay = req.flow_tool_overlay.or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.flow_tool_overlay.clone())
+            });
+            let pre_turn_context_appends = req.pre_turn_context_appends;
+            let execution_kind = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.execution_kind);
+            let (active_admission, restore_staged_capacity_on_pre_run_failure) =
+                if let Some(admission) = reserved_admission.take() {
+                    admission.into_start_turn_parts()
+                } else {
+                    match self.acquire_runtime_context_admission_for_handle(handle) {
+                        Ok(admission) => admission.into_start_turn_parts(),
+                        Err(err) => {
+                            Self::try_abort_admitted_turn(handle);
+                            return Err((err, None));
+                        }
+                    }
+                };
+
+            let command = SessionCommand::StartTurn {
+                prompt,
+                render_metadata,
+                handling_mode,
+                event_tx: req.event_tx,
+                result_tx,
+                active_admission: Some(active_admission),
+                restore_staged_capacity_on_pre_run_failure,
+                skill_references,
+                flow_tool_overlay,
+                pre_turn_context_appends,
+                execution_kind,
+            };
+            if let Err(send_error) = handle.command_tx.send(command).await {
+                let SessionCommand::StartTurn {
+                    active_admission,
+                    restore_staged_capacity_on_pre_run_failure,
+                    ..
+                } = send_error.0
+                else {
+                    unreachable!("only StartTurn command was sent")
+                };
+                if restore_staged_capacity_on_pre_run_failure
+                    && let Some(admission) = active_admission
+                {
+                    admission.restore_staged_capacity();
+                }
+                Self::try_abort_admitted_turn(handle);
+                return Err((
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "Session task has exited".to_string(),
+                    )),
+                    None,
+                ));
+            }
+        }
+
+        let result = result_rx.await.map_err(|_| {
+            (
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the result channel".to_string(),
+                )),
+                None,
+            )
+        })?;
+
+        result.map_err(|failure| (failure.into_session_error(id), None))
     }
 
     /// Get the event injector for a session, if available.
@@ -1408,6 +1928,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
         for (_id, handle) in sessions.drain(..) {
+            release_staged_capacity_permit(&handle.staged_capacity_permit);
             let phase = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
                 slot.request_shutdown().ok()
@@ -1546,21 +2067,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        // Reserve capacity up front so two concurrent create_session calls cannot race
-        // past max_sessions between check and insert.
-        let capacity_permit = match self.session_capacity.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let active = self.sessions.read().await.len();
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "Max sessions reached ({}/{})",
-                        active, self.max_sessions
-                    )),
-                ));
-            }
-        };
-
         let prompt = req.prompt.clone();
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
@@ -1570,6 +2076,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref());
+        let resumed_session_id = resumed_session.map(|session| session.id().clone());
         let mut deferred_turn_state = resumed_session
             .and_then(meerkat_core::Session::deferred_turn_state)
             .unwrap_or_default();
@@ -1602,6 +2109,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         }
         let deferred_turn_state = Arc::new(std::sync::Mutex::new(deferred_turn_state));
 
+        let reserved_create_admission = if let Some(session_id) = resumed_session_id.as_ref() {
+            self.reserved_create_admissions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(session_id)
+        } else {
+            None
+        };
+        let create_capacity_permit = match reserved_create_admission {
+            Some(admission) => admission.into_create_session_permit(),
+            None => self.try_acquire_active_permit()?,
+        };
+
         // Create the permanent event channel for this session.
         let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
@@ -1618,6 +2138,20 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
         let turn_admission = Arc::new(std::sync::Mutex::new(TurnAdmissionSlot::new()));
+        let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
+        let active_capacity_lease =
+            Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
+        let eager_active_admission = if defer_initial_turn {
+            *lock_staged_capacity_permit(&staged_capacity_permit) = create_capacity_permit;
+            None
+        } else {
+            Some(acquire_active_capacity_lease(
+                Arc::clone(&active_capacity_lease),
+                create_capacity_permit,
+                None,
+                false,
+            ))
+        };
 
         // Extract the event injector before the agent moves into its task.
         let event_injector = agent.event_injector();
@@ -1691,7 +2225,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             summary_rx,
             llm_identity_rx,
             turn_admission: Arc::clone(&turn_admission),
-            _capacity_permit: capacity_permit,
             created_at,
             labels,
             event_injector,
@@ -1699,6 +2232,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             comms_runtime,
             system_context_state,
             deferred_turn_state,
+            staged_capacity_permit,
+            active_capacity_lease,
             interrupt_notify,
             cancel_after_boundary_handle,
             session_event_tx,
@@ -1802,6 +2337,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 handling_mode: initial_handling_mode,
                 event_tx: caller_event_tx,
                 result_tx,
+                active_admission: eager_active_admission,
+                restore_staged_capacity_on_pre_run_failure: false,
                 skill_references: initial_skill_references,
                 flow_tool_overlay: initial_flow_tool_overlay,
                 pre_turn_context_appends: Vec::new(),
@@ -1845,114 +2382,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
-
-        {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&prompt, &identity).await?;
-
-            // Atomic busy check via compare-and-swap. This is the single
-            // point of admission — if two callers race, exactly one wins.
-            Self::request_start_turn(id, handle, req.pre_admission_cancel_check.as_ref())?;
-
-            if let Some(system_prompt) = req.system_prompt {
-                let allows_override = {
-                    let guard = lock_deferred_turn_state(&handle.deferred_turn_state);
-                    guard.allows_initial_turn_overrides()
-                };
-                if !allows_override {
-                    Self::try_abort_admitted_turn(handle);
-                    return Err(SessionError::Unsupported(
-                        "system_prompt override is only allowed on a deferred session's first turn"
-                            .to_string(),
-                    ));
-                }
-                let (reply_tx, reply_rx) = oneshot::channel();
-                handle
-                    .command_tx
-                    .send(SessionCommand::UpdateSystemPrompt {
-                        system_prompt,
-                        reply_tx,
-                    })
-                    .await
-                    .map_err(|_| {
-                        Self::try_abort_admitted_turn(handle);
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            "Session task has exited".to_string(),
-                        ))
-                    })?;
-                let update_result = reply_rx.await.map_err(|_| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        "Session task dropped reply channel".to_string(),
-                    ))
-                })?;
-                update_result.map_err(|error| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(error)
-                })?;
-            }
-
-            let metadata = req.turn_metadata;
-            let render_metadata = req.render_metadata.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.render_metadata.clone())
-            });
-            let handling_mode = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.handling_mode)
-                .unwrap_or(req.handling_mode);
-            let skill_references = req.skill_references.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.skill_references.clone())
-            });
-            let flow_tool_overlay = req.flow_tool_overlay.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.flow_tool_overlay.clone())
-            });
-            let pre_turn_context_appends = req.pre_turn_context_appends;
-            let execution_kind = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.execution_kind);
-
-            handle
-                .command_tx
-                .send(SessionCommand::StartTurn {
-                    prompt,
-                    render_metadata,
-                    handling_mode,
-                    event_tx: req.event_tx,
-                    result_tx,
-                    skill_references,
-                    flow_tool_overlay,
-                    pre_turn_context_appends,
-                    execution_kind,
-                })
-                .await
-                .map_err(|_| {
-                    Self::try_abort_admitted_turn(handle);
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        "Session task has exited".to_string(),
-                    ))
-                })?;
-        }
-
-        let result = result_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the result channel".to_string(),
-            ))
-        })?;
-
-        result.map_err(|failure| failure.into_session_error(id))
+        self.start_turn_with_admission(id, req, None).await
     }
 
     async fn set_session_client(
@@ -2191,6 +2621,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
+        release_staged_capacity_permit(&handle.staged_capacity_permit);
         self.archived_views
             .write()
             .await
@@ -2515,6 +2946,125 @@ fn lock_deferred_turn_state(
     }
 }
 
+fn lock_staged_capacity_permit(
+    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
+) -> std::sync::MutexGuard<'_, Option<OwnedSemaphorePermit>> {
+    permit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_active_capacity_lease(
+    lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
+) -> std::sync::MutexGuard<'_, SessionActiveCapacityLease> {
+    lease
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn take_staged_capacity_permit(
+    permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
+) -> Option<OwnedSemaphorePermit> {
+    lock_staged_capacity_permit(permit).take()
+}
+
+fn restore_staged_capacity_permit(
+    slot: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
+    permit: Option<OwnedSemaphorePermit>,
+) {
+    let Some(permit) = permit else {
+        return;
+    };
+    let mut guard = lock_staged_capacity_permit(slot);
+    if guard.is_none() {
+        *guard = Some(permit);
+    }
+}
+
+fn release_staged_capacity_permit(permit: &Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>) {
+    let _ = lock_staged_capacity_permit(permit).take();
+}
+
+fn acquire_active_capacity_lease(
+    active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
+    permit: Option<OwnedSemaphorePermit>,
+    staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
+    restore_staged_capacity_on_drop: bool,
+) -> RuntimeContextAdmissionGuard {
+    let mut lease = lock_active_capacity_lease(&active_capacity_lease);
+    if lease.leases == 0 {
+        lease.permit = permit;
+        lease.restore_staged_capacity_on_final_release = false;
+        lease.staged_capacity_permit = None;
+    } else {
+        drop(permit);
+    }
+    lease.leases = lease.leases.saturating_add(1);
+    drop(lease);
+    RuntimeContextAdmissionGuard {
+        staged_capacity_permit,
+        active_capacity_lease: Some(active_capacity_lease),
+        active_permit: None,
+        restore_staged_capacity_on_drop,
+    }
+}
+
+fn try_join_active_capacity_lease(
+    active_capacity_lease: Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
+) -> Option<RuntimeContextAdmissionGuard> {
+    let mut lease = lock_active_capacity_lease(&active_capacity_lease);
+    if lease.leases == 0 {
+        return None;
+    }
+    lease.leases = lease.leases.saturating_add(1);
+    drop(lease);
+    Some(RuntimeContextAdmissionGuard {
+        staged_capacity_permit: None,
+        active_capacity_lease: Some(active_capacity_lease),
+        active_permit: None,
+        restore_staged_capacity_on_drop: false,
+    })
+}
+
+fn mark_active_capacity_lease_restore_staged(
+    active_capacity_lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
+    staged_capacity_permit: Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>,
+) {
+    let mut lease = lock_active_capacity_lease(active_capacity_lease);
+    lease.restore_staged_capacity_on_final_release = true;
+    if lease.staged_capacity_permit.is_none() {
+        lease.staged_capacity_permit = Some(staged_capacity_permit);
+    }
+}
+
+fn release_active_capacity_lease(
+    active_capacity_lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
+) -> ActiveCapacityLeaseRelease {
+    let mut lease = lock_active_capacity_lease(active_capacity_lease);
+    if lease.leases == 0 {
+        return ActiveCapacityLeaseRelease::default();
+    }
+    lease.leases -= 1;
+    if lease.leases == 0 {
+        let permit = lease.permit.take();
+        if lease.restore_staged_capacity_on_final_release {
+            lease.restore_staged_capacity_on_final_release = false;
+            ActiveCapacityLeaseRelease {
+                permit,
+                staged_capacity_permit: lease.staged_capacity_permit.take(),
+            }
+        } else {
+            lease.staged_capacity_permit = None;
+            ActiveCapacityLeaseRelease {
+                permit,
+                staged_capacity_permit: None,
+            }
+        }
+    } else {
+        ActiveCapacityLeaseRelease::default()
+    }
+}
+
 fn map_turn_phase_to_session_state(phase: TurnAdmissionPhase) -> SessionState {
     match phase {
         TurnAdmissionPhase::Idle => SessionState::Idle,
@@ -2709,11 +3259,14 @@ async fn session_task<A: SessionAgent>(
                 handling_mode,
                 event_tx,
                 result_tx,
+                active_admission,
+                restore_staged_capacity_on_pre_run_failure,
                 skill_references,
                 flow_tool_overlay,
                 pre_turn_context_appends,
                 execution_kind,
             } => {
+                let mut active_admission = active_admission;
                 let current_phase = lock_turn_admission(&control.turn_admission).phase();
                 if current_phase == TurnAdmissionPhase::ShuttingDown {
                     let _ = result_tx.send(Err(SessionTurnFailure::before_admission(
@@ -2758,6 +3311,11 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
+                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(SessionTurnFailure::before_admission(
                         AgentError::NoPendingBoundary,
@@ -2773,6 +3331,11 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
+                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(SessionTurnFailure::before_admission(error)));
                     continue;
@@ -2785,6 +3348,11 @@ async fn session_task<A: SessionAgent>(
                         pending_initial_prompt,
                         pending_tool_results,
                     );
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
+                    }
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(SessionTurnFailure::before_admission(error)));
                     continue;
@@ -2812,6 +3380,11 @@ async fn session_task<A: SessionAgent>(
                                 "illegal begin-run transition: {error}"
                             )),
                         )));
+                        if restore_staged_capacity_on_pre_run_failure
+                            && let Some(admission) = active_admission.take()
+                        {
+                            admission.restore_staged_capacity();
+                        }
                         continue;
                     }
                 }
@@ -2871,6 +3444,11 @@ async fn session_task<A: SessionAgent>(
                             break Err(meerkat_core::error::AgentError::Cancelled);
                         }
                         let interrupt_wait = control.interrupt_notify.notified();
+                        tokio::pin!(interrupt_wait);
+                        if lock_turn_admission(&control.turn_admission).interrupt_pending() {
+                            interrupted = true;
+                            break Err(meerkat_core::error::AgentError::Cancelled);
+                        }
                         tokio::select! {
                             result = &mut run_fut => {
                                 let mut slot = lock_turn_admission(&control.turn_admission);
@@ -2881,7 +3459,7 @@ async fn session_task<A: SessionAgent>(
                                 resolved_phase = slot.resolve().ok();
                                 break result;
                             }
-                            () = interrupt_wait => {
+                            () = &mut interrupt_wait => {
                                 let interrupt_pending =
                                     lock_turn_admission(&control.turn_admission).interrupt_pending();
                                 if interrupt_pending {
@@ -2979,6 +3557,7 @@ async fn session_task<A: SessionAgent>(
                         false
                     }
                 };
+                drop(active_admission);
                 let _ = result_tx.send(result.map_err(SessionTurnFailure::after_admission));
                 if shutting_down {
                     break;
@@ -3707,6 +4286,8 @@ mod admission_window_tests {
                 handling_mode: request.handling_mode,
                 event_tx: request.event_tx,
                 result_tx,
+                active_admission: None,
+                restore_staged_capacity_on_pre_run_failure: false,
                 skill_references: request.skill_references,
                 flow_tool_overlay: request.flow_tool_overlay,
                 pre_turn_context_appends: request.pre_turn_context_appends,

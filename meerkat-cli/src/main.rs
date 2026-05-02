@@ -2705,6 +2705,9 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     config
         .apply_env_overrides()
         .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid runtime config: {e}"))?;
     Ok((config, base_dir))
 }
 
@@ -6047,6 +6050,7 @@ fn build_cli_service_with_defaults(
     config: Config,
     defaults: CliServiceBuildDefaults,
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
+    let max_sessions = config.max_sessions();
     let mut builder = FactoryAgentBuilder::new(factory, config);
     if let Some(machine) = defaults.image_generation_machine {
         builder = builder.with_image_generation_machine(machine);
@@ -6054,7 +6058,7 @@ fn build_cli_service_with_defaults(
     builder.default_blob_store = defaults.default_blob_store;
     builder.default_image_generation_executor = defaults.default_image_generation_executor;
     meerkat::surface::set_default_schedule_tools(&builder, defaults.default_schedule_tools);
-    meerkat::surface::build_embedded_service_from_builder(builder, 64)
+    meerkat::surface::build_embedded_service_from_builder(builder, max_sessions)
 }
 
 #[cfg(feature = "session-store")]
@@ -6067,10 +6071,11 @@ fn build_cli_runtime_backed_service_with_defaults(
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
     Arc<meerkat_runtime::MeerkatMachine>,
 ) {
+    let max_sessions = config.max_sessions();
     let builder = FactoryAgentBuilder::new(factory, config);
     meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
     let (service, runtime_adapter) =
-        meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
+        meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
     (service, runtime_adapter)
 }
 
@@ -7060,11 +7065,12 @@ async fn resume_session_with_llm_override(
 
         log_stage("build_cli_persistent_service");
         // Build persistent session service for resume — durable runtime semantics.
+        let max_sessions = config.max_sessions();
         let (persistent_service, resume_adapter) =
             meerkat::build_persistent_service_with_runtime_adapter(
                 factory,
                 config.clone(),
-                64,
+                max_sessions,
                 persistence.clone(),
             );
         let service = Arc::new(persistent_service);
@@ -8483,8 +8489,8 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                 .await
             {
                 meerkat_mob_mcp::archive_session_with_mob_cleanup(
-                    service.as_ref(),
-                    &state,
+                    Arc::clone(&service),
+                    Arc::clone(&state),
                     &session_id,
                 )
                 .await
@@ -10464,11 +10470,12 @@ where
         Arc::clone(&config_store),
         paths.root.join("config_state.json"),
     ));
+    let max_sessions = config.max_sessions();
     let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
         factory,
         config.clone(),
         Arc::clone(&config_store),
-        64,
+        max_sessions,
         persistence,
         meerkat_rpc::router::NotificationSink::noop(),
     );
@@ -10729,6 +10736,14 @@ mod tests {
         let skill_name = meerkat_core::skills::SkillName::parse(name)
             .expect("fixture skill name should be valid");
         meerkat_core::skills::SkillKey::new(meerkat_core::skills::SourceUuid::builtin(), skill_name)
+    }
+
+    #[cfg(feature = "session-store")]
+    fn sqlite_session_store(temp: &tempfile::TempDir) -> Arc<dyn meerkat::SessionStore> {
+        Arc::new(
+            meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite"))
+                .expect("sqlite session store should open"),
+        )
     }
 
     #[test]
@@ -13319,6 +13334,10 @@ default_model = "gemma"
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let ws_url = format!("ws://{addr}/realtime/ws");
+        let protocol_version = meerkat_contracts::RealtimeProtocolVersion::CURRENT
+            .as_str()
+            .to_string();
+        let server_protocol_version = protocol_version.clone();
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -13335,7 +13354,7 @@ default_model = "gemma"
                 open_frame,
                 meerkat_contracts::RealtimeClientFrame::ChannelOpen(
                     meerkat_contracts::RealtimeChannelOpenFrame {
-                        protocol_version: "1".to_string(),
+                        protocol_version: server_protocol_version.clone(),
                         open_token: "token-1".to_string(),
                         role: meerkat_contracts::RealtimeChannelRole::Primary,
                         turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
@@ -13347,7 +13366,7 @@ default_model = "gemma"
                 .send(Message::Text(
                     serde_json::to_string(&meerkat_contracts::RealtimeServerFrame::ChannelOpened(
                         meerkat_contracts::RealtimeChannelOpenedFrame {
-                            protocol_version: "1".to_string(),
+                            protocol_version: server_protocol_version,
                             status: meerkat_contracts::RealtimeChannelStatus {
                                 state: meerkat_contracts::RealtimeChannelState::Ready,
                                 attempt_count: 0,
@@ -13473,8 +13492,8 @@ default_model = "gemma"
             target: meerkat_contracts::RealtimeChannelTarget::SessionTarget {
                 session_id: "session-1".to_string(),
             },
-            supported_protocol_versions: vec!["1".to_string()],
-            default_protocol_version: "1".to_string(),
+            supported_protocol_versions: vec![protocol_version.clone()],
+            default_protocol_version: protocol_version.clone(),
             capabilities: meerkat_contracts::RealtimeCapabilities {
                 input_kinds: vec![meerkat_contracts::RealtimeInputKind::Text],
                 output_kinds: vec![meerkat_contracts::RealtimeOutputKind::Text],
@@ -13496,7 +13515,7 @@ default_model = "gemma"
                 stdout_server,
                 open_info,
                 meerkat_contracts::RealtimeChannelOpenFrame {
-                    protocol_version: "1".to_string(),
+                    protocol_version,
                     open_token: "token-1".to_string(),
                     role: meerkat_contracts::RealtimeChannelRole::Primary,
                     turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
@@ -15005,7 +15024,7 @@ capabilities = ["definitely_missing_capability"]
     #[tokio::test]
     async fn test_cli_runtime_backed_service_preserves_persistence_oauth_authority() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let session_store = sqlite_session_store(&temp);
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
@@ -15052,7 +15071,7 @@ capabilities = ["definitely_missing_capability"]
     #[tokio::test]
     async fn test_cli_runtime_backed_service_persists_authority_snapshot_for_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let session_store = sqlite_session_store(&temp);
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
@@ -15147,7 +15166,7 @@ capabilities = ["definitely_missing_capability"]
     #[tokio::test]
     async fn test_cli_interrupt_destroyed_noop_rejects_persisted_stopped_runtime() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let session_store = sqlite_session_store(&temp);
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(

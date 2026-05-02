@@ -21,6 +21,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+/// Default active session admission capacity for RPC/CLI runtime surfaces.
+pub const DEFAULT_MAX_SESSIONS: usize = 64;
+
 /// Complete configuration for Meerkat
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +87,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Active/staged session admission capacity for runtime surfaces.
+    pub fn max_sessions(&self) -> usize {
+        self.limits.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
+    }
+
     /// Build the effective model registry for this config snapshot.
     pub fn model_registry(&self) -> Result<crate::ModelRegistry, ConfigError> {
         crate::ModelRegistry::from_config(self)
@@ -655,6 +663,11 @@ impl Config {
                 "limits.budget must be greater than 0 when set".to_string(),
             ));
         }
+        if self.limits.max_sessions == Some(0) {
+            return Err(ConfigError::Validation(
+                "limits.max_sessions must be greater than 0 when set".to_string(),
+            ));
+        }
         if self.compaction.auto_compact_threshold == 0 {
             return Err(ConfigError::Validation(
                 "compaction.auto_compact_threshold must be greater than 0".to_string(),
@@ -1114,6 +1127,10 @@ impl Default for GeminiProviderToolsConfig {
 #[serde(default)]
 pub struct LimitsConfig {
     pub budget: Option<u64>,
+    /// Active session admission capacity. Persisted history does not consume
+    /// this limit. RPC observes runtime config updates dynamically; REST/MCP
+    /// process-local services apply changes on service restart.
+    pub max_sessions: Option<usize>,
     #[serde(with = "optional_duration_serde")]
     pub max_duration: Option<Duration>,
 }
@@ -1963,6 +1980,21 @@ mod tests {
         assert_eq!(config.agent.model, "claude-opus-4-7");
         assert_eq!(config.agent.max_tokens_per_turn, 16384);
         assert_eq!(config.retry.max_retries, 3);
+        assert_eq!(config.max_sessions(), DEFAULT_MAX_SESSIONS);
+    }
+
+    #[test]
+    fn test_limits_max_sessions_configures_runtime_capacity() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[limits]
+max_sessions = 7
+"#,
+            )
+            .expect("merge max_sessions");
+        assert_eq!(config.max_sessions(), 7);
     }
 
     #[test]
@@ -2416,6 +2448,16 @@ api_style = "chat_completions"
             err.to_string()
                 .contains("max_tokens must be greater than 0")
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_limits_max_sessions() {
+        let mut config = Config::default();
+        config.limits.max_sessions = Some(0);
+        let err = config
+            .validate()
+            .expect_err("limits.max_sessions=0 should be invalid");
+        assert!(err.to_string().contains("limits.max_sessions"));
     }
 
     #[test]

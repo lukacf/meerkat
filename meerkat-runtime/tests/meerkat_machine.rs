@@ -101,6 +101,28 @@ async fn wait_for_input_state(
     .expect(context)
 }
 
+async fn wait_for_runtime_state(
+    adapter: &MeerkatMachine,
+    sid: &SessionId,
+    expected: RuntimeState,
+    context: &'static str,
+) -> RuntimeState {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let state = adapter
+                .runtime_state(sid)
+                .await
+                .expect("runtime state read should succeed");
+            if state == expected {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect(context)
+}
+
 struct HarnessRuntimeStore {
     inner: meerkat_runtime::store::InMemoryRuntimeStore,
     fail_atomic_apply: bool,
@@ -1575,10 +1597,14 @@ async fn failed_executor_continues_processing_backlog() {
     )
     .await;
     assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
-    );
+    let runtime_state = wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Attached,
+        "runtime should return to Attached after draining queued backlog",
+    )
+    .await;
+    assert_eq!(runtime_state, RuntimeState::Attached);
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "the runtime loop should keep draining queued backlog after a failed run"

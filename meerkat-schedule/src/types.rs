@@ -660,15 +660,26 @@ fn fold_legacy_keep_alive(
     target: &mut Option<TurnMetadataOverride<KeepAlivePolicy>>,
     value: Option<bool>,
 ) -> Result<(), String> {
-    if value != Some(true) {
+    let Some(value) = value else {
         return Ok(());
+    };
+    let legacy = if value {
+        TurnMetadataOverride::Set(default_legacy_keep_alive_policy())
+    } else {
+        TurnMetadataOverride::Clear
+    };
+    match target.as_ref() {
+        Some(existing) if existing != &legacy => {
+            Err("split keep_alive diverges from turn_metadata.keep_alive".to_string())
+        }
+        Some(_) => Ok(()),
+        None => {
+            if value {
+                *target = Some(legacy);
+            }
+            Ok(())
+        }
     }
-    fold_legacy_field(
-        target,
-        Some(TurnMetadataOverride::Set(default_legacy_keep_alive_policy())),
-        "keep_alive",
-        "keep_alive",
-    )
 }
 
 fn fold_legacy_provider_params(
@@ -2185,6 +2196,29 @@ mod tests {
 
         let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
         assert!(err.to_string().contains("model"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn session_materialization_rejects_divergent_legacy_keep_alive_false() {
+        let json = serde_json::json!({
+            "keep_alive": false,
+            "turn_metadata": {
+                "model": "claude-sonnet-4-6",
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                }
+            }
+        });
+
+        let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("keep_alive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

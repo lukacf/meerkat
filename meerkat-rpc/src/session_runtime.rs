@@ -1496,10 +1496,20 @@ impl SessionRuntime {
             session_id,
             runtime_entry_existed_before_prepare,
         } = recovered;
+        let live_session_discarded = match self.service.discard_live_session(&session_id).await {
+            Ok(()) => true,
+            Err(SessionError::NotFound { .. }) => false,
+            Err(error) => {
+                if !runtime_entry_existed_before_prepare {
+                    self.runtime_adapter.unregister_session(&session_id).await;
+                }
+                return Err(session_error_to_rpc(error));
+            }
+        };
         match self.service.create_session(request).await {
             Ok(_) => Ok(()),
             Err(error) => {
-                if !runtime_entry_existed_before_prepare {
+                if live_session_discarded || !runtime_entry_existed_before_prepare {
                     self.runtime_adapter.unregister_session(&session_id).await;
                 }
                 Err(session_error_to_rpc(error))
@@ -3551,6 +3561,12 @@ impl SessionRuntime {
         };
 
         if self.live_session_is_stale(session_id).await? {
+            match self.service.discard_live_session(session_id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {
+                    self.runtime_adapter.unregister_session(session_id).await;
+                }
+                Err(error) => return Err(session_error_to_rpc(error)),
+            }
             return Box::pin(self.try_recover_persisted_session(
                 session_id,
                 turn_prompt,
@@ -5649,6 +5665,235 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn context_only_recovery_replaces_stale_live_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store.clone(), None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (initial_tx, _initial_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize stale-live target".into(),
+                initial_tx,
+                None,
+            )
+            .await
+            .expect("materialize target session");
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "test precondition: live session should still exist"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "test precondition: runtime session should still exist"
+        );
+
+        let mut persisted = store
+            .load(&session_id)
+            .await
+            .expect("load persisted target")
+            .expect("persisted target session");
+        let mut system_context_state = persisted.system_context_state().unwrap_or_default();
+        system_context_state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: "persisted-only stale-live update".to_string(),
+                    source: Some("stale-live-test".to_string()),
+                    idempotency_key: Some("stale-live-test".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("stage persisted-only system context");
+        persisted
+            .set_system_context_state(system_context_state)
+            .expect("persist system context state");
+        store
+            .save(&persisted)
+            .await
+            .expect("save newer persisted target");
+        assert!(
+            stored_has_unapplied_system_context(
+                &persisted,
+                &runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .expect("export live session")
+            ),
+            "test precondition: persisted session should have unapplied context"
+        );
+        assert!(
+            runtime
+                .live_session_is_stale(&session_id)
+                .await
+                .expect("stale check"),
+            "test precondition: stale live session should be detected"
+        );
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-stale-live-replace".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context after stale live session"
+                            .to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect("context-only recovery should replace stale live session");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "successful recovery should leave a live replacement session"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "successful recovery should keep the runtime registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_turn_recovery_replaces_stale_live_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store.clone(), None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (initial_tx, _initial_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize stale-live target".into(),
+                initial_tx,
+                None,
+            )
+            .await
+            .expect("materialize target session");
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "test precondition: live session should still exist"
+        );
+
+        let mut persisted = store
+            .load(&session_id)
+            .await
+            .expect("load persisted target")
+            .expect("persisted target session");
+        let mut system_context_state = persisted.system_context_state().unwrap_or_default();
+        system_context_state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: "persisted-only stale-live start_turn update".to_string(),
+                    source: Some("stale-live-start-turn-test".to_string()),
+                    idempotency_key: Some("stale-live-start-turn-test".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("stage persisted-only system context");
+        persisted
+            .set_system_context_state(system_context_state)
+            .expect("persist system context state");
+        store
+            .save(&persisted)
+            .await
+            .expect("save newer persisted target");
+        assert!(
+            runtime
+                .live_session_is_stale(&session_id)
+                .await
+                .expect("stale check"),
+            "test precondition: stale live session should be detected"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "continue after stale live".into(),
+                event_tx,
+                None,
+            )
+            .await
+            .expect("start_turn recovery should replace stale live session");
+
+        assert_eq!(result.session_id, session_id);
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "successful recovery should leave a live replacement session"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "successful recovery should keep the runtime registered"
+        );
     }
 
     #[tokio::test]

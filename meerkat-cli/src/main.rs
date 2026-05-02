@@ -2930,13 +2930,13 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             let registry = cli_provider_registry();
-            use meerkat_providers::auth_store::TokenStoreBackend;
-            let store = TokenStoreBackend::default_auto()
+            let store: Arc<dyn TokenStore> = TokenStoreBackend::default_auto()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                 .open()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(store)
+                .with_refresh_coordinator(Arc::new(InMemoryCoordinator::default()))
                 .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
             let connection_ref = meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
@@ -2985,16 +2985,19 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
             };
-            let snapshot = scope
-                .auth_lease
-                .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-            let token_key = meerkat_core::auth::TokenKey::from_connection_ref(&connection_ref);
-            let projection = meerkat_core::project_published_auth_status(
+            let token_store = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+            {
+                Ok(backend) => backend.open().ok(),
+                Err(_) => None,
+            };
+            let projection = project_cli_auth_status(
+                scope.auth_lease.as_ref(),
+                token_store.as_deref(),
+                &connection_ref,
+                profile,
                 chrono::Utc::now(),
-                &token_key,
-                None,
-                &snapshot,
-            );
+            )
+            .await;
             println!("state:       {}", projection.phase.as_public_str());
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
@@ -3256,7 +3259,7 @@ async fn refresh_auth_profile(
         .load(&key)
         .await
         .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-    let Some(before_tokens) = before.as_ref() else {
+    if before.is_none() {
         println!(
             "profile:       {realm}:{profile_id}\n\
              binding:       {realm}:{binding_id}\n\
@@ -3265,7 +3268,7 @@ async fn refresh_auth_profile(
             profile.provider.as_str(),
         );
         return Ok(());
-    };
+    }
     let connection_ref = meerkat_core::ConnectionRef {
         realm: meerkat_core::RealmId::parse(realm)
             .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -3273,13 +3276,6 @@ async fn refresh_auth_profile(
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
     };
-    save_cli_tokens_and_publish_lifecycle(
-        store.as_ref(),
-        scope.auth_lease.as_ref(),
-        &connection_ref,
-        before_tokens,
-    )
-    .await?;
 
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
@@ -3303,16 +3299,9 @@ async fn refresh_auth_profile(
         .load(&key)
         .await
         .map_err(|e| anyhow::anyhow!("TokenStore reload failed: {e}"))?;
-    let Some(after_tokens) = after.as_ref() else {
+    if after.is_none() {
         anyhow::bail!("Refresh completed but TokenStore no longer has '{realm}:{binding_id}'");
-    };
-    save_cli_tokens_and_publish_lifecycle(
-        store.as_ref(),
-        scope.auth_lease.as_ref(),
-        &connection_ref,
-        after_tokens,
-    )
-    .await?;
+    }
 
     println!("profile:       {realm}:{profile_id}");
     println!("binding:       {realm}:{binding_id}");
@@ -3743,20 +3732,7 @@ fn connection_ref_from_token_key(key: &meerkat_providers::auth_store::TokenKey) 
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-struct CliPreparedTokenCommitSnapshot {
-    key: meerkat_providers::auth_store::TokenKey,
-    lease_key: meerkat_core::handles::LeaseKey,
-    previous: Option<meerkat_providers::auth_store::PersistedTokens>,
-}
-
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-struct CliTokenCommitSnapshot {
-    key: meerkat_providers::auth_store::TokenKey,
-    lease_key: meerkat_core::handles::LeaseKey,
-    previous: Option<meerkat_providers::auth_store::PersistedTokens>,
-    previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
-    lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
-}
+struct CliPreparedTokenCommitSnapshot;
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn prepare_cli_token_commit_unlocked(
@@ -3764,15 +3740,20 @@ async fn prepare_cli_token_commit_unlocked(
     connection_ref: &ConnectionRef,
 ) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
-    let previous = store
-        .load(&key)
-        .await
-        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-    Ok(CliPreparedTokenCommitSnapshot {
-        key,
-        lease_key: meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref),
-        previous,
-    })
+    let _previous = load_cli_token_snapshot_for_commit(store, &key).await?;
+    Ok(CliPreparedTokenCommitSnapshot)
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn load_cli_token_snapshot_for_commit(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    key: &meerkat_providers::auth_store::TokenKey,
+) -> anyhow::Result<Option<meerkat_providers::auth_store::PersistedTokens>> {
+    match store.load(key).await {
+        Ok(previous) => Ok(previous),
+        Err(meerkat_providers::auth_store::TokenStoreError::KeyringUnavailable(_)) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("TokenStore load failed: {e}")),
+    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3781,6 +3762,25 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     connection_ref: &ConnectionRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
+    _mark_for_rehydration: bool,
+) -> anyhow::Result<()> {
+    meerkat_core::save_tokens_and_publish_lifecycle_acquired(
+        store,
+        auth_lease,
+        connection_ref,
+        tokens,
+    )
+    .await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+    tokens: &meerkat_providers::auth_store::PersistedTokens,
+    prepared: CliPreparedTokenCommitSnapshot,
 ) -> anyhow::Result<()> {
     meerkat_core::save_tokens_and_publish_lifecycle_acquired(
         store,
@@ -3789,65 +3789,38 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         tokens,
     )
     .await
-    .map_err(|e| anyhow::anyhow!(e))
+    .map_err(|e| {
+        if matches!(
+            &e,
+            meerkat_core::TokenLifecycleSaveError::AuthMachineAcquire { .. }
+                | meerkat_core::TokenLifecycleSaveError::AuthMachineAcquireRace { .. }
+        ) {
+            anyhow::anyhow!("AuthMachine lifecycle acquire failed after OAuth consume: {e}")
+        } else {
+            anyhow::anyhow!("AuthMachine lifecycle commit failed after OAuth consume: {e}")
+        }
+    })?;
+    let CliPreparedTokenCommitSnapshot = prepared;
+    Ok(())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-async fn rollback_cli_token_commit(
+async fn save_cli_tokens_and_publish_lifecycle(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    commit: &CliTokenCommitSnapshot,
-) -> Result<(), String> {
-    match &commit.previous {
-        Some(previous) => match commit.previous_lifecycle.phase {
-            Some(phase) if phase != meerkat_core::handles::AuthLeasePhase::Released => {
-                auth_lease
-                    .release_credential_lifecycle(&commit.lease_key)
-                    .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
-                store
-                    .save(&commit.key, previous)
-                    .await
-                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
-                meerkat_core::restore_token_lifecycle_snapshot(
-                    auth_lease,
-                    &commit.lease_key,
-                    &commit.previous_lifecycle,
-                    Some(previous),
-                )
-                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
-                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
-                if restored_snapshot.credential_present {
-                    let restored_previous =
-                        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(
-                            previous,
-                            &restored_snapshot,
-                        );
-                    store
-                        .save(&commit.key, &restored_previous)
-                        .await
-                        .map_err(|e| format!("TokenStore rollback marker save failed: {e}"))?;
-                }
-            }
-            _ => {
-                auth_lease
-                    .release_credential_lifecycle(&commit.lease_key)
-                    .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
-                store
-                    .save(&commit.key, previous)
-                    .await
-                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?
-            }
-        },
-        None => {
-            auth_lease
-                .release_credential_lifecycle(&commit.lease_key)
-                .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
-            store
-                .clear(&commit.key)
-                .await
-                .map_err(|e| format!("TokenStore rollback clear failed: {e}"))?;
-        }
-    }
+    connection_ref: &ConnectionRef,
+    tokens: &meerkat_providers::auth_store::PersistedTokens,
+) -> anyhow::Result<()> {
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+    save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+        store,
+        auth_lease,
+        connection_ref,
+        tokens,
+        true,
+    )
+    .await?;
     Ok(())
 }
 
@@ -4076,7 +4049,7 @@ async fn interactive_login(
             connection_ref.clone(),
             identity,
             redirect_url.clone(),
-            pkce.verifier.secret().to_string(),
+            pkce.verifier.secret().clone(),
         )
         .map_err(|e| anyhow::anyhow!("OAuth flow admission failed: {e}"))?;
     let handle = pending_callback.expect_state(state_token.clone());
@@ -4468,7 +4441,6 @@ async fn project_cli_auth_status(
         .unwrap_or(false);
     let oauth_store_missing = source_uses_store && oauth_mode && stored.is_none();
     let unknown_snapshot;
-    let marker_projection_snapshot;
     let (projection_tokens, projection_snapshot) = if oauth_source_rejected || oauth_store_missing {
         unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
             phase: None,
@@ -4479,16 +4451,15 @@ async fn project_cli_auth_status(
         };
         (None, &unknown_snapshot)
     } else {
-        marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
-            meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
-        });
-        (
-            stored.as_ref(),
-            marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
-        )
+        (stored.as_ref(), &snapshot)
     };
-    let projection =
-        meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
+    let token_key = meerkat_core::auth::TokenKey::from_connection_ref(connection_ref);
+    let projection = meerkat_core::project_published_auth_status(
+        now,
+        &token_key,
+        projection_tokens,
+        projection_snapshot,
+    );
     CliAuthStatusProjection {
         phase: projection.phase,
         expires_at: projection.expires_at,
@@ -8455,10 +8426,12 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
-            Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
-            })
-            | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            Err(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                }
+                | meerkat_runtime::RuntimeDriverError::Destroyed,
+            ) => {
                 reject_persisted_runtime_state_for_interrupt_noop(service.as_ref(), &session_id)
                     .await?;
                 println!("Interrupted session: {session_id}");
@@ -10897,6 +10870,7 @@ mod tests {
             scopes: vec!["openid".into()],
             account_id: None,
             metadata: serde_json::Value::Null,
+            auth_lease: None,
         }
     }
 
@@ -10909,11 +10883,15 @@ mod tests {
         let store = EphemeralTokenStore::new();
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
         let connection_ref = openai_connection_ref();
+        let token_key = TokenKey::from_connection_ref(&connection_ref);
         let tokens = openai_oauth_tokens();
         store
             .save(
-                &TokenKey::from_connection_ref(&connection_ref),
-                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+                &token_key,
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                    &tokens.with_auth_lease_binding(token_key.clone(), 1),
+                    1,
+                ),
             )
             .await
             .expect("token save succeeds");
@@ -11180,11 +11158,43 @@ mod tests {
             self.inner.save(key, tokens).await
         }
 
+        async fn save_if_current(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            expected: &meerkat_providers::auth_store::PersistedTokens,
+            replacement: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            self.save_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save_if_current(key, expected, replacement).await
+        }
+
+        async fn save_if_current_optional(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            expected: Option<&meerkat_providers::auth_store::PersistedTokens>,
+            replacement: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            self.save_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .save_if_current_optional(key, expected, replacement)
+                .await
+        }
+
         async fn clear(
             &self,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.inner.clear(key).await
+        }
+
+        async fn clear_if_current(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            expected: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<bool, meerkat_providers::auth_store::TokenStoreError> {
+            self.inner.clear_if_current(key, expected).await
         }
 
         async fn list(

@@ -272,7 +272,6 @@ struct SessionRuntimeLlmReconfigureHost {
     auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
 }
 
 impl SessionRuntimeLlmReconfigureHost {
@@ -989,7 +988,6 @@ impl SessionRuntime {
                 auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
-                auth_lease: Arc::clone(&auth_lease),
             },
         ));
 
@@ -1066,7 +1064,6 @@ impl SessionRuntime {
                 auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
-                auth_lease: Arc::clone(&auth_lease),
             },
         ));
 
@@ -1651,7 +1648,6 @@ impl SessionRuntime {
             auth_lease: self.runtime_adapter.auth_lease_handle(),
             default_llm_client: Arc::clone(&self.default_llm_client),
             config_runtime: Arc::clone(&self.config_runtime),
-            auth_lease: self.runtime_adapter.auth_lease_handle(),
         }
     }
 
@@ -6555,19 +6551,14 @@ mod tests {
         )));
         let connection_ref = test_connection_ref("dev", "default_openai");
         let tokens = meerkat_providers::auth_store::PersistedTokens::api_key("sk-hot-swap");
-        token_store
-            .save(
-                &meerkat_providers::auth_store::TokenKey::from_connection_ref(&connection_ref),
-                &tokens,
-            )
-            .await
-            .unwrap();
         let auth_lease = runtime.auth_lease_handle();
-        meerkat_core::publish_token_lifecycle_acquired(
+        meerkat_core::save_tokens_and_publish_lifecycle_acquired(
+            token_store.as_ref(),
             auth_lease.as_ref(),
             &connection_ref,
             &tokens,
         )
+        .await
         .expect("test credential lifecycle should be acquired");
 
         let host = runtime.llm_reconfigure_host();

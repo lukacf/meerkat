@@ -13,16 +13,15 @@
 //! https://developers.google.com/identity/protocols/oauth2#installed —
 //! the secret is considered non-sensitive in this flow.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
-#[cfg(test)]
-use meerkat_auth_core::auth_oauth::exchange_authorization_code;
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
+    exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -140,23 +139,20 @@ impl GoogleIdClaims {
 
 pub struct GoogleCodeAssistOAuthRuntime {
     http: reqwest::Client,
-    _token_store: Arc<dyn TokenStore>,
     refresh_coord: Arc<dyn RefreshCoordinator>,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
-#[cfg_attr(test, allow(dead_code))]
 impl GoogleCodeAssistOAuthRuntime {
     pub fn new(
-        token_store: Arc<dyn TokenStore>,
+        _token_store: Arc<dyn TokenStore>,
         refresh_coord: Arc<dyn RefreshCoordinator>,
         endpoints: OAuthEndpoints,
         key: TokenKey,
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            _token_store: token_store,
             refresh_coord,
             endpoints,
             key,
@@ -184,115 +180,72 @@ impl GoogleCodeAssistOAuthRuntime {
         &self.key
     }
 
-    #[cfg(test)]
-    async fn load(&self) -> Result<Option<PersistedTokens>, GoogleCodeAssistOAuthError> {
-        self._token_store
-            .load(&self.key)
-            .await
-            .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
-    }
-
-    #[cfg(test)]
-    async fn save(&self, tokens: &PersistedTokens) -> Result<(), GoogleCodeAssistOAuthError> {
-        self._token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_tokens(
+    pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        let persisted = self
-            .load()
-            .await?
-            .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && persisted.primary_secret.is_some()
-        {
-            return Ok(persisted);
-        }
-        self.refresh_access_token().await
+        Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token_without_save(
+    pub async fn get_or_refresh_tokens_with_commit(
+        &self,
+        _commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
+        Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
+    }
+
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        _commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
+        Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
+    }
+
+    pub async fn get_or_refresh_tokens(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        let persisted = self
-            .load()
-            .await?
-            .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
-        self.refresh_access_token_from_persisted_without_save(&persisted)
-            .await
+        Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
     }
 
-    pub(crate) async fn refresh_access_token_from_persisted_without_save(
+    pub(super) async fn refresh_access_token_from_persisted_without_save(
         &self,
         persisted: &PersistedTokens,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(GoogleCodeAssistOAuthError::MissingRefreshToken)?;
+        let persisted = persisted.clone();
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let token_store = Arc::clone(&self.token_store);
-        let key = self.key.clone();
-        let commit_slot_for_refresh = Arc::clone(&commit_slot);
-        // Google requires the client_secret for refresh on installed apps.
         let refresh_fn: RefreshFn = Box::new(move || {
-            let http = http.clone();
-            let endpoints = endpoints.clone();
-            let token_store = Arc::clone(&token_store);
-            let key = key.clone();
-            let commit_slot = Arc::clone(&commit_slot_for_refresh);
             Box::pin(async move {
-                let current = token_store
-                    .load(&key)
-                    .await
-                    .map_err(|e| RefreshError::Refresh(e.to_string()))?
-                    .ok_or_else(|| {
-                        RefreshError::Refresh(
-                            "persisted tokens disappeared before OAuth refresh".into(),
-                        )
-                        .await
-                        .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::GoogleOauth,
-                            Some(refresh_token),
-                        ))
-                    })
-                }),
-            )
-            .await?;
-        Ok(refreshed)
+                let refresh_token = persisted
+                    .refresh_token
+                    .clone()
+                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let result = exchange_refresh_token(
+                    &http,
+                    &endpoints,
+                    &refresh_token,
+                    Some(CODE_ASSIST_CLIENT_SECRET),
+                )
+                .await
+                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                oauth_result_to_persisted(
+                    result,
+                    PersistedAuthMode::GoogleOauth,
+                    Some(refresh_token),
+                )
+                .map_err(|e| RefreshError::Refresh(e.to_string()))
+            })
+        });
+        Ok(self
+            .refresh_coord
+            .with_forced_refresh(self.key.clone(), refresh_fn)
+            .await?)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token(
-        &self,
-    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        let refreshed = self.refresh_access_token_without_save().await?;
-        self.save(&refreshed).await?;
-        Ok(refreshed)
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, GoogleCodeAssistOAuthError> {
+        Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_access_token(
-        &self,
-    ) -> Result<String, GoogleCodeAssistOAuthError> {
-        self.get_or_refresh_tokens()
-            .await?
-            .primary_secret
-            .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn complete_login(
+    pub async fn complete_login(
         &self,
         code: &str,
         pkce_verifier: &str,
@@ -333,7 +286,7 @@ fn oauth_result_to_persisted(
         account_id: None,
         metadata: serde_json::Value::Null,
         auth_lease: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -369,6 +322,71 @@ impl Default for GoogleLoginSession {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn direct_token_getters_fail_closed_over_fresh_store_material() {
+        let key = TokenKey::parse("dev", "default_google").expect("valid token key");
+        let store: Arc<dyn TokenStore> =
+            Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new());
+        store
+            .save(
+                &key,
+                &PersistedTokens {
+                    auth_mode: PersistedAuthMode::GoogleOauth,
+                    primary_secret: Some("fresh-google-access".into()),
+                    refresh_token: Some("refresh-google".into()),
+                    id_token: None,
+                    expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                    last_refresh: Some(Utc::now()),
+                    scopes: CODE_ASSIST_SCOPES
+                        .iter()
+                        .map(|scope| (*scope).into())
+                        .collect(),
+                    account_id: Some("acct-1".into()),
+                    metadata: serde_json::Value::Null,
+                    auth_lease: None,
+                },
+            )
+            .await
+            .unwrap();
+        let runtime = GoogleCodeAssistOAuthRuntime::new_with_default_coordinator(
+            store,
+            code_assist_endpoints(""),
+            key,
+        );
+
+        assert!(matches!(
+            runtime.get_or_refresh_tokens_uncommitted().await,
+            Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
+        ));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
+        ));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .force_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(GoogleCodeAssistOAuthError::InteractiveLoginRequired)
+        ));
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            0,
+            "direct public OAuth APIs must not consume or commit store material"
+        );
+    }
 
     #[test]
     fn code_assist_constants_match_gemini_cli_source() {

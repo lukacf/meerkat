@@ -86,7 +86,9 @@ impl FixedAuthLeaseHandle {
             snapshot: AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::ReauthRequired),
                 expires_at: Some((Utc::now() + ChronoDuration::hours(1)).timestamp() as u64),
+                credential_present: false,
                 generation: 7,
+                credential_published_at_millis: None,
             },
         }
     }

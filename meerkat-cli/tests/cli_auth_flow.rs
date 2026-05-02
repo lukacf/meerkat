@@ -10,7 +10,7 @@
 //! parsing, and deterministic error paths under minimal feature
 //! configurations.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -131,6 +131,28 @@ fn seed_unmarked_auth_lease_token_file_for_binding(root: &std::path::Path, bindi
     );
     let marker_path = token_file_path_for_binding(root, binding_id).with_extension("json.fallback");
     std::fs::write(marker_path, marker).expect("write mismatched fallback marker");
+}
+
+fn seed_auth_lease_fallback_marker_for_binding(
+    root: &std::path::Path,
+    binding_id: &str,
+    auth_mode: &str,
+    generation: u64,
+) {
+    let marker = format!(
+        r#"{{
+  "auth_mode": "{auth_mode}",
+  "auth_lease": {{
+    "token_key": {{
+      "realm": "dev",
+      "binding": "{binding_id}"
+    }},
+    "generation": {generation}
+  }}
+}}"#
+    );
+    let marker_path = token_file_path_for_binding(root, binding_id).with_extension("json.fallback");
+    std::fs::write(marker_path, marker).expect("write matching fallback marker");
 }
 
 fn token_file_exists(root: &std::path::Path) -> bool {
@@ -566,9 +588,26 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
   "expires_at": 1893456000,
   "last_refresh": 1700000000,
   "scopes": ["openid", "email"],
-  "account_id": "acct-fresh"
+  "account_id": "acct-fresh",
+  "metadata": {
+    "meerkat_auth_lifecycle": {
+      "published": true,
+      "version": 2,
+      "expires_at": 1893456000,
+      "generation": 1,
+      "credential_published_at_millis": 1
+    }
+  },
+  "auth_lease": {
+    "token_key": {
+      "realm": "dev",
+      "binding": "default_openai"
+    },
+    "generation": 1
+  }
 }"#,
     );
+    seed_auth_lease_fallback_marker_for_binding(tmp.path(), "default_openai", "chatgpt_oauth", 1);
 
     let refresh = Command::new(&rkat)
         .args([
@@ -598,7 +637,8 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
         "fixture intentionally omits refresh_token so refresh stops at the provider boundary"
     );
     assert!(
-        stderr.contains("persisted tokens missing refresh_token"),
+        stderr.contains("persisted tokens missing refresh_token")
+            || stderr.contains("missing refresh_token"),
         "refresh must reach the lease-bound provider refresh path; stderr={stderr}"
     );
     assert!(
@@ -608,6 +648,72 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
     assert!(
         !stderr.contains("reason:        no persisted credential"),
         "refresh must not preflight token storage by auth profile id; stderr={stderr}"
+    );
+}
+
+#[test]
+fn rkat_auth_refresh_does_not_publish_unbound_token_before_resolve() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
+    seed_openai_realm_config_with_ids_and_method(
+        tmp.path(),
+        "openai_managed",
+        "default_openai",
+        "chatgpt_backend",
+        "managed_chatgpt_oauth",
+    );
+    seed_token_file(
+        tmp.path(),
+        r#"{
+  "auth_mode": "chatgpt_oauth",
+  "primary_secret": "fresh-chatgpt-access",
+  "expires_at": 1893456000,
+  "last_refresh": 1700000000,
+  "scopes": ["openid", "email"],
+  "account_id": "acct-fresh"
+}"#,
+    );
+
+    let refresh = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "refresh",
+            "--realm",
+            "dev",
+            "openai_managed",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth refresh must spawn");
+    let stderr = String::from_utf8_lossy(&refresh.stderr);
+    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+        eprintln!("SKIP: auth provider features unavailable");
+        return;
+    }
+    assert!(
+        !refresh.status.success(),
+        "unbound durable OAuth material must not refresh successfully"
+    );
+    assert!(
+        !stderr.contains("missing refresh_token"),
+        "refresh must not reach provider-token refresh with unbound durable material; stderr={stderr}"
+    );
+    let token_file = std::fs::read_to_string(token_file_path(tmp.path())).expect("token file");
+    assert!(
+        !token_file.contains("\"auth_lease\""),
+        "refresh must not publish AuthMachine lifecycle from unbound durable material; token_file={token_file}"
     );
 }
 

@@ -199,10 +199,11 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: Some(generation),
         };
         Ok(AuthLeaseTransition {
             generation,
-            credential_published_at_millis: None,
+            credential_published_at_millis: Some(generation),
         })
     }
 
@@ -255,10 +256,12 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .unwrap()
             .push(LeaseEvent::BeginRefresh(lease_key.clone()));
         let mut snapshot = self.snapshot.lock().unwrap();
+        let credential_published_at_millis = snapshot.credential_published_at_millis;
         snapshot.phase = Some(AuthLeasePhase::Refreshing);
         snapshot.generation = self.next_generation();
         Ok(AuthLeaseTransition {
             generation: snapshot.generation,
+            credential_published_at_millis,
         })
     }
 
@@ -298,10 +301,11 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(new_expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: Some(generation),
         };
         Ok(AuthLeaseTransition {
             generation,
-            credential_published_at_millis: None,
+            credential_published_at_millis: Some(generation),
         })
     }
 

@@ -96,6 +96,19 @@ impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle 
         self.0.acquire_lease(lease_key, expires_at)
     }
 
+    fn acquire_lease_if_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expected: &meerkat_core::handles::AuthLeaseSnapshot,
+        expires_at: u64,
+    ) -> Result<
+        Option<meerkat_core::handles::AuthLeaseTransition>,
+        meerkat_core::handles::DslTransitionError,
+    > {
+        self.0
+            .acquire_lease_if_snapshot(lease_key, expected, expires_at)
+    }
+
     fn mark_expiring(
         &self,
         lease_key: &meerkat_core::handles::LeaseKey,
@@ -106,8 +119,20 @@ impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle 
     fn begin_refresh(
         &self,
         lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
         self.0.begin_refresh(lease_key)
+    }
+
+    fn begin_refresh_if_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expected: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> Result<
+        Option<meerkat_core::handles::AuthLeaseTransition>,
+        meerkat_core::handles::DslTransitionError,
+    > {
+        self.0.begin_refresh_if_snapshot(lease_key, expected)
     }
 
     fn complete_refresh(
@@ -120,6 +145,20 @@ impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle 
         self.0.complete_refresh(lease_key, new_expires_at, now)
     }
 
+    fn complete_refresh_if_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expected: &meerkat_core::handles::AuthLeaseSnapshot,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<
+        Option<meerkat_core::handles::AuthLeaseTransition>,
+        meerkat_core::handles::DslTransitionError,
+    > {
+        self.0
+            .complete_refresh_if_snapshot(lease_key, expected, new_expires_at, now)
+    }
+
     fn refresh_failed(
         &self,
         lease_key: &meerkat_core::handles::LeaseKey,
@@ -128,11 +167,29 @@ impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle 
         self.0.refresh_failed(lease_key, permanent)
     }
 
+    fn refresh_failed_if_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expected: &meerkat_core::handles::AuthLeaseSnapshot,
+        permanent: bool,
+    ) -> Result<bool, meerkat_core::handles::DslTransitionError> {
+        self.0
+            .refresh_failed_if_snapshot(lease_key, expected, permanent)
+    }
+
     fn mark_reauth_required(
         &self,
         lease_key: &meerkat_core::handles::LeaseKey,
     ) -> Result<(), meerkat_core::handles::DslTransitionError> {
         self.0.mark_reauth_required(lease_key)
+    }
+
+    fn mark_reauth_required_if_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expected: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> Result<bool, meerkat_core::handles::DslTransitionError> {
+        self.0.mark_reauth_required_if_snapshot(lease_key, expected)
     }
 
     fn release_lease(

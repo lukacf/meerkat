@@ -131,7 +131,9 @@ impl LeaseFreshnessObserver {
                         LeaseRefreshLifecycle::Refresh(AuthLeaseSnapshot {
                             phase: Some(AuthLeasePhase::Refreshing),
                             expires_at: snapshot.expires_at,
+                            credential_present: snapshot.credential_present,
                             generation: transition.generation,
+                            credential_published_at_millis: snapshot.credential_published_at_millis,
                         }),
                     )),
                     Ok(None) => match self.handle.snapshot(&self.lease_key).phase {
@@ -452,7 +454,7 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition::new(1, Some(1)))
         }
 
         fn begin_refresh_if_snapshot(
@@ -549,7 +551,9 @@ mod tests {
                 snapshot: Mutex::new(AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::Valid),
                     expires_at: Some(1_800_000_000),
+                    credential_present: true,
                     generation: 7,
+                    credential_published_at_millis: Some(7),
                 }),
             }
         }
@@ -584,7 +588,9 @@ mod tests {
             *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Refreshing),
                 expires_at: Some(1_800_000_000),
+                credential_present: true,
                 generation: 8,
+                credential_published_at_millis: Some(7),
             };
             Err(DslTransitionError::no_matching(
                 "begin_refresh",
@@ -671,7 +677,9 @@ mod tests {
                 snapshot: Mutex::new(AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::Valid),
                     expires_at: Some(1_800_000_000),
+                    credential_present: true,
                     generation: 7,
+                    credential_published_at_millis: Some(7),
                 }),
                 unconditional_begin_calls: Mutex::new(0),
                 conditional_begin_calls: Mutex::new(0),
@@ -715,9 +723,11 @@ mod tests {
             *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Refreshing),
                 expires_at: Some(1_800_000_000),
+                credential_present: true,
                 generation: 8,
+                credential_published_at_millis: Some(7),
             };
-            Ok(AuthLeaseTransition { generation: 8 })
+            Ok(AuthLeaseTransition::new(8, Some(7)))
         }
 
         fn begin_refresh_if_snapshot(
@@ -731,7 +741,9 @@ mod tests {
                 *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::Valid),
                     expires_at: Some(1_900_000_000),
+                    credential_present: true,
                     generation: 8,
+                    credential_published_at_millis: Some(8),
                 };
                 return Ok(None);
             }
@@ -741,11 +753,14 @@ mod tests {
             *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Refreshing),
                 expires_at: expected.expires_at,
+                credential_present: expected.credential_present,
                 generation: expected.generation + 1,
+                credential_published_at_millis: expected.credential_published_at_millis,
             };
-            Ok(Some(AuthLeaseTransition {
-                generation: expected.generation + 1,
-            }))
+            Ok(Some(AuthLeaseTransition::new(
+                expected.generation + 1,
+                expected.credential_published_at_millis,
+            )))
         }
 
         fn complete_refresh(
@@ -912,7 +927,9 @@ mod tests {
         let expected = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Refreshing),
             expires_at: Some(1_700_000_000),
+            credential_present: true,
             generation: 3,
+            credential_published_at_millis: Some(3),
         };
         *handle.snapshot.lock().unwrap() = expected.clone();
         let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key);

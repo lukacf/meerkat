@@ -1476,7 +1476,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 target.clone(),
                 provider,
                 redirect_uri.clone(),
-                pkce_verifier.clone(),
+                pkce_verifier,
             );
         }
         let pruned = match inserted {
@@ -3443,6 +3443,38 @@ mod tests {
         assert_eq!(flow.pkce_verifier, "new-verifier");
         assert!(matches!(
             authority.consume(&old_state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn conditional_release_prunes_oauth_flow_payloads() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+        let snapshot = lifecycle.snapshot(&lease_key);
+        assert!(lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+
+        assert!(
+            lifecycle
+                .release_lease_if_snapshot(&lease_key, &snapshot)
+                .expect("conditional release succeeds")
+        );
+
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
             Err(OAuthFlowError::Missing)
         ));
     }

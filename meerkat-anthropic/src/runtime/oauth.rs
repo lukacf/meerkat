@@ -8,16 +8,15 @@
 //!   `claude-code/src/services/oauth/client.ts:311-321` +
 //!   `claude-code/src/cli/handlers/auth.ts:79-109`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
-#[cfg(test)]
-use meerkat_auth_core::auth_oauth::exchange_authorization_code;
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
+    exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -167,23 +166,20 @@ impl AnthropicIdClaims {
 
 pub struct AnthropicOAuthRuntime {
     http: reqwest::Client,
-    _token_store: Arc<dyn TokenStore>,
     refresh_coord: Arc<dyn RefreshCoordinator>,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
-#[cfg_attr(test, allow(dead_code))]
 impl AnthropicOAuthRuntime {
     pub fn new(
-        token_store: Arc<dyn TokenStore>,
+        _token_store: Arc<dyn TokenStore>,
         refresh_coord: Arc<dyn RefreshCoordinator>,
         endpoints: OAuthEndpoints,
         key: TokenKey,
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            _token_store: token_store,
             refresh_coord,
             endpoints,
             key,
@@ -212,116 +208,72 @@ impl AnthropicOAuthRuntime {
         &self.key
     }
 
-    /// Load the persisted bundle, or `None` if not yet saved.
-    #[cfg(test)]
-    async fn load_persisted(&self) -> Result<Option<PersistedTokens>, AnthropicOAuthError> {
-        self._token_store
-            .load(&self.key)
-            .await
-            .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
-    }
-
-    #[cfg(test)]
-    async fn save_persisted(&self, tokens: &PersistedTokens) -> Result<(), AnthropicOAuthError> {
-        self._token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
-    }
-
-    /// Return a valid token bundle, refreshing if the persisted token is
-    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
-    /// tokens are persisted yet.
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_tokens(
+    pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let persisted = self
-            .load_persisted()
-            .await?
-            .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
-
-        // Fresh enough? Use cached.
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && persisted.primary_secret.is_some()
-        {
-            return Ok(persisted);
-        }
-        self.refresh_access_token().await
+        Err(AnthropicOAuthError::InteractiveLoginRequired)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token_without_save(
+    pub async fn get_or_refresh_tokens_with_commit(
         &self,
+        _commit_fn: TokenCommitFn,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let persisted = self
-            .load_persisted()
-            .await?
-            .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
-        self.refresh_access_token_from_persisted_without_save(&persisted)
-            .await
+        Err(AnthropicOAuthError::InteractiveLoginRequired)
     }
 
-    pub(crate) async fn refresh_access_token_from_persisted_without_save(
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        _commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        Err(AnthropicOAuthError::InteractiveLoginRequired)
+    }
+
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+        Err(AnthropicOAuthError::InteractiveLoginRequired)
+    }
+
+    pub(super) async fn refresh_access_token_from_persisted_without_save(
         &self,
         persisted: &PersistedTokens,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        // Need to refresh. Must have a refresh_token.
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(AnthropicOAuthError::MissingRefreshToken)?;
-
+        let persisted = persisted.clone();
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let refreshed = self
+        let refresh_fn: RefreshFn = Box::new(move || {
+            Box::pin(async move {
+                let refresh_token = persisted
+                    .refresh_token
+                    .clone()
+                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let result = exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                oauth_result_to_persisted(
+                    result,
+                    PersistedAuthMode::ClaudeAiOauth,
+                    Some(refresh_token),
+                )
+                .map_err(|e| RefreshError::Refresh(e.to_string()))
+            })
+        });
+        Ok(self
             .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result =
-                            exchange_refresh_token(&http, &endpoints, &refresh_token, None)
-                                .await
-                                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::ClaudeAiOauth,
-                            Some(refresh_token),
-                        ))
-                    })
-                }),
-            )
-            .await?;
-
-        Ok(refreshed)
+            .with_forced_refresh(self.key.clone(), refresh_fn)
+            .await?)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token(
-        &self,
-    ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let refreshed = self.refresh_access_token_without_save().await?;
-        self.save_persisted(&refreshed).await?;
-        Ok(refreshed)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
-        self.get_or_refresh_tokens()
-            .await?
-            .primary_secret
-            .ok_or(AnthropicOAuthError::InteractiveLoginRequired)
+    /// Return a valid access token, refreshing if the persisted token is
+    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
+    /// tokens are persisted yet. Refresh persistence belongs to the
+    /// AuthMachine-managed resolver boundary.
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
+        Err(AnthropicOAuthError::InteractiveLoginRequired)
     }
 
     /// Complete an interactive login: exchange the authorization code for
-    /// tokens and persist them. Caller supplies `code + pkce_verifier`
-    /// from the loopback callback.
-    #[cfg(test)]
-    pub(crate) async fn complete_login(
+    /// tokens. Caller supplies `code + pkce_verifier` from the loopback
+    /// callback and owns AuthMachine publication plus persistence.
+    pub async fn complete_login(
         &self,
         code: &str,
         pkce_verifier: &str,
@@ -335,8 +287,8 @@ impl AnthropicOAuthRuntime {
 
     /// Console OAuth → API key provisioning. POST to `API_KEY_CREATE_URL`
     /// with `Authorization: Bearer <access_token>`; the response carries
-    /// the new API key. We persist it as an api_key entry.
-    pub async fn provision_api_key_without_save(
+    /// the new API key. The caller owns lifecycle admission and persistence.
+    pub async fn provision_api_key_tokens(
         &self,
         access_token: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
@@ -381,16 +333,6 @@ impl AnthropicOAuthRuntime {
         Ok(tokens)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn provision_api_key(
-        &self,
-        access_token: &str,
-    ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let tokens = self.provision_api_key_without_save(access_token).await?;
-        self.save_persisted(&tokens).await?;
-        Ok(tokens)
-    }
-
     /// Console OAuth → API key provisioning. The caller owns lifecycle
     /// admission and persistence.
     pub async fn provision_api_key(
@@ -424,7 +366,7 @@ fn oauth_result_to_persisted(
         account_id: None,
         metadata: serde_json::Value::Null,
         auth_lease: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -464,6 +406,71 @@ impl Default for AnthropicLoginSession {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn direct_token_getters_fail_closed_over_fresh_store_material() {
+        let key = TokenKey::parse("dev", "default_claude").expect("valid token key");
+        let store: Arc<dyn TokenStore> =
+            Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new());
+        store
+            .save(
+                &key,
+                &PersistedTokens {
+                    auth_mode: PersistedAuthMode::ClaudeAiOauth,
+                    primary_secret: Some("fresh-claude-access".into()),
+                    refresh_token: Some("refresh-claude".into()),
+                    id_token: None,
+                    expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                    last_refresh: Some(Utc::now()),
+                    scopes: CLAUDE_AI_SCOPES
+                        .iter()
+                        .map(|scope| (*scope).into())
+                        .collect(),
+                    account_id: Some("acct-1".into()),
+                    metadata: serde_json::Value::Null,
+                    auth_lease: None,
+                },
+            )
+            .await
+            .unwrap();
+        let runtime = AnthropicOAuthRuntime::new_with_default_coordinator(
+            store,
+            claude_ai_endpoints(""),
+            key,
+        );
+
+        assert!(matches!(
+            runtime.get_or_refresh_tokens_uncommitted().await,
+            Err(AnthropicOAuthError::InteractiveLoginRequired)
+        ));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(AnthropicOAuthError::InteractiveLoginRequired)
+        ));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .force_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(AnthropicOAuthError::InteractiveLoginRequired)
+        ));
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            0,
+            "direct public OAuth APIs must not consume or commit store material"
+        );
+    }
 
     #[test]
     fn oauth_result_to_persisted_rejects_expiry_overflow() {

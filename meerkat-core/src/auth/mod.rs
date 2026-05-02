@@ -27,9 +27,15 @@ pub use lifecycle::{
     PublishedAuthStatus, TokenLifecycleClearError, TokenLifecycleSaveError,
     clear_tokens_and_publish_lifecycle_released,
     clear_unreadable_tokens_and_publish_lifecycle_released, lease_snapshot_expires_at_datetime,
-    persisted_token_acquired_snapshot, persisted_token_expires_at_epoch_secs,
-    persisted_tokens_match_lifecycle_snapshot, project_published_auth_status,
-    save_tokens_and_publish_lifecycle_acquired,
+    mark_tokens_lifecycle_published, mark_tokens_lifecycle_published_for_generation,
+    mark_tokens_lifecycle_published_for_snapshot, mark_tokens_lifecycle_published_for_transition,
+    persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_acquired_snapshot,
+    persisted_token_expires_at_epoch_secs, persisted_tokens_match_lifecycle_snapshot,
+    project_published_auth_status, publish_token_lifecycle_acquired,
+    publish_token_lifecycle_released, restore_token_lifecycle_snapshot,
+    save_tokens_and_publish_lifecycle_acquired, strip_tokens_lifecycle_publication,
+    tokens_lifecycle_publication, tokens_lifecycle_publication_with_explicit_expiry,
+    tokens_lifecycle_published, tokens_lifecycle_published_generation,
 };
 pub use metadata::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthMetadata, AuthMetadataDefaults, AuthRouteHints,

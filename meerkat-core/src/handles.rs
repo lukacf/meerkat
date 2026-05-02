@@ -1202,6 +1202,50 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// sets and the expiry map.
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
+    /// Clear credential lifecycle authority without treating persisted token
+    /// bytes as a new lease source.
+    ///
+    /// Handles that co-locate short-lived OAuth flow membership with credential
+    /// lifecycle state should preserve those flow memberships when clearing
+    /// only the credential side after a failed login commit.
+    fn release_credential_lifecycle(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        self.release_lease(lease_key)
+    }
+
+    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    ///
+    /// The default implementation can reconstruct credential-present snapshots
+    /// through public lease transitions. Runtime-backed handles override this to
+    /// preserve machine-owned metadata such as credential publication time and to
+    /// restore empty snapshots without leaving an unretryable generation behind.
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        snapshot: &AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), DslTransitionError> {
+        if !snapshot.credential_present {
+            return Ok(());
+        }
+        let Some(phase) = snapshot.phase else {
+            return Ok(());
+        };
+        if phase == AuthLeasePhase::Released {
+            return Ok(());
+        }
+        let Some(expires_at) = expires_at else {
+            return Ok(());
+        };
+        self.acquire_lease(lease_key, expires_at)?;
+        match phase {
+            AuthLeasePhase::Valid => Ok(()),
+            AuthLeasePhase::Expiring => self.mark_expiring(lease_key),
+            AuthLeasePhase::Refreshing => self.begin_refresh(lease_key).map(|_| ()),
+            AuthLeasePhase::ReauthRequired => self.mark_reauth_required(lease_key),
+            AuthLeasePhase::Released => Ok(()),
+        }
+    }
+
     /// Fire `ReleaseAuthLease { lease_key }` only when the current projection
     /// exactly matches `expected`.
     ///

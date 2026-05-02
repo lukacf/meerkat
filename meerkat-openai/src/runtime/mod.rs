@@ -15,16 +15,13 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 use meerkat_auth_core::resolver::{
     ManagedOauthAccess, RefreshableStoredTokenLease, StoredTokenRefreshFn,
     StoredTokenRefreshOutcome, begin_managed_oauth_refresh, fail_managed_oauth_refresh,
-    oauth_refresh_error_text_is_permanent, resolve_lease_bound_stored_tokens,
-    resolve_managed_oauth_access, save_and_complete_managed_oauth_refresh,
+    managed_store_oauth_refresh_failure_is_permanent, oauth_refresh_error_text_is_permanent,
+    resolve_lease_bound_stored_tokens, resolve_managed_oauth_access,
+    save_and_complete_managed_oauth_refresh,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret_with_auth_context,
-};
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::{
-    auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
@@ -125,6 +122,7 @@ fn openai_managed_oauth_refresh_fn(
         env_lookup: env.env_lookup.clone(),
         external_resolvers: env.external_resolvers.clone(),
         now: env.now.clone(),
+        force_refresh: env.force_refresh,
         auth_lease_handle: Some(auth_lease_handle),
         token_store: Some(store.clone()),
         refresh_coord: Some(refresh_coord.clone()),
@@ -135,6 +133,7 @@ fn openai_managed_oauth_refresh_fn(
             env_lookup: refresh_env.env_lookup.clone(),
             external_resolvers: refresh_env.external_resolvers.clone(),
             now: refresh_env.now.clone(),
+            force_refresh: refresh_env.force_refresh,
             auth_lease_handle: refresh_env.auth_lease_handle.clone(),
             token_store: refresh_env.token_store.clone(),
             refresh_coord: refresh_env.refresh_coord.clone(),
@@ -155,7 +154,7 @@ fn openai_managed_oauth_refresh_fn(
                 .refresh_access_token_from_persisted_without_save(&tokens)
                 .await
                 .map_err(|error| {
-                    let permanent = openai_oauth_refresh_error_is_permanent(&error);
+                    let permanent = openai_oauth_refresh_failure_is_permanent(&error);
                     let _ = fail_managed_oauth_refresh(
                         &refresh_env,
                         &binding,

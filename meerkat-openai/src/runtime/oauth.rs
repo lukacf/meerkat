@@ -11,16 +11,15 @@
 //! For the `managed_chatgpt_oauth` path we use the token bundle;
 //! `api_key` mode reads `OPENAI_API_KEY` straight.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
-#[cfg(test)]
-use meerkat_auth_core::auth_oauth::exchange_authorization_code;
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
+    exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -145,23 +144,20 @@ impl ChatGptIdClaims {
 
 pub struct OpenAiOAuthRuntime {
     http: reqwest::Client,
-    _token_store: Arc<dyn TokenStore>,
     refresh_coord: Arc<dyn RefreshCoordinator>,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
-#[cfg_attr(test, allow(dead_code))]
 impl OpenAiOAuthRuntime {
     pub fn new(
-        token_store: Arc<dyn TokenStore>,
+        _token_store: Arc<dyn TokenStore>,
         refresh_coord: Arc<dyn RefreshCoordinator>,
         endpoints: OAuthEndpoints,
         key: TokenKey,
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            _token_store: token_store,
             refresh_coord,
             endpoints,
             key,
@@ -189,102 +185,67 @@ impl OpenAiOAuthRuntime {
         &self.key
     }
 
-    #[cfg(test)]
-    async fn load(&self) -> Result<Option<PersistedTokens>, OpenAiOAuthError> {
-        self._token_store
-            .load(&self.key)
-            .await
-            .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
-    }
-
-    #[cfg(test)]
-    async fn save(&self, tokens: &PersistedTokens) -> Result<(), OpenAiOAuthError> {
-        self._token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let persisted = self
-            .load()
-            .await?
-            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && persisted.primary_secret.is_some()
-        {
-            return Ok(persisted);
-        }
-        self.refresh_access_token().await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token_without_save(
+    pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let persisted = self
-            .load()
-            .await?
-            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
-        self.refresh_access_token_from_persisted_without_save(&persisted)
-            .await
+        Err(OpenAiOAuthError::InteractiveLoginRequired)
     }
 
-    pub(crate) async fn refresh_access_token_from_persisted_without_save(
+    pub async fn get_or_refresh_tokens_with_commit(
+        &self,
+        _commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
+        Err(OpenAiOAuthError::InteractiveLoginRequired)
+    }
+
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        _commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
+        Err(OpenAiOAuthError::InteractiveLoginRequired)
+    }
+
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+        Err(OpenAiOAuthError::InteractiveLoginRequired)
+    }
+
+    pub(super) async fn refresh_access_token_from_persisted_without_save(
         &self,
         persisted: &PersistedTokens,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(OpenAiOAuthError::MissingRefreshToken)?;
-        let account_id = persisted.account_id.clone();
+        let persisted = persisted.clone();
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let refreshed = self
+        let refresh_fn: RefreshFn = Box::new(move || {
+            Box::pin(async move {
+                let refresh_token = persisted
+                    .refresh_token
+                    .clone()
+                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let account_id = persisted.account_id.clone();
+                let result = exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                oauth_result_to_persisted(
+                    result,
+                    PersistedAuthMode::ChatgptOauth,
+                    Some(refresh_token),
+                    account_id,
+                )
+                .map_err(|e| RefreshError::Refresh(e.to_string()))
+            })
+        });
+        Ok(self
             .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result =
-                            exchange_refresh_token(&http, &endpoints, &refresh_token, None)
-                                .await
-                                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::ChatgptOauth,
-                            Some(refresh_token),
-                            account_id,
-                        ))
-                    })
-                }),
-            )
-            .await?;
-        Ok(refreshed)
+            .with_forced_refresh(self.key.clone(), refresh_fn)
+            .await?)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let refreshed = self.refresh_access_token_without_save().await?;
-        self.save(&refreshed).await?;
-        Ok(refreshed)
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
+        Err(OpenAiOAuthError::InteractiveLoginRequired)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
-        self.get_or_refresh_tokens()
-            .await?
-            .primary_secret
-            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn complete_login(
+    pub async fn complete_login(
         &self,
         code: &str,
         pkce_verifier: &str,
@@ -333,7 +294,7 @@ fn oauth_result_to_persisted(
         account_id,
         metadata: serde_json::Value::Null,
         auth_lease: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -369,6 +330,65 @@ impl Default for OpenAiLoginSession {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn direct_token_getters_fail_closed_over_fresh_store_material() {
+        let key = TokenKey::parse("dev", "default_chatgpt").expect("valid token key");
+        let store: Arc<dyn TokenStore> =
+            Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new());
+        store
+            .save(
+                &key,
+                &PersistedTokens {
+                    auth_mode: PersistedAuthMode::ChatgptOauth,
+                    primary_secret: Some("fresh-chatgpt-access".into()),
+                    refresh_token: Some("refresh-chatgpt".into()),
+                    id_token: None,
+                    expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                    last_refresh: Some(Utc::now()),
+                    scopes: CHATGPT_SCOPES.iter().map(|scope| (*scope).into()).collect(),
+                    account_id: Some("acct-1".into()),
+                    metadata: serde_json::Value::Null,
+                    auth_lease: None,
+                },
+            )
+            .await
+            .unwrap();
+        let runtime =
+            OpenAiOAuthRuntime::new_with_default_coordinator(store, chatgpt_endpoints(""), key);
+
+        assert!(matches!(
+            runtime.get_or_refresh_tokens_uncommitted().await,
+            Err(OpenAiOAuthError::InteractiveLoginRequired)
+        ));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(OpenAiOAuthError::InteractiveLoginRequired)
+        ));
+        let commit_counter = Arc::clone(&commits);
+        assert!(matches!(
+            runtime
+                .force_refresh_tokens_with_commit(Box::new(move |tokens| {
+                    commit_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(tokens) })
+                }))
+                .await,
+            Err(OpenAiOAuthError::InteractiveLoginRequired)
+        ));
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            0,
+            "direct public OAuth APIs must not consume or commit store material"
+        );
+    }
 
     #[test]
     fn chatgpt_constants_match_codex_source() {

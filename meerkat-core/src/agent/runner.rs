@@ -1151,7 +1151,9 @@ mod tests {
                 snapshot: Mutex::new(AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::Valid),
                     expires_at: Some(1_800_000_000),
+                    credential_present: true,
                     generation: 1,
+                    credential_published_at_millis: None,
                 }),
                 race_release: AtomicBool::new(false),
             }
@@ -1165,7 +1167,10 @@ mod tests {
             _expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
             self.acquired.lock().unwrap().push(lease_key.clone());
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn acquire_lease_if_snapshot(
@@ -1185,7 +1190,10 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn begin_refresh_if_snapshot(
@@ -1193,7 +1201,10 @@ mod tests {
             _lease_key: &LeaseKey,
             _expected: &AuthLeaseSnapshot,
         ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-            Ok(Some(AuthLeaseTransition { generation: 1 }))
+            Ok(Some(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            }))
         }
 
         fn complete_refresh(
@@ -1202,7 +1213,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn complete_refresh_if_snapshot(
@@ -1212,7 +1226,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
-            Ok(Some(AuthLeaseTransition { generation: 1 }))
+            Ok(Some(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            }))
         }
 
         fn refresh_failed(
@@ -1261,7 +1278,9 @@ mod tests {
                 *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                     phase: Some(AuthLeasePhase::ReauthRequired),
                     expires_at: Some(1_800_000_000),
+                    credential_present: false,
                     generation: expected.generation + 1,
+                    credential_published_at_millis: None,
                 };
                 return Ok(false);
             }
@@ -1275,7 +1294,9 @@ mod tests {
             *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                credential_present: false,
                 generation: expected.generation + 1,
+                credential_published_at_millis: None,
             };
             Ok(true)
         }

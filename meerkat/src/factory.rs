@@ -2426,7 +2426,8 @@ impl AgentFactory {
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
         if matches!(
             connection.auth_lease.kind(),
-            meerkat_core::ResolvedAuthKind::DynamicAuthorizer(_)
+            meerkat_core::ResolvedAuthKind::None
+                | meerkat_core::ResolvedAuthKind::DynamicAuthorizer(_)
         ) {
             return Ok(());
         }
@@ -4861,45 +4862,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn realm_default_binding_is_explicit_config_auth_source() {
-        let mut config = Config::default();
-        let mut section = RealmConfigSection {
-            default_binding: Some("default_anthropic".to_string()),
-            ..Default::default()
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn hot_swap_env_default_fallback_does_not_publish_auth_lease() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
         };
-        section.backend.insert(
-            "anthropic_backend".to_string(),
-            BackendProfileConfig {
-                provider: "anthropic".to_string(),
-                backend_kind: "anthropic_api".to_string(),
-                base_url: None,
-                options: serde_json::Value::Null,
-            },
-        );
-        section.auth.insert(
-            "anthropic_env".to_string(),
-            meerkat_core::AuthProfileConfig {
-                provider: "anthropic".to_string(),
-                auth_method: "api_key".to_string(),
-                source: CredentialSourceSpec::Env {
-                    env: "ANTHROPIC_API_KEY".to_string(),
-                    fallback: Vec::new(),
-                },
-                constraints: Default::default(),
-                metadata_defaults: Default::default(),
-            },
-        );
-        section.binding.insert(
-            "default_anthropic".to_string(),
-            ProviderBindingConfig {
-                backend_profile: "anthropic_backend".to_string(),
-                auth_profile: "anthropic_env".to_string(),
-                default_model: None,
-                policy: Default::default(),
-            },
-        );
-        config.realm.insert("dev".to_string(), section);
 
         struct RecordingOpenAiRuntime {
             auth_lease_handle_seen: Arc<std::sync::atomic::AtomicBool>,
@@ -5093,18 +5063,38 @@ mod tests {
                 _lease_key: &LeaseKey,
                 _expires_at: u64,
             ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                panic!("factory publication must use conditional acquire")
+            }
+
+            fn acquire_lease_if_snapshot(
+                &self,
+                _lease_key: &LeaseKey,
+                _expected: &AuthLeaseSnapshot,
+                _expires_at: u64,
+            ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
                 Err(DslTransitionError::guard_rejected(
-                    "acquire_lease",
+                    "acquire_lease_if_snapshot",
                     "test rejected lifecycle publication",
                 ))
             }
 
             fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
+                panic!("factory publication must not mark expiring")
             }
 
-            fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
+            fn begin_refresh(
+                &self,
+                _lease_key: &LeaseKey,
+            ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                panic!("factory publication must not begin refresh")
+            }
+
+            fn begin_refresh_if_snapshot(
+                &self,
+                _lease_key: &LeaseKey,
+                _expected: &AuthLeaseSnapshot,
+            ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+                panic!("factory publication must not conditionally begin refresh")
             }
 
             fn complete_refresh(
@@ -5113,10 +5103,17 @@ mod tests {
                 _new_expires_at: u64,
                 _now: u64,
             ) -> Result<AuthLeaseTransition, DslTransitionError> {
-                Ok(AuthLeaseTransition {
-                    generation: 0,
-                    credential_published_at_millis: None,
-                })
+                panic!("factory publication must not complete refresh")
+            }
+
+            fn complete_refresh_if_snapshot(
+                &self,
+                _lease_key: &LeaseKey,
+                _expected: &AuthLeaseSnapshot,
+                _new_expires_at: u64,
+                _now: u64,
+            ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+                panic!("factory publication must not conditionally complete refresh")
             }
 
             fn refresh_failed(
@@ -5124,18 +5121,35 @@ mod tests {
                 _lease_key: &LeaseKey,
                 _permanent: bool,
             ) -> Result<(), DslTransitionError> {
-                Ok(())
+                panic!("factory publication must not fail refresh")
+            }
+
+            fn refresh_failed_if_snapshot(
+                &self,
+                _lease_key: &LeaseKey,
+                _expected: &AuthLeaseSnapshot,
+                _permanent: bool,
+            ) -> Result<bool, DslTransitionError> {
+                panic!("factory publication must not conditionally fail refresh")
             }
 
             fn mark_reauth_required(
                 &self,
                 _lease_key: &LeaseKey,
             ) -> Result<(), DslTransitionError> {
-                Ok(())
+                panic!("factory publication must not mark reauth required")
+            }
+
+            fn mark_reauth_required_if_snapshot(
+                &self,
+                _lease_key: &LeaseKey,
+                _expected: &AuthLeaseSnapshot,
+            ) -> Result<bool, DslTransitionError> {
+                panic!("factory publication must not conditionally mark reauth required")
             }
 
             fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
+                panic!("factory publication must not release")
             }
 
             fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
@@ -5189,7 +5203,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("AuthMachine lifecycle acquire failed"),
+                .contains("AuthMachine lease publication failed"),
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -5841,10 +5855,11 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_runtime_resolution_publishes_auth_lease_visibility() {
+    async fn self_hosted_legacy_authless_runtime_resolution_does_not_publish_auth_lease_visibility()
+    {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let calls = install_recording_self_hosted_runtime(&mut factory);
+        let calls = install_authless_self_hosted_runtime(&mut factory);
         let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
@@ -5881,10 +5896,10 @@ mod tests {
             meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
         let snapshot = bindings.auth_lease.snapshot(&lease_key);
         assert_eq!(
-            snapshot.phase,
-            Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            "self-hosted runtime resolution must publish the resolved lease to AuthMachine"
+            snapshot.phase, None,
+            "authless self-hosted runtime resolution must not publish fake lease truth"
         );
+        assert!(!snapshot.credential_present);
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -5951,7 +5966,9 @@ mod tests {
                     snapshot: std::sync::Mutex::new(meerkat_core::handles::AuthLeaseSnapshot {
                         phase: None,
                         expires_at: None,
+                        credential_present: false,
                         generation: 0,
+                        credential_published_at_millis: None,
                     }),
                 }
             }
@@ -5983,7 +6000,9 @@ mod tests {
                 *snapshot = meerkat_core::handles::AuthLeaseSnapshot {
                     phase: Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
                     expires_at: Some(1_700_000_000),
+                    credential_present: false,
                     generation: expected.generation + 1,
+                    credential_published_at_millis: None,
                 };
                 Ok(None)
             }
@@ -6146,18 +6165,10 @@ mod tests {
             profile: None,
         };
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
-        let transition = handle.acquire_lease(&lease_key, 1_800_000_000).unwrap();
-        let resolved_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            expires_at: Some(1_800_000_000),
-            generation: transition.generation,
-        };
-        let refreshing = handle.begin_refresh(&lease_key).unwrap();
-        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
-            expires_at: Some(1_800_000_000),
-            generation: refreshing.generation,
-        };
+        handle.acquire_lease(&lease_key, 1_800_000_000).unwrap();
+        let resolved_snapshot = handle.snapshot(&lease_key);
+        handle.begin_refresh(&lease_key).unwrap();
+        let refreshing_snapshot = handle.snapshot(&lease_key);
         handle
             .complete_refresh_if_snapshot(
                 &lease_key,
@@ -6843,24 +6854,16 @@ mod tests {
             .await
             .expect("session runtime bindings");
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
-        let first_valid = bindings
+        bindings
             .auth_lease
             .acquire_lease(&lease_key, 1_800_000_000)
             .expect("initial valid lease");
-        let stale_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            expires_at: Some(1_800_000_000),
-            generation: first_valid.generation,
-        };
-        let refreshing = bindings
+        let stale_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        bindings
             .auth_lease
             .begin_refresh(&lease_key)
             .expect("begin refresh");
-        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
-            expires_at: Some(1_800_000_000),
-            generation: refreshing.generation,
-        };
+        let refreshing_snapshot = bindings.auth_lease.snapshot(&lease_key);
         bindings
             .auth_lease
             .complete_refresh_if_snapshot(
@@ -7034,24 +7037,16 @@ mod tests {
             .await
             .expect("session runtime bindings");
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
-        let first_valid = bindings
+        bindings
             .auth_lease
             .acquire_lease(&lease_key, 1_800_000_000)
             .expect("initial valid lease");
-        let stale_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            expires_at: Some(1_800_000_000),
-            generation: first_valid.generation,
-        };
-        let refreshing = bindings
+        let stale_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        bindings
             .auth_lease
             .begin_refresh(&lease_key)
             .expect("begin refresh");
-        let refreshing_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
-            expires_at: Some(1_800_000_000),
-            generation: refreshing.generation,
-        };
+        let refreshing_snapshot = bindings.auth_lease.snapshot(&lease_key);
         bindings
             .auth_lease
             .complete_refresh_if_snapshot(
@@ -7365,7 +7360,7 @@ mod tests {
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-image-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
-                        Some(self.expires_at.clone()),
+                        Some(self.expires_at),
                         "test",
                     )),
                 })

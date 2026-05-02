@@ -726,8 +726,37 @@ mod tests {
             Ok(())
         }
 
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
+        fn begin_refresh(
+            &self,
+            lease_key: &LeaseKey,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition {
+                generation: self.snapshot(lease_key).generation,
+                credential_published_at_millis: None,
+            })
+        }
+
+        fn acquire_lease_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+            expires_at: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(None);
+            }
+            self.acquire_lease(lease_key, expires_at).map(Some)
+        }
+
+        fn begin_refresh_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(None);
+            }
+            self.begin_refresh(lease_key).map(Some)
         }
 
         fn complete_refresh(
@@ -739,6 +768,20 @@ mod tests {
             self.acquire_lease(lease_key, new_expires_at)
         }
 
+        fn complete_refresh_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+            new_expires_at: u64,
+            now: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(None);
+            }
+            self.complete_refresh(lease_key, new_expires_at, now)
+                .map(Some)
+        }
+
         fn refresh_failed(
             &self,
             _lease_key: &LeaseKey,
@@ -747,8 +790,33 @@ mod tests {
             Ok(())
         }
 
+        fn refresh_failed_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+            permanent: bool,
+        ) -> Result<bool, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(false);
+            }
+            self.refresh_failed(lease_key, permanent)?;
+            Ok(true)
+        }
+
         fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
             Ok(())
+        }
+
+        fn mark_reauth_required_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            if self.snapshot(lease_key) != *expected {
+                return Ok(false);
+            }
+            self.mark_reauth_required(lease_key)?;
+            Ok(true)
         }
 
         fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {

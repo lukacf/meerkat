@@ -332,7 +332,12 @@ result = await client.create_session(
 # TypeScript SDK:
 const result = await client.createSession("Hello peers!", {
     commsName: "agent-a",
-    turnMetadata: { keepAlive: true },
+    turnMetadata: {
+        keepAlive: {
+            action: "set",
+            value: { policy: "pinned", ttlSecs: 30 },
+        },
+    },
 });
 
 # Peer directory:

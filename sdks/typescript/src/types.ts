@@ -233,6 +233,14 @@ export interface TurnOptions {
   readonly turnMetadata?: RuntimeTurnMetadata;
 }
 
+/** Build-only overrides used when a deferred session materializes its first turn. */
+export interface DeferredBuildOnlyTurnOptions {
+  readonly systemPrompt?: string;
+  readonly maxTokens?: number;
+  readonly outputSchema?: Record<string, unknown>;
+  readonly structuredOutputRetries?: number;
+}
+
 export type TurnMetadataOverride<T> =
   | { readonly action: "set"; readonly value: T }
   | { readonly action: "clear" };

@@ -1901,6 +1901,50 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
 
 
 @pytest.mark.asyncio
+async def test_deferred_turn_build_only_options_remain_top_level():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "session_id": params["session_id"],
+            "text": "ok",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+    deferred = DeferredSession(client, "s-deferred", "team/deferred")
+    result = await deferred.start_turn(
+        "begin",
+        system_prompt="deferred system",
+        max_tokens=256,
+        output_schema={"type": "object"},
+        structured_output_retries=3,
+        turn_metadata={"model": "gpt-5.4"},
+    )
+
+    assert result.text == "ok"
+    assert calls == [
+        (
+            "turn/start",
+            {
+                "session_id": "s-deferred",
+                "prompt": "begin",
+                "system_prompt": "deferred system",
+                "max_tokens": 256,
+                "output_schema": {"type": "object"},
+                "structured_output_retries": 3,
+                "turn_metadata": {"model": "gpt-5.4"},
+            },
+        )
+    ]
+    assert "max_tokens" not in calls[0][1]["turn_metadata"]
+
+
+@pytest.mark.asyncio
 async def test_client_mcp_methods_send_expected_rpc_calls():
     client = MeerkatClient()
     calls = []

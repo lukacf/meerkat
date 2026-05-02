@@ -260,7 +260,12 @@ Configuration:
   # TypeScript SDK
   const result = await client.createSession("Process incoming events", {{
       commsName: "processor",
-      turnMetadata: {{ keepAlive: true }},
+      turnMetadata: {{
+          keepAlive: {{
+              action: "set",
+              value: {{ policy: "pinned", ttlSecs: 30 }},
+          }},
+      }},
   }});
 
   # Inject events via REST

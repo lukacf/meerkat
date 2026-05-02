@@ -771,6 +771,44 @@ describe("Session wrappers", () => {
     ]]);
   });
 
+  it("deferred startTurn keeps build-only overrides outside turnMetadata", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push({ method, params });
+      return {
+        session_id: "sess-2",
+        text: "started",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    };
+
+    const deferred = new DeferredSession(client, "sess-2", "team/deferred");
+    await deferred.startTurn("Begin now", {
+      systemPrompt: "deferred system",
+      maxTokens: 256,
+      outputSchema: { type: "object" },
+      structuredOutputRetries: 3,
+      turnMetadata: { model: "gpt-5.4" },
+    });
+
+    assert.deepEqual(seen, [{
+      method: "turn/start",
+      params: {
+        session_id: "sess-2",
+        prompt: "Begin now",
+        system_prompt: "deferred system",
+        max_tokens: 256,
+        output_schema: { type: "object" },
+        structured_output_retries: 3,
+        turn_metadata: { model: "gpt-5.4" },
+      },
+    }]);
+    assert.equal("max_tokens" in seen[0].params.turn_metadata, false);
+  });
+
   it("createSession forwards extended creation options", async () => {
     const client = new MeerkatClient();
     const seen = [];

@@ -2367,8 +2367,20 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if system_prompt is not None:
+            params["system_prompt"] = system_prompt
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if output_schema is not None:
+            params["output_schema"] = output_schema
+        if structured_output_retries is not None:
+            params["structured_output_retries"] = structured_output_retries
         metadata = _runtime_turn_metadata(turn_metadata)
         if metadata is not None:
             params["turn_metadata"] = metadata
@@ -2381,6 +2393,10 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
@@ -2390,6 +2406,14 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if system_prompt is not None:
+            params["system_prompt"] = system_prompt
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if output_schema is not None:
+            params["output_schema"] = output_schema
+        if structured_output_retries is not None:
+            params["structured_output_retries"] = structured_output_retries
         metadata = _runtime_turn_metadata(turn_metadata)
         if metadata is not None:
             params["turn_metadata"] = metadata

@@ -596,7 +596,23 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
 </ParamField>
 
 <ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
-  Canonical per-turn metadata carrier. Put turn-scoped model/provider/provider_params, skill_references, flow_tool_overlay, additional_instructions, keep_alive, and render metadata inside this object; split top-level turn fields are rejected.
+  Canonical per-turn metadata carrier. Put turn-scoped model/provider/provider_params, skill_references, flow_tool_overlay, additional_instructions, keep_alive, and render metadata inside this object; split top-level runtime metadata fields are rejected.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="from session">
+  Build-only deferred materialization override. Honored only when `turn/start` runs a deferred session's first turn; it is not runtime metadata.
+</ParamField>
+
+<ParamField body="system_prompt" type="string | null" default="from session">
+  Build-only deferred materialization override. Honored only when `turn/start` runs a deferred session's first turn; it is not runtime metadata.
+</ParamField>
+
+<ParamField body="output_schema" type="object | null" default="from session">
+  Build-only deferred materialization override. Honored only when `turn/start` runs a deferred session's first turn; it is not runtime metadata.
+</ParamField>
+
+<ParamField body="structured_output_retries" type="u32 | null" default="from session">
+  Build-only deferred materialization override. Honored only when `turn/start` runs a deferred session's first turn; it is not runtime metadata.
 </ParamField>
 
 ### turn/interrupt

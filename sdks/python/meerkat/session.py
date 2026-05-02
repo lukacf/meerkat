@@ -319,16 +319,24 @@ class DeferredSession:
         prompt: str | list[ContentBlock],
         *,
         turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
     ) -> RunResult:
         """Run the first turn on this deferred session.
 
-        Accepts ``turn_metadata`` that is applied
-        before the session is materialized. Returns a :class:`~meerkat.RunResult`.
+        Accepts ``turn_metadata`` plus build-only deferred materialization
+        overrides. Returns a :class:`~meerkat.RunResult`.
         """
         return await self._client._start_turn(  # noqa: SLF001
             self._id,
             prompt,
             turn_metadata=turn_metadata,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
         )
 
     async def interrupt(self) -> None:

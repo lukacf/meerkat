@@ -31,6 +31,7 @@ import type {
   SessionHistory,
   SessionIngressOptions,
   SkillRef,
+  DeferredBuildOnlyTurnOptions,
   TurnOptions,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
@@ -180,7 +181,7 @@ export class Session {
 }
 
 /** Turn-time metadata options for deferred sessions. */
-export interface DeferredTurnOptions extends TurnOptions {}
+export interface DeferredTurnOptions extends TurnOptions, DeferredBuildOnlyTurnOptions {}
 
 /**
  * A session created with `initial_turn: "deferred"`.

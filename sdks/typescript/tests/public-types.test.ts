@@ -1,5 +1,6 @@
 import { MeerkatClient } from "../src/index.js";
 import type { MemberSendOptions } from "../src/mob.js";
+import type { DeferredTurnOptions } from "../src/index.js";
 import type {
   MobCreateOptions,
   MobDefinition,
@@ -84,6 +85,23 @@ const publicTurnOptions: TurnOptions = {
 };
 
 void publicTurnOptions;
+
+const publicDeferredTurnOptions: DeferredTurnOptions = {
+  systemPrompt: "deferred first-turn system",
+  maxTokens: 256,
+  outputSchema: { type: "object" },
+  structuredOutputRetries: 3,
+  turnMetadata: publicRuntimeTurnMetadata,
+};
+
+void publicDeferredTurnOptions;
+
+const publicTurnOptionsWithDeferredBuildOnly: TurnOptions = {
+  // @ts-expect-error build-only first-turn overrides are only valid on DeferredTurnOptions.
+  maxTokens: 256,
+};
+
+void publicTurnOptionsWithDeferredBuildOnly;
 
 const publicTurnOptionsWithSplitMetadata: TurnOptions = {
   // @ts-expect-error turn metadata belongs inside turnMetadata.

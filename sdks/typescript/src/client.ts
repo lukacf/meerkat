@@ -132,6 +132,7 @@ import type {
   SkillRuntimeDiagnostics,
   SpawnManySpec,
   SpawnSpec,
+  DeferredBuildOnlyTurnOptions,
   TurnMetadataOverride,
   UpdateScheduleRequest,
   TurnOptions,
@@ -610,6 +611,21 @@ function mobTurnStartPayload(
   }
   return payload;
 }
+
+function applyDeferredBuildOnlyTurnOptions(
+  params: Record<string, unknown>,
+  options?: DeferredBuildOnlyTurnOptions,
+): void {
+  if (!options) return;
+  if (options.systemPrompt !== undefined) params.system_prompt = options.systemPrompt;
+  if (options.maxTokens !== undefined) params.max_tokens = options.maxTokens;
+  if (options.outputSchema !== undefined) params.output_schema = options.outputSchema;
+  if (options.structuredOutputRetries !== undefined) {
+    params.structured_output_retries = options.structuredOutputRetries;
+  }
+}
+
+type TurnStartOptions = TurnOptions & DeferredBuildOnlyTurnOptions;
 
 export class MeerkatClient {
   private process: ChildProcess | null = null;
@@ -2163,9 +2179,10 @@ export class MeerkatClient {
   async _startTurn(
     sessionId: string,
     prompt: string | ContentBlock[],
-    options?: TurnOptions,
+    options?: TurnStartOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    applyDeferredBuildOnlyTurnOptions(params, options);
     const turnMetadata = runtimeTurnMetadataPayload(options?.turnMetadata);
     if (turnMetadata) params.turn_metadata = turnMetadata;
     const raw = await this.request("turn/start", params);
@@ -2176,7 +2193,7 @@ export class MeerkatClient {
   _startTurnStreaming(
     sessionId: string,
     prompt: string | ContentBlock[],
-    options?: TurnOptions,
+    options?: TurnStartOptions,
     session?: Session,
   ): EventStream {
     if (!this.process?.stdin) {
@@ -2191,6 +2208,7 @@ export class MeerkatClient {
 
     const responsePromise = this.registerRequest(requestId);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    applyDeferredBuildOnlyTurnOptions(params, options);
     const turnMetadata = runtimeTurnMetadataPayload(options?.turnMetadata);
     if (turnMetadata) params.turn_metadata = turnMetadata;
 

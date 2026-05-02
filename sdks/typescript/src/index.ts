@@ -55,6 +55,7 @@ export type {
   ContentBlock,
   ContentInput,
   CreateScheduleRequest,
+  DeferredBuildOnlyTurnOptions,
   EventEnvelope,
   InlineImageBlock,
   InlineVideoBlock,

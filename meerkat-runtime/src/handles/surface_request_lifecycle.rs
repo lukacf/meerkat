@@ -215,6 +215,17 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
             .map_err(|_| self.map_transition_error(key))
     }
 
+    fn complete_committed(&self, key: &str) -> Result<(), RequestTransitionError> {
+        self.dsl
+            .apply_input(
+                mm_dsl::MeerkatMachineInput::CompleteSurfaceRequestCommitted {
+                    request_id: key.to_owned(),
+                },
+                "SurfaceRequestLifecycleHandle::complete_committed",
+            )
+            .map_err(|_| self.map_transition_error(key))
+    }
+
     fn finish_unpublished(&self, key: &str) -> Result<CompleteTransition, RequestTransitionError> {
         let effects = self
             .dsl
@@ -306,6 +317,25 @@ mod tests {
             handle.classify_terminal("missing", SurfaceRequestTerminalOutcome::Succeeded),
             Err(RequestTransitionError::NotFound)
         );
+    }
+
+    #[test]
+    fn committed_failure_classification_completes_after_cancel() {
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
+
+        handle
+            .try_begin_request("request".to_owned(), SurfaceRequestKind::SessionTurn)
+            .expect("request begins");
+        assert_eq!(
+            handle.classify_terminal("request", SurfaceRequestTerminalOutcome::CommittedFailure),
+            Ok(SurfaceRequestTerminalDisposition::Commit)
+        );
+        assert_eq!(
+            handle.cancel_request("request").outcome,
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(handle.complete_committed("request"), Ok(()));
+        assert_eq!(handle.phase("request"), None);
     }
 
     #[test]

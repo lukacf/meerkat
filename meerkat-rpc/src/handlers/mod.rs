@@ -26,8 +26,8 @@ pub mod turn;
 use serde_json::value::RawValue;
 
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
-use crate::session_runtime::SessionRuntime;
+use crate::protocol::{RpcError, RpcId, RpcResponse};
+use crate::session_runtime::{RuntimeTurnStartError, SessionRuntime};
 use meerkat_core::SessionId;
 
 // ---------------------------------------------------------------------------
@@ -56,6 +56,28 @@ impl RpcResponseExt for RpcResponse {
     fn with_id(mut self, id: Option<RpcId>) -> Self {
         self.id = id;
         self
+    }
+}
+
+pub(crate) fn rpc_response_from_error(id: Option<RpcId>, err: RpcError) -> RpcResponse {
+    match err.data {
+        Some(data) => RpcResponse::error_with_data(id, err.code, err.message, data),
+        None => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+pub(crate) fn rpc_response_from_turn_start_error(
+    id: Option<RpcId>,
+    err: RuntimeTurnStartError,
+) -> RpcResponse {
+    let admission_committed = err.admission_committed();
+    let response = rpc_response_from_error(id, err.into_rpc_error());
+    if admission_committed {
+        response.with_surface_terminal_outcome(
+            meerkat_core::handles::SurfaceRequestTerminalOutcome::CommittedFailure,
+        )
+    } else {
+        response
     }
 }
 

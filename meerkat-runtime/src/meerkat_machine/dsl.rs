@@ -1300,6 +1300,7 @@ pub enum SurfaceRequestTerminalPolicy {
 pub enum SurfaceRequestTerminalOutcome {
     #[default]
     Succeeded,
+    CommittedFailure,
     Failed,
 }
 
@@ -1307,6 +1308,9 @@ impl From<meerkat_core::handles::SurfaceRequestTerminalOutcome> for SurfaceReque
     fn from(outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome) -> Self {
         match outcome {
             meerkat_core::handles::SurfaceRequestTerminalOutcome::Succeeded => Self::Succeeded,
+            meerkat_core::handles::SurfaceRequestTerminalOutcome::CommittedFailure => {
+                Self::CommittedFailure
+            }
             meerkat_core::handles::SurfaceRequestTerminalOutcome::Failed => Self::Failed,
         }
     }
@@ -1318,6 +1322,7 @@ pub enum SurfaceRequestTerminalDisposition {
     #[default]
     Inline,
     Publish,
+    Commit,
     RespondWithoutPublish,
 }
 
@@ -1328,6 +1333,7 @@ impl From<SurfaceRequestTerminalDisposition>
         match disposition {
             SurfaceRequestTerminalDisposition::Inline => Self::Inline,
             SurfaceRequestTerminalDisposition::Publish => Self::Publish,
+            SurfaceRequestTerminalDisposition::Commit => Self::Commit,
             SurfaceRequestTerminalDisposition::RespondWithoutPublish => Self::RespondWithoutPublish,
         }
     }

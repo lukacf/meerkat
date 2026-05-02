@@ -2900,7 +2900,10 @@ fn committed_terminal(
             Some(ctx) => ctx.classify_success_terminal(Ok(payload)),
             None => RequestTerminal::respond_without_publish(Ok(payload)),
         },
-        Err(err) => failed_terminal(ctx, err),
+        Err(err) => match ctx {
+            Some(ctx) => ctx.classify_committed_failure_terminal(Err(err)),
+            None => RequestTerminal::respond_without_publish(Err(err)),
+        },
     }
 }
 
@@ -8069,12 +8072,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_error_terminal_after_publish_authorization_uses_unpublished_path() {
+        async fn test_committed_error_terminal_after_cancel_preserves_payload() {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
                 .try_begin_request(
-                    "rest-error-after-publish-auth",
+                    "rest-committed-error-after-cancel",
                     meerkat::surface::SurfaceRequestKind::SessionTurn,
                     noop_request_action(),
                 )
@@ -8090,26 +8093,42 @@ mod tests {
                 }
             }));
 
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+
             let terminal = committed_terminal(
                 Some(&ctx),
-                Err(ApiError::Internal(
-                    "committed REST error must not publish".to_string(),
-                )),
+                Err(ApiError::InternalWithData {
+                    message: "committed REST error must survive cancellation".to_string(),
+                    code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+                    details: json!({
+                        "session_id": SessionId::new().to_string(),
+                        "session_created": true,
+                        "resumable": true,
+                    }),
+                }),
             );
 
-            assert!(
-                terminal.is_respond_without_publish(),
-                "REST Result::Err terminals must route through machine-owned failure classification"
-            );
             let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
 
-            assert!(matches!(result, Err(ApiError::Internal(_))));
+            assert!(
+                matches!(
+                    result,
+                    Err(ApiError::InternalWithData { code, details, .. })
+                        if code == "SESSION_CREATED_WITH_TURN_FAILURE"
+                            && details["session_created"] == true
+                            && details["resumable"] == true
+                ),
+                "committed REST error payload must not be replaced by cancellation"
+            );
             assert_eq!(
                 cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "failed REST terminals must complete through the unpublished lifecycle path"
+                0,
+                "committed REST errors must not run unpublished cleanup after admission"
             );
-            assert_eq!(executor.phase("rest-error-after-publish-auth"), None);
+            assert_eq!(executor.phase("rest-committed-error-after-cancel"), None);
         }
 
         #[tokio::test]

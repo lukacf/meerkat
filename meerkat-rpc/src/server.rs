@@ -399,11 +399,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let request_key_for_task = request_key.clone();
         let handle = tokio::spawn(async move {
             if let Some(response) = dispatch(request, context).await {
-                let terminal = if response.error.is_none() {
-                    terminal_context.classify_success_terminal(response)
-                } else {
-                    terminal_context.classify_failure_terminal(response)
-                };
+                let outcome = response.surface_terminal_outcome();
+                let terminal = terminal_context.classify_terminal(outcome, response);
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
@@ -779,6 +776,11 @@ mod tests {
             .expect("tracked response channel should stay open");
         task.await.expect("session/create task should complete");
 
+        assert_eq!(
+            server.request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel after admitted turn failure must not replace the committed error payload"
+        );
         assert!(server.write_long_running_response(response).await);
         assert_eq!(server.request_executor.phase(&request_key), None);
 
@@ -797,7 +799,14 @@ mod tests {
             serde_json::from_str(line.trim()).expect("response should parse");
         assert_eq!(response.id, Some(request_id));
         assert!(response.result.is_none());
-        assert!(response.error.is_some());
+        let error = response
+            .error
+            .expect("post-admission create failure should write its error payload");
+        assert_ne!(
+            error.code,
+            crate::error::REQUEST_CANCELLED,
+            "post-admission RPC errors must not be classified from JSON-RPC error shape as unpublished cancellation losers"
+        );
     }
 
     #[tokio::test]
@@ -1380,6 +1389,18 @@ mod tests {
                 .classify_failure_terminal(error)
                 .is_respond_without_publish()
         );
+
+        let committed_error = RpcResponse::error(
+            Some(RpcId::Num(1)),
+            crate::error::INTERNAL_ERROR,
+            "admitted boom",
+        );
+        assert!(
+            !context
+                .classify_committed_failure_terminal(committed_error)
+                .is_respond_without_publish(),
+            "committed failure classification must not use the unpublished failure disposition"
+        );
     }
 
     #[test]
@@ -1388,6 +1409,20 @@ mod tests {
         assert!(
             !source.contains(concat!("rpc", "_request", "_lifecycle")),
             "RPC request admission must use machine-owned request classification, not the legacy raw method lifecycle helper"
+        );
+    }
+
+    #[test]
+    fn rpc_terminal_classification_does_not_branch_on_json_rpc_error_shape() {
+        let source = include_str!("server.rs");
+        let forbidden_error_shape_check = ["response", ".error", ".is_none()"].concat();
+        assert!(
+            !source.contains(&forbidden_error_shape_check),
+            "tracked RPC terminal classification must consume explicit terminal outcome metadata"
+        );
+        assert!(
+            source.contains("surface_terminal_outcome"),
+            "tracked RPC terminal classification should use the explicit terminal outcome carried by handlers"
         );
     }
 

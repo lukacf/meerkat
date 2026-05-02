@@ -81,6 +81,10 @@ enum RequestTerminalKind<T> {
     /// Committed terminal. The request's side effects have been persisted and
     /// the client must observe the result; late cancel does not override this.
     Publish { lifecycle_key: String, payload: T },
+    /// Committed failed terminal. The request's side effects have been persisted
+    /// and the client must observe the failure payload; late cancel does not
+    /// override this.
+    Commit { lifecycle_key: String, payload: T },
     /// Uncommitted terminal. Side effects did not land; a late cancel can
     /// supersede this via [`CompleteOutcome::SupersededByCancel`].
     RespondWithoutPublish { lifecycle_key: String, payload: T },
@@ -127,6 +131,7 @@ impl<T> RequestTerminal<T> {
             | RequestTerminalKind::UntrackedRespondWithoutPublish(payload)
             | RequestTerminalKind::PreAuthorityFailure { payload, .. }
             | RequestTerminalKind::Publish { payload, .. }
+            | RequestTerminalKind::Commit { payload, .. }
             | RequestTerminalKind::RespondWithoutPublish { payload, .. }
             | RequestTerminalKind::LifecycleError { payload, .. } => payload,
         }
@@ -269,9 +274,15 @@ impl RequestContext {
         self.classify_terminal(SurfaceRequestTerminalOutcome::Failed, response)
     }
 
+    /// Classify a failed handler terminal that occurred after admission
+    /// committed through this request's runtime-owned publication authority.
+    pub fn classify_committed_failure_terminal<T>(&self, response: T) -> RequestTerminal<T> {
+        self.classify_terminal(SurfaceRequestTerminalOutcome::CommittedFailure, response)
+    }
+
     /// Classify a handler terminal through this request's runtime-owned
     /// publication authority.
-    fn classify_terminal<T>(
+    pub fn classify_terminal<T>(
         &self,
         outcome: SurfaceRequestTerminalOutcome,
         response: T,
@@ -308,6 +319,12 @@ impl RequestContext {
         match disposition {
             SurfaceRequestTerminalDisposition::Publish => RequestTerminal {
                 kind: RequestTerminalKind::Publish {
+                    lifecycle_key: self.entry.lifecycle_key.clone(),
+                    payload: response,
+                },
+            },
+            SurfaceRequestTerminalDisposition::Commit => RequestTerminal {
+                kind: RequestTerminalKind::Commit {
                     lifecycle_key: self.entry.lifecycle_key.clone(),
                     payload: response,
                 },
@@ -563,6 +580,19 @@ impl SurfaceRequestMechanics {
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn complete_committed_for_lifecycle_key(
+        &self,
+        key: &str,
+        lifecycle_key: &str,
+    ) -> Result<(), RequestTransitionError> {
+        let mut entries = lock_or_recover(&self.entries);
+        let entry = Self::matching_entry(&entries, key, Some(lifecycle_key))?;
+        let lifecycle = Self::entry_lifecycle(&entry)?;
+        lifecycle.complete_committed(&entry.lifecycle_key)?;
+        entries.remove(key);
+        Ok(())
     }
 
     fn publish_or_cancelled_decision(
@@ -882,6 +912,7 @@ impl SurfaceRequestExecutor {
             return match terminal.kind {
                 RequestTerminalKind::Inline { .. }
                 | RequestTerminalKind::Publish { .. }
+                | RequestTerminalKind::Commit { .. }
                 | RequestTerminalKind::RespondWithoutPublish { .. }
                 | RequestTerminalKind::PreAuthorityFailure { .. }
                 | RequestTerminalKind::LifecycleError { .. } => {
@@ -936,6 +967,19 @@ impl SurfaceRequestExecutor {
                     }
                 }
             }
+            RequestTerminalKind::Commit {
+                lifecycle_key,
+                payload,
+            } => match self
+                .mechanics
+                .complete_committed_for_lifecycle_key(key, &lifecycle_key)
+            {
+                Ok(()) => RequestTerminalResolution::Emit(payload),
+                Err(err) => {
+                    let _ = self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key);
+                    RequestTerminalResolution::LifecycleError(err)
+                }
+            },
             RequestTerminalKind::RespondWithoutPublish {
                 lifecycle_key,
                 payload,
@@ -1371,6 +1415,47 @@ mod tests {
             0,
             "post-commit failed terminals must stay machine-classified without running rollback cleanup"
         );
+    }
+
+    #[tokio::test]
+    async fn committed_failure_terminal_after_cancel_emits_without_unpublished_cleanup() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = begin_test_request_with_kind(
+            &executor,
+            "committed-failure-after-cancel",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        assert_eq!(
+            executor.cancel_request(context.key()).await,
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(
+                    Some(context.key()),
+                    context.classify_committed_failure_terminal("committed-error"),
+                )
+                .await,
+            RequestTerminalResolution::Emit("committed-error")
+        );
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            0,
+            "committed failures must complete without rollback cleanup even when cancel arrived first"
+        );
+        assert_eq!(executor.phase("committed-failure-after-cancel"), None);
     }
 
     #[tokio::test]
@@ -1898,6 +1983,10 @@ mod tests {
             self.inner.publish_and_complete(key)
         }
 
+        fn complete_committed(&self, key: &str) -> Result<(), RequestTransitionError> {
+            self.inner.complete_committed(key)
+        }
+
         fn finish_unpublished(
             &self,
             key: &str,
@@ -2070,6 +2159,10 @@ mod tests {
 
         fn publish_and_complete(&self, _key: &str) -> Result<(), RequestTransitionError> {
             Err(RequestTransitionError::NotFound)
+        }
+
+        fn complete_committed(&self, _key: &str) -> Result<(), RequestTransitionError> {
+            Ok(())
         }
 
         fn finish_unpublished(

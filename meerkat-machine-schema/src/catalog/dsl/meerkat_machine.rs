@@ -803,6 +803,7 @@ pub enum SurfaceRequestTerminalPolicy {
 pub enum SurfaceRequestTerminalOutcome {
     #[default]
     Succeeded,
+    CommittedFailure,
     Failed,
 }
 
@@ -824,6 +825,7 @@ pub enum SurfaceRequestTerminalDisposition {
     #[default]
     Inline,
     Publish,
+    Commit,
     RespondWithoutPublish,
 }
 
@@ -2176,6 +2178,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             DecideSurfaceRequestCancelActionInstall { request_id: String },
             CancelSurfaceRequest { request_id: String },
             PublishSurfaceRequest { request_id: String },
+            CompleteSurfaceRequestCommitted { request_id: String },
             FinishSurfaceRequestUnpublished { request_id: String },
             RemoveSurfaceRequest { request_id: String },
             // Ops lifecycle inputs.
@@ -7222,10 +7225,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 {
                     SurfaceRequestTerminalDisposition::Publish
                 } else {
-                    if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::InlineObservation {
-                        SurfaceRequestTerminalDisposition::Inline
+                    if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
+                        && outcome == SurfaceRequestTerminalOutcome::CommittedFailure
+                    {
+                        SurfaceRequestTerminalDisposition::Commit
                     } else {
-                        SurfaceRequestTerminalDisposition::RespondWithoutPublish
+                        if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::InlineObservation {
+                            SurfaceRequestTerminalDisposition::Inline
+                        } else {
+                            SurfaceRequestTerminalDisposition::RespondWithoutPublish
+                        }
                     }
                 }
             }
@@ -7338,6 +7347,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "request_pending" {
                 self.surface_request_phases.contains_key(request_id)
                 && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+            }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
+        }
+
+        transition CompleteSurfaceRequestCommitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CompleteSurfaceRequestCommitted { request_id }
+            guard "request_tracked" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_terminal_policy.contains_key(request_id)
             }
             update {
                 self.surface_request_phases.remove(request_id);

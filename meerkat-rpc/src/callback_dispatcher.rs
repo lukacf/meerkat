@@ -344,6 +344,8 @@ mod tests {
                 id: request.id,
                 result: Some(result_raw),
                 error: None,
+                surface_terminal_outcome:
+                    meerkat_core::handles::SurfaceRequestTerminalOutcome::Succeeded,
             })
             .unwrap();
 

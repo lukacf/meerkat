@@ -255,6 +255,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DecideSurfaceRequestCancelActionInstall`(request_id: String)
 - `CancelSurfaceRequest`(request_id: String)
 - `PublishSurfaceRequest`(request_id: String)
+- `CompleteSurfaceRequestCommitted`(request_id: String)
 - `FinishSurfaceRequestUnpublished`(request_id: String)
 - `RemoveSurfaceRequest`(request_id: String)
 - `RegisterOp`(operation_id: String, kind: OperationKind)
@@ -3910,6 +3911,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PublishSurfaceRequest`(request_id)
 - Guards:
   - `request_pending`
+- To: `Stopped`
+
+### `CompleteSurfaceRequestCommittedInitializing`
+- From: `Initializing`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
+- To: `Initializing`
+
+### `CompleteSurfaceRequestCommittedIdle`
+- From: `Idle`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
+- To: `Idle`
+
+### `CompleteSurfaceRequestCommittedAttached`
+- From: `Attached`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
+- To: `Attached`
+
+### `CompleteSurfaceRequestCommittedRunning`
+- From: `Running`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
+- To: `Running`
+
+### `CompleteSurfaceRequestCommittedRetired`
+- From: `Retired`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
+- To: `Retired`
+
+### `CompleteSurfaceRequestCommittedStopped`
+- From: `Stopped`
+- On: `CompleteSurfaceRequestCommitted`(request_id)
+- Guards:
+  - `request_tracked`
 - To: `Stopped`
 
 ### `FinishSurfaceRequestUnpublishedPendingInitializing`

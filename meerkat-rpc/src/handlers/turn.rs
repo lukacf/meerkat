@@ -14,7 +14,9 @@ use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::skills::reject_retired_skill_references;
-use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
+use super::{
+    RpcResponseExt, parse_params, parse_session_id_for_runtime, rpc_response_from_turn_start_error,
+};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -302,8 +304,7 @@ pub async fn handle_start(
     {
         Ok(r) => r,
         Err(rpc_err) => {
-            let rpc_err = rpc_err.into_rpc_error();
-            return RpcResponse::error(id, rpc_err.code, rpc_err.message);
+            return rpc_response_from_turn_start_error(id, rpc_err);
         }
     };
 

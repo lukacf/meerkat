@@ -556,11 +556,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "SurfaceRequestTerminalDisposition",
-                &["Inline", "Publish", "RespondWithoutPublish"],
+                &["Inline", "Publish", "Commit", "RespondWithoutPublish"],
             ),
             NamedTypeBinding::string_enum(
                 "SurfaceRequestTerminalOutcome",
-                &["Succeeded", "Failed"],
+                &["Succeeded", "CommittedFailure", "Failed"],
             ),
             NamedTypeBinding::string_enum(
                 "SurfaceRequestTerminalPolicy",

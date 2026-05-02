@@ -1327,6 +1327,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishSurfaceRequestStopped`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CompleteSurfaceRequestCommittedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `FinishSurfaceRequestUnpublishedPendingInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`

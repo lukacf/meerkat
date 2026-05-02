@@ -322,6 +322,9 @@ pub enum SurfaceRequestTerminalDisposition {
     Inline,
     /// Committed terminal. The request's side effects have been persisted.
     Publish,
+    /// Committed non-success terminal. The request's side effects have been
+    /// persisted and the terminal payload must not be replaced by cancellation.
+    Commit,
     /// Uncommitted terminal. A prior cancel can supersede the response.
     RespondWithoutPublish,
 }
@@ -332,6 +335,8 @@ pub enum SurfaceRequestTerminalOutcome {
     /// Handler reached the terminal condition that may publish under the
     /// request's machine-owned lifecycle policy.
     Succeeded,
+    /// Handler reached a failed terminal after admission committed.
+    CommittedFailure,
     /// Handler reached a terminal condition that must remain unpublished.
     Failed,
 }
@@ -362,6 +367,8 @@ pub trait SurfaceRequestLifecycleHandle: Send + Sync {
     fn cancel_request(&self, key: &str) -> CancelTransition;
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError>;
+
+    fn complete_committed(&self, key: &str) -> Result<(), RequestTransitionError>;
 
     fn finish_unpublished(&self, key: &str) -> Result<CompleteTransition, RequestTransitionError>;
 

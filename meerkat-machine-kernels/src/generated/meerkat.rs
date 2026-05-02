@@ -3764,6 +3764,8 @@ pub enum SurfaceRequestTerminalDisposition {
     Inline,
     #[serde(rename = "Publish")]
     Publish,
+    #[serde(rename = "Commit")]
+    Commit,
     #[serde(rename = "RespondWithoutPublish")]
     RespondWithoutPublish,
 }
@@ -3772,6 +3774,7 @@ impl SurfaceRequestTerminalDisposition {
         match self {
             Self::Inline => "Inline",
             Self::Publish => "Publish",
+            Self::Commit => "Commit",
             Self::RespondWithoutPublish => "RespondWithoutPublish",
         }
     }
@@ -3782,6 +3785,7 @@ impl std::convert::TryFrom<&str> for SurfaceRequestTerminalDisposition {
         match value {
             "Inline" => Ok(Self::Inline),
             "Publish" => Ok(Self::Publish),
+            "Commit" => Ok(Self::Commit),
             "RespondWithoutPublish" => Ok(Self::RespondWithoutPublish),
             other => Err(format!(
                 "invalid SurfaceRequestTerminalDisposition value `{other}`"
@@ -3818,6 +3822,8 @@ pub enum SurfaceRequestTerminalOutcome {
     #[default]
     #[serde(rename = "Succeeded")]
     Succeeded,
+    #[serde(rename = "CommittedFailure")]
+    CommittedFailure,
     #[serde(rename = "Failed")]
     Failed,
 }
@@ -3825,6 +3831,7 @@ impl SurfaceRequestTerminalOutcome {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Succeeded => "Succeeded",
+            Self::CommittedFailure => "CommittedFailure",
             Self::Failed => "Failed",
         }
     }
@@ -3834,6 +3841,7 @@ impl std::convert::TryFrom<&str> for SurfaceRequestTerminalOutcome {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Succeeded" => Ok(Self::Succeeded),
+            "CommittedFailure" => Ok(Self::CommittedFailure),
             "Failed" => Ok(Self::Failed),
             other => Err(format!(
                 "invalid SurfaceRequestTerminalOutcome value `{other}`"
@@ -4964,6 +4972,10 @@ pub mod inputs {
         pub request_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompleteSurfaceRequestCommitted {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FinishSurfaceRequestUnpublished {
         pub request_id: String,
     }
@@ -5460,6 +5472,7 @@ pub enum Input {
     DecideSurfaceRequestCancelActionInstall(inputs::DecideSurfaceRequestCancelActionInstall),
     CancelSurfaceRequest(inputs::CancelSurfaceRequest),
     PublishSurfaceRequest(inputs::PublishSurfaceRequest),
+    CompleteSurfaceRequestCommitted(inputs::CompleteSurfaceRequestCommitted),
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     RemoveSurfaceRequest(inputs::RemoveSurfaceRequest),
     RegisterOp(inputs::RegisterOp),
@@ -5665,6 +5678,7 @@ impl Input {
             }
             Self::CancelSurfaceRequest(_) => InputKind::CancelSurfaceRequest,
             Self::PublishSurfaceRequest(_) => InputKind::PublishSurfaceRequest,
+            Self::CompleteSurfaceRequestCommitted(_) => InputKind::CompleteSurfaceRequestCommitted,
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::RemoveSurfaceRequest(_) => InputKind::RemoveSurfaceRequest,
             Self::RegisterOp(_) => InputKind::RegisterOp,
@@ -5875,6 +5889,7 @@ pub enum InputKind {
     DecideSurfaceRequestCancelActionInstall,
     CancelSurfaceRequest,
     PublishSurfaceRequest,
+    CompleteSurfaceRequestCommitted,
     FinishSurfaceRequestUnpublished,
     RemoveSurfaceRequest,
     RegisterOp,
@@ -6967,6 +6982,12 @@ pub enum TransitionId {
     PublishSurfaceRequestRunning,
     PublishSurfaceRequestRetired,
     PublishSurfaceRequestStopped,
+    CompleteSurfaceRequestCommittedInitializing,
+    CompleteSurfaceRequestCommittedIdle,
+    CompleteSurfaceRequestCommittedAttached,
+    CompleteSurfaceRequestCommittedRunning,
+    CompleteSurfaceRequestCommittedRetired,
+    CompleteSurfaceRequestCommittedStopped,
     FinishSurfaceRequestUnpublishedPendingInitializing,
     FinishSurfaceRequestUnpublishedPendingIdle,
     FinishSurfaceRequestUnpublishedPendingAttached,

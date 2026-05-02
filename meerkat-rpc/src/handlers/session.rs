@@ -18,7 +18,9 @@ use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
 
 use super::skills::reject_retired_skill_references;
-use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
+use super::{
+    RpcResponseExt, parse_params, parse_session_id_for_runtime, rpc_response_from_turn_start_error,
+};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcError, RpcId, RpcResponse};
@@ -561,7 +563,7 @@ pub async fn handle_create(
             },
         };
         if let Some(rpc_err) = pre_admission_error {
-            return rpc_response_from_error(id, rpc_err.into_rpc_error());
+            return rpc_response_from_turn_start_error(id, rpc_err);
         }
 
         if !await_comms_runtime_ready(&runtime, &session_id).await {
@@ -609,7 +611,7 @@ pub async fn handle_create(
                     request_context.as_ref(),
                     &rpc_err,
                 );
-                return rpc_response_from_error(id, rpc_err.into_rpc_error());
+                return rpc_response_from_turn_start_error(id, rpc_err);
             }
         }
     };
@@ -642,13 +644,6 @@ fn runtime_pre_admission_cancel_check(
     context.map(|context| {
         Box::new(move || context.cancel_already_requested()) as RuntimePreAdmissionCancelCheck
     })
-}
-
-fn rpc_response_from_error(id: Option<RpcId>, err: RpcError) -> RpcResponse {
-    match err.data {
-        Some(data) => RpcResponse::error_with_data(id, err.code, err.message, data),
-        None => RpcResponse::error(id, err.code, err.message),
-    }
 }
 
 #[cfg(feature = "comms")]

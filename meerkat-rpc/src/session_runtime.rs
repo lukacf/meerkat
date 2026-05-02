@@ -3049,7 +3049,7 @@ impl SessionRuntime {
                     }
                 }
                 Err(err) => {
-                    self.restore_pending_from_promoting(
+                    self.restore_pending_from_promoting_after_create_error(
                         session_id,
                         rollback_build_config,
                         effective_llm_identity.clone(),
@@ -3542,7 +3542,7 @@ impl SessionRuntime {
                     return result.map_err(session_error_to_rpc);
                 }
                 Err(err) => {
-                    self.restore_pending_from_promoting(
+                    self.restore_pending_from_promoting_after_create_error(
                         session_id,
                         rollback_build_config,
                         effective_llm_identity.clone(),
@@ -3692,6 +3692,69 @@ impl SessionRuntime {
                 updated_at_secs,
             )
             .await;
+    }
+
+    async fn finish_pending_promotion_after_committed_create_error(&self, session_id: &SessionId) {
+        if let Some((starting_system_context_state, current_system_context_state, _updated_at_secs)) =
+            self.take_promoting_system_context_state(session_id).await
+            && let Err(err) = self
+                .replay_promoted_system_context(
+                    session_id,
+                    &starting_system_context_state,
+                    &current_system_context_state,
+                )
+                .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err.message,
+                "failed to replay promoted system-context state after post-commit create error"
+            );
+        }
+        self.bridge_pending_session_event_streams(session_id).await;
+    }
+
+    /// Restore pending state only if service creation failed before a live
+    /// session was committed. Post-commit failures leave the service and runtime
+    /// adapter authoritative, so the staged slot must be dropped instead.
+    #[allow(clippy::too_many_arguments)]
+    async fn restore_pending_from_promoting_after_create_error(
+        &self,
+        session_id: &SessionId,
+        build_config: AgentBuildConfig,
+        effective_llm_identity: SessionLlmIdentity,
+        labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<ContentInput>,
+        created_at_secs: u64,
+        updated_at_secs: u64,
+    ) {
+        match self.service.export_live_session(session_id).await {
+            Ok(_) => {
+                self.finish_pending_promotion_after_committed_create_error(session_id)
+                    .await;
+            }
+            Err(SessionError::NotFound { .. }) => {
+                self.restore_pending_from_promoting(
+                    session_id,
+                    build_config,
+                    effective_llm_identity,
+                    labels,
+                    deferred_prompt,
+                    created_at_secs,
+                    updated_at_secs,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "preserving RPC runtime registration after create error because live session state is unknown"
+                );
+                self.finish_pending_promotion_after_committed_create_error(session_id)
+                    .await;
+            }
+        }
     }
 
     /// Attempt to recover a persisted session that is no longer live.
@@ -6178,6 +6241,66 @@ mod tests {
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
             "post-commit create error must preserve the committed runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_start_turn_post_commit_create_error_does_not_restore_pending_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&fail_store) as Arc<dyn meerkat::SessionStore>;
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("stage pending session");
+        assert!(
+            runtime.pending_session_exists(&session_id).await,
+            "test precondition: session should start staged"
+        );
+
+        fail_store.set_fail_save(true);
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let error = runtime
+            .start_turn(
+                &session_id,
+                "materialize pending after save failure".into(),
+                event_tx,
+                None,
+            )
+            .await
+            .expect_err("post-commit persistence failure should be returned");
+
+        assert!(
+            error.message.contains("forced save failure"),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "post-commit create error should leave the committed live session"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "post-commit create error must preserve committed runtime registration"
+        );
+        assert!(
+            !runtime.pending_session_exists(&session_id).await,
+            "post-commit create error must not restore stale pending state over the live session"
         );
     }
 

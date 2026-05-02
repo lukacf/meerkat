@@ -3431,7 +3431,7 @@ async fn create_session_inner(
     let create_result = match state.session_service.create_session(svc_req).await {
         Ok(result) => result,
         Err(err) => {
-            cleanup_prepared_rest_runtime(state, &session_id).await;
+            cleanup_prepared_rest_runtime_after_create_error(state, &session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             let api_err = match err {
@@ -4994,6 +4994,7 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool as TestAtomicBool, Ordering as TestOrdering};
     use tempfile::TempDir;
 
     #[test]
@@ -5177,6 +5178,54 @@ mod tests {
     struct MockLlmClient;
 
     struct ErrorLlmClient;
+
+    struct FailingSaveSessionStore {
+        inner: meerkat::MemoryStore,
+        fail_save: TestAtomicBool,
+    }
+
+    impl FailingSaveSessionStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                fail_save: TestAtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, TestOrdering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for FailingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            if self.fail_save.load(TestOrdering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
+        }
+    }
 
     #[async_trait]
     impl LlmClient for MockLlmClient {
@@ -7212,6 +7261,90 @@ mod tests {
             .and_then(|metadata| metadata.model.map(|model| model.to_string())),
             Some("gpt-5.4".to_string()),
             "provider-only REST create must carry resolved model in RuntimeTurnMetadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_create_post_commit_error_preserves_runtime_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&fail_store) as Arc<dyn meerkat::SessionStore>;
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::clone(&store),
+            None,
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let factory = AgentFactory::new(temp.path().join("runtime-sessions")).session_store(store);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient));
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
+        state.session_service = Arc::new(service);
+        state.runtime_adapter = runtime_adapter;
+
+        fail_store.set_fail_save(true);
+        let outcome = Box::pin(create_session_inner(
+            &state,
+            CreateSessionRequest {
+                prompt: "Trigger post-commit persistence failure".to_string().into(),
+                system_prompt: None,
+                turn_metadata: None,
+                max_tokens: None,
+                output_schema: None,
+                structured_output_retries: None,
+                verbose: false,
+                comms_name: None,
+                peer_meta: None,
+                hooks_override: None,
+                enable_builtins: None,
+                enable_shell: None,
+                enable_memory: None,
+                enable_mob: None,
+                budget_limits: None,
+                labels: None,
+                app_context: None,
+                shell_env: None,
+            },
+            None,
+        ))
+        .await;
+
+        let api_error = match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(err)) => err,
+            other => panic!("expected REST create to return an unpublished error, got {other:?}"),
+        };
+        match api_error {
+            ApiError::Agent(message) => assert!(
+                message.contains("forced save failure"),
+                "unexpected error: {message}"
+            ),
+            other => panic!("expected post-commit save failure as agent error, got {other:?}"),
+        }
+
+        let summaries = state
+            .session_service
+            .list(Default::default())
+            .await
+            .expect("live session should remain listable");
+        assert_eq!(summaries.len(), 1, "post-commit live session should remain");
+        let session_id = summaries[0].session_id.clone();
+        state
+            .session_service
+            .export_live_session(&session_id)
+            .await
+            .expect("post-commit live session must remain committed");
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "REST create post-commit errors must not clear committed runtime registration"
+        );
+        #[cfg(feature = "mcp")]
+        assert!(
+            state.mcp_sessions.read().await.contains_key(&session_id),
+            "REST create post-commit errors must not clear committed MCP adapter state"
         );
     }
 

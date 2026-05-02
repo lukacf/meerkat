@@ -2353,7 +2353,7 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
-        pre_admission_cancelled: Option<RuntimePreAdmissionCancelCheck>,
+        mut pre_admission_cancelled: Option<RuntimePreAdmissionCancelCheck>,
     ) -> Result<RunResult, RuntimeTurnStartError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
@@ -2383,7 +2383,12 @@ impl SessionRuntime {
             }
             let mut mcp_text = String::new();
             let committed = match self
-                .apply_mcp_boundary(session_id, &mcp_event_tx, &mut mcp_text)
+                .apply_mcp_boundary(
+                    session_id,
+                    &mcp_event_tx,
+                    &mut mcp_text,
+                    &mut pre_admission_cancelled,
+                )
                 .await
             {
                 Ok(committed) => committed,
@@ -3262,8 +3267,14 @@ impl SessionRuntime {
         #[cfg(feature = "mcp")]
         {
             let mut mcp_text = String::new();
-            self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
-                .await?;
+            let mut pre_admission_cancelled = None;
+            self.apply_mcp_boundary(
+                session_id,
+                &event_tx,
+                &mut mcp_text,
+                &mut pre_admission_cancelled,
+            )
+            .await?;
             if !mcp_text.is_empty() {
                 let mut blocks = turn_prompt.into_blocks();
                 blocks.insert(
@@ -4828,9 +4839,23 @@ impl SessionRuntime {
         session_id: &SessionId,
         event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
         prompt: &mut String,
+        pre_admission_cancelled: &mut Option<RuntimePreAdmissionCancelCheck>,
     ) -> Result<bool, RpcError> {
+        if pre_admission_cancelled
+            .as_ref()
+            .is_some_and(|check| check())
+        {
+            return Err(request_cancelled_rpc_error());
+        }
+
         let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
             let mut map = self.mcp_sessions.write().await;
+            if pre_admission_cancelled
+                .as_ref()
+                .is_some_and(|check| check())
+            {
+                return Err(request_cancelled_rpc_error());
+            }
             let state = match map.get_mut(session_id) {
                 Some(state) => state,
                 None => return Ok(false),
@@ -8676,6 +8701,70 @@ mod tests {
             persisted.session_metadata().map(|meta| meta.keep_alive),
             Some(true),
             "pre-admission cancellation must not persist the keep_alive override"
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn turn_start_pre_cancel_while_waiting_for_mcp_boundary_lock_does_not_mutate_mcp_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "First".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_requested_for_gate = Arc::clone(&cancel_requested);
+        let (event_tx, _rx) = mpsc::channel(100);
+        let guard = runtime.mcp_sessions.write().await;
+        let turn = runtime.start_turn_via_runtime_with_admission_controls(
+            &session_id,
+            meerkat_core::types::ContentInput::Text("Second".to_string()),
+            event_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Box::new(move || {
+                cancel_requested_for_gate.load(std::sync::atomic::Ordering::SeqCst)
+            })),
+        );
+        tokio::pin!(turn);
+        tokio::select! {
+            result = &mut turn => panic!("turn start should wait on the held MCP write lock, got {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+
+        cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(guard);
+
+        let err = turn
+            .await
+            .expect_err("cancellation during MCP lock wait should reject before boundary mutation");
+        assert_eq!(err.as_rpc_error().code, error::REQUEST_CANCELLED);
+        let map = runtime.mcp_sessions.read().await;
+        assert_eq!(
+            map.get(&session_id)
+                .expect("MCP session should remain registered")
+                .turn_counter,
+            1,
+            "cancel observed after the lock wait must not advance turn-scoped MCP state"
         );
     }
 

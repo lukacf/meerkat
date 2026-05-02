@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_completion_after_cancel_writes_cancel_response() {
+    async fn committed_publish_completion_after_cancel_writes_result_response() {
         use tokio::io::AsyncReadExt;
 
         let (transport, mut output) = tokio::io::duplex(4096);
@@ -1121,10 +1121,7 @@ mod tests {
             .expect("output should read");
         let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
         assert_eq!(response["id"], 42);
-        assert_eq!(
-            response["error"]["code"],
-            ErrorCode::RequestCancelled.jsonrpc_code()
-        );
-        assert!(response.get("result").is_none());
+        assert_eq!(response["result"]["ok"], true);
+        assert!(response.get("error").is_none());
     }
 }

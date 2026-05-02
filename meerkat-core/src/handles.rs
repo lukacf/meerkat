@@ -225,6 +225,9 @@ pub enum SurfaceRequestKind {
     SessionCreateWithTurn,
     /// Request runs or resumes work for an existing session.
     SessionTurn,
+    /// Request commits a non-turn surface mutation whose successful terminal
+    /// must remain visible after the mutation lands.
+    CommittedMutation,
 }
 
 impl std::fmt::Display for SurfaceRequestPhase {

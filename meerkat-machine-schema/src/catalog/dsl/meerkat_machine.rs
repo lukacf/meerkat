@@ -771,6 +771,7 @@ pub enum SurfaceRequestKind {
     CancellableObservation,
     SessionCreateWithTurn,
     SessionTurn,
+    CommittedMutation,
 }
 
 /// Machine-owned terminal policy for a tracked surface request.
@@ -7203,6 +7204,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_request_terminal_policy.insert(request_id,
                     if kind == SurfaceRequestKind::SessionCreateWithTurn
                         || kind == SurfaceRequestKind::SessionTurn
+                        || kind == SurfaceRequestKind::CommittedMutation
                     {
                         SurfaceRequestTerminalPolicy::PublishOnSuccess
                     } else {

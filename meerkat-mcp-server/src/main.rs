@@ -1124,4 +1124,62 @@ mod tests {
         assert_eq!(response["result"]["ok"], true);
         assert!(response.get("error").is_none());
     }
+
+    #[tokio::test]
+    async fn committed_mcp_mutation_completion_after_cancel_writes_result_response() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor =
+            SurfaceRequestExecutor::new_standalone(tokio::time::Duration::from_millis(1));
+        let request_id = json!(43);
+        let request_key = request_key(&request_id);
+        let kind = mcp_tracked_surface_request_kind("meerkat_config")
+            .expect("committed mutation tools must be lifecycle tracked");
+        let context = begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
+            .expect("test request key should be unique");
+
+        assert_eq!(
+            request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+        let terminal = mcp_tool_terminal_from_result(
+            request_id,
+            Some(&context),
+            Ok(json!({
+                "generation": 2,
+                "config": {}
+            })),
+        );
+
+        assert!(
+            write_tool_completion(
+                &writer,
+                &request_executor,
+                ToolCompletion {
+                    request_key: Some(request_key.clone()),
+                    terminal,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(request_executor.phase(&request_key), None);
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 43);
+        assert_eq!(response["result"]["generation"], 2);
+        assert!(response.get("error").is_none());
+    }
 }

@@ -552,6 +552,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "CancellableObservation",
                     "SessionCreateWithTurn",
                     "SessionTurn",
+                    "CommittedMutation",
                 ],
             ),
             NamedTypeBinding::string_enum(

@@ -103,8 +103,72 @@ pub const MCP_TOOL_REQUEST_LIFECYCLE_CATALOG: McpToolRequestLifecycleCatalog =
                 request_kind: SurfaceRequestKind::SessionTurn,
             },
             McpToolRequestLifecycleDescriptor {
+                name: "meerkat_config",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
                 name: "meerkat_sessions",
                 request_kind: SurfaceRequestKind::InlineObservation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_interrupt",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_archive",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mcp_add",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mcp_remove",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mcp_reload",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_event_stream_open",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_event_stream_close",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_schedule_create",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_schedule_update",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_schedule_pause",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_schedule_resume",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_schedule_delete",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_event_stream_open",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_mob_event_stream_close",
+                request_kind: SurfaceRequestKind::CommittedMutation,
+            },
+            McpToolRequestLifecycleDescriptor {
+                name: "meerkat_comms_send",
+                request_kind: SurfaceRequestKind::CommittedMutation,
             },
         ],
     };

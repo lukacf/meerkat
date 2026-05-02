@@ -3650,6 +3650,8 @@ pub enum SurfaceRequestKind {
     SessionCreateWithTurn,
     #[serde(rename = "SessionTurn")]
     SessionTurn,
+    #[serde(rename = "CommittedMutation")]
+    CommittedMutation,
 }
 impl SurfaceRequestKind {
     pub fn as_str(&self) -> &'static str {
@@ -3658,6 +3660,7 @@ impl SurfaceRequestKind {
             Self::CancellableObservation => "CancellableObservation",
             Self::SessionCreateWithTurn => "SessionCreateWithTurn",
             Self::SessionTurn => "SessionTurn",
+            Self::CommittedMutation => "CommittedMutation",
         }
     }
 }
@@ -3669,6 +3672,7 @@ impl std::convert::TryFrom<&str> for SurfaceRequestKind {
             "CancellableObservation" => Ok(Self::CancellableObservation),
             "SessionCreateWithTurn" => Ok(Self::SessionCreateWithTurn),
             "SessionTurn" => Ok(Self::SessionTurn),
+            "CommittedMutation" => Ok(Self::CommittedMutation),
             other => Err(format!("invalid SurfaceRequestKind value `{other}`")),
         }
     }

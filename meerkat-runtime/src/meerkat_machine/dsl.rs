@@ -1277,6 +1277,7 @@ pub enum SurfaceRequestKind {
     CancellableObservation,
     SessionCreateWithTurn,
     SessionTurn,
+    CommittedMutation,
 }
 
 impl From<meerkat_core::handles::SurfaceRequestKind> for SurfaceRequestKind {
@@ -1290,6 +1291,7 @@ impl From<meerkat_core::handles::SurfaceRequestKind> for SurfaceRequestKind {
                 Self::SessionCreateWithTurn
             }
             meerkat_core::handles::SurfaceRequestKind::SessionTurn => Self::SessionTurn,
+            meerkat_core::handles::SurfaceRequestKind::CommittedMutation => Self::CommittedMutation,
         }
     }
 }

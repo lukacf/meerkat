@@ -388,9 +388,14 @@ pub(crate) async fn handle_create_terminal(
     } else {
         None
     };
-    let session_id = match runtime
-        .create_session(build_config, params.labels, deferred_prompt)
-        .await
+    let session_id = match SessionRuntime::create_session_for_surface_request(
+        &runtime,
+        build_config,
+        params.labels,
+        deferred_prompt,
+        request_context.as_ref(),
+    )
+    .await
     {
         Ok(sid) => sid,
         Err(rpc_err) => {
@@ -403,39 +408,6 @@ pub(crate) async fn handle_create_terminal(
     };
 
     if let Some(context) = request_context.as_ref() {
-        let runtime_for_cleanup = Arc::clone(&runtime);
-        let runtime_adapter_for_cleanup = Arc::clone(runtime_adapter);
-        let session_id_for_cleanup = session_id.clone();
-        context.set_unpublished_cleanup(request_action(move || {
-            let runtime = Arc::clone(&runtime_for_cleanup);
-            let runtime_adapter = Arc::clone(&runtime_adapter_for_cleanup);
-            let session_id = session_id_for_cleanup.clone();
-            async move {
-                let _ = runtime.archive_session(&session_id).await;
-                runtime_adapter.unregister_session(&session_id).await;
-            }
-        }));
-        if context.cancel_already_requested() {
-            let _ = runtime.archive_session(&session_id).await;
-            runtime_adapter.unregister_session(&session_id).await;
-            return RpcTerminalResponse::failure(RpcResponse::error(
-                id,
-                error::REQUEST_CANCELLED,
-                "request cancelled before start",
-            ));
-        }
-        if let Err(err) = context
-            .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
-            .await
-        {
-            let _ = runtime.archive_session(&session_id).await;
-            runtime_adapter.unregister_session(&session_id).await;
-            return RpcTerminalResponse::failure(RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("request lifecycle rejected session binding: {err}"),
-            ));
-        }
         let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -451,8 +423,6 @@ pub(crate) async fn handle_create_terminal(
             .await;
 
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            let _ = runtime.archive_session(&session_id).await;
-            runtime_adapter.unregister_session(&session_id).await;
             return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,
@@ -791,6 +761,22 @@ mod tests {
         request_action,
     };
     use meerkat_runtime::{RuntimeDriverError, RuntimeDriverPostAdmissionOperation};
+    use serde_json::json;
+
+    use crate::session_runtime::SessionRuntime;
+
+    fn make_test_runtime(temp: &tempfile::TempDir) -> SessionRuntime {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        SessionRuntime::new(
+            meerkat::AgentFactory::new(temp.path().join("sessions")),
+            meerkat_core::Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        )
+    }
 
     #[test]
     fn create_session_result_preserves_skill_diagnostics() {
@@ -919,6 +905,55 @@ mod tests {
             cleanup_runs.load(Ordering::SeqCst),
             0,
             "admitted RPC initial-turn failures must not run pre-admission rollback cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_create_pre_cancel_binds_lifecycle_before_returning_cancelled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = Arc::new(make_test_runtime(&temp));
+        let runtime_adapter = runtime.runtime_adapter();
+        let executor = SurfaceRequestExecutor::new_with_machine(
+            std::time::Duration::from_millis(1),
+            runtime_adapter.as_ref(),
+        );
+        let context = executor
+            .try_begin_request(
+                "rpc-create-cancel-before-bind",
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
+            .expect("test request should be admitted");
+
+        assert_eq!(
+            executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+
+        let params = serde_json::value::to_raw_value(&json!({
+            "prompt": "hello"
+        }))
+        .expect("params should serialize");
+        let response = super::handle_create_terminal(
+            Some(super::RpcId::Num(41)),
+            Some(params.as_ref()),
+            Arc::clone(&runtime),
+            &crate::router::NotificationSink::noop(),
+            &runtime_adapter,
+            Some(context.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            response.error.as_ref().map(|err| err.code),
+            Some(crate::error::REQUEST_CANCELLED)
+        );
+        assert!(
+            context
+                .classify_failure_terminal(())
+                .is_respond_without_publish(),
+            "RPC create must bind the request lifecycle before cancellation cleanup can return"
         );
     }
 }

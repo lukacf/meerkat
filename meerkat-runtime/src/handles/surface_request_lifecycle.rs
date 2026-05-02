@@ -339,6 +339,25 @@ mod tests {
     }
 
     #[test]
+    fn committed_mutation_success_classification_completes_after_cancel() {
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
+
+        handle
+            .try_begin_request("request".to_owned(), SurfaceRequestKind::CommittedMutation)
+            .expect("request begins");
+        assert_eq!(
+            handle.cancel_request("request").outcome,
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(
+            handle.classify_terminal("request", SurfaceRequestTerminalOutcome::Succeeded),
+            Ok(SurfaceRequestTerminalDisposition::Publish)
+        );
+        assert_eq!(handle.complete_committed("request"), Ok(()));
+        assert_eq!(handle.phase("request"), None);
+    }
+
+    #[test]
     fn dsl_terminal_classification_rejects_unknown_request() {
         let authority = HandleDslAuthority::ephemeral();
 

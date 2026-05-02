@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
+use meerkat::surface::{RequestContext, request_action};
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
     PersistentSessionService, ScheduleService, ScheduleToolDispatcher, StagedPhase,
@@ -3159,9 +3160,39 @@ impl SessionRuntime {
     /// and will be materialized inside the service on the first `start_turn`.
     pub async fn create_session(
         &self,
+        build_config: AgentBuildConfig,
+        labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<ContentInput>,
+    ) -> Result<SessionId, RpcError> {
+        self.create_session_inner(build_config, labels, deferred_prompt, None, None)
+            .await
+    }
+
+    pub(crate) async fn create_session_for_surface_request(
+        runtime: &Arc<Self>,
+        build_config: AgentBuildConfig,
+        labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<ContentInput>,
+        request_context: Option<&RequestContext>,
+    ) -> Result<SessionId, RpcError> {
+        runtime
+            .create_session_inner(
+                build_config,
+                labels,
+                deferred_prompt,
+                request_context,
+                Some(Arc::clone(runtime)),
+            )
+            .await
+    }
+
+    async fn create_session_inner(
+        &self,
         mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
+        request_context: Option<&RequestContext>,
+        runtime_for_cleanup: Option<Arc<Self>>,
     ) -> Result<SessionId, RpcError> {
         let effective_llm_identity = self.llm_identity_from_pending_build(&build_config).await?;
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
@@ -3205,6 +3236,38 @@ impl SessionRuntime {
                 ),
                 data: None,
             })?;
+
+        if let Some(context) = request_context {
+            if let Err(err) = context
+                .bind_runtime_session(self.runtime_adapter.as_ref(), &session_id)
+                .await
+            {
+                self.runtime_adapter.unregister_session(&session_id).await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("request lifecycle rejected session binding: {err}"),
+                    data: None,
+                });
+            }
+
+            if let Some(runtime) = runtime_for_cleanup {
+                let runtime_adapter_for_cleanup = Arc::clone(&self.runtime_adapter);
+                let session_id_for_cleanup = session_id.clone();
+                context.set_unpublished_cleanup(request_action(move || {
+                    let runtime = Arc::clone(&runtime);
+                    let runtime_adapter = Arc::clone(&runtime_adapter_for_cleanup);
+                    let session_id = session_id_for_cleanup.clone();
+                    async move {
+                        let _ = runtime.archive_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                    }
+                }));
+            }
+
+            if context.cancel_already_requested() {
+                return Err(request_cancelled_rpc_error());
+            }
+        }
 
         let build_config = AgentBuildConfig {
             resume_session: Some(session),

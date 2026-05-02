@@ -979,6 +979,30 @@ mod tests {
             mcp_tool_surface_request_kind("meerkat_sessions"),
             SurfaceRequestKind::InlineObservation
         );
+        for tool_name in [
+            "meerkat_config",
+            "meerkat_interrupt",
+            "meerkat_archive",
+            "meerkat_mcp_add",
+            "meerkat_mcp_remove",
+            "meerkat_mcp_reload",
+            "meerkat_event_stream_open",
+            "meerkat_event_stream_close",
+            "meerkat_schedule_create",
+            "meerkat_schedule_update",
+            "meerkat_schedule_pause",
+            "meerkat_schedule_resume",
+            "meerkat_schedule_delete",
+            "meerkat_mob_event_stream_open",
+            "meerkat_mob_event_stream_close",
+            "meerkat_comms_send",
+        ] {
+            assert_eq!(
+                mcp_tool_surface_request_kind(tool_name),
+                SurfaceRequestKind::CommittedMutation,
+                "MCP mutation tool {tool_name} must not fall through to the cancellable observation default"
+            );
+        }
         assert_eq!(mcp_tracked_surface_request_kind("meerkat_sessions"), None);
         assert_eq!(
             mcp_tracked_surface_request_kind("meerkat_resume"),

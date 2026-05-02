@@ -3040,6 +3040,55 @@ mod tests {
             .expect("failed durable release leaves browser flow retryable");
     }
 
+    #[test]
+    fn stale_release_persistence_failure_does_not_install_released_authority() {
+        let releasing_lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let releasing_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            releasing_lifecycle.clone(),
+            &store_dyn,
+        );
+        let admitting_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = admitting_authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("other authority admits browser flow");
+        assert!(
+            !releasing_lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "releasing authority starts stale and has no local machine membership"
+        );
+
+        store.fail_oauth_persist();
+        assert!(
+            releasing_lifecycle.release_lease(&lease_key).is_err(),
+            "release should fail closed when stale durable OAuth cleanup cannot persist"
+        );
+        assert_eq!(
+            releasing_lifecycle.snapshot(&lease_key).phase,
+            None,
+            "failed stale release must not synthesize a local AuthMachine authority"
+        );
+
+        store.allow_oauth_persist();
+        releasing_authority
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("failed stale durable release must leave browser flow retryable");
+    }
+
     #[cfg(feature = "sqlite-store")]
     #[test]
     fn persistent_release_prunes_durable_flows_from_stale_authority() {

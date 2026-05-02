@@ -501,41 +501,66 @@ impl RuntimeAuthLeaseHandle {
     fn restore_released_lease_after_observer_failure(
         &self,
         lease_key: &LeaseKey,
-        previous_state: auth_dsl::AuthMachineState,
+        previous_state: Option<auth_dsl::AuthMachineState>,
         previous_generation: Option<u64>,
         previous_published_at: Option<u64>,
     ) {
-        let mut restored_state = previous_state;
-        let to_phase = map_phase(restored_state.lifecycle_phase);
         let mut guard = self
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(current) = guard.authorities.get(lease_key) {
-            merge_oauth_membership(&mut restored_state, &current.state);
-        }
-        guard.authorities.insert(
-            lease_key.clone(),
-            auth_dsl::AuthMachineAuthority::from_state(restored_state),
-        );
-        match previous_generation {
-            Some(generation) => {
-                guard.generations.insert(lease_key.clone(), generation);
+        let to_phase = if let Some(mut restored_state) = previous_state {
+            let to_phase = map_phase(restored_state.lifecycle_phase);
+            if let Some(current) = guard.authorities.get(lease_key) {
+                merge_oauth_membership(&mut restored_state, &current.state);
             }
-            None => {
-                guard.generations.remove(lease_key);
+            guard.authorities.insert(
+                lease_key.clone(),
+                auth_dsl::AuthMachineAuthority::from_state(restored_state),
+            );
+            match previous_generation {
+                Some(generation) => {
+                    guard.generations.insert(lease_key.clone(), generation);
+                }
+                None => {
+                    guard.generations.remove(lease_key);
+                }
             }
-        }
-        match previous_published_at {
-            Some(published_at) => {
-                guard
-                    .credential_published_at_millis
-                    .insert(lease_key.clone(), published_at);
+            match previous_published_at {
+                Some(published_at) => {
+                    guard
+                        .credential_published_at_millis
+                        .insert(lease_key.clone(), published_at);
+                }
+                None => {
+                    guard.credential_published_at_millis.remove(lease_key);
+                }
             }
-            None => {
-                guard.credential_published_at_millis.remove(lease_key);
+            to_phase
+        } else if let Some(current) = guard.authorities.get(lease_key) {
+            map_phase(current.state.lifecycle_phase)
+        } else {
+            guard.authorities.remove(lease_key);
+            match previous_generation {
+                Some(generation) => {
+                    guard.generations.insert(lease_key.clone(), generation);
+                }
+                None => {
+                    guard.generations.remove(lease_key);
+                }
             }
-        }
+            match previous_published_at {
+                Some(published_at) => {
+                    guard
+                        .credential_published_at_millis
+                        .insert(lease_key.clone(), published_at);
+                }
+                None => {
+                    guard.credential_published_at_millis.remove(lease_key);
+                }
+            }
+            AuthLeasePhase::Released
+        };
         drop(guard);
         emit_audit(
             lease_key,
@@ -718,6 +743,10 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 previous_generation = guard.generations.get(lease_key).copied();
                 previous_published_at =
                     guard.credential_published_at_millis.get(lease_key).copied();
+                previous_state = guard
+                    .authorities
+                    .get(lease_key)
+                    .map(|authority| authority.state.clone());
             }
             let entry =
                 guard
@@ -730,7 +759,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                     });
             #[cfg(not(target_arch = "wasm32"))]
             {
-                previous_state = entry.state.clone();
                 released
                     .browser_flow_ids
                     .extend(entry.state.oauth_browser_flow_ids.iter().cloned());

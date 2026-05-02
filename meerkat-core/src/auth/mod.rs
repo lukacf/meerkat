@@ -18,6 +18,11 @@ pub use lease::{
     AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationRequest, HttpAuthorizer,
     ResolvedAuthEnvelope, ResolvedAuthKind,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use lifecycle::{
+    AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
+    rehydrate_marked_oauth_tokens_for_status,
+};
 pub use lifecycle::{
     PublishedAuthStatus, TokenLifecycleClearError, TokenLifecycleSaveError,
     clear_tokens_and_publish_lifecycle_released,

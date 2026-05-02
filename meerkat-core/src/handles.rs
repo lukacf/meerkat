@@ -1024,7 +1024,9 @@ impl std::fmt::Display for LeaseKey {
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
+    pub credential_present: bool,
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
 }
 
 /// Result of an accepted auth lease lifecycle transition.
@@ -1032,9 +1034,21 @@ pub struct AuthLeaseSnapshot {
 /// `generation` is the projection version assigned while the transition is
 /// accepted, so consumers can bind derived material to the exact lease state
 /// that published it without taking a later snapshot.
+/// `credential_published_at_millis` is the durable credential publication
+/// timestamp attached to acquired/refreshed credential material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
+}
+
+impl AuthLeaseTransition {
+    pub fn new(generation: u64, credential_published_at_millis: Option<u64>) -> Self {
+        Self {
+            generation,
+            credential_published_at_millis,
+        }
+    }
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is
@@ -1051,7 +1065,7 @@ pub struct AuthLeaseTransition {
 pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
-pub trait AuthLeaseHandle: Send + Sync {
+pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `AcquireAuthLease { lease_key, expires_at }` — unconditional.
     ///
     /// Moves the binding into `auth_valid_leases` and records its expiry.

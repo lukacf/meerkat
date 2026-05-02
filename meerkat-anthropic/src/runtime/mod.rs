@@ -28,6 +28,10 @@ use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret_with_auth_context,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::{
+    auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
+};
 use meerkat_llm_core::LlmClient;
 #[cfg(any(
     all(not(target_arch = "wasm32"), feature = "bedrock"),
@@ -45,6 +49,21 @@ use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
 pub use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthError) -> bool {
+    match error {
+        oauth::AnthropicOAuthError::InteractiveLoginRequired
+        | oauth::AnthropicOAuthError::MissingRefreshToken => true,
+        oauth::AnthropicOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(message)) => {
+            managed_store_oauth_refresh_failure_is_permanent(message)
+        }
+        oauth::AnthropicOAuthError::OAuth(error) => {
+            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+        }
+        _ => false,
+    }
+}
 
 /// Allowed (backend, auth) combinations for Anthropic.
 pub const ALLOWED_BINDINGS: &[(AnthropicBackendKind, AnthropicAuthMethod)] = &[

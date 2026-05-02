@@ -3020,6 +3020,7 @@ dependencies = [
  "base64",
  "chrono",
  "indexmap",
+ "meerkat-auth-core",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",

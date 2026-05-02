@@ -22,6 +22,10 @@ use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret_with_auth_context,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::{
+    auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
+};
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
 };
@@ -33,6 +37,21 @@ use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 pub use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn openai_oauth_refresh_failure_is_permanent(error: &oauth::OpenAiOAuthError) -> bool {
+    match error {
+        oauth::OpenAiOAuthError::InteractiveLoginRequired
+        | oauth::OpenAiOAuthError::MissingRefreshToken => true,
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(message)) => {
+            managed_store_oauth_refresh_failure_is_permanent(message)
+        }
+        oauth::OpenAiOAuthError::OAuth(error) => {
+            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+        }
+        _ => false,
+    }
+}
 
 /// Allowed (backend, auth) combinations for OpenAI. Phase 2 parses all
 /// variants but only resolves ApiKey / StaticBearer / ExternalAuthorizer;

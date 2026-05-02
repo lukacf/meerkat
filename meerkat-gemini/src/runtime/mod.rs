@@ -24,6 +24,10 @@ use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
     resolve_simple_secret_with_auth_context,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::{
+    auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
@@ -37,6 +41,23 @@ use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 pub use meerkat_core::provider_matrix::google::{GoogleAuthMethod, GoogleBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn google_code_assist_oauth_refresh_failure_is_permanent(
+    error: &oauth::GoogleCodeAssistOAuthError,
+) -> bool {
+    match error {
+        oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired
+        | oauth::GoogleCodeAssistOAuthError::MissingRefreshToken => true,
+        oauth::GoogleCodeAssistOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(
+            message,
+        )) => managed_store_oauth_refresh_failure_is_permanent(message),
+        oauth::GoogleCodeAssistOAuthError::OAuth(error) => {
+            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+        }
+        _ => false,
+    }
+}
 
 /// Allowed (backend, auth) combinations for Google.
 pub const ALLOWED_BINDINGS: &[(GoogleBackendKind, GoogleAuthMethod)] = &[

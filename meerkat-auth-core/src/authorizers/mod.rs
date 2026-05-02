@@ -381,7 +381,9 @@ mod tests {
                 snapshot: Mutex::new(AuthLeaseSnapshot {
                     phase: None,
                     expires_at: None,
+                    credential_present: false,
                     generation: 0,
+                    credential_published_at_millis: None,
                 }),
                 generation: Mutex::new(0),
                 accepted_generations: Mutex::new(Vec::new()),
@@ -406,10 +408,13 @@ mod tests {
             *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: Some(expires_at),
+                credential_present: true,
                 generation: accepted_generation + 1,
+                credential_published_at_millis: None,
             };
             Ok(AuthLeaseTransition {
                 generation: accepted_generation,
+                credential_published_at_millis: None,
             })
         }
 

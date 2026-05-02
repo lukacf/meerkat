@@ -11,9 +11,10 @@
 //! For the `managed_chatgpt_oauth` path we use the token bundle;
 //! `api_key` mode reads `OPENAI_API_KEY` straight.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
+use futures::future::BoxFuture;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -23,7 +24,7 @@ use meerkat_auth_core::auth_oauth::{
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    TokenKey, TokenStore,
+    RefreshFn, TokenKey, TokenStore,
 };
 
 // ---------------------------------------------------------------------
@@ -49,6 +50,12 @@ pub const CHATGPT_SCOPES: &[&str] = &[
 // Wire header constants are defined in `auth.rs` (unconditional module) so
 // they remain available when the interactive OAuth flow is feature-gated off.
 pub use meerkat_core::provider_matrix::openai_auth::{CHATGPT_ACCOUNT_HEADER, FEDRAMP_HEADER};
+
+pub type TokenCommitFn = Box<
+    dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
+        + Send
+        + 'static,
+>;
 
 // ---------------------------------------------------------------------
 // Endpoints
@@ -297,8 +304,7 @@ impl OpenAiOAuthRuntime {
             None
         };
         let tokens =
-            oauth_result_to_persisted(result, PersistedAuthMode::ChatgptOauth, None, account_id);
-        self.save(&tokens).await?;
+            oauth_result_to_persisted(result, PersistedAuthMode::ChatgptOauth, None, account_id)?;
         Ok(tokens)
     }
 }
@@ -308,22 +314,21 @@ fn oauth_result_to_persisted(
     mode: PersistedAuthMode,
     fallback_refresh: Option<String>,
     account_id: Option<String>,
-) -> PersistedTokens {
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| Utc::now() + Duration::seconds(s as i64));
+) -> Result<PersistedTokens, OAuthError> {
+    let now = Utc::now();
+    let expires_at = result.expires_at_from(now)?;
     let scopes = result
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
-    PersistedTokens {
+    Ok(PersistedTokens {
         auth_mode: mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token.or(fallback_refresh),
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(Utc::now()),
+        last_refresh: Some(now),
         scopes,
         account_id,
         metadata: serde_json::Value::Null,
@@ -388,6 +393,30 @@ mod tests {
         );
         assert_eq!(CHATGPT_ACCOUNT_HEADER, "ChatGPT-Account-ID");
         assert_eq!(FEDRAMP_HEADER, "X-OpenAI-Fedramp");
+    }
+
+    #[test]
+    fn oauth_result_to_persisted_rejects_expiry_overflow() {
+        let err = oauth_result_to_persisted(
+            OAuthTokenResult {
+                access_token: "access-token".into(),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_in_secs: Some(u64::MAX),
+                scope: None,
+            },
+            PersistedAuthMode::ChatgptOauth,
+            None,
+            None,
+        )
+        .expect_err("oversized expires_in must not be persisted");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
     }
 
     #[test]

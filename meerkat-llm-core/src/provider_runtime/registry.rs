@@ -44,10 +44,12 @@ pub type NowFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// methods (Claude.ai, ChatGPT, Google OAuth-personal) to find a
 /// persisted access/refresh token. Absent store → OAuth paths return
 /// `AuthError::InteractiveLoginRequired`.
+#[derive(Clone)]
 pub struct ResolverEnvironment {
     pub env_lookup: EnvLookup,
     pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,
     pub now: NowFn,
+    pub force_refresh: bool,
     pub auth_lease_handle: Option<Arc<dyn AuthLeaseHandle>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub token_store: Option<Arc<dyn meerkat_core::auth::TokenStore>>,
@@ -63,6 +65,7 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|_| None),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            force_refresh: false,
             auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
             token_store: None,
@@ -78,6 +81,7 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|key| std::env::var(key).ok()),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            force_refresh: false,
             auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
             token_store: None,
@@ -119,6 +123,13 @@ impl ResolverEnvironment {
     /// truth after a lazy token exchange.
     pub fn with_auth_lease_handle(mut self, handle: Arc<dyn AuthLeaseHandle>) -> Self {
         self.auth_lease_handle = Some(handle);
+        self
+    }
+
+    /// Force provider runtimes to take their refresh path even when persisted
+    /// credentials are still fresh.
+    pub fn with_force_refresh(mut self, force_refresh: bool) -> Self {
+        self.force_refresh = force_refresh;
         self
     }
 

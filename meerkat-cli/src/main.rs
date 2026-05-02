@@ -2595,12 +2595,37 @@ struct RuntimeScope {
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
     auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    oauth_flow_authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
 }
 
 impl RuntimeScope {
     fn backend_hint(&self) -> Option<RealmBackend> {
         self.backend_hint
     }
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn new_cli_auth_handles() -> (
+    Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+) {
+    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let oauth_flow_authority = Arc::new(
+        meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+            std::time::Duration::from_secs(10 * 60),
+            Arc::clone(&auth_lease),
+        ),
+    );
+    (
+        auth_lease as Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        oauth_flow_authority as Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+    )
+}
+
+#[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+fn new_cli_auth_lease() -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
+    Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new())
 }
 
 fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
@@ -2636,6 +2661,10 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
         }
     });
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+    #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+    let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
         instance_id: cli.instance.clone(),
@@ -2645,7 +2674,9 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
         origin_hint,
         context_root,
         user_config_root,
-        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+        auth_lease,
+        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        oauth_flow_authority,
     })
 }
 
@@ -2888,6 +2919,10 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             }
         }
         AuthCommands::Test { realm, binding_id } => {
+            use meerkat_providers::auth_store::{
+                InMemoryCoordinator, TokenStore, TokenStoreBackend,
+            };
+
             let section = config
                 .realm
                 .get(&realm)
@@ -2943,7 +2978,6 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             println!("source_kind: {}", source_kind_label(&profile.source));
             let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
             println!("binding_id:  {binding_id}");
-            use meerkat_core::handles::LeaseKey;
             let connection_ref = ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -3375,6 +3409,56 @@ impl LoginProvider {
         }
     }
 
+    fn config_provider(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Google => "gemini",
+        }
+    }
+
+    fn backend_profile_id(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic_api",
+            Self::OpenAi => "openai_chatgpt",
+            Self::Google => "google_code_assist",
+        }
+    }
+
+    fn backend_kind(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic_api",
+            Self::OpenAi => "chatgpt_backend",
+            Self::Google => "google_code_assist",
+        }
+    }
+
+    fn oauth_auth_method(self) -> &'static str {
+        match self {
+            Self::Anthropic => "claude_ai_oauth",
+            Self::OpenAi => "managed_chatgpt_oauth",
+            Self::Google => "google_oauth",
+        }
+    }
+
+    fn oauth_alias(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Google => "google",
+        }
+    }
+
+    fn oauth_identity(self) -> meerkat_providers::oauth_flow::OAuthProviderIdentity {
+        match self {
+            Self::Anthropic => {
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi
+            }
+            Self::OpenAi => meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            Self::Google => meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+        }
+    }
+
     fn sample_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
@@ -3390,6 +3474,9 @@ const ALL_LOGIN_PROVIDERS: &[LoginProvider] = &[
     LoginProvider::OpenAi,
     LoginProvider::Google,
 ];
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+const CLI_INTERACTIVE_OAUTH_REALM_ID: &str = "dev";
 
 fn auth_supports_ansi() -> bool {
     use std::io::IsTerminal;
@@ -3513,6 +3600,140 @@ fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[derive(Debug)]
+struct CliOAuthLoginTarget {
+    connection_ref: ConnectionRef,
+    auth_profile: meerkat_core::AuthProfile,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Config) -> bool {
+    let realm_id = CLI_INTERACTIVE_OAUTH_REALM_ID;
+    let binding_id = provider.binding_id();
+    let backend_profile_id = provider.backend_profile_id();
+    let auth_profile_id = binding_id;
+    let section = config.realm.entry(realm_id.to_string()).or_default();
+    let mut changed = false;
+
+    if !section.backend.contains_key(backend_profile_id) {
+        section.backend.insert(
+            backend_profile_id.to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: provider.config_provider().to_string(),
+                backend_kind: provider.backend_kind().to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        changed = true;
+    }
+
+    if !section.auth.contains_key(auth_profile_id) {
+        section.auth.insert(
+            auth_profile_id.to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: provider.config_provider().to_string(),
+                auth_method: provider.oauth_auth_method().to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: meerkat_core::AuthConstraints {
+                    allow_interactive_login: true,
+                    ..Default::default()
+                },
+                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+            },
+        );
+        changed = true;
+    }
+
+    if !section.binding.contains_key(binding_id) {
+        section.binding.insert(
+            binding_id.to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: backend_profile_id.to_string(),
+                auth_profile: auth_profile_id.to_string(),
+                default_model: Some(provider.sample_model().to_string()),
+                policy: meerkat_core::BindingPolicy::default(),
+            },
+        );
+        changed = true;
+    }
+
+    if section.default_binding.is_none() {
+        section.default_binding = Some(binding_id.to_string());
+        changed = true;
+    }
+
+    changed
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn resolve_configured_cli_interactive_oauth_target(
+    provider: LoginProvider,
+    config: &Config,
+) -> anyhow::Result<CliOAuthLoginTarget> {
+    let realm_id = CLI_INTERACTIVE_OAUTH_REALM_ID;
+    let binding_id = provider.binding_id();
+    let section = config.realm.get(realm_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "OAuth login target '{realm_id}:{binding_id}' is not configured; \
+             add a [realm.{realm_id}] binding for {} OAuth before running interactive login",
+            provider.display_name(),
+        )
+    })?;
+    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm_id, section)
+        .map_err(|e| anyhow::anyhow!("Realm config invalid for '{realm_id}': {e}"))?;
+    let connection_ref = ConnectionRef {
+        realm: meerkat_core::RealmId::parse(realm_id)
+            .map_err(|e| anyhow::anyhow!("invalid realm id '{realm_id}': {e}"))?,
+        binding: meerkat_core::BindingId::parse(binding_id)
+            .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
+        profile: None,
+    };
+    let (_, backend_profile, auth_profile) = realm_set
+        .lookup_connection_ref(&connection_ref)
+        .map_err(|e| {
+            anyhow::anyhow!("OAuth login target '{realm_id}:{binding_id}' invalid: {e}")
+        })?;
+    meerkat_providers::oauth_flow::validate_oauth_login_binding(
+        backend_profile,
+        auth_profile,
+        provider.oauth_identity(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "OAuth login target '{realm_id}:{binding_id}' cannot accept {} OAuth credentials: {e}",
+            provider.display_name(),
+        )
+    })?;
+    Ok(CliOAuthLoginTarget {
+        connection_ref,
+        auth_profile: auth_profile.clone(),
+    })
+}
+
+#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn resolve_cli_interactive_oauth_target(
+    provider: LoginProvider,
+    config: &Config,
+) -> anyhow::Result<CliOAuthLoginTarget> {
+    match resolve_configured_cli_interactive_oauth_target(provider, config) {
+        Ok(target) => Ok(target),
+        Err(err) => {
+            let binding_missing = config
+                .realm
+                .get(CLI_INTERACTIVE_OAUTH_REALM_ID)
+                .is_none_or(|section| !section.binding.contains_key(provider.binding_id()));
+            if !binding_missing {
+                return Err(err);
+            }
+            let mut synthesized = config.clone();
+            ensure_cli_interactive_oauth_config(provider, &mut synthesized);
+            resolve_configured_cli_interactive_oauth_target(provider, &synthesized)
+        }
+    }
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn connection_ref_from_token_key(key: &meerkat_providers::auth_store::TokenKey) -> ConnectionRef {
     ConnectionRef {
         realm: key.realm.clone(),
@@ -3522,7 +3743,40 @@ fn connection_ref_from_token_key(key: &meerkat_providers::auth_store::TokenKey) 
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-async fn save_cli_tokens_and_publish_lifecycle(
+struct CliPreparedTokenCommitSnapshot {
+    key: meerkat_providers::auth_store::TokenKey,
+    lease_key: meerkat_core::handles::LeaseKey,
+    previous: Option<meerkat_providers::auth_store::PersistedTokens>,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+struct CliTokenCommitSnapshot {
+    key: meerkat_providers::auth_store::TokenKey,
+    lease_key: meerkat_core::handles::LeaseKey,
+    previous: Option<meerkat_providers::auth_store::PersistedTokens>,
+    previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
+    lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn prepare_cli_token_commit_unlocked(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    connection_ref: &ConnectionRef,
+) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
+    let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
+    let previous = store
+        .load(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
+    Ok(CliPreparedTokenCommitSnapshot {
+        key,
+        lease_key: meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref),
+        previous,
+    })
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     connection_ref: &ConnectionRef,
@@ -3536,6 +3790,101 @@ async fn save_cli_tokens_and_publish_lifecycle(
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn rollback_cli_token_commit(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    commit: &CliTokenCommitSnapshot,
+) -> Result<(), String> {
+    match &commit.previous {
+        Some(previous) => match commit.previous_lifecycle.phase {
+            Some(phase) if phase != meerkat_core::handles::AuthLeasePhase::Released => {
+                auth_lease
+                    .release_credential_lifecycle(&commit.lease_key)
+                    .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
+                store
+                    .save(&commit.key, previous)
+                    .await
+                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
+                meerkat_core::restore_token_lifecycle_snapshot(
+                    auth_lease,
+                    &commit.lease_key,
+                    &commit.previous_lifecycle,
+                    Some(previous),
+                )
+                .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
+                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
+                if restored_snapshot.credential_present {
+                    let restored_previous =
+                        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(
+                            previous,
+                            &restored_snapshot,
+                        );
+                    store
+                        .save(&commit.key, &restored_previous)
+                        .await
+                        .map_err(|e| format!("TokenStore rollback marker save failed: {e}"))?;
+                }
+            }
+            _ => {
+                auth_lease
+                    .release_credential_lifecycle(&commit.lease_key)
+                    .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
+                store
+                    .save(&commit.key, previous)
+                    .await
+                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?
+            }
+        },
+        None => {
+            auth_lease
+                .release_credential_lifecycle(&commit.lease_key)
+                .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
+            store
+                .clear(&commit.key)
+                .await
+                .map_err(|e| format!("TokenStore rollback clear failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+struct CliBrowserFlowConsume<'a> {
+    authority: &'a dyn meerkat_providers::oauth_flow::OAuthFlowAuthority,
+    state: &'a str,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+    redirect_uri: &'a str,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn save_cli_oauth_tokens_and_consume_browser_flow(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+    tokens: &meerkat_providers::auth_store::PersistedTokens,
+    flow: CliBrowserFlowConsume<'_>,
+) -> anyhow::Result<()> {
+    flow.authority
+        .verify(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+    let prepared = prepare_cli_token_commit_unlocked(store, connection_ref).await?;
+    flow.authority
+        .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .map_err(|err| anyhow::anyhow!("oauth state terminal consume failed: {err}"))?;
+    save_prepared_cli_tokens_after_terminal_consume_unlocked(
+        store,
+        auth_lease,
+        connection_ref,
+        tokens,
+        prepared,
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3645,16 +3994,38 @@ async fn interactive_login(
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
-    use meerkat_anthropic::runtime::oauth as a_oauth;
-    use meerkat_gemini::runtime::oauth as g_oauth;
-    use meerkat_openai::runtime::oauth as o_oauth;
-    use meerkat_providers::auth_oauth::{OAuthError, PkcePair, run_loopback_callback};
-    use meerkat_providers::auth_store::{
-        PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreBackend,
-    };
+    use meerkat_providers::auth_oauth::{OAuthError, PkcePair, bind_loopback_callback};
+    use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreBackend};
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;
+    let (config_store, _) = resolve_config_store(scope).await?;
+    let mut config = config_store
+        .get()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    config
+        .apply_env_overrides()
+        .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
+    let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config);
+    let target = resolve_configured_cli_interactive_oauth_target(provider, &config)?;
+    if config_changed {
+        config_store
+            .set(config.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to persist OAuth login target config: {e}"))?;
+    }
+    tracing::debug!(
+        realm = %target.connection_ref.realm.as_str(),
+        binding = %target.connection_ref.binding.as_str(),
+        auth_profile = %target.auth_profile.id,
+        auth_method = %target.auth_profile.auth_method,
+        config_provisioned = config_changed,
+        "validated CLI OAuth login target"
+    );
+    let connection_ref = target.connection_ref;
+    let identity = provider.oauth_identity();
+    let key = TokenKey::from_connection_ref(&connection_ref);
 
     eprintln!();
     eprintln!(
@@ -3689,44 +4060,33 @@ async fn interactive_login(
         "Preparing a local callback to receive the authorization code",
     );
     let pkce = PkcePair::generate_s256();
-    let state_token = format!(
-        "st-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    let handle = run_loopback_callback(state_token.clone(), "/callback")
+    let pending_callback = bind_loopback_callback("/callback")
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
-    let redirect_url = handle.redirect_url.clone();
+    let redirect_url = pending_callback.redirect_url.clone();
+    let resolved = meerkat_providers::oauth_flow::resolve_oauth_provider(
+        provider.oauth_alias(),
+        &redirect_url,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    debug_assert_eq!(resolved.identity, identity);
+    let state_token = scope
+        .oauth_flow_authority
+        .start(
+            connection_ref.clone(),
+            identity,
+            redirect_url.clone(),
+            pkce.verifier.secret().to_string(),
+        )
+        .map_err(|e| anyhow::anyhow!("OAuth flow admission failed: {e}"))?;
+    let handle = pending_callback.expect_state(state_token.clone());
     print_ok(&format!(
         "Local callback ready at {}",
         auth_cyan(&redirect_url),
     ));
-
-    // Wave-c C-12 / C-1 follow-up: TokenKey now takes typed atoms.
-    // `provider.binding_id()` returns `&'static str`; build the key
-    // outside the match so the fallible parse flows cleanly via `?`.
-    let key = TokenKey::parse("dev", provider.binding_id())
-        .map_err(|e| anyhow::anyhow!("invalid token-key for provider login: {e}"))?;
-    let (endpoints, client_secret, auth_mode) = match provider {
-        LoginProvider::Anthropic => (
-            a_oauth::claude_ai_endpoints(&redirect_url),
-            None,
-            PersistedAuthMode::ClaudeAiOauth,
-        ),
-        LoginProvider::OpenAi => (
-            o_oauth::chatgpt_endpoints(&redirect_url),
-            None,
-            PersistedAuthMode::ChatgptOauth,
-        ),
-        LoginProvider::Google => (
-            g_oauth::code_assist_endpoints(&redirect_url),
-            Some(g_oauth::CODE_ASSIST_CLIENT_SECRET),
-            PersistedAuthMode::GoogleOauth,
-        ),
-    };
+    let endpoints = resolved.endpoints;
+    let client_secret = resolved.client_secret;
+    let auth_mode = resolved.auth_mode;
 
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
@@ -3784,6 +4144,10 @@ async fn interactive_login(
         }
     };
     print_ok("Received authorization code from the provider.");
+    let flow = scope
+        .oauth_flow_authority
+        .verify(&outcome.state, &connection_ref, identity, &redirect_url)
+        .map_err(|e| anyhow::anyhow!("OAuth flow verification failed: {e}"))?;
 
     // --- Step 4: exchange + persist ------------------------------
     print_step(4, 4, "Exchanging the code for access + refresh tokens");
@@ -3792,7 +4156,7 @@ async fn interactive_login(
         &http,
         &endpoints,
         &outcome.code,
-        pkce.verifier.secret(),
+        &flow.pkce_verifier,
         client_secret,
     )
     .await
@@ -3803,9 +4167,10 @@ async fn interactive_login(
         anyhow::anyhow!("Token exchange failed: {e}")
     })?;
 
+    let now = chrono::Utc::now();
     let expires_at = result
-        .expires_in_secs
-        .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+        .expires_at_from(now)
+        .map_err(|e| anyhow::anyhow!("Token expiry conversion failed: {e}"))?;
     let has_refresh = result.refresh_token.is_some();
     let tokens = PersistedTokens {
         auth_mode,
@@ -3813,7 +4178,7 @@ async fn interactive_login(
         refresh_token: result.refresh_token,
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(chrono::Utc::now()),
+        last_refresh: Some(now),
         scopes: result
             .scope
             .as_deref()
@@ -3828,12 +4193,17 @@ async fn interactive_login(
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
         .open()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-    let connection_ref = connection_ref_from_token_key(&key);
-    save_cli_tokens_and_publish_lifecycle(
+    save_cli_oauth_tokens_and_consume_browser_flow(
         store.as_ref(),
         scope.auth_lease.as_ref(),
         &connection_ref,
         &tokens,
+        CliBrowserFlowConsume {
+            authority: scope.oauth_flow_authority.as_ref(),
+            state: &outcome.state,
+            provider: identity,
+            redirect_uri: &redirect_url,
+        },
     )
     .await?;
     print_ok("Tokens persisted securely (keyring if available, file 0o600 otherwise).");
@@ -4035,6 +4405,93 @@ fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static st
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
         meerkat_core::CredentialSourceSpec::Command { .. } => "command",
         meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
+struct CliAuthStatusProjection {
+    phase: AuthStatusPhase,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn project_cli_auth_status(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
+    connection_ref: &ConnectionRef,
+    auth_profile: &meerkat_core::AuthProfile,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CliAuthStatusProjection {
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let mut snapshot = auth_lease.snapshot(&lease_key);
+    let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
+        &auth_profile.auth_method,
+    );
+    let source_uses_store =
+        meerkat_providers::auth_store::credential_source_uses_persisted_store(&auth_profile.source);
+    let oauth_mode = expected_mode
+        .map(meerkat_providers::auth_store::persisted_auth_mode_is_oauth_login)
+        .unwrap_or(false);
+    let mut stored = None;
+    if source_uses_store && let Some(store) = token_store {
+        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        if phase == AuthStatusPhase::Unknown
+            && let Some(expected_mode) = expected_mode
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+                store,
+                auth_lease,
+                connection_ref,
+                expected_mode,
+                now,
+            )
+            .await
+        {
+            stored = Some(rehydrated);
+            snapshot = auth_lease.snapshot(&lease_key);
+        } else if phase != AuthStatusPhase::Unknown {
+            stored = store
+                .load(&meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref))
+                .await
+                .ok()
+                .flatten();
+        }
+    }
+    if stored
+        .as_ref()
+        .is_some_and(|tokens| Some(tokens.auth_mode) != expected_mode)
+    {
+        stored = None;
+    }
+    let oauth_source_rejected = expected_mode
+        .map(|mode| {
+            meerkat_providers::auth_store::persisted_auth_mode_is_oauth_login(mode)
+                && !source_uses_store
+        })
+        .unwrap_or(false);
+    let oauth_store_missing = source_uses_store && oauth_mode && stored.is_none();
+    let unknown_snapshot;
+    let marker_projection_snapshot;
+    let (projection_tokens, projection_snapshot) = if oauth_source_rejected || oauth_store_missing {
+        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: false,
+            generation: snapshot.generation,
+            credential_published_at_millis: None,
+        };
+        (None, &unknown_snapshot)
+    } else {
+        marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
+            meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
+        });
+        (
+            stored.as_ref(),
+            marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
+        )
+    };
+    let projection =
+        meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
+    CliAuthStatusProjection {
+        phase: projection.phase,
+        expires_at: projection.expires_at,
     }
 }
 
@@ -5510,7 +5967,6 @@ fn build_cli_runtime_backed_service_with_defaults(
     factory: AgentFactory,
     config: Config,
     persistence: PersistenceBundle,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> (
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
@@ -5520,7 +5976,6 @@ fn build_cli_runtime_backed_service_with_defaults(
     meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
     let (service, runtime_adapter) =
         meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
-    runtime_adapter.set_auth_lease_handle(auth_lease);
     (service, runtime_adapter)
 }
 
@@ -5872,7 +6327,6 @@ async fn run_agent(
             factory,
             config.clone(),
             persistence.clone(),
-            Arc::clone(&scope.auth_lease),
             default_schedule_tools,
         );
 
@@ -6936,7 +7390,6 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         factory,
         config,
         persistence,
-        Arc::clone(&scope.auth_lease),
         default_schedule_tools,
     );
     let service = Arc::new(service);
@@ -10225,6 +10678,10 @@ mod tests {
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
+        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             locator: RealmLocator {
                 state_root,
@@ -10236,7 +10693,9 @@ mod tests {
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
-            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+            auth_lease,
+            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            oauth_flow_authority,
         }
     }
 
@@ -10289,6 +10748,527 @@ mod tests {
         assert_eq!(
             stored.auth_lease.as_ref().map(|b| b.generation),
             Some(snapshot.generation)
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn openai_oauth_login_config(
+        auth_method: &str,
+        source: meerkat_core::CredentialSourceSpec,
+    ) -> Config {
+        let mut config = Config::default();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "openai_chatgpt".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".into(),
+                backend_kind: "chatgpt_backend".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_oauth".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".into(),
+                auth_method: auth_method.into(),
+                source,
+                constraints: meerkat_core::AuthConstraints::default(),
+                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_oauth".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_chatgpt".into(),
+                auth_profile: "openai_oauth".into(),
+                default_model: None,
+                policy: meerkat_core::BindingPolicy::default(),
+            },
+        );
+        section.default_binding = Some("openai_oauth".into());
+        config.realm.insert("dev".into(), section);
+        config
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_resolves_configured_oauth_binding() {
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+
+        let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
+            .expect("configured OAuth binding resolves");
+
+        assert_eq!(target.connection_ref.realm.as_str(), "dev");
+        assert_eq!(target.connection_ref.binding.as_str(), "openai_oauth");
+        assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_allows_first_time_default_oauth_binding() {
+        let config = Config::default();
+
+        let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
+            .expect("fresh config should synthesize the default OpenAI OAuth login target");
+
+        assert_eq!(target.connection_ref.realm.as_str(), "dev");
+        assert_eq!(target.connection_ref.binding.as_str(), "openai_oauth");
+        assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
+        assert_eq!(
+            target.auth_profile.source,
+            meerkat_core::CredentialSourceSpec::ManagedStore
+        );
+        assert!(target.auth_profile.constraints.allow_interactive_login);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_rejects_same_provider_non_oauth_binding() {
+        let config =
+            openai_oauth_login_config("api_key", meerkat_core::CredentialSourceSpec::ManagedStore);
+
+        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
+            .expect_err("api_key binding must not accept OAuth login tokens");
+
+        assert!(err.to_string().contains("auth_method 'api_key'"));
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_rejects_oauth_auth_with_wrong_backend_kind() {
+        let mut config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+        config
+            .realm
+            .get_mut("dev")
+            .expect("dev realm exists")
+            .backend
+            .get_mut("openai_chatgpt")
+            .expect("default backend exists")
+            .backend_kind = "openai_api".into();
+
+        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
+            .expect_err("OAuth login must reject unsupported backend/auth combinations");
+
+        assert!(err.to_string().contains("backend_kind 'openai_api'"));
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_rejects_non_store_oauth_binding() {
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::Env {
+                env: "OPENAI_API_KEY".into(),
+                fallback: Vec::new(),
+            },
+        );
+
+        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
+            .expect_err("env-source binding must not accept persisted OAuth login tokens");
+
+        assert!(err.to_string().contains("source 'env'"));
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn openai_connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse("openai_oauth").expect("binding id parses"),
+            profile: None,
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn openai_oauth_tokens() -> meerkat_providers::auth_store::PersistedTokens {
+        meerkat_providers::auth_store::PersistedTokens {
+            auth_mode: meerkat_providers::auth_store::PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access-token".into()),
+            refresh_token: Some("refresh-token".into()),
+            id_token: None,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            last_refresh: Some(chrono::Utc::now()),
+            scopes: vec!["openid".into()],
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
+        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
+
+        let store = EphemeralTokenStore::new();
+        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let connection_ref = openai_connection_ref();
+        let tokens = openai_oauth_tokens();
+        store
+            .save(
+                &TokenKey::from_connection_ref(&connection_ref),
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+            )
+            .await
+            .expect("token save succeeds");
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+        let section = config.realm.get("dev").expect("dev realm exists");
+        let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
+            .expect("realm config parses");
+        let (_, _, auth_profile) = realm
+            .lookup_connection_ref(&connection_ref)
+            .expect("binding resolves");
+
+        let projection = project_cli_auth_status(
+            &auth_lease,
+            Some(&store as &dyn TokenStore),
+            &connection_ref,
+            auth_profile,
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(snapshot.credential_present);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_auth_status_hides_non_store_oauth_lifecycle() {
+        use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+        use meerkat_providers::auth_store::TokenStore;
+
+        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let connection_ref = openai_connection_ref();
+        auth_lease
+            .acquire_lease(
+                &LeaseKey::from_connection_ref(&connection_ref),
+                (chrono::Utc::now() + chrono::Duration::minutes(30)).timestamp() as u64,
+            )
+            .expect("lease acquire succeeds");
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::Env {
+                env: "OPENAI_API_KEY".into(),
+                fallback: Vec::new(),
+            },
+        );
+        let section = config.realm.get("dev").expect("dev realm exists");
+        let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
+            .expect("realm config parses");
+        let (_, _, auth_profile) = realm
+            .lookup_connection_ref(&connection_ref)
+            .expect("binding resolves");
+
+        let projection = project_cli_auth_status(
+            &auth_lease,
+            None::<&dyn TokenStore>,
+            &connection_ref,
+            auth_profile,
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
+        assert!(projection.expires_at.is_none());
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
+        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
+        use meerkat_providers::oauth_flow::{OAuthFlowAuthority, OAuthFlowError};
+
+        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let authority = meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+            std::time::Duration::from_secs(60),
+            Arc::clone(&auth_lease),
+        );
+        let store = EphemeralTokenStore::new();
+        let connection_ref = openai_connection_ref();
+        let redirect_uri = "http://127.0.0.1:12345/callback";
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+        let state = authority
+            .start(
+                connection_ref.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "pkce-verifier".into(),
+            )
+            .expect("authority admits browser flow");
+
+        save_cli_oauth_tokens_and_consume_browser_flow(
+            &store,
+            auth_lease.as_ref(),
+            &connection_ref,
+            &openai_oauth_tokens(),
+            CliBrowserFlowConsume {
+                authority: &authority,
+                state: &state,
+                provider,
+                redirect_uri,
+            },
+        )
+        .await
+        .expect("CLI OAuth save consumes terminal flow");
+
+        assert!(matches!(
+            authority.consume(&state, &connection_ref, provider, redirect_uri),
+            Err(OAuthFlowError::Missing)
+        ));
+        assert_eq!(
+            auth_lease
+                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .phase,
+            Some(AuthLeasePhase::Valid)
+        );
+        let stored = store
+            .load(&TokenKey::from_connection_ref(&connection_ref))
+            .await
+            .expect("token load succeeds")
+            .expect("token should be persisted");
+        let marker = meerkat_core::tokens_lifecycle_publication(&stored)
+            .expect("CLI OAuth login should stamp durable lifecycle marker");
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(marker.generation, Some(snapshot.generation));
+        assert_eq!(
+            marker.credential_published_at_millis,
+            snapshot.credential_published_at_millis
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    struct RejectCliBrowserConsumeAuthority;
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    impl meerkat_providers::oauth_flow::OAuthFlowAuthority for RejectCliBrowserConsumeAuthority {
+        fn start(
+            &self,
+            _target: ConnectionRef,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _redirect_uri: String,
+            _pkce_verifier: String,
+        ) -> Result<String, meerkat_providers::oauth_flow::OAuthFlowError> {
+            unreachable!("rollback test starts no browser flow")
+        }
+
+        fn verify(
+            &self,
+            _state: &str,
+            target: &ConnectionRef,
+            provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            redirect_uri: &str,
+        ) -> Result<
+            meerkat_providers::oauth_flow::OAuthFlowRecord,
+            meerkat_providers::oauth_flow::OAuthFlowError,
+        > {
+            Ok(meerkat_providers::oauth_flow::OAuthFlowRecord {
+                target: target.clone(),
+                provider,
+                redirect_uri: redirect_uri.to_string(),
+                pkce_verifier: "pkce-verifier".into(),
+                created_at: std::time::Instant::now(),
+            })
+        }
+
+        fn consume(
+            &self,
+            _state: &str,
+            _target: &ConnectionRef,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _redirect_uri: &str,
+        ) -> Result<
+            meerkat_providers::oauth_flow::OAuthFlowRecord,
+            meerkat_providers::oauth_flow::OAuthFlowError,
+        > {
+            Err(
+                meerkat_providers::oauth_flow::OAuthFlowError::LifecycleRejected {
+                    operation: "consume_oauth_browser_flow",
+                    detail: "test rejection".into(),
+                },
+            )
+        }
+
+        fn admit_device_code(
+            &self,
+            _target: ConnectionRef,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+            _device_code: String,
+            _expires_in: std::time::Duration,
+        ) -> Result<(), meerkat_providers::oauth_flow::OAuthFlowError> {
+            unreachable!("rollback test does not admit device flows")
+        }
+
+        fn verify_device_code(
+            &self,
+            _device_code: &str,
+            _target: &ConnectionRef,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+        ) -> Result<
+            meerkat_providers::oauth_flow::OAuthDeviceFlowRecord,
+            meerkat_providers::oauth_flow::OAuthFlowError,
+        > {
+            unreachable!("rollback test does not verify device flows")
+        }
+
+        fn begin_device_code_poll(
+            &self,
+            _device_code: &str,
+            _target: &ConnectionRef,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+        ) -> Result<
+            meerkat_providers::oauth_flow::OAuthDevicePollLease,
+            meerkat_providers::oauth_flow::OAuthFlowError,
+        > {
+            unreachable!("rollback test does not poll device flows")
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    struct SaveCountingCliTokenStore {
+        inner: meerkat_providers::auth_store::EphemeralTokenStore,
+        save_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    impl SaveCountingCliTokenStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_providers::auth_store::EphemeralTokenStore::new(),
+                save_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn save_count(&self) -> usize {
+            self.save_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[async_trait]
+    impl meerkat_providers::auth_store::TokenStore for SaveCountingCliTokenStore {
+        async fn load(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<
+            Option<meerkat_providers::auth_store::PersistedTokens>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            self.inner.load(key).await
+        }
+
+        async fn save(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            tokens: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.save_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save(key, tokens).await
+        }
+
+        async fn clear(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.inner.clear(key).await
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<
+            Vec<meerkat_providers::auth_store::TokenKey>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            self.inner.list().await
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "save_counting_cli"
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_oauth_login_consume_failure_does_not_save_before_durable_claim() {
+        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_providers::auth_store::{TokenKey, TokenStore};
+
+        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let store = SaveCountingCliTokenStore::new();
+        let connection_ref = openai_connection_ref();
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+
+        let err = save_cli_oauth_tokens_and_consume_browser_flow(
+            &store,
+            &auth_lease,
+            &connection_ref,
+            &openai_oauth_tokens(),
+            CliBrowserFlowConsume {
+                authority: &RejectCliBrowserConsumeAuthority,
+                state: "state",
+                provider,
+                redirect_uri: "http://127.0.0.1:12345/callback",
+            },
+        )
+        .await
+        .expect_err("terminal consume failure must fail the CLI login");
+
+        assert!(err.to_string().contains("consume_oauth_browser_flow"));
+        assert_eq!(
+            store.save_count(),
+            0,
+            "token material must not be saved before winning the durable OAuth consume claim"
+        );
+        assert!(
+            store
+                .load(&TokenKey::from_connection_ref(&connection_ref))
+                .await
+                .expect("token load succeeds")
+                .is_none(),
+            "failed terminal consume must remove newly saved token material"
+        );
+        assert_ne!(
+            auth_lease
+                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .phase,
+            Some(AuthLeasePhase::Valid),
+            "failed terminal consume must not leave the newly acquired credential lifecycle valid"
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_interactive_oauth_login_uses_runtime_flow_authority_for_browser_state() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("async fn interactive_login(")
+            .expect("interactive_login exists");
+        let end = source[start..]
+            .find("fn token_store_load_error_allows_clear")
+            .map(|offset| start + offset)
+            .expect("interactive_login successor exists");
+        let interactive_login_source = &source[start..end];
+        assert!(
+            interactive_login_source.contains(".oauth_flow_authority\n        .start("),
+            "CLI interactive OAuth login must admit browser state through the runtime OAuth flow authority"
+        );
+        assert!(
+            !interactive_login_source.contains("let state_token = format!("),
+            "CLI interactive OAuth login must not mint helper-local browser state outside AuthMachine authority"
         );
     }
 
@@ -13929,6 +14909,53 @@ capabilities = ["definitely_missing_capability"]
 
     #[cfg(feature = "session-store")]
     #[tokio::test]
+    async fn test_cli_runtime_backed_service_preserves_persistence_oauth_authority() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Some(runtime_store),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let persistence_adapter = persistence.runtime_adapter();
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
+            profile: None,
+        };
+        let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1:1455/callback";
+        let state = persistence_adapter
+            .oauth_flow_authority()
+            .start(
+                connection_ref.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "cli-persistence-verifier".to_string(),
+            )
+            .expect("persistence authority should admit OAuth flow before CLI surface build");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (_service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            None,
+        );
+        let flow = runtime_adapter
+            .oauth_flow_authority()
+            .consume(&state, &connection_ref, provider, redirect_uri)
+            .expect("CLI service construction must preserve PersistenceBundle OAuth authority");
+
+        assert_eq!(flow.pkce_verifier, "cli-persistence-verifier");
+    }
+
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
     async fn test_cli_runtime_backed_service_persists_authority_snapshot_for_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -13943,15 +14970,13 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
-            Arc::clone(&auth_lease),
             None,
         );
+        let auth_lease = runtime_adapter.auth_lease_handle();
 
         let session = Session::new();
         let session_id = session.id().clone();
@@ -13968,12 +14993,12 @@ capabilities = ["definitely_missing_capability"]
         bindings
             .auth_lease
             .acquire_lease(&lease_key, u64::MAX)
-            .expect("runtime bindings should publish into the CLI scope auth lease");
+            .expect("runtime bindings should publish into the bundle auth lease");
         let snapshot = auth_lease.snapshot(&lease_key);
         assert_eq!(
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
-            "CLI runtime-backed surfaces must share the same auth lease authority that status reads"
+            "CLI runtime-backed surfaces must use the PersistenceBundle auth lease authority"
         );
         let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
             Arc::new(Mutex::new(Vec::new())),
@@ -14040,13 +15065,10 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
-            auth_lease,
             None,
         );
         let service = Arc::new(service);
@@ -14775,6 +15797,10 @@ supports_reasoning = true
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {
+        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        let (auth_lease, oauth_flow_authority) = new_cli_auth_handles();
+        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             locator: RealmLocator {
                 state_root: root.clone(),
@@ -14786,7 +15812,9 @@ supports_reasoning = true
             origin_hint: RealmOrigin::Explicit,
             context_root: Some(root),
             user_config_root: None,
-            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+            auth_lease,
+            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            oauth_flow_authority,
         }
     }
 

@@ -95,6 +95,16 @@ pub struct State {
     pub expires_at: Option<u64>,
     pub last_refresh: Option<u64>,
     pub refresh_attempt: u64,
+    pub credential_present: bool,
+    pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
+    pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
+    pub oauth_browser_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
+    pub oauth_device_flow_ids: std::collections::BTreeSet<String>,
+    pub oauth_device_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_device_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
+    pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
+    pub oauth_outstanding_flow_count: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -125,7 +135,68 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkReauthRequired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearCredentialLifecycle {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Release {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitOAuthBrowserFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub expires_at_millis: u64,
+        pub max_outstanding_flows: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct VerifyOAuthBrowserFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub now_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeOAuthBrowserFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub redirect_uri: String,
+        pub now_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExpireOAuthBrowserFlow {
+        pub flow_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitOAuthDeviceFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub expires_at_millis: u64,
+        pub max_outstanding_flows: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct VerifyOAuthDeviceFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginOAuthDevicePoll {
+        pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishOAuthDevicePoll {
+        pub flow_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeOAuthDeviceFlow {
+        pub flow_id: String,
+        pub provider: String,
+        pub now_millis: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExpireOAuthDeviceFlow {
+        pub flow_id: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -137,7 +208,18 @@ pub enum Input {
     RefreshFailedTransient(inputs::RefreshFailedTransient),
     RefreshFailedPermanent(inputs::RefreshFailedPermanent),
     MarkReauthRequired(inputs::MarkReauthRequired),
+    ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
     Release(inputs::Release),
+    AdmitOAuthBrowserFlow(inputs::AdmitOAuthBrowserFlow),
+    VerifyOAuthBrowserFlow(inputs::VerifyOAuthBrowserFlow),
+    ConsumeOAuthBrowserFlow(inputs::ConsumeOAuthBrowserFlow),
+    ExpireOAuthBrowserFlow(inputs::ExpireOAuthBrowserFlow),
+    AdmitOAuthDeviceFlow(inputs::AdmitOAuthDeviceFlow),
+    VerifyOAuthDeviceFlow(inputs::VerifyOAuthDeviceFlow),
+    BeginOAuthDevicePoll(inputs::BeginOAuthDevicePoll),
+    FinishOAuthDevicePoll(inputs::FinishOAuthDevicePoll),
+    ConsumeOAuthDeviceFlow(inputs::ConsumeOAuthDeviceFlow),
+    ExpireOAuthDeviceFlow(inputs::ExpireOAuthDeviceFlow),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -149,7 +231,18 @@ impl Input {
             Self::RefreshFailedTransient(_) => InputKind::RefreshFailedTransient,
             Self::RefreshFailedPermanent(_) => InputKind::RefreshFailedPermanent,
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
+            Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
+            Self::AdmitOAuthBrowserFlow(_) => InputKind::AdmitOAuthBrowserFlow,
+            Self::VerifyOAuthBrowserFlow(_) => InputKind::VerifyOAuthBrowserFlow,
+            Self::ConsumeOAuthBrowserFlow(_) => InputKind::ConsumeOAuthBrowserFlow,
+            Self::ExpireOAuthBrowserFlow(_) => InputKind::ExpireOAuthBrowserFlow,
+            Self::AdmitOAuthDeviceFlow(_) => InputKind::AdmitOAuthDeviceFlow,
+            Self::VerifyOAuthDeviceFlow(_) => InputKind::VerifyOAuthDeviceFlow,
+            Self::BeginOAuthDevicePoll(_) => InputKind::BeginOAuthDevicePoll,
+            Self::FinishOAuthDevicePoll(_) => InputKind::FinishOAuthDevicePoll,
+            Self::ConsumeOAuthDeviceFlow(_) => InputKind::ConsumeOAuthDeviceFlow,
+            Self::ExpireOAuthDeviceFlow(_) => InputKind::ExpireOAuthDeviceFlow,
         }
     }
 }
@@ -162,7 +255,18 @@ pub enum InputKind {
     RefreshFailedTransient,
     RefreshFailedPermanent,
     MarkReauthRequired,
+    ClearCredentialLifecycle,
     Release,
+    AdmitOAuthBrowserFlow,
+    VerifyOAuthBrowserFlow,
+    ConsumeOAuthBrowserFlow,
+    ExpireOAuthBrowserFlow,
+    AdmitOAuthDeviceFlow,
+    VerifyOAuthDeviceFlow,
+    BeginOAuthDevicePoll,
+    FinishOAuthDevicePoll,
+    ConsumeOAuthDeviceFlow,
+    ExpireOAuthDeviceFlow,
 }
 
 pub mod effects {
@@ -200,7 +304,48 @@ pub enum TransitionId {
     MarkReauthRequiredFromValid,
     MarkReauthRequiredFromExpiring,
     MarkReauthRequiredFromRefreshing,
+    ClearCredentialLifecycle,
     Release,
+    AdmitOAuthBrowserFlowValid,
+    AdmitOAuthBrowserFlowExpiring,
+    AdmitOAuthBrowserFlowRefreshing,
+    AdmitOAuthBrowserFlowReauthRequired,
+    VerifyOAuthBrowserFlowValid,
+    VerifyOAuthBrowserFlowExpiring,
+    VerifyOAuthBrowserFlowRefreshing,
+    VerifyOAuthBrowserFlowReauthRequired,
+    ConsumeOAuthBrowserFlowValid,
+    ConsumeOAuthBrowserFlowExpiring,
+    ConsumeOAuthBrowserFlowRefreshing,
+    ConsumeOAuthBrowserFlowReauthRequired,
+    ExpireOAuthBrowserFlowValid,
+    ExpireOAuthBrowserFlowExpiring,
+    ExpireOAuthBrowserFlowRefreshing,
+    ExpireOAuthBrowserFlowReauthRequired,
+    AdmitOAuthDeviceFlowValid,
+    AdmitOAuthDeviceFlowExpiring,
+    AdmitOAuthDeviceFlowRefreshing,
+    AdmitOAuthDeviceFlowReauthRequired,
+    VerifyOAuthDeviceFlowValid,
+    VerifyOAuthDeviceFlowExpiring,
+    VerifyOAuthDeviceFlowRefreshing,
+    VerifyOAuthDeviceFlowReauthRequired,
+    BeginOAuthDevicePollValid,
+    BeginOAuthDevicePollExpiring,
+    BeginOAuthDevicePollRefreshing,
+    BeginOAuthDevicePollReauthRequired,
+    FinishOAuthDevicePollValid,
+    FinishOAuthDevicePollExpiring,
+    FinishOAuthDevicePollRefreshing,
+    FinishOAuthDevicePollReauthRequired,
+    ConsumeOAuthDeviceFlowValid,
+    ConsumeOAuthDeviceFlowExpiring,
+    ConsumeOAuthDeviceFlowRefreshing,
+    ConsumeOAuthDeviceFlowReauthRequired,
+    ExpireOAuthDeviceFlowValid,
+    ExpireOAuthDeviceFlowExpiring,
+    ExpireOAuthDeviceFlowRefreshing,
+    ExpireOAuthDeviceFlowReauthRequired,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -276,5 +421,15 @@ pub fn initial_state() -> State {
         expires_at: None,
         last_refresh: None,
         refresh_attempt: 0,
+        credential_present: false,
+        oauth_browser_flow_ids: Default::default(),
+        oauth_browser_flow_providers: Default::default(),
+        oauth_browser_flow_redirect_uris: Default::default(),
+        oauth_browser_flow_expires_at_millis: Default::default(),
+        oauth_device_flow_ids: Default::default(),
+        oauth_device_flow_providers: Default::default(),
+        oauth_device_flow_expires_at_millis: Default::default(),
+        oauth_device_poll_ids: Default::default(),
+        oauth_outstanding_flow_count: 0,
     }
 }

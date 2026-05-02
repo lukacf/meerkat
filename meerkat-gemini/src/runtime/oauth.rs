@@ -13,9 +13,10 @@
 //! https://developers.google.com/identity/protocols/oauth2#installed —
 //! the secret is considered non-sensitive in this flow.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
+use futures::future::BoxFuture;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -25,8 +26,14 @@ use meerkat_auth_core::auth_oauth::{
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    TokenKey, TokenStore,
+    RefreshFn, TokenKey, TokenStore,
 };
+
+pub type TokenCommitFn = Box<
+    dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
+        + Send
+        + 'static,
+>;
 
 // ---------------------------------------------------------------------
 // Constants (verified against gemini-cli oauth2.ts:72-94)
@@ -232,20 +239,24 @@ impl GoogleCodeAssistOAuthRuntime {
             .ok_or(GoogleCodeAssistOAuthError::MissingRefreshToken)?;
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
+        let token_store = Arc::clone(&self.token_store);
+        let key = self.key.clone();
+        let commit_slot_for_refresh = Arc::clone(&commit_slot);
         // Google requires the client_secret for refresh on installed apps.
-        let refreshed = self
-            .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result = exchange_refresh_token(
-                            &http,
-                            &endpoints,
-                            &refresh_token,
-                            Some(CODE_ASSIST_CLIENT_SECRET),
+        let refresh_fn: RefreshFn = Box::new(move || {
+            let http = http.clone();
+            let endpoints = endpoints.clone();
+            let token_store = Arc::clone(&token_store);
+            let key = key.clone();
+            let commit_slot = Arc::clone(&commit_slot_for_refresh);
+            Box::pin(async move {
+                let current = token_store
+                    .load(&key)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?
+                    .ok_or_else(|| {
+                        RefreshError::Refresh(
+                            "persisted tokens disappeared before OAuth refresh".into(),
                         )
                         .await
                         .map_err(|e| RefreshError::Refresh(e.to_string()))?;
@@ -294,8 +305,7 @@ impl GoogleCodeAssistOAuthRuntime {
             Some(CODE_ASSIST_CLIENT_SECRET),
         )
         .await?;
-        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::GoogleOauth, None);
-        self.save(&tokens).await?;
+        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::GoogleOauth, None)?;
         Ok(tokens)
     }
 }
@@ -304,22 +314,21 @@ fn oauth_result_to_persisted(
     result: OAuthTokenResult,
     mode: PersistedAuthMode,
     fallback_refresh: Option<String>,
-) -> PersistedTokens {
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| Utc::now() + Duration::seconds(s as i64));
+) -> Result<PersistedTokens, OAuthError> {
+    let now = Utc::now();
+    let expires_at = result.expires_at_from(now)?;
     let scopes = result
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
-    PersistedTokens {
+    Ok(PersistedTokens {
         auth_mode: mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token.or(fallback_refresh),
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(Utc::now()),
+        last_refresh: Some(now),
         scopes,
         account_id: None,
         metadata: serde_json::Value::Null,
@@ -395,5 +404,28 @@ mod tests {
                 "https://www.googleapis.com/auth/userinfo.profile",
             ]
         );
+    }
+
+    #[test]
+    fn oauth_result_to_persisted_rejects_expiry_overflow() {
+        let err = oauth_result_to_persisted(
+            OAuthTokenResult {
+                access_token: "access-token".into(),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_in_secs: Some(u64::MAX),
+                scope: None,
+            },
+            PersistedAuthMode::GoogleOauth,
+            None,
+        )
+        .expect_err("oversized expires_in must not be persisted");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
     }
 }

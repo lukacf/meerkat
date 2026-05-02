@@ -625,6 +625,61 @@ impl PendingPromotionCleanup {
         Ok(())
     }
 
+    async fn recover_materialized_staged_capacity_admission(
+        &mut self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+    ) -> Result<(), SessionError> {
+        if self.staged_capacity_admission.is_none() {
+            self.staged_capacity_admission = Some(
+                service
+                    .reserve_runtime_turn_admission(&self.session_id)
+                    .await?,
+            );
+        }
+        Ok(())
+    }
+
+    async fn abort_restore_without_capacity(&mut self) {
+        tracing::warn!(
+            session_id = %self.session_id,
+            "aborting staged-session restore without a capacity admission"
+        );
+        let _ = self
+            .staged_sessions
+            .take_promoting_system_context_state(&self.session_id)
+            .await;
+        self.armed = false;
+    }
+
+    async fn restore_after_materialized_failure(
+        &mut self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+    ) -> Result<(), SessionError> {
+        if let Err(error) = self
+            .recover_materialized_staged_capacity_admission(service)
+            .await
+        {
+            self.abort_restore_without_capacity().await;
+            return Err(error);
+        }
+
+        if let Err(error) = service.archive(&self.session_id).await {
+            let _ = service.discard_live_session(&self.session_id).await;
+            self.restore_now().await;
+            return Err(error);
+        }
+        if let Err(error) = service
+            .mark_transient_pending_archive(&self.session_id)
+            .await
+        {
+            self.restore_now().await;
+            return Err(error);
+        }
+        self.mark_transient_pending_archive();
+        self.restore_now().await;
+        Ok(())
+    }
+
     fn mark_transient_pending_archive(&mut self) {
         if !self.armed {
             return;
@@ -688,6 +743,10 @@ impl PendingPromotionCleanup {
         if self.transient_pending_archive {
             Self::mark_build_config_transient_pending_archive(&self.session_id, &mut build_config);
         }
+        let Some(admission) = self.staged_capacity_admission.take() else {
+            self.abort_restore_without_capacity().await;
+            return;
+        };
         let restored = self
             .staged_sessions
             .abandon_promotion(
@@ -700,7 +759,7 @@ impl PendingPromotionCleanup {
                 self.updated_at_secs,
             )
             .await;
-        if restored && let Some(admission) = self.staged_capacity_admission.take() {
+        if restored {
             restore_staged_capacity_admission(
                 &self.staged_capacity_admissions,
                 self.session_id.clone(),
@@ -3042,53 +3101,14 @@ impl SessionRuntime {
 
             let result = service.start_turn(&session_id, start_req).await;
             if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
-                if let Err(error) = service.archive(&session_id).await {
-                    let _ = service.discard_live_session(&session_id).await;
-                    if let Err(capacity_error) = promotion_cleanup
-                        .replenish_staged_capacity_admission(&service)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %capacity_error,
-                            "failed to replenish staged capacity after archive error"
-                        );
-                    }
-                    promotion_cleanup.restore_now().await;
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(error));
-                    return;
-                }
-                if let Err(error) = service.mark_transient_pending_archive(&session_id).await {
-                    if let Err(capacity_error) = promotion_cleanup
-                        .replenish_staged_capacity_admission(&service)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %capacity_error,
-                            "failed to replenish staged capacity after transient archive error"
-                        );
-                    }
-                    promotion_cleanup.restore_now().await;
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(error));
-                    return;
-                }
-                if let Err(error) = promotion_cleanup
-                    .replenish_staged_capacity_admission(&service)
-                    .await
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %error,
-                        "failed to replenish staged capacity while restoring pending session"
-                    );
-                }
-                promotion_cleanup.mark_transient_pending_archive();
-                promotion_cleanup.restore_now().await;
+                let restore_result = promotion_cleanup
+                    .restore_after_materialized_failure(&service)
+                    .await;
                 promotion_cleanup.disarm();
-                let _ = result_tx.send(result);
+                let _ = result_tx.send(match restore_result {
+                    Ok(()) => result,
+                    Err(error) => Err(error),
+                });
                 return;
             }
 
@@ -3282,53 +3302,14 @@ impl SessionRuntime {
             if Self::should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
                 .await
             {
-                if let Err(error) = service.archive(&session_id).await {
-                    let _ = service.discard_live_session(&session_id).await;
-                    if let Err(capacity_error) = promotion_cleanup
-                        .replenish_staged_capacity_admission(&service)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %capacity_error,
-                            "failed to replenish staged capacity after archive error"
-                        );
-                    }
-                    promotion_cleanup.restore_now().await;
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(error));
-                    return;
-                }
-                if let Err(error) = service.mark_transient_pending_archive(&session_id).await {
-                    if let Err(capacity_error) = promotion_cleanup
-                        .replenish_staged_capacity_admission(&service)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %capacity_error,
-                            "failed to replenish staged capacity after transient archive error"
-                        );
-                    }
-                    promotion_cleanup.restore_now().await;
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(error));
-                    return;
-                }
-                if let Err(error) = promotion_cleanup
-                    .replenish_staged_capacity_admission(&service)
-                    .await
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %error,
-                        "failed to replenish staged capacity while restoring pending session"
-                    );
-                }
-                promotion_cleanup.mark_transient_pending_archive();
-                promotion_cleanup.restore_now().await;
+                let restore_result = promotion_cleanup
+                    .restore_after_materialized_failure(&service)
+                    .await;
                 promotion_cleanup.disarm();
-                let _ = result_tx.send(result);
+                let _ = result_tx.send(match restore_result {
+                    Ok(()) => result,
+                    Err(error) => Err(error),
+                });
                 return;
             }
 
@@ -11197,12 +11178,18 @@ mod tests {
             .await
             .expect("begin promotion")
             .expect("promoting slot");
+        let staged_capacity_admissions = Arc::new(StdMutex::new(HashMap::new()));
+        let admission = runtime
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve staged capacity");
         let mut cleanup = PendingPromotionCleanup::new(
             Arc::clone(&staged_sessions),
-            Arc::new(StdMutex::new(HashMap::new())),
+            Arc::clone(&staged_capacity_admissions),
             &session_id,
             &slot,
-            None,
+            Some(admission),
         );
         let append = AppendSystemContextRequest {
             text: "Preserve this append across rollback.".to_string(),
@@ -14865,6 +14852,101 @@ mod tests {
         assert!(
             !session_metadata_marks_archived(&stored),
             "retry should overwrite archived start no-pending snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_start_restore_without_replenished_capacity_aborts_staged_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin staged promotion")
+            .expect("staged slot should exist");
+        let mut promotion_cleanup = PendingPromotionCleanup::new(
+            Arc::clone(&runtime.staged_sessions),
+            Arc::clone(&runtime.staged_capacity_admissions),
+            &session_id,
+            &slot,
+            runtime.take_staged_capacity_admission(&session_id),
+        );
+        let PromotingSlot {
+            build_config,
+            labels,
+            ..
+        } = slot;
+        let build_config = *build_config;
+        let create_req = CreateSessionRequest {
+            model: build_config.model.clone(),
+            prompt: ContentInput::Text(String::new()),
+            render_metadata: None,
+            system_prompt: build_config.system_prompt.clone(),
+            max_tokens: build_config.max_tokens,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(build_config.to_session_build_options()),
+            labels,
+        };
+        let admission = promotion_cleanup
+            .take_staged_capacity_admission()
+            .expect("promotion should own staged admission");
+        runtime
+            .service
+            .create_session_with_reserved_admission(create_req, admission)
+            .await
+            .expect("materialize pending session");
+        promotion_cleanup.mark_materialized();
+
+        let result = runtime
+            .service
+            .start_turn(&session_id, service_resume_pending_request())
+            .await;
+        assert!(
+            SessionRuntime::should_restore_pending_after_start_turn(
+                &runtime.service,
+                &session_id,
+                &result,
+            )
+            .await,
+            "test must reach the materialized pending restore path"
+        );
+        runtime
+            .service
+            .archive(&session_id)
+            .await
+            .expect("archive should release live capacity before replenishment");
+        let _competitor = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("competing create should consume the released live capacity");
+        let replenish = promotion_cleanup
+            .replenish_staged_capacity_admission(&runtime.service)
+            .await;
+        assert!(
+            replenish.is_err(),
+            "competing create must make staged capacity replenishment fail"
+        );
+
+        promotion_cleanup.mark_transient_pending_archive();
+        promotion_cleanup.restore_now().await;
+        promotion_cleanup.disarm();
+
+        assert!(
+            !runtime.staged_sessions.contains(&session_id).await,
+            "restore must abort instead of re-staging without capacity"
+        );
+        assert!(
+            !runtime.has_staged_capacity_admission(&session_id),
+            "failed restore must not leave a capacity-less staged admission entry"
         );
     }
 

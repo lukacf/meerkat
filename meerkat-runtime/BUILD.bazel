@@ -42,6 +42,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -53,6 +54,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
@@ -77,6 +79,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -126,6 +129,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core_agent_factory_build",
         "//meerkat-contracts:meerkat_contracts_agent_factory_build",
         "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-schema:meerkat_machine_schema_agent_factory_build",
@@ -156,6 +160,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -182,6 +187,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -215,6 +221,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/auth_reauth_notice.rs",
@@ -244,6 +251,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -278,6 +286,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/composition_dispatch_is_the_path.rs",
@@ -306,6 +315,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -340,6 +350,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/composition_driver_contract.rs",
@@ -368,6 +379,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -402,6 +414,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/control_plane_contract.rs",
@@ -430,6 +443,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -464,6 +478,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/core_apply_terminal_truth.rs",
@@ -497,6 +512,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -531,6 +547,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/detached_wake_contract.rs",
@@ -557,6 +574,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -591,6 +609,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/driver_ephemeral.rs",
@@ -617,6 +636,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -651,6 +671,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/driver_persistent.rs",
@@ -677,6 +698,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -711,6 +733,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/handles_dispatch_through_dispatcher.rs",
@@ -742,6 +765,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -776,6 +800,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/meerkat_machine.rs",
@@ -802,6 +827,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -836,6 +862,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/ops_lifecycle_contract.rs",
@@ -862,6 +889,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -896,6 +924,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/ops_lifecycle_persistence.rs",
@@ -922,6 +951,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -956,6 +986,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/peer_handling_mode_contract.rs",
@@ -982,6 +1013,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1016,6 +1048,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/peer_ingress_fact_ratchet.rs",
@@ -1046,6 +1079,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1080,6 +1114,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/peer_interaction_dsl.rs",
@@ -1106,6 +1141,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1140,6 +1176,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/peer_projection_dsl.rs",
@@ -1166,6 +1203,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1200,6 +1238,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/peer_projection_producer_wiring.rs",
@@ -1228,6 +1267,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1262,6 +1302,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/recovery_contract.rs",
@@ -1288,6 +1329,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1322,6 +1364,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/recovery_replay.rs",
@@ -1348,6 +1391,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1382,6 +1426,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/regression_comms_runtime.rs",
@@ -1410,6 +1455,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1444,6 +1490,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/runtime_bindings_contract.rs",
@@ -1470,6 +1517,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1504,6 +1552,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/runtime_ingress_control.rs",
@@ -1530,6 +1579,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1564,6 +1614,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/session_context_observer_race.rs",
@@ -1590,6 +1641,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1624,6 +1676,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/trust_reconcile_add_failure.rs",
@@ -1653,6 +1706,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1687,6 +1741,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/trust_reconcile_concurrency.rs",
@@ -1716,6 +1771,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1750,6 +1806,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/turn_content_shape_contract.rs",
@@ -1778,6 +1835,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -1812,6 +1870,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/turn_metadata_single_construction_site.rs",
@@ -1840,6 +1899,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",

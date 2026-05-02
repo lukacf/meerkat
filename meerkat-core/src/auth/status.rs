@@ -46,6 +46,9 @@ impl AuthStatusPhase {
     }
 
     pub fn from_lease_snapshot(now: DateTime<Utc>, snapshot: &AuthLeaseSnapshot) -> Self {
+        if !snapshot.credential_present {
+            return Self::Unknown;
+        }
         match snapshot.phase {
             Some(AuthLeasePhase::Valid) => Self::from_lease_expires_at(now, snapshot.expires_at),
             Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => {
@@ -162,7 +165,9 @@ mod tests {
         let valid = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+            credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
@@ -172,7 +177,9 @@ mod tests {
         let expired = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now - Duration::seconds(1)).timestamp() as u64),
+            credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
@@ -182,7 +189,9 @@ mod tests {
         let stale_token_without_machine = AuthLeaseSnapshot {
             phase: None,
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+            credential_present: false,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),

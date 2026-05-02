@@ -299,9 +299,20 @@ pub use auth::{
     HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
     ProviderAuthMetadata, PublishedAuthStatus, ResolvedAuthEnvelope, ResolvedAuthKind,
     TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
-    lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
+    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published,
+    mark_tokens_lifecycle_published_for_generation, mark_tokens_lifecycle_published_for_snapshot,
+    mark_tokens_lifecycle_published_for_transition,
+    oauth_status_projection_snapshot_from_newer_marker,
+    persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
-    publish_token_lifecycle_released,
+    publish_token_lifecycle_released, restore_token_lifecycle_snapshot,
+    tokens_lifecycle_publication, tokens_lifecycle_publication_with_explicit_expiry,
+    tokens_lifecycle_published, tokens_lifecycle_published_generation,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use auth::{
+    AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
+    rehydrate_marked_oauth_tokens_for_status,
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,

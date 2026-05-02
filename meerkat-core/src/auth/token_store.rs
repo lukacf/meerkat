@@ -255,4 +255,12 @@ pub trait RefreshCoordinator: Send + Sync {
         key: TokenKey,
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError>;
+
+    async fn with_forced_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        self.with_refresh(key, refresh_fn).await
+    }
 }

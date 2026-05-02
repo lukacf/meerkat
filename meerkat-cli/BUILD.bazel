@@ -49,6 +49,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -106,6 +107,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -169,6 +171,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/cli_auth_flow.rs",
@@ -253,6 +256,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -337,6 +341,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -430,6 +435,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -523,6 +529,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -616,6 +623,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/connection_ref_single_parser.rs",
@@ -700,6 +708,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/live_smoke_cli.rs",
@@ -784,6 +793,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/live_smoke_cli.rs",
@@ -877,6 +887,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/runtime_backed_ingress.rs",
@@ -960,6 +971,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/sqlite_tools_full_reuse.rs",
@@ -1043,6 +1055,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/system_cli_init.rs",
@@ -1127,6 +1140,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/system_cli_init.rs",
@@ -1219,6 +1233,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/system_cli_mini.rs",
@@ -1301,6 +1316,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/system_cli_resume.rs",
@@ -1385,6 +1401,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = [
         "tests/system_cli_resume.rs",
@@ -1461,6 +1478,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1513,6 +1531,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1566,6 +1585,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1619,6 +1639,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1675,6 +1696,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1732,6 +1754,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1786,6 +1809,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1840,6 +1864,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/main.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

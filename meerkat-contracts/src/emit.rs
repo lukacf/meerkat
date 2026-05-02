@@ -722,11 +722,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         );
         components.insert(
             "RestAuthLoginStartRequest".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": true,
-                "required": ["provider"],
-            }),
+            object_schema(
+                vec![
+                    ("provider", string_schema()),
+                    ("redirect_uri", string_schema()),
+                    ("realm_id", string_schema()),
+                    ("binding_id", string_schema()),
+                    ("profile_id", string_schema()),
+                ],
+                vec!["provider", "redirect_uri", "realm_id", "binding_id"],
+            ),
         );
         components.insert(
             "RestMobHelperRequest".to_string(),
@@ -974,14 +979,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 "WireLoginStart",
             ),
             ("/auth/login/complete", "post") => {
-                RestOperationContract::with_json_request("JsonValue", "WireLoginReady")
+                RestOperationContract::with_json_request("LoginCompleteParams", "WireLoginReady")
             }
             ("/auth/login/device/start", "post") => {
-                RestOperationContract::with_json_request("JsonValue", "WireDeviceStart")
+                RestOperationContract::with_json_request("DeviceStartParams", "WireDeviceStart")
             }
-            ("/auth/login/device/complete", "post") => {
-                RestOperationContract::with_json_request("JsonValue", "WireLoginReady")
-            }
+            ("/auth/login/device/complete", "post") => RestOperationContract::with_json_request(
+                "DeviceCompleteParams",
+                "WireDeviceCompleteResult",
+            ),
             ("/realms", "get") => RestOperationContract::json("WireRealmList"),
             ("/realms/{id}", "get") => RestOperationContract::json("WireRealmConnectionSet"),
             _ => RestOperationContract::json("JsonValue"),

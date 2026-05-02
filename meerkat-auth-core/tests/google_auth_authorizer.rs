@@ -149,7 +149,9 @@ impl Default for RecordingAuthLeaseHandle {
             snapshot: Mutex::new(AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                credential_present: false,
                 generation: 0,
+                credential_published_at_millis: None,
             }),
             generation: Mutex::new(0),
             fail_action: Mutex::new(None),
@@ -211,9 +213,13 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(expires_at),
+            credential_present: true,
             generation,
         };
-        Ok(AuthLeaseTransition { generation })
+        Ok(AuthLeaseTransition {
+            generation,
+            credential_published_at_millis: None,
+        })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -258,9 +264,13 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(new_expires_at),
+            credential_present: true,
             generation,
         };
-        Ok(AuthLeaseTransition { generation })
+        Ok(AuthLeaseTransition {
+            generation,
+            credential_published_at_millis: None,
+        })
     }
 
     fn refresh_failed(
@@ -304,7 +314,9 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: None,
             expires_at: None,
+            credential_present: false,
             generation: self.next_generation(),
+            credential_published_at_millis: None,
         };
         Ok(())
     }

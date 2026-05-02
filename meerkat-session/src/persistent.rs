@@ -911,14 +911,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let stored_has_more_transcript = stored.messages().len() > live.messages().len();
         let stored_is_archived = metadata_marks_archived(stored.metadata());
+        let stored_has_unapplied_system_context =
+            stored_has_unapplied_system_context(&stored, &live);
 
         // A durable snapshot timestamp is a projection witness, not live-session
         // authority. Runtime commits can normalize/persist an equivalent
         // transcript a few microseconds after the live session updates itself;
-        // evicting the live handle on timestamp alone drops mechanical runtime
-        // resources such as comms. Only terminal archive state or a strictly
-        // longer durable transcript can evict the live session.
-        if !stored_has_more_transcript && !stored_is_archived {
+        // evicting the live handle on timestamp alone drops mechanical
+        // runtime resources such as comms. Only terminal archive state,
+        // a strictly longer durable transcript, or durable pending system
+        // context absent from the live state can evict the live session.
+        if !stored_has_more_transcript
+            && !stored_is_archived
+            && !stored_has_unapplied_system_context
+        {
             return Ok(false);
         }
 
@@ -929,6 +935,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             live_message_count = live.messages().len(),
             stored_message_count = stored.messages().len(),
             stored_is_archived,
+            stored_has_unapplied_system_context,
             "discarding stale live session in favor of newer durable session-store snapshot"
         );
         self.discard_live_session(id).await?;

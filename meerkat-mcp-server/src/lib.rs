@@ -5117,6 +5117,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_resume_non_rebuild_replaces_stale_live_pending_context() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let external_tool_surface = Arc::clone(&bindings.external_tool_surface);
+        let created = state
+            .service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(1024),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        state
+            .upsert_mcp_adapter(
+                &created.session_id,
+                Arc::new(meerkat_mcp::McpRouterAdapter::new(
+                    McpRouter::new_with_surface_handle(external_tool_surface),
+                )),
+            )
+            .await;
+
+        let mut persisted = store
+            .load(&created.session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session");
+        let mut state_context = persisted.system_context_state().unwrap_or_default();
+        state_context
+            .stage_append(
+                &meerkat_core::service::AppendSystemContextRequest {
+                    text: "mcp persisted-only pending context".to_string(),
+                    source: Some("mcp-stale-live-test".to_string()),
+                    idempotency_key: Some("mcp-stale-live-test".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("stage persisted-only context");
+        persisted
+            .set_system_context_state(state_context)
+            .expect("persist system-context state");
+        store.save(&persisted).await.expect("save stale snapshot");
+        assert!(
+            state
+                .service
+                .export_live_session(&created.session_id)
+                .await
+                .expect("live session")
+                .system_context_state()
+                .unwrap_or_default()
+                .pending
+                .is_empty(),
+            "test precondition: live session must not carry the durable-only pending context"
+        );
+
+        let input: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": created.session_id.to_string(),
+            "prompt": "resume without rebuild metadata"
+        }))
+        .expect("valid resume input");
+        let result = Box::pin(handle_meerkat_resume(&state, input, None, None)).await;
+        assert!(
+            result.is_ok(),
+            "non-rebuild MCP resume should succeed after replacing stale live state: {result:?}"
+        );
+
+        let persisted_state = store
+            .load(&created.session_id)
+            .await
+            .expect("reload persisted session")
+            .expect("persisted session after resume")
+            .system_context_state()
+            .unwrap_or_default();
+        assert!(
+            persisted_state
+                .pending
+                .iter()
+                .any(|pending| { pending.text == "mcp persisted-only pending context" })
+                || persisted_state
+                    .applied
+                    .iter()
+                    .any(|applied| { applied.text == "mcp persisted-only pending context" }),
+            "MCP non-rebuild resume must preserve durable-only system context"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_resume_rebuild_post_commit_error_preserves_live_runtime() {
         let fail_store = Arc::new(FailingSaveSessionStore::new());
         let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;

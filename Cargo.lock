@@ -4702,9 +4702,6 @@ name = "surface-build-fixtures"
 version = "0.6.0"
 dependencies = [
  "meerkat",
- "meerkat-core",
- "meerkat-runtime",
- "meerkat-store",
  "serde_json",
  "tempfile",
  "tokio",

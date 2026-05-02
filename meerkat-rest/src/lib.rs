@@ -170,6 +170,8 @@ pub struct AppState {
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Request-level cancellation executor.
     pub request_executor: Arc<SurfaceRequestExecutor>,
+    #[cfg(test)]
+    test_cancel_after_rest_continue_final_recheck_before_admission: bool,
     /// Persistent TokenStore for OAuth-backed bindings. Shared with the
     /// AgentFactory so both read and write paths (login, resolve,
     /// logout) see the same credentials.
@@ -447,6 +449,8 @@ impl AppState {
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             request_executor,
+            #[cfg(test)]
+            test_cancel_after_rest_continue_final_recheck_before_admission: false,
             token_store,
             auth_lease,
             provider_registry,
@@ -2920,6 +2924,18 @@ fn cancelled_terminal(
     }
 }
 
+#[cfg(test)]
+async fn maybe_cancel_rest_continue_after_final_recheck_before_admission(
+    state: &AppState,
+    ctx: Option<&RequestContext>,
+) {
+    if state.test_cancel_after_rest_continue_final_recheck_before_admission
+        && let Some(ctx) = ctx
+    {
+        let _ = state.request_executor.cancel_request(ctx.key()).await;
+    }
+}
+
 #[cfg(feature = "mcp")]
 fn mcp_boundary_error_terminal(
     ctx: Option<&RequestContext>,
@@ -4245,6 +4261,9 @@ async fn continue_session_inner(
             drain_event_forwarder(&session_id, forward_task).await;
             return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
         }
+        #[cfg(test)]
+        maybe_cancel_rest_continue_after_final_recheck_before_admission(state, req_ctx.as_ref())
+            .await;
         let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
             Box::new(move || ctx.cancel_already_requested())
                 as meerkat_runtime::RuntimePreAdmissionCancelCheck
@@ -4262,10 +4281,7 @@ async fn continue_session_inner(
             Err(meerkat_runtime::RuntimeDriverError::RequestCancelled) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::RequestCancelled { details: None },
-                );
+                return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
             }
             Err(err) => {
                 if err.is_post_admission_failure() {
@@ -4362,6 +4378,9 @@ async fn continue_session_inner(
             drain_event_forwarder(&session_id, forward_task).await;
             return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
         }
+        #[cfg(test)]
+        maybe_cancel_rest_continue_after_final_recheck_before_admission(state, req_ctx.as_ref())
+            .await;
         let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
             Box::new(move || ctx.cancel_already_requested())
                 as meerkat_runtime::RuntimePreAdmissionCancelCheck
@@ -4379,10 +4398,7 @@ async fn continue_session_inner(
             Err(meerkat_runtime::RuntimeDriverError::RequestCancelled) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::RequestCancelled { details: None },
-                );
+                return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
             }
             Err(err) => {
                 if err.is_post_admission_failure() {
@@ -7928,6 +7944,110 @@ mod tests {
                     "partial MCP boundary failures must be emitted as committed failures, got {other:?}"
                 ),
             }
+        }
+
+        #[tokio::test]
+        async fn test_runtime_pre_admission_cancel_after_mcp_boundary_uses_committed_terminal() {
+            let (mut state, _temp) = make_test_state().await;
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            state.test_cancel_after_rest_continue_final_recheck_before_admission = true;
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    model: state.default_model.to_string(),
+                    prompt: "Hello".to_string().into(),
+                    render_metadata: None,
+                    system_prompt: None,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("deferred session create should succeed");
+            let session_id = created.session_id;
+            {
+                let mut map = state.mcp_sessions.write().await;
+                let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+                let (tx, rx) = mpsc::unbounded_channel();
+                map.insert(
+                    session_id.clone(),
+                    SessionMcpState {
+                        adapter,
+                        turn_counter: 0,
+                        lifecycle_tx: tx,
+                        lifecycle_rx: rx,
+                        drain_task_running: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+
+            let ctx = state
+                .request_executor
+                .try_begin_request(
+                    "rest-runtime-pre-admission-cancel-after-mcp-boundary",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+            let request = ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: "Continue".to_string().into(),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: Some(false),
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            };
+
+            let terminal =
+                continue_session_inner(&state, &session_id.to_string(), request, Some(ctx.clone()))
+                    .await;
+            let resolution = state
+                .request_executor
+                .resolve_terminal(Some(ctx.key()), terminal)
+                .await;
+
+            match resolution {
+                RequestTerminalResolution::Emit(Err(ApiError::RequestCancelled {
+                    details: None,
+                })) => {}
+                other => panic!(
+                    "runtime pre-admission cancel after MCP boundary must be emitted as a committed terminal, got {other:?}"
+                ),
+            }
+            assert_eq!(
+                state
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .get(&session_id)
+                    .expect("MCP session should remain registered")
+                    .turn_counter,
+                1,
+                "test must commit the REST MCP boundary before runtime cancellation"
+            );
+            state.session_service.read(&session_id).await.expect(
+                "committed MCP boundary cancellation must not run unpublished rebuild cleanup",
+            );
         }
 
         #[tokio::test]

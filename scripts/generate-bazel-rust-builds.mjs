@@ -863,6 +863,7 @@ for (const pkg of localPackages.values()) {
       targetDeps = deps
         .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule")
         .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule_agent_factory_build")
+        .filter((dep) => dep !== "//meerkat:meerkat_schedule_agent_factory_build")
         .concat(scheduleMachineSchemaExports)
         .sort();
     }

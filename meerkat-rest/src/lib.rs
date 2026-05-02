@@ -2904,6 +2904,16 @@ fn committed_terminal(
     }
 }
 
+async fn unregister_prepared_rest_runtime_if_new(
+    state: &AppState,
+    session_id: &SessionId,
+    existed_before_prepare: bool,
+) {
+    if !existed_before_prepare {
+        state.runtime_adapter.unregister_session(session_id).await;
+    }
+}
+
 /// Create and run a new session. Extracts the optional request-lifecycle
 /// context from `X-Meerkat-Request-Id`, runs the typed inner body, and routes
 /// the `RequestTerminal` outcome through the canonical surface request
@@ -3859,6 +3869,15 @@ async fn continue_session_inner(
             ApiError::NotFound(format!("Session not found: {session_id}")),
         );
     }
+    let runtime_entry_existed_before_prepare = if requires_rebuild {
+        state
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .is_some()
+    } else {
+        false
+    };
     let prepared_bindings = if requires_rebuild {
         let bindings = match state
             .runtime_adapter
@@ -3878,6 +3897,12 @@ async fn continue_session_inner(
                 .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
                 .await
         {
+            unregister_prepared_rest_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return failed_terminal(
@@ -3920,6 +3945,14 @@ async fn continue_session_inner(
         if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled
             || ctx.cancel_already_requested()
         {
+            if requires_rebuild {
+                unregister_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
+            }
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return failed_terminal(
@@ -3938,6 +3971,14 @@ async fn continue_session_inner(
         match apply_mcp_boundary(state, &session_id, &caller_event_tx, &mut mcp_text).await {
             Ok(()) => {}
             Err(e) => {
+                if requires_rebuild {
+                    unregister_prepared_rest_runtime_if_new(
+                        state,
+                        &session_id,
+                        runtime_entry_existed_before_prepare,
+                    )
+                    .await;
+                }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return failed_terminal(req_ctx.as_ref(), e);
@@ -4068,6 +4109,12 @@ async fn continue_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
+                unregister_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
@@ -4080,6 +4127,12 @@ async fn continue_session_inner(
         )
         .await
         {
+            unregister_prepared_rest_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
@@ -4087,6 +4140,12 @@ async fn continue_session_inner(
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
             Err(e) => {
+                unregister_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return failed_terminal(
@@ -4196,7 +4255,7 @@ async fn continue_session_inner(
         }
     } else {
         #[cfg(feature = "comms")]
-        {
+        let post_admission_keep_alive_update = {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
                 drop(caller_event_tx);
@@ -4208,23 +4267,8 @@ async fn continue_session_inner(
                     ),
                 );
             }
-            if keep_alive_override.is_some()
-                && let Err(e) = state
-                    .session_service
-                    .update_session_keep_alive(&session_id, keep_alive)
-                    .await
-            {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::Internal(format!("failed to persist keep_alive: {e}")),
-                );
-            }
-            adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
-        }
+            comms_rt
+        };
 
         let fallback_identity =
             match resolve_validation_identity(&state.config_runtime, &state.default_model, None)
@@ -4304,22 +4348,59 @@ async fn continue_session_inner(
                 return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
             }
         };
+        #[cfg(feature = "comms")]
+        let keep_alive_side_effect_result: Result<(), ApiError> = if outcome.is_accepted() {
+            if keep_alive_override.is_some()
+                && let Err(e) = state
+                    .session_service
+                    .apply_runtime_session_keep_alive(&session_id, keep_alive)
+                    .await
+            {
+                Err(ApiError::Internal(format!(
+                    "failed to persist keep_alive: {e}"
+                )))
+            } else {
+                adapter
+                    .update_peer_ingress_context(
+                        &session_id,
+                        keep_alive,
+                        post_admission_keep_alive_update,
+                    )
+                    .await;
+                Ok(())
+            }
+        } else {
+            Ok(())
+        };
+        #[cfg(not(feature = "comms"))]
+        let keep_alive_side_effect_result: Result<(), ApiError> = Ok(());
 
         match handle {
-            Some(handle) => completion_outcome_to_api_result(
-                handle.wait().await,
-                &session_id,
-                &state.realm,
-                false,
-            ),
+            Some(handle) => {
+                let result = completion_outcome_to_api_result(
+                    handle.wait().await,
+                    &session_id,
+                    &state.realm,
+                    false,
+                );
+                if let Err(err) = keep_alive_side_effect_result {
+                    Err(err)
+                } else {
+                    result
+                }
+            }
             None => {
-                let existing_id = match &outcome {
-                    meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                        existing_id.to_string()
-                    }
-                    _ => String::new(),
-                };
-                Err(ApiError::DuplicateInput { existing_id })
+                if let Err(err) = keep_alive_side_effect_result {
+                    Err(err)
+                } else {
+                    let existing_id = match &outcome {
+                        meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                            existing_id.to_string()
+                        }
+                        _ => String::new(),
+                    };
+                    Err(ApiError::DuplicateInput { existing_id })
+                }
             }
         }
     };
@@ -6851,6 +6932,60 @@ mod tests {
         assert!(
             classify < disarm && disarm < fail,
             "rebuild continue must preserve admitted sessions before returning accept errors"
+        );
+    }
+
+    #[test]
+    fn test_live_continue_defers_keep_alive_side_effects_until_after_runtime_admission() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("    } else {\n        #[cfg(feature = \"comms\")]")
+            .expect("continue_session_inner should have a live continue path");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("        match handle {")
+                    .expect("live continue path should wait on completion handle")];
+        let accept = body
+            .find(".accept_input_with_completion_and_admission_controls(")
+            .expect("live continue should submit through runtime admission controls");
+        let keep_alive_apply = body
+            .find(".apply_runtime_session_keep_alive(")
+            .expect("live continue should use runtime-owned keep_alive mutation");
+        let ingress_update = body
+            .find(".update_peer_ingress_context(")
+            .expect("live continue should update peer ingress after admission");
+
+        assert!(
+            accept < keep_alive_apply && accept < ingress_update,
+            "live continue keep_alive/ingress mutations must happen after runtime admission"
+        );
+    }
+
+    #[test]
+    fn test_rebuild_continue_cleans_prepared_runtime_when_cancel_wins_before_cleanup() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("let prepared_bindings = if requires_rebuild")
+            .expect("continue_session_inner should prepare rebuild bindings");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("    // Apply staged MCP operations")
+                    .expect("cancel install should precede MCP boundary")];
+        let cancel_branch = body
+            .find("CancelActionInstallOutcome::AlreadyCancelled")
+            .expect("continue path should handle already-cancelled install");
+        let cleanup = body[cancel_branch..]
+            .find("unregister_prepared_rest_runtime_if_new(")
+            .expect("already-cancelled rebuild should unregister newly prepared runtime");
+        let terminal = body[cancel_branch..]
+            .find("return failed_terminal")
+            .expect("already-cancelled rebuild should return cancelled terminal");
+
+        assert!(
+            cleanup < terminal,
+            "prepared rebuild runtime must be cleaned before returning cancellation"
         );
     }
 

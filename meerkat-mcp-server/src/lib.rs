@@ -3400,7 +3400,9 @@ async fn handle_meerkat_resume(
             runtime_entry_existed_before_prepare,
         )
         .await;
-        ingress.clear_session(&session_id).await;
+        if !runtime_entry_existed_before_prepare {
+            ingress.clear_session(&session_id).await;
+        }
     }
     let session_exists =
         !service_admission_cancelled && state.service.read(&session_id).await.is_ok();
@@ -3411,7 +3413,9 @@ async fn handle_meerkat_resume(
             runtime_entry_existed_before_prepare,
         )
         .await;
-        ingress.clear_session(&session_id).await;
+        if !runtime_entry_existed_before_prepare {
+            ingress.clear_session(&session_id).await;
+        }
     }
 
     drop(event_tx);
@@ -5373,6 +5377,32 @@ mod tests {
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);
         assert_eq!(close_payload["closed"], false);
+    }
+
+    #[test]
+    fn test_resume_cancel_cleanup_preserves_existing_runtime_ingress() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("let service_admission_cancelled =")
+            .expect("resume should classify service admission cancellation");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("    drop(event_tx);")
+                    .expect("resume cancellation cleanup should precede event drain")];
+        let cancelled = body
+            .find("if service_admission_cancelled")
+            .expect("resume should have a cancellation cleanup branch");
+        let branch = &body[cancelled
+            ..cancelled
+                + body[cancelled..]
+                    .find("let session_exists")
+                    .expect("session_exists should follow cancellation cleanup")];
+
+        assert!(
+            branch.contains("if !runtime_entry_existed_before_prepare"),
+            "resume cancellation cleanup must only clear ingress for newly prepared runtime state"
+        );
     }
 
     #[cfg(feature = "comms")]

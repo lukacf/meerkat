@@ -53,6 +53,29 @@ pub use crate::migrations;
 
 const SESSION_ARCHIVED_KEY: &str = "session_archived";
 
+struct CreateTimeEventCapture {
+    sidecar_session_tx: watch::Sender<Option<SessionId>>,
+    discovered_session_rx: watch::Receiver<Option<SessionId>>,
+}
+
+impl CreateTimeEventCapture {
+    fn sidecar_session_tx(&self) -> watch::Sender<Option<SessionId>> {
+        self.sidecar_session_tx.clone()
+    }
+
+    async fn discovered_session_id(&mut self) -> Option<SessionId> {
+        if let Some(session_id) = self.discovered_session_rx.borrow().clone() {
+            return Some(session_id);
+        }
+        while self.discovered_session_rx.changed().await.is_ok() {
+            if let Some(session_id) = self.discovered_session_rx.borrow().clone() {
+                return Some(session_id);
+            }
+        }
+        None
+    }
+}
+
 fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
     match event {
         meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
@@ -104,18 +127,20 @@ async fn flush_projected_events(
 }
 
 async fn project_create_time_events(
-    event_store: Arc<dyn EventStore>,
-    projector: Arc<SessionProjector>,
+    event_store: Option<Arc<dyn EventStore>>,
+    projector: Option<Arc<SessionProjector>>,
     mut projection_rx: mpsc::Receiver<
         meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
     >,
     mut session_rx: watch::Receiver<Option<SessionId>>,
+    discovered_session_tx: watch::Sender<Option<SessionId>>,
     caller_event_tx: Option<
         mpsc::Sender<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
     >,
 ) {
     let mut session_id = session_rx.borrow().clone();
     let mut pending = Vec::new();
+    let projection_enabled = event_store.is_some() && projector.is_some();
 
     loop {
         tokio::select! {
@@ -125,6 +150,9 @@ async fn project_create_time_events(
                 };
                 if session_id.is_none() {
                     session_id = session_id_from_event(&envelope.payload);
+                    if let Some(session_id) = session_id.as_ref() {
+                        let _ = discovered_session_tx.send(Some(session_id.clone()));
+                    }
                 }
                 let event = envelope.payload.clone();
                 if let Some(tx) = caller_event_tx.as_ref()
@@ -132,11 +160,17 @@ async fn project_create_time_events(
                 {
                     tracing::warn!("session event stream receiver dropped; continuing event projection");
                 }
-                if let Some(session_id) = session_id.as_ref() {
-                    pending.push(event);
-                    flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
-                } else {
-                    pending.push(event);
+                if projection_enabled {
+                    if let Some(session_id) = session_id.as_ref() {
+                        pending.push(event);
+                        if let (Some(event_store), Some(projector)) =
+                            (event_store.as_ref(), projector.as_ref())
+                        {
+                            flush_projected_events(event_store, projector, session_id, &mut pending).await;
+                        }
+                    } else {
+                        pending.push(event);
+                    }
                 }
             }
             changed = session_rx.changed(), if session_id.is_none() => {
@@ -145,14 +179,21 @@ async fn project_create_time_events(
                 }
                 session_id = session_rx.borrow().clone();
                 if let Some(session_id) = session_id.as_ref() {
-                    flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
+                    let _ = discovered_session_tx.send(Some(session_id.clone()));
+                    if let (Some(event_store), Some(projector)) =
+                        (event_store.as_ref(), projector.as_ref())
+                    {
+                        flush_projected_events(event_store, projector, session_id, &mut pending).await;
+                    }
                 }
             }
         }
     }
 
-    if let Some(session_id) = session_id.as_ref() {
-        flush_projected_events(&event_store, &projector, session_id, &mut pending).await;
+    if let Some(session_id) = session_id.as_ref()
+        && let (Some(event_store), Some(projector)) = (event_store.as_ref(), projector.as_ref())
+    {
+        flush_projected_events(event_store, projector, session_id, &mut pending).await;
     }
 }
 
@@ -1091,42 +1132,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     fn install_create_time_event_projection(
         &self,
         req: &mut CreateSessionRequest,
-    ) -> Option<watch::Sender<Option<SessionId>>> {
-        let (Some(event_store), Some(projector)) =
-            (self.event_store.clone(), self.projector.clone())
-        else {
-            return None;
-        };
-
+    ) -> CreateTimeEventCapture {
         let caller_event_tx = req.event_tx.take();
         let (projection_tx, projection_rx) = mpsc::channel(128);
-        let (session_tx, session_rx) = watch::channel(None);
+        let (sidecar_session_tx, session_rx) = watch::channel(None);
+        let (discovered_session_tx, discovered_session_rx) = watch::channel(None);
         req.event_tx = Some(projection_tx);
 
         tokio::spawn(project_create_time_events(
-            event_store,
-            projector,
+            self.event_store.clone(),
+            self.projector.clone(),
             projection_rx,
             session_rx,
+            discovered_session_tx,
             caller_event_tx,
         ));
 
-        Some(session_tx)
+        CreateTimeEventCapture {
+            sidecar_session_tx,
+            discovered_session_rx,
+        }
     }
 
     async fn install_create_session_sidecars(
         &self,
         id: &SessionId,
         gate: Arc<CheckpointerGate>,
-        create_projection_session_tx: Option<watch::Sender<Option<SessionId>>>,
+        create_projection_session_tx: watch::Sender<Option<SessionId>>,
     ) {
         self.checkpointer_gates
             .lock()
             .await
             .insert(id.clone(), gate);
-        if let Some(session_tx) = create_projection_session_tx {
-            let _ = session_tx.send(Some(id.clone()));
-        }
+        let _ = create_projection_session_tx.send(Some(id.clone()));
         self.spawn_event_projection_task(id).await;
     }
 
@@ -1571,10 +1609,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let build = req.build.get_or_insert_with(Default::default);
         build.checkpointer = Some(checkpointer.clone());
         build.blob_store_override = Some(Arc::clone(&self.blob_store));
-        if build.resume_session.is_none() {
-            build.resume_session = Some(Session::new());
-        }
-        let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
+        let mut create_time_events = self.install_create_time_event_projection(&mut req);
         let create_session_id = req
             .build
             .as_ref()
@@ -1583,16 +1618,22 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let result = match self.inner.create_session(req).await {
             Ok(result) => result,
             Err(error) => {
-                let committed_session_id = match &error {
-                    SessionError::PostAdmissionFailure { id, .. } => Some(id.clone()),
-                    _ if Self::callback_pending_terminal(&error).is_some() => create_session_id,
-                    _ => None,
-                };
+                let committed_session_id =
+                    if let SessionError::PostAdmissionFailure { id, .. } = &error {
+                        Some(id.clone())
+                    } else if Self::callback_pending_terminal(&error).is_some() {
+                        match create_session_id {
+                            Some(session_id) => Some(session_id),
+                            None => create_time_events.discovered_session_id().await,
+                        }
+                    } else {
+                        None
+                    };
                 if let Some(session_id) = committed_session_id {
                     self.install_create_session_sidecars(
                         &session_id,
                         Arc::clone(&gate),
-                        create_projection_session_tx,
+                        create_time_events.sidecar_session_tx(),
                     )
                     .await;
                     if let Ok(saved_len) = self.persist_full_session(&session_id).await {
@@ -1608,7 +1649,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.install_create_session_sidecars(
             &result.session_id,
             gate,
-            create_projection_session_tx,
+            create_time_events.sidecar_session_tx(),
         )
         .await;
 
@@ -7002,6 +7043,34 @@ mod tests {
         let projected = read_projected_events_after(&events_path, "run_completed").await;
         assert!(projected.contains("run_started"));
         assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_fresh_create_does_not_mark_request_as_resume_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let builder = CapturingBuildBuilder::new();
+        let captured_builds = Arc::clone(&builder.captured_builds);
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        service
+            .create_session(create_request("fresh prompt", InitialTurnPolicy::Defer))
+            .await
+            .expect("fresh create should succeed");
+
+        let builds = captured_builds.lock().await;
+        let build = builds
+            .first()
+            .expect("persistent service should forward build options to the builder");
+        assert!(
+            build.resume_session.is_none(),
+            "persistent fresh creates must not use resume_session as a sidecar id carrier"
+        );
     }
 
     #[tokio::test]

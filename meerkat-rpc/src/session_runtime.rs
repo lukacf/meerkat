@@ -808,6 +808,16 @@ impl Drop for PendingPromotionCleanup {
                 let updated_at_secs = self.updated_at_secs;
                 let transient_pending_archive = self.transient_pending_archive;
                 tokio::spawn(async move {
+                    let Some(admission) = staged_capacity_admission else {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "aborting staged-session drop restore without a capacity admission"
+                        );
+                        let _ = staged_sessions
+                            .take_promoting_system_context_state(&session_id)
+                            .await;
+                        return;
+                    };
                     Self::preserve_promoting_system_context_state(
                         staged_sessions.as_ref(),
                         &session_id,
@@ -831,7 +841,7 @@ impl Drop for PendingPromotionCleanup {
                             updated_at_secs,
                         )
                         .await;
-                    if restored && let Some(admission) = staged_capacity_admission {
+                    if restored {
                         restore_staged_capacity_admission(
                             &staged_capacity_admissions,
                             session_id,
@@ -14948,6 +14958,53 @@ mod tests {
             !runtime.has_staged_capacity_admission(&session_id),
             "failed restore must not leave a capacity-less staged admission entry"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_promotion_drop_without_staged_capacity_aborts_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin staged promotion")
+            .expect("staged slot should exist");
+        let mut promotion_cleanup = PendingPromotionCleanup::new(
+            Arc::clone(&runtime.staged_sessions),
+            Arc::clone(&runtime.staged_capacity_admissions),
+            &session_id,
+            &slot,
+            runtime.take_staged_capacity_admission(&session_id),
+        );
+        let service_admission = promotion_cleanup
+            .take_staged_capacity_admission()
+            .expect("promotion should own staged admission");
+
+        drop(promotion_cleanup);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while runtime.staged_sessions.contains(&session_id).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("drop cleanup should abort restore instead of re-staging without capacity");
+        assert!(
+            !runtime.has_staged_capacity_admission(&session_id),
+            "drop cleanup must not synthesize staged capacity without the original guard"
+        );
+
+        drop(service_admission);
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("aborted drop restore should release capacity after service admission drops");
     }
 
     #[tokio::test]

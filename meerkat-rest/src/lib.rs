@@ -45,10 +45,12 @@ use futures::stream::Stream;
 use meerkat::surface::{
     CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, CONTEXT_ONLY_TURN_METADATA_ERROR,
     RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
-    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
-    has_context_only_materialization_metadata, has_context_only_unapplied_turn_metadata,
-    noop_request_action, recovery_overrides_from_runtime_turn, request_action,
+    SurfaceRequestExecutor, SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    has_build_only_turn_overrides, has_context_only_materialization_metadata,
+    has_context_only_unapplied_turn_metadata, materialization_recovery_overrides_from_runtime_turn,
+    noop_request_action, recovery_overrides_from_runtime_turn,
+    rematerialize_session_for_runtime_turn, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -623,6 +625,16 @@ async fn validate_prompt_video_input(
     Ok(())
 }
 
+fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> SessionError {
+    match error {
+        SurfaceRuntimeMaterializeError::Session(error) => error,
+        SurfaceRuntimeMaterializeError::Recovery(SurfaceSessionRecoveryError::InvalidOverride(
+            message,
+        )) => SessionError::Unsupported(message),
+        other => SessionError::Agent(meerkat_core::AgentError::InternalError(other.to_string())),
+    }
+}
+
 async fn apply_runtime_turn(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
@@ -809,6 +821,9 @@ async fn apply_runtime_turn(
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
+    let live_materialization_requires_recovery = primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_materialization_recovery_fields());
     let session_identity = context
         .session_service
         .load_authoritative_session(session_id)
@@ -820,7 +835,8 @@ async fn apply_runtime_turn(
                 .session_metadata()
                 .map(|metadata| metadata.llm_identity())
         });
-    if let Some(identity) = session_identity
+    if !live_materialization_requires_recovery
+        && let Some(identity) = session_identity
         && let Err(message) =
             validate_prompt_video_input(&context.config_runtime, &prompt, &identity).await
     {
@@ -838,6 +854,57 @@ async fn apply_runtime_turn(
     let build_only_requires_recovery = primitive
         .build_only_overrides()
         .is_some_and(|overrides| overrides.requires_materialization_recovery());
+    if live_materialization_requires_recovery && !build_only_requires_recovery {
+        let materialization_overrides =
+            materialization_recovery_overrides_from_runtime_turn(primitive.turn_metadata());
+        let current_generation = context
+            .config_runtime
+            .get()
+            .await
+            .ok()
+            .map(|s| s.generation);
+        let executor_context = context.clone();
+        let (_result, _rematerialized_keep_alive) =
+            Box::pin(rematerialize_session_for_runtime_turn(
+                &context.session_service,
+                &context.runtime_adapter,
+                session_id,
+                materialization_overrides,
+                SurfaceSessionRecoveryContext {
+                    llm_client_override: context
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    external_tools: None,
+                    checkpointer: None,
+                    runtime_owned_recovery: false,
+                    require_runtime_build_mode: true,
+                    realm_id: Some(context.realm.to_string()),
+                    instance_id: context.instance_id.clone(),
+                    backend: Some(context.backend.clone()),
+                    config_generation: current_generation,
+                    runtime_build_mode: None,
+                },
+                move |runtime_session_id| {
+                    Box::new(RestSessionRuntimeExecutor {
+                        context: executor_context,
+                        session_id: runtime_session_id,
+                    })
+                },
+            ))
+            .await
+            .map_err(surface_materialize_session_error)?;
+        #[cfg(feature = "comms")]
+        {
+            let keep_alive = _rematerialized_keep_alive;
+            let comms_rt = context.session_service.comms_runtime(session_id).await;
+            let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+            context
+                .runtime_adapter
+                .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                .await;
+        }
+    }
     let live_result = if build_only_requires_recovery {
         Err(SessionError::NotFound {
             id: session_id.clone(),

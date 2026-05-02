@@ -301,6 +301,9 @@ async fn handle_chat(
 
 ## Complete example
 
+This example imports low-level runtime metadata types directly, so include
+`meerkat-core = "0.6.0"` alongside `meerkat` in `Cargo.toml`.
+
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};

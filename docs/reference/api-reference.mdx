@@ -252,7 +252,7 @@ See the [hooks guide](/guides/hooks) for usage details.
 | `SourceUuid` | Stable source identity |
 | `SkillName` | Lowercase dash-separated skill slug |
 | `SkillKey` | Canonical skill identifier: `source_uuid` + `skill_name` |
-| `SkillRef` | Tagged per-turn skill reference (`kind: "structured"`) |
+| `turn_metadata.skill_references` | Plain per-turn `SkillKey` references |
 | `SkillScope` | `Builtin`, `Project`, `User` |
 | `SkillDescriptor` | Skill metadata (key, name, description, required capabilities, source name) |
 | `SkillDocument` | Loaded skill with body content |

@@ -21,7 +21,8 @@ pub use meerkat_core::{
     SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
     has_build_only_turn_overrides, has_context_only_materialization_metadata,
     has_context_only_unapplied_turn_metadata, has_materialization_overrides,
-    recovery_overrides_from_runtime_turn, session_allows_first_turn_build_overrides,
+    materialization_recovery_overrides_from_runtime_turn, recovery_overrides_from_runtime_turn,
+    session_allows_first_turn_build_overrides,
 };
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,
@@ -36,6 +37,7 @@ pub use runtime_backed::configure_peer_ingress;
 pub use runtime_backed::{
     PersistentRuntimeExecutor, SurfaceRuntimeMaterializeError, build_runtime_backed_service,
     default_persistent_executor, install_prepared_runtime_interrupt_handle, materialize_session,
+    rematerialize_session_for_runtime_turn,
 };
 #[cfg(feature = "session-store")]
 pub use runtime_schedule_host::{

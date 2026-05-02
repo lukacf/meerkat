@@ -9,8 +9,9 @@ use meerkat::{
         CONTEXT_ONLY_TURN_METADATA_ERROR, SurfaceRuntimeMaterializeError,
         SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
         has_build_only_turn_overrides, has_context_only_materialization_metadata,
-        has_context_only_unapplied_turn_metadata, materialize_session,
-        recovery_overrides_from_runtime_turn,
+        has_context_only_unapplied_turn_metadata,
+        materialization_recovery_overrides_from_runtime_turn, materialize_session,
+        recovery_overrides_from_runtime_turn, rematerialize_session_for_runtime_turn,
     },
 };
 use meerkat_core::agent::AgentToolDispatcher;
@@ -320,11 +321,73 @@ impl McpRuntimeIngressContext {
         .await?;
         Ok(result.session_id)
     }
+
+    async fn rematerialize_live_session_for_turn_metadata(
+        &self,
+        session_id: &SessionId,
+        state: Arc<McpRuntimeSessionState>,
+        recovery_overrides: SurfaceSessionRecoveryOverrides,
+        keep_alive_override: Option<bool>,
+    ) -> Result<SessionId, SessionError> {
+        self.runtime_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), state.clone());
+        let current_generation = self
+            .config_runtime
+            .get()
+            .await
+            .ok()
+            .map(|snapshot| snapshot.generation);
+        let external_tools = self.external_tools_for_session(session_id, &state).await?;
+        let context = self.clone();
+        let state_for_executor = state.clone();
+        let (result, _rematerialized_keep_alive) =
+            Box::pin(rematerialize_session_for_runtime_turn(
+                &self.service,
+                &self.runtime_adapter,
+                session_id,
+                recovery_overrides,
+                SurfaceSessionRecoveryContext {
+                    llm_client_override: None,
+                    external_tools,
+                    realm_id: Some(self.realm_id.to_string()),
+                    instance_id: self.instance_id.clone(),
+                    backend: Some(self.backend.clone()),
+                    config_generation: current_generation,
+                    runtime_owned_recovery: true,
+                    ..Default::default()
+                },
+                move |runtime_session_id| {
+                    Box::new(McpSessionRuntimeExecutor::new(
+                        context,
+                        runtime_session_id,
+                        state_for_executor,
+                    ))
+                },
+            ))
+            .await
+            .map_err(surface_materialize_session_error)?;
+        #[cfg(feature = "comms")]
+        let keep_alive = keep_alive_override.unwrap_or(_rematerialized_keep_alive);
+        #[cfg(feature = "comms")]
+        configure_peer_ingress(
+            &self.runtime_adapter,
+            &self.service,
+            &result.session_id,
+            keep_alive,
+        )
+        .await;
+        Ok(result.session_id)
+    }
 }
 
 fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> SessionError {
     match error {
         SurfaceRuntimeMaterializeError::Session(error) => error,
+        SurfaceRuntimeMaterializeError::Recovery(
+            meerkat::surface::SurfaceSessionRecoveryError::InvalidOverride(message),
+        ) => SessionError::Unsupported(message),
         other => SessionError::Agent(AgentError::InternalError(other.to_string())),
     }
 }
@@ -635,6 +698,33 @@ async fn apply_runtime_turn(
     let build_only_requires_recovery = primitive
         .build_only_overrides()
         .is_some_and(|overrides| overrides.requires_materialization_recovery());
+    let live_materialization_requires_recovery = primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_materialization_recovery_fields());
+    if live_materialization_requires_recovery && !build_only_requires_recovery {
+        let materialization_overrides =
+            materialization_recovery_overrides_from_runtime_turn(primitive.turn_metadata());
+        let keep_alive_override = match primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.keep_alive.as_ref())
+        {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => {
+                Some(true)
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                Some(false)
+            }
+            None => None,
+        };
+        Box::pin(context.rematerialize_live_session_for_turn_metadata(
+            session_id,
+            state.clone(),
+            materialization_overrides,
+            keep_alive_override,
+        ))
+        .await
+        .map(|_| ())?;
+    }
     let live_result = if build_only_requires_recovery {
         Err(SessionError::NotFound {
             id: session_id.clone(),

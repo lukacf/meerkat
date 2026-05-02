@@ -108,7 +108,7 @@ The session's default model can be set in config (`~/.rkat/config.toml` or proje
 
 ### Mid-session: swap to a realtime-capable model
 
-If a session was started on a non-realtime model and later needs realtime, a reconfigure swap is required. The runtime owns the orchestration via `MeerkatMachine::reconfigure_live_topology` (see [Live-topology reconfigure](#live-topology-reconfigure) below). Host surfaces expose this through the `SessionLlmReconfigureHost` trait; no public RPC exists to trigger the swap from a remote caller today — it is invoked internally by host code (for example during a mob member profile change or a model-routing policy decision).
+If a session was started on a non-realtime model and later needs realtime, send the next turn with `turn_metadata.model` and, when needed, `turn_metadata.provider` / `turn_metadata.provider_params`. JSON-RPC `turn/start`, REST continue, and host SDK turn helpers all route that canonical metadata through the runtime; the runtime then orchestrates the swap via `MeerkatMachine::reconfigure_live_topology` (see [Live-topology reconfigure](#live-topology-reconfigure) below).
 
 When the swap targets a realtime-capable model, the runtime mints a fresh authority epoch and brings the binding up. When it targets a non-realtime model, the existing binding is torn down and the response surfaces `ValidationFailed` so the caller knows the binding is gone.
 
@@ -315,7 +315,7 @@ Every member spawned under that profile is initialized on `gpt-realtime-1.5` and
 - **OpenAI Realtime only.** The shipped provider integration is OpenAI Realtime (`gpt-realtime-1.5`, with `gpt-realtime` kept as a compatibility alias). Other providers are not yet wired into the realtime transport layer.
 - **Single realtime binding per session.** A session has at most one realtime attachment at a time. To attach multiple members, spawn them as separate mob members — each has its own session.
 - **Idle sessions cannot host a new binding.** The realtime transport is brought up as part of the executor binding; sessions that have never run a turn have no binding to attach to. Start a turn first (even a trivial prompt) or spawn via a mob to bring the executor online.
-- **No remote-callable reconfigure RPC.** Host code can call `reconfigure_live_topology` via `SessionLlmReconfigureHost`; there is no JSON-RPC or REST method that triggers a model swap from a remote caller today. Applications that need mid-session swaps should integrate at the host trait level.
+- **No standalone reconfigure method.** Remote callers request a mid-session swap on the next turn through `turn_metadata.model` / `turn_metadata.provider`; host code can still call `reconfigure_live_topology` via `SessionLlmReconfigureHost` for internal orchestration.
 
 ## See also
 

@@ -10,7 +10,9 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::service::SessionService;
 use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
-    CONTEXT_ONLY_TURN_METADATA_ERROR,
+    CONTEXT_ONLY_TURN_METADATA_ERROR, RuntimeBuildMode, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    materialization_recovery_overrides_from_runtime_turn,
 };
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
@@ -59,6 +61,8 @@ pub enum SurfaceRuntimeMaterializeError {
     RuntimeBindings(#[from] RuntimeBindingsError),
     #[error(transparent)]
     RuntimeDriver(#[from] RuntimeDriverError),
+    #[error(transparent)]
+    Recovery(#[from] SurfaceSessionRecoveryError),
     #[error("session service returned mismatched session id: expected {expected}, got {actual}")]
     SessionIdMismatch {
         expected: SessionId,
@@ -115,6 +119,54 @@ where
         .await;
 
     Ok(result)
+}
+
+pub async fn rematerialize_session_for_runtime_turn<F>(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    recovery_overrides: SurfaceSessionRecoveryOverrides,
+    mut recovery_context: SurfaceSessionRecoveryContext,
+    executor_factory: F,
+) -> Result<(RunResult, bool), SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId) -> Box<dyn CoreExecutor>,
+{
+    let session = match service.export_live_session(session_id).await {
+        Ok(session) => session,
+        Err(SessionError::NotFound { .. }) => service
+            .load_authoritative_session(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?,
+        Err(error) => return Err(SurfaceRuntimeMaterializeError::Session(error)),
+    };
+
+    let bindings = adapter.prepare_bindings(session_id.clone()).await?;
+    install_prepared_runtime_interrupt_handle(service, adapter, session_id).await?;
+    recovery_context.runtime_build_mode = Some(RuntimeBuildMode::SessionOwned(bindings));
+    recovery_context.require_runtime_build_mode = true;
+
+    let recovered = build_recovered_session(session, &recovery_overrides, recovery_context)?;
+    let keep_alive = recovered.keep_alive;
+    match service.discard_live_session(session_id).await {
+        Ok(()) | Err(SessionError::NotFound { .. }) => {}
+        Err(error) => return Err(SurfaceRuntimeMaterializeError::Session(error)),
+    }
+    let result = service
+        .create_session(recovered.into_deferred_create_request())
+        .await?;
+    ensure_materialized_session_id_matches(session_id, &result.session_id)?;
+
+    adapter
+        .ensure_session_with_executor(
+            result.session_id.clone(),
+            executor_factory(result.session_id.clone()),
+        )
+        .await;
+
+    Ok((result, keep_alive))
 }
 
 pub async fn install_prepared_runtime_interrupt_handle(
@@ -343,6 +395,25 @@ impl CoreExecutor for PersistentRuntimeExecutor {
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
         let req = start_turn_request_from_primitive(&primitive)?;
+        if primitive
+            .turn_metadata()
+            .is_some_and(|metadata| metadata.has_materialization_recovery_fields())
+        {
+            let recovery_overrides =
+                materialization_recovery_overrides_from_runtime_turn(primitive.turn_metadata());
+            let service = Arc::clone(&self.service);
+            let adapter = Arc::clone(&self.adapter);
+            Box::pin(rematerialize_session_for_runtime_turn(
+                &self.service,
+                &self.adapter,
+                &self.session_id,
+                recovery_overrides,
+                SurfaceSessionRecoveryContext::default(),
+                move |session_id| default_persistent_executor(service, adapter, session_id),
+            ))
+            .await
+            .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))?;
+        }
         self.service
             .apply_runtime_turn(
                 &self.session_id,
@@ -448,8 +519,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, TestClient};
     use meerkat_core::lifecycle::run_primitive::{
-        KeepAliveMode, KeepAlivePolicy, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata,
-        TurnMetadataOverride,
+        KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride,
+        RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata, TurnMetadataOverride,
     };
     use meerkat_core::{HandlingMode, SessionBuildOptions};
     #[cfg(all(
@@ -1421,6 +1492,87 @@ mod tests {
                 && error.to_string().contains("materialization"),
             "unexpected rejection reason: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_rematerializes_live_session_for_materialization_metadata()
+    {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RuntimeExecutionKind, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        let provider_params = serde_json::json!({ "reasoning_effort": "low" });
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let output = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "use the reconfigured model".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        model: Some(ModelId::new("gpt-5.4-mini")),
+                        provider_params: Some(TurnMetadataOverride::Set(
+                            ProviderParamsOverride::from_legacy_provider_value(
+                                "openai",
+                                &provider_params,
+                            ),
+                        )),
+                        ..Default::default()
+                    }),
+                    build_only_overrides: None,
+                }),
+            )
+            .await
+            .expect("runtime turn should rematerialize before applying");
+
+        match output.terminal {
+            Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
+                run_result,
+            )) => assert_eq!(run_result.text, "ok"),
+            other => panic!("expected runtime turn run result, got {other:?}"),
+        }
+        let identity = service
+            .live_session_llm_identity(&result.session_id)
+            .await
+            .expect("live identity should be readable after runtime turn");
+        assert_eq!(identity.model, "gpt-5.4-mini");
+        assert_eq!(identity.provider_params, Some(provider_params));
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
     }
 
     #[tokio::test]

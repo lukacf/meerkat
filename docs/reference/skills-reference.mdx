@@ -11,17 +11,18 @@ Use this page when you need exact skill-system vocabulary rather than a task wal
 - `SourceUuid` is the stable source identity. Builtins use `00000000-0000-4b11-8111-000000000001`; conventional project-local `.rkat/skills` uses `00000000-0000-4b11-8111-000000000002`.
 - `SkillName` is a lowercase dash-separated slug (`[a-z0-9-]`, no leading/trailing dash, no `--`).
 - `SkillKey { source_uuid, skill_name }` is the canonical skill identity across runtime, RPC, REST, SDK, CLI, and tool surfaces.
-- `SkillRef` is the wire wrapper for per-turn refs. It currently has one tagged form:
+- `turn_metadata.skill_references` carries plain `SkillKey` objects for first-turn/session creation and per-turn injection:
 
 ```json
-{
-  "kind": "structured",
-  "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-  "skill_name": "email-extractor"
-}
+[
+  {
+    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+    "skill_name": "email-extractor"
+  }
+]
 ```
 
-`turn_metadata.skill_references` carries plain `SkillKey` objects for first-turn/session creation and per-turn injection. Legacy top-level `preload_skills`, `skill_refs`, and string refs are rejected on wire/API surfaces.
+Legacy tagged `SkillRef` wrappers, top-level `preload_skills`, top-level `skill_refs`, and string refs are rejected on wire/API surfaces.
 
 ## Source Identity
 

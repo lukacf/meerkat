@@ -147,6 +147,25 @@ pub fn recovery_overrides_from_runtime_turn(
     overrides
 }
 
+pub fn materialization_recovery_overrides_from_runtime_turn(
+    turn_metadata: Option<&RuntimeTurnMetadata>,
+) -> SurfaceSessionRecoveryOverrides {
+    let turn_metadata = turn_metadata.and_then(|metadata| {
+        let materialization_metadata = RuntimeTurnMetadata {
+            model: metadata.model.clone(),
+            provider: metadata.provider,
+            provider_params: metadata.provider_params.clone(),
+            connection_ref: metadata.connection_ref.clone(),
+            ..Default::default()
+        };
+        (!materialization_metadata.is_empty()).then_some(materialization_metadata)
+    });
+    SurfaceSessionRecoveryOverrides {
+        turn_metadata,
+        ..Default::default()
+    }
+}
+
 pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
     overrides.turn_metadata.as_ref().is_some_and(|metadata| {
         metadata.model.is_some()

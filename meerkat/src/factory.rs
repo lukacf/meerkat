@@ -581,6 +581,16 @@ impl AgentBuildConfig {
         if metadata.skill_references.is_some() {
             self.preload_skills = metadata.skill_references;
         }
+        if let Some(instructions) = metadata.additional_instructions {
+            let instructions = instructions
+                .into_iter()
+                .map(|instruction| instruction.body.trim().to_string())
+                .filter(|body| !body.is_empty())
+                .collect::<Vec<_>>();
+            if !instructions.is_empty() {
+                self.additional_instructions = Some(instructions);
+            }
+        }
     }
 
     fn initial_turn_metadata_from_internal_build_fields(
@@ -4183,6 +4193,29 @@ mod tests {
             ),
             None,
             "provider-aware default lookup must not reuse OpenAI defaults for Anthropic"
+        );
+    }
+
+    #[test]
+    fn initial_turn_metadata_authority_restores_additional_instructions() {
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.initial_turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                additional_instructions: Some(vec![
+                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                        body: "persist this host instruction".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+        );
+
+        build.apply_initial_turn_metadata_authority();
+
+        assert_eq!(
+            build.additional_instructions,
+            Some(vec!["persist this host instruction".to_string()])
         );
     }
 

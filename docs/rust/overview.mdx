@@ -31,6 +31,8 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     ```toml
     [dependencies]
     meerkat = "0.6.0"
+    meerkat-core = "0.6.0"
+    meerkat-store = "0.6.0"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -45,6 +47,8 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     ```toml Add persistence
     [dependencies]
     meerkat = { version = "0.6.0", features = ["sqlite-store", "session-store"] }
+    meerkat-core = "0.6.0"
+    meerkat-store = "0.6.0"
     ```
 
     ```toml Full harness
@@ -53,6 +57,8 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
         "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "comms", "mcp", "skills"
     ] }
+    meerkat-core = "0.6.0"
+    meerkat-store = "0.6.0"
     ```
 
     ```toml Minimal (single provider)
@@ -201,7 +207,7 @@ let created = service.create_session(CreateSessionRequest {
     max_tokens: None,
     event_tx: None,
     initial_turn: InitialTurnPolicy::Defer,
-    deferred_prompt_policy: DeferredPromptPolicy::Retain,
+    deferred_prompt_policy: DeferredPromptPolicy::Stage,
     build: Some(SessionBuildOptions {
         initial_turn_metadata: Some(RuntimeTurnMetadata {
             model: Some(ModelId::new("claude-sonnet-4-6")),
@@ -216,6 +222,7 @@ let result = service.start_turn(&created.session_id, StartTurnRequest {
     prompt: "Now run with the first-turn override.".into(),
     system_prompt: Some("You are the deferred first-turn override.".into()),
     event_tx: None,
+    pre_turn_context_appends: Vec::new(),
     turn_metadata: None,
 }).await?;
 ```

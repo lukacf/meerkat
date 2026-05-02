@@ -599,11 +599,18 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::LlmStreamResult;
+    use crate::connection::{BindingId, ConnectionRef, RealmId};
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
+    use crate::handles::{
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
+        DslTransitionError, LeaseKey,
+    };
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
 
@@ -669,6 +676,145 @@ mod tests {
         async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
             Ok(None)
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingAuthLeaseHandle {
+        snapshots: Mutex<BTreeMap<LeaseKey, AuthLeaseSnapshot>>,
+    }
+
+    impl RecordingAuthLeaseHandle {
+        fn seed(&self, key: LeaseKey, snapshot: AuthLeaseSnapshot) {
+            self.snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, snapshot);
+        }
+    }
+
+    impl AuthLeaseHandle for RecordingAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            lease_key: &LeaseKey,
+            expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            let mut snapshots = self
+                .snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let generation = snapshots
+                .get(lease_key)
+                .map(|snapshot| snapshot.generation + 1)
+                .unwrap_or(1);
+            snapshots.insert(
+                lease_key.clone(),
+                AuthLeaseSnapshot {
+                    phase: Some(AuthLeasePhase::Valid),
+                    expires_at: (expires_at != u64::MAX).then_some(expires_at),
+                    credential_present: true,
+                    generation,
+                    credential_published_at_millis: None,
+                },
+            );
+            Ok(AuthLeaseTransition {
+                generation,
+                credential_published_at_millis: None,
+            })
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn complete_refresh(
+            &self,
+            lease_key: &LeaseKey,
+            new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            self.acquire_lease(lease_key, new_expires_at)
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            self.snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(lease_key);
+            Ok(())
+        }
+
+        fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(lease_key)
+                .cloned()
+                .unwrap_or(AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    credential_present: false,
+                    generation: 0,
+                    credential_published_at_millis: None,
+                })
+        }
+    }
+
+    fn connection_ref(binding: &str) -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm fixture"),
+            binding: BindingId::parse(binding).expect("valid binding fixture"),
+            profile: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_lease_rotation_preserves_existing_target_expiry() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let auth_lease = Arc::new(RecordingAuthLeaseHandle::default());
+        let previous = connection_ref("previous");
+        let target = connection_ref("target");
+        let target_key = LeaseKey::from_connection_ref(&target);
+        auth_lease.seed(
+            target_key.clone(),
+            AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: Some(1_900_000_000),
+                credential_present: true,
+                generation: 7,
+                credential_published_at_millis: None,
+            },
+        );
+        let agent = AgentBuilder::new()
+            .with_auth_lease_handle(auth_lease.clone())
+            .build(client, tools, store)
+            .await;
+
+        agent
+            .rotate_auth_lease_connection_ref(Some(&previous), Some(&target))
+            .unwrap();
+
+        let snapshot = auth_lease.snapshot(&target_key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snapshot.expires_at, Some(1_900_000_000));
+        assert_eq!(snapshot.generation, 7);
     }
 
     /// Regression test: AgentBuilder should apply system_prompt to new sessions

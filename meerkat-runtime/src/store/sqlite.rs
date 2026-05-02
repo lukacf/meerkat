@@ -13,7 +13,10 @@ mod inner {
     use crate::identifiers::LogicalRuntimeId;
     use crate::input_state::StoredInputState;
     use crate::runtime_state::RuntimeState;
-    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
+    use crate::store::{
+        AuthOAuthFlowSnapshotUpdate, RuntimeStore, RuntimeStoreError, SessionDelta,
+        authoritative_receipt,
+    };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS runtime_input_states (
@@ -40,6 +43,10 @@ CREATE TABLE IF NOT EXISTS runtime_states (
 CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
     runtime_id TEXT PRIMARY KEY,
     state_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
+    id TEXT PRIMARY KEY,
+    state_json BLOB NOT NULL
 )";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
@@ -64,6 +71,8 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
     fn runtime_id_text(runtime_id: &LogicalRuntimeId) -> &str {
         &runtime_id.0
     }
+
+    const AUTH_OAUTH_FLOW_STATE_ID: &str = "auth_oauth_flow_state";
 
     fn next_receipt_sequence(
         tx: &Transaction<'_>,
@@ -188,6 +197,79 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
 
     #[async_trait::async_trait]
     impl RuntimeStore for SqliteRuntimeStore {
+        fn auth_authority_key(&self) -> Option<String> {
+            let path = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+            Some(format!("sqlite:{}", path.display()))
+        }
+
+        fn persist_auth_oauth_flow_snapshot(
+            &self,
+            snapshot_json: &[u8],
+        ) -> Result<(), RuntimeStoreError> {
+            let mut conn = open_runtime_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            tx.execute(
+                r"
+                INSERT INTO runtime_auth_oauth_flow_state (id, state_json)
+                VALUES (?1, ?2)
+                ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json
+                ",
+                params![AUTH_OAUTH_FLOW_STATE_ID, snapshot_json],
+            )
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            tx.commit()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            Ok(())
+        }
+
+        fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let conn = open_runtime_connection(&self.path)?;
+            conn.query_row(
+                r"
+                SELECT state_json
+                FROM runtime_auth_oauth_flow_state
+                WHERE id = ?1
+                ",
+                params![AUTH_OAUTH_FLOW_STATE_ID],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        }
+
+        fn update_auth_oauth_flow_snapshot(
+            &self,
+            update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+        ) -> Result<(), RuntimeStoreError> {
+            let mut conn = open_runtime_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_auth_oauth_flow_state
+                    WHERE id = ?1
+                    ",
+                    params![AUTH_OAUTH_FLOW_STATE_ID],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+            let next = update(current.as_deref())?;
+            tx.execute(
+                r"
+                INSERT INTO runtime_auth_oauth_flow_state (id, state_json)
+                VALUES (?1, ?2)
+                ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json
+                ",
+                params![AUTH_OAUTH_FLOW_STATE_ID, next],
+            )
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            tx.commit()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            Ok(())
+        }
+
         async fn commit_session_boundary(
             &self,
             runtime_id: &LogicalRuntimeId,

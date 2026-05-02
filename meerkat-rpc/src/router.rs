@@ -1282,12 +1282,14 @@ impl MethodRouter {
             "auth/profile/delete" => {
                 handlers::auth::handle_auth_profile_delete(id, params, &self.runtime).await
             }
-            "auth/login/start" => handlers::auth::handle_auth_login_start(id, params).await,
+            "auth/login/start" => {
+                handlers::auth::handle_auth_login_start(id, params, &self.runtime).await
+            }
             "auth/login/complete" => {
                 handlers::auth::handle_auth_login_complete(id, params, &self.runtime).await
             }
             "auth/login/device_start" => {
-                handlers::auth::handle_auth_login_device_start(id, params).await
+                handlers::auth::handle_auth_login_device_start(id, params, &self.runtime).await
             }
             "auth/login/device_complete" => {
                 handlers::auth::handle_auth_login_device_complete(id, params, &self.runtime).await

@@ -2895,7 +2895,13 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             let registry = cli_provider_registry();
+            use meerkat_providers::auth_store::TokenStoreBackend;
+            let store = TokenStoreBackend::default_auto()
+                .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
+                .open()
+                .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
+                .with_token_store(store)
                 .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
             let connection_ref = meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())

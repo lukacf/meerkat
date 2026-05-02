@@ -1111,9 +1111,9 @@ impl TokenStore for AutoTokenStore {
                     }
                     let mut cleared = false;
                     if &keyring_tokens == expected {
-                        self.keyring.clear_unlocked(key)?;
                         self.clear_file_shadow_if_current_or_unreadable(key, expected)
                             .await?;
+                        self.keyring.clear_unlocked(key)?;
                         let _ = self.clear_file_fallback_marker(key).await;
                         let _ = self.clear_clear_tombstone(key).await;
                         cleared = true;
@@ -3786,6 +3786,43 @@ mod tests {
         assert_eq!(
             store.file.load_unlocked(&key).await.expect("file load"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn keyring_clear_if_current_keeps_keyring_when_file_shadow_clear_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MemoryKeyringBackend::default());
+        let store =
+            AutoTokenStore::new_with_keyring_backend(temp.path().to_path_buf(), keyring.clone());
+        let key = key();
+        let expected = token("expected").with_auth_lease_binding(key.clone(), 1);
+        keyring
+            .save_unlocked(&key, &expected)
+            .expect("seed keyring");
+        let shadow_path = file_shadow_path(temp.path(), &key);
+        std::fs::create_dir_all(&shadow_path).expect("make file shadow cleanup fail");
+
+        let err = store
+            .clear_if_current(&key, &expected)
+            .await
+            .expect_err("file shadow cleanup failure must fail conditional clear");
+
+        assert!(
+            matches!(
+                err,
+                TokenStoreError::Io(_) | TokenStoreError::PermissionDenied(_)
+            ),
+            "unexpected file shadow cleanup failure: {err}"
+        );
+        assert_eq!(
+            keyring.load_unlocked(&key).expect("keyring load"),
+            Some(expected),
+            "primary keyring material must remain when the file shadow clear does not commit"
+        );
+        assert!(
+            shadow_path.is_dir(),
+            "failed shadow path should remain for retry diagnostics"
         );
     }
 }

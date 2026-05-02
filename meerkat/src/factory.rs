@@ -999,6 +999,106 @@ impl meerkat_core::service::VisibleToolSnapshotProvider for DeferredSnapshotProv
     }
 }
 
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+struct AuthLeaseOpenAiLiveFactory {
+    provider_registry: Arc<meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry>,
+    realm: RealmConnectionSet,
+    connection_ref: ConnectionRef,
+    lease_connection_ref: Option<ConnectionRef>,
+    token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>,
+    refresh_coord: Option<Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>>,
+    external_auth_resolvers:
+        BTreeMap<String, Arc<dyn meerkat_providers::ExternalAuthResolverHandle>>,
+    auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+}
+
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+impl AuthLeaseOpenAiLiveFactory {
+    async fn resolve_secret(&self) -> Result<String, meerkat_llm_core::LlmError> {
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        if let Some(store) = self.token_store.clone() {
+            env = env.with_token_store(store);
+        }
+        if let Some(coord) = self.refresh_coord.clone() {
+            env = env.with_refresh_coordinator(coord);
+        }
+        if let Some(handle) = self.auth_lease_handle.clone() {
+            env = env.with_auth_lease_handle(handle);
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+
+        let connection = self
+            .provider_registry
+            .resolve(&self.realm, &self.connection_ref, &env)
+            .await
+            .map_err(Self::resolution_error)?;
+        if let Some(handle) = &self.auth_lease_handle
+            && let Some(connection_ref) = self.lease_connection_ref.as_ref()
+        {
+            AgentFactory::publish_auth_lease(handle, connection_ref, &connection)
+                .map_err(Self::resolution_error)?;
+        }
+        connection.resolved_secret().ok_or_else(|| {
+            meerkat_llm_core::LlmError::AuthenticationFailed {
+                message: "OpenAI realtime sideband requires resolved inline credential material"
+                    .to_string(),
+            }
+        })
+    }
+
+    async fn resolve_live_factory(
+        &self,
+    ) -> Result<Arc<dyn meerkat_client::OpenAiLiveSessionFactory>, meerkat_llm_core::LlmError> {
+        let secret = self.resolve_secret().await?;
+        Ok(Arc::new(meerkat_client::OpenAiLiveClient::new(secret))
+            as Arc<dyn meerkat_client::OpenAiLiveSessionFactory>)
+    }
+
+    fn resolution_error(error: impl std::fmt::Display) -> meerkat_llm_core::LlmError {
+        meerkat_llm_core::LlmError::AuthenticationFailed {
+            message: format!("OpenAI realtime sideband credential resolution failed: {error}"),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+#[async_trait::async_trait]
+impl meerkat_client::OpenAiLiveSessionFactory for AuthLeaseOpenAiLiveFactory {
+    async fn open_session(
+        &self,
+        open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+    ) -> Result<Box<dyn meerkat_client::OpenAiLiveSession>, meerkat_llm_core::LlmError> {
+        self.resolve_live_factory()
+            .await?
+            .open_session(open_config)
+            .await
+    }
+
+    async fn attach_to_call(
+        &self,
+        target: &meerkat_client::OpenAiLiveCallTarget,
+    ) -> Result<Box<dyn meerkat_client::OpenAiLiveSession>, meerkat_llm_core::LlmError> {
+        self.resolve_live_factory()
+            .await?
+            .attach_to_call(target)
+            .await
+    }
+}
+
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
@@ -1280,36 +1380,43 @@ impl AgentFactory {
     pub async fn build_openai_realtime_session_factory(
         &self,
         config: &Config,
+        auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
     ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, BuildAgentError> {
-        let (realm, _binding_id, connection_ref) =
-            Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
-                .map_err(BuildAgentError::ConnectionResolution)?;
-        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        if let Some(store) = self.token_store.clone() {
-            env = env.with_token_store(store);
-        }
-        if let Some(coord) = self.refresh_coord.clone() {
-            env = env.with_refresh_coordinator(coord);
-        }
-        for (handle, resolver) in &self.external_auth_resolvers {
-            env = env.with_external_resolver(handle.clone(), resolver.clone());
-        }
-        let connection = self
-            .provider_registry
-            .resolve(&realm, &connection_ref, &env)
-            .await
-            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
-        let secret = connection.resolved_secret().ok_or_else(|| {
-            BuildAgentError::ConnectionResolution(
-                "OpenAI realtime sideband requires resolved inline credential material".to_string(),
-            )
-        })?;
-        let live = Arc::new(meerkat_client::OpenAiLiveClient::new(secret))
-            as Arc<dyn meerkat_client::OpenAiLiveSessionFactory>;
+        let live = self.build_openai_realtime_live_factory(config, auth_lease_handle)?;
         Ok(
             Arc::new(meerkat_client::OpenAiRealtimeSessionFactory::new(live))
                 as Arc<dyn meerkat_client::RealtimeSessionFactory>,
         )
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    fn build_openai_realtime_live_factory(
+        &self,
+        config: &Config,
+        auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+    ) -> Result<Arc<AuthLeaseOpenAiLiveFactory>, BuildAgentError> {
+        let (realm, _binding_id, connection_ref) =
+            Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
+                .map_err(BuildAgentError::ConnectionResolution)?;
+        let lease_connection_ref = if connection_ref.is_env_default() {
+            None
+        } else {
+            Some(connection_ref.clone())
+        };
+        Ok(Arc::new(AuthLeaseOpenAiLiveFactory {
+            provider_registry: Arc::clone(&self.provider_registry),
+            realm,
+            connection_ref,
+            lease_connection_ref: lease_connection_ref.clone(),
+            token_store: self.token_store.clone(),
+            refresh_coord: self.refresh_coord.clone(),
+            external_auth_resolvers: self.external_auth_resolvers.clone(),
+            auth_lease_handle: lease_connection_ref.and(auth_lease_handle),
+        }))
     }
 
     /// Create a minimal factory for environments without filesystem access (e.g. wasm32).
@@ -4242,6 +4349,144 @@ mod tests {
         assert!(
             err.contains("env_default"),
             "error should name the rejected synthetic realm: {err}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn openai_realtime_factory_plumbs_auth_lease_handle_for_configured_binding() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct RecordingOpenAiRuntime {
+            auth_lease_handle_seen: Arc<AtomicBool>,
+            resolve_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for RecordingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "default");
+                self.auth_lease_handle_seen
+                    .store(env.auth_lease_handle.is_some(), Ordering::SeqCst);
+                let call = self.resolve_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        format!("test-openai-key-{call}"),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let auth_lease_handle_seen = Arc::new(AtomicBool::new(false));
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RecordingOpenAiRuntime {
+                auth_lease_handle_seen: Arc::clone(&auth_lease_handle_seen),
+                resolve_calls: Arc::clone(&resolve_calls),
+            }));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "default".to_string(),
+            inline_realm_section(&[("openai", "test-openai-key")]),
+        );
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+
+        let live_factory = factory
+            .build_openai_realtime_live_factory(&config, Some(Arc::clone(&auth_lease)))
+            .expect("OpenAI realtime factory should resolve configured credentials");
+
+        assert_eq!(
+            resolve_calls.load(Ordering::SeqCst),
+            0,
+            "OpenAI realtime sideband must not pin credential material during RPC startup"
+        );
+        let secret = live_factory
+            .resolve_secret()
+            .await
+            .expect("OpenAI realtime sideband should resolve credentials when opened");
+        assert_eq!(secret, "test-openai-key-1");
+        assert!(
+            auth_lease_handle_seen.load(Ordering::SeqCst),
+            "OpenAI realtime sideband resolution must receive the AuthMachine lease handle"
+        );
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("default").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+
+        auth_lease.mark_reauth_required(&lease_key).unwrap();
+        let err = live_factory
+            .resolve_secret()
+            .await
+            .expect_err("sideband must re-check AuthMachine truth instead of reusing a pinned key");
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lease publication refused"),
+            "got {err:?}"
         );
     }
 

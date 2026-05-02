@@ -810,3 +810,72 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         "repeat logout must not panic; stderr={stderr}"
     );
 }
+
+#[test]
+fn rkat_auth_test_uses_token_store_for_scripted_login_credentials() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let keyring_service = isolated_keyring_service(tmp.path());
+    seed_managed_openai_realm_config(tmp.path());
+    let login = Command::new(&rkat)
+        .args([
+            "auth",
+            "login",
+            "openai",
+            "--non-interactive",
+            "--secret",
+            "sk-test",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth login must spawn");
+    if !login.status.success() {
+        let stderr = String::from_utf8_lossy(&login.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("scripted login failed: {stderr}");
+    }
+
+    let auth_test = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "test",
+            "--realm",
+            "dev",
+            "default_openai",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("MEERKAT_AUTH_KEYRING_SERVICE", &keyring_service)
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth test must spawn");
+    let stderr = String::from_utf8_lossy(&auth_test.stderr);
+    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+        eprintln!("SKIP: auth provider features unavailable");
+        return;
+    }
+    assert!(
+        auth_test.status.success(),
+        "auth test must resolve scripted-login credentials through TokenStore; stderr={stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&auth_test.stdout);
+    assert!(
+        stdout.contains("state: valid") && stdout.contains("has_credential: true"),
+        "auth test should report a valid credential from the managed store; stdout:\n{stdout}"
+    );
+}

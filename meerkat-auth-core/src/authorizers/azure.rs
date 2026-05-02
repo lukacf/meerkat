@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{LeaseFreshnessObserver, oauth_endpoint_failure_is_permanent};
+use super::{LeaseFreshnessObserver, LeaseRefreshCompletion, oauth_endpoint_failure_is_permanent};
 use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
@@ -230,33 +230,41 @@ impl AzureAdAuthorizer {
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
-            return Ok(access_token);
-        }
 
-        let lifecycle = observer.begin_refresh(&self.label).await?;
-
-        // Miss — fetch a fresh token.
-        let new_token = match self.fetch_token().await {
-            Ok(token) => token,
-            Err(err) => {
-                observer.refresh_failed(
-                    &self.label,
-                    lifecycle,
-                    azure_refresh_failure_is_permanent(&err),
-                )?;
-                return Err(err.into());
+        loop {
+            if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+                return Ok(access_token);
             }
-        };
-        let access = new_token.access_token.clone();
-        let expires_at = new_token.expires_at;
-        let lease_generation =
-            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
-        *self.cache.lock() = Some(CachedToken {
-            access_token: access.clone(),
-            lease_generation,
-        });
-        Ok(access)
+
+            let lifecycle = observer.begin_refresh(&self.label).await?;
+
+            // Miss — fetch a fresh token.
+            let new_token = match self.fetch_token().await {
+                Ok(token) => token,
+                Err(err) => {
+                    observer.refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        azure_refresh_failure_is_permanent(&err),
+                    )?;
+                    return Err(err.into());
+                }
+            };
+            let access = new_token.access_token.clone();
+            let expires_at = new_token.expires_at;
+            match observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())? {
+                LeaseRefreshCompletion::Accepted(lease_generation) => {
+                    *self.cache.lock() = Some(CachedToken {
+                        access_token: access.clone(),
+                        lease_generation,
+                    });
+                    return Ok(access);
+                }
+                LeaseRefreshCompletion::Retry => {
+                    continue;
+                }
+            }
+        }
     }
 }
 

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
+    EnvLookup, LeaseFreshnessObserver, LeaseRefreshCompletion, endpoint_failure_is_transient,
     oauth_endpoint_failure_is_permanent,
 };
 use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
@@ -258,45 +258,53 @@ impl GoogleAuthAuthorizer {
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
-            return Ok(access_token);
+
+        loop {
+            if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+                return Ok(access_token);
+            }
+
+            let lifecycle = observer.begin_refresh(&self.label).await?;
+
+            let token = match self.chain {
+                GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
+                    Ok(token) => token,
+                    Err(err) => {
+                        observer.refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_is_permanent(&err),
+                        )?;
+                        return Err(err.into());
+                    }
+                },
+                GoogleAuthChain::Default => match self.fetch_full_chain().await {
+                    Ok(token) => token,
+                    Err(err) => {
+                        observer.refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_is_permanent(&err),
+                        )?;
+                        return Err(err.into());
+                    }
+                },
+            };
+            let access = token.access_token.clone();
+            let expires_at = token.expires_at;
+            match observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())? {
+                LeaseRefreshCompletion::Accepted(lease_generation) => {
+                    *self.cache.lock() = Some(CachedToken {
+                        access_token: access.clone(),
+                        lease_generation,
+                    });
+                    return Ok(access);
+                }
+                LeaseRefreshCompletion::Retry => {
+                    continue;
+                }
+            }
         }
-
-        let lifecycle = observer.begin_refresh(&self.label).await?;
-
-        let token = match self.chain {
-            GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
-                Ok(token) => token,
-                Err(err) => {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        google_refresh_failure_is_permanent(&err),
-                    )?;
-                    return Err(err.into());
-                }
-            },
-            GoogleAuthChain::Default => match self.fetch_full_chain().await {
-                Ok(token) => token,
-                Err(err) => {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        google_refresh_failure_is_permanent(&err),
-                    )?;
-                    return Err(err.into());
-                }
-            },
-        };
-        let access = token.access_token.clone();
-        let expires_at = token.expires_at;
-        let lease_generation =
-            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
-        *self.cache.lock() = Some(CachedToken {
-            access_token: access.clone(),
-            lease_generation,
-        });
-        Ok(access)
     }
 
     async fn fetch_full_chain(&self) -> Result<FetchedToken, GoogleAuthError> {

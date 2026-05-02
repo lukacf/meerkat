@@ -167,21 +167,20 @@ impl LeaseFreshnessObserver {
         lifecycle: LeaseRefreshLifecycle,
         expires_at: DateTime<Utc>,
         now: DateTime<Utc>,
-    ) -> Result<u64, AuthError> {
+    ) -> Result<LeaseRefreshCompletion, AuthError> {
         let expires_at = epoch_secs(expires_at);
         let transition = match lifecycle {
-            LeaseRefreshLifecycle::InitialAcquire(expected) => self
+            LeaseRefreshLifecycle::InitialAcquire(expected) => match self
                 .handle
                 .acquire_lease_if_snapshot(&self.lease_key, &expected, expires_at)
                 .map_err(|err| {
                     self.observer_error(authorizer_label, "acquire_lease_if_snapshot", err)
-                })?
-                .ok_or_else(|| {
-                    AuthError::Other(format!(
-                        "{authorizer_label} auth lease initial acquire lost a race for {}; retry required",
-                        self.lease_key
-                    ))
-                })?,
+                })? {
+                Some(transition) => transition,
+                None => {
+                    return self.initial_acquire_lost_race_completion(authorizer_label, now);
+                }
+            },
             LeaseRefreshLifecycle::Refresh(expected) => self
                 .handle
                 .complete_refresh_if_snapshot(
@@ -200,7 +199,40 @@ impl LeaseFreshnessObserver {
                     ))
                 })?,
         };
-        Ok(transition.generation)
+        Ok(LeaseRefreshCompletion::Accepted(transition.generation))
+    }
+
+    fn initial_acquire_lost_race_completion(
+        &self,
+        authorizer_label: &str,
+        now: DateTime<Utc>,
+    ) -> Result<LeaseRefreshCompletion, AuthError> {
+        let snapshot = self.handle.snapshot(&self.lease_key);
+        match snapshot.phase {
+            Some(AuthLeasePhase::Valid) => {
+                if let Some(expires_at) = snapshot.expires_at
+                    && lease_epoch_secs_is_fresh_at(expires_at, now)
+                {
+                    tracing::debug!(
+                        authorizer = %authorizer_label,
+                        lease_key = %self.lease_key,
+                        snapshot_generation = snapshot.generation,
+                        snapshot_expires_at = expires_at,
+                        "cloud authorizer initial acquire lost a race but observed fresh AuthMachine lease truth"
+                    );
+                    return Ok(LeaseRefreshCompletion::Retry);
+                }
+            }
+            Some(AuthLeasePhase::ReauthRequired) => return Err(AuthError::Expired),
+            Some(
+                AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing | AuthLeasePhase::Released,
+            )
+            | None => {}
+        }
+        Err(AuthError::Other(format!(
+            "{authorizer_label} auth lease initial acquire lost a race for {}; retry required",
+            self.lease_key
+        )))
     }
 
     pub(crate) fn refresh_failed(
@@ -237,6 +269,13 @@ impl LeaseFreshnessObserver {
 pub(crate) enum LeaseRefreshLifecycle {
     InitialAcquire(AuthLeaseSnapshot),
     Refresh(AuthLeaseSnapshot),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+pub(crate) enum LeaseRefreshCompletion {
+    Accepted(u64),
+    Retry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -778,7 +817,7 @@ mod tests {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
-        let generation = observer
+        let completion = observer
             .complete_refresh(
                 "race-test",
                 LeaseRefreshLifecycle::InitialAcquire(expected),
@@ -788,7 +827,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(handle.accepted_generations(), vec![1]);
-        assert_eq!(generation, 1);
+        assert_eq!(completion, LeaseRefreshCompletion::Accepted(1));
     }
 
     #[test]
@@ -825,6 +864,43 @@ mod tests {
     }
 
     #[test]
+    fn initial_acquire_lost_race_discards_unaccepted_token_and_retries() {
+        let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
+        let lease_key = lease_key();
+        let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key.clone());
+        let start = observer.try_begin_refresh("race-test").unwrap();
+        let lifecycle = match start {
+            LeaseRefreshStart::Started(LeaseRefreshLifecycle::InitialAcquire(snapshot)) => {
+                LeaseRefreshLifecycle::InitialAcquire(snapshot)
+            }
+            other => panic!("expected initial acquire lifecycle, got {other:?}"),
+        };
+        handle.accept_valid_transition(1_900_000_000).unwrap();
+        let expires_at = DateTime::<Utc>::from_timestamp(1_950_000_000, 0).unwrap();
+        let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
+
+        let completion = observer
+            .complete_refresh("race-test", lifecycle, expires_at, now)
+            .expect("fresh lease truth published by the winner should send the loser through AuthMachine again");
+
+        assert_eq!(
+            completion,
+            LeaseRefreshCompletion::Retry,
+            "loser must discard token material that AuthMachine did not accept"
+        );
+        assert_eq!(
+            handle.accepted_generations(),
+            vec![1],
+            "stale initial acquire must not publish a second generation"
+        );
+        assert_eq!(
+            handle.snapshot(&lease_key).expires_at,
+            Some(1_900_000_000),
+            "winner's AuthMachine lease truth must remain intact"
+        );
+    }
+
+    #[test]
     fn refresh_returns_generation_from_accepted_transition() {
         let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
         let lease_key = lease_key();
@@ -838,7 +914,7 @@ mod tests {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
-        let generation = observer
+        let completion = observer
             .complete_refresh(
                 "race-test",
                 LeaseRefreshLifecycle::Refresh(expected),
@@ -848,7 +924,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(handle.accepted_generations(), vec![1]);
-        assert_eq!(generation, 1);
+        assert_eq!(completion, LeaseRefreshCompletion::Accepted(1));
     }
 
     #[test]

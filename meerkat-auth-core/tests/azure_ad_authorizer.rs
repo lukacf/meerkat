@@ -44,7 +44,7 @@ struct TokenForm {
 struct MockState {
     counter: Arc<AtomicUsize>,
     captured: Arc<std::sync::Mutex<Vec<TokenForm>>>,
-    token_value: String,
+    token_values_by_call: Vec<String>,
     expires_in_by_call: Vec<u64>,
     failure: Option<MockFailure>,
     delay_from_call: Option<usize>,
@@ -78,8 +78,14 @@ async fn token_handler(State(state): State<MockState>, Form(form): Form<TokenFor
         .or_else(|| state.expires_in_by_call.last())
         .copied()
         .unwrap_or(3600);
+    let token_value = state
+        .token_values_by_call
+        .get(call.saturating_sub(1))
+        .or_else(|| state.token_values_by_call.last())
+        .cloned()
+        .unwrap_or_else(|| "mock-azure-access-token".into());
     Json(serde_json::json!({
-        "access_token": state.token_value,
+        "access_token": token_value,
         "token_type": "Bearer",
         "expires_in": expires_in,
     }))
@@ -109,6 +115,7 @@ struct RecordingAuthLeaseHandle {
     snapshot: Mutex<AuthLeaseSnapshot>,
     generation: Mutex<u64>,
     fail_action: Mutex<Option<&'static str>>,
+    lose_initial_acquire_to_fresh_expires_at: Mutex<Option<u64>>,
 }
 
 impl Default for RecordingAuthLeaseHandle {
@@ -122,6 +129,7 @@ impl Default for RecordingAuthLeaseHandle {
             }),
             generation: Mutex::new(0),
             fail_action: Mutex::new(None),
+            lose_initial_acquire_to_fresh_expires_at: Mutex::new(None),
         }
     }
 }
@@ -130,6 +138,13 @@ impl RecordingAuthLeaseHandle {
     fn fail_on(action: &'static str) -> Self {
         Self {
             fail_action: Mutex::new(Some(action)),
+            ..Self::default()
+        }
+    }
+
+    fn lose_initial_acquire_to_fresh_lease(expires_at: u64) -> Self {
+        Self {
+            lose_initial_acquire_to_fresh_expires_at: Mutex::new(Some(expires_at)),
             ..Self::default()
         }
     }
@@ -191,6 +206,21 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         expected: &AuthLeaseSnapshot,
         expires_at: u64,
     ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        let race_expires_at = {
+            let mut race = self
+                .lose_initial_acquire_to_fresh_expires_at
+                .lock()
+                .unwrap();
+            if race.is_some() && self.snapshot(lease_key) == *expected {
+                race.take()
+            } else {
+                None
+            }
+        };
+        if let Some(race_expires_at) = race_expires_at {
+            self.acquire_lease(lease_key, race_expires_at)?;
+            return Ok(None);
+        }
         if self.snapshot(lease_key) != *expected {
             return Ok(None);
         }
@@ -388,12 +418,27 @@ async fn start_mock_with_config(
     failure: Option<MockFailure>,
     delay_from_call: Option<usize>,
 ) -> MockServer {
+    start_mock_with_token_values_config(
+        vec![token_value.into()],
+        expires_in_by_call,
+        failure,
+        delay_from_call,
+    )
+    .await
+}
+
+async fn start_mock_with_token_values_config(
+    token_values_by_call: Vec<String>,
+    expires_in_by_call: Vec<u64>,
+    failure: Option<MockFailure>,
+    delay_from_call: Option<usize>,
+) -> MockServer {
     let counter = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let state = MockState {
         counter: counter.clone(),
         captured: captured.clone(),
-        token_value: token_value.into(),
+        token_values_by_call,
         expires_in_by_call,
         failure,
         delay_from_call,
@@ -659,6 +704,84 @@ async fn released_and_reacquired_auth_lease_invalidates_private_token_cache() {
         mock.counter.load(Ordering::SeqCst),
         2,
         "a private cached token from a previous AuthMachine lease generation must not win when the lease is released and reacquired"
+    );
+}
+
+#[tokio::test]
+async fn initial_acquire_lost_race_discards_unaccepted_token_material() {
+    let mock = start_mock_with_token_values_config(
+        vec![
+            "unaccepted-loser-token".into(),
+            "accepted-retry-token".into(),
+        ],
+        vec![3600, 3600],
+        None,
+        None,
+    )
+    .await;
+    let winner_expires_at = (Utc::now() + chrono::Duration::seconds(3600))
+        .timestamp()
+        .max(0) as u64;
+    let handle =
+        Arc::new(RecordingAuthLeaseHandle::lose_initial_acquire_to_fresh_lease(winner_expires_at));
+    let lease_key = azure_lease_key();
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    let authorizer = AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds(&mock.base_url),
+    )
+    .with_auth_lease_observer(lease_handle, lease_key)
+    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    let auth = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .unwrap();
+
+    assert_eq!(
+        auth.1, "Bearer accepted-retry-token",
+        "token material that lost AuthMachine acquire must not be returned under the winner's lease generation"
+    );
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "authorizer must retry through AuthMachine instead of caching the losing token"
+    );
+    let events = handle.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, LeaseEvent::Acquire(_, _)))
+            .count(),
+        1,
+        "lost initial acquire must not publish a second AuthMachine acquire"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LeaseEvent::CompleteRefresh(_, _))),
+        "retry path must complete the accepted token through AuthMachine"
+    );
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "subsequent reuse must be tied to the accepted retry token generation"
     );
 }
 

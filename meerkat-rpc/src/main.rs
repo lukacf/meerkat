@@ -257,18 +257,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
-
-    let realtime_openai_factory = match factory.build_openai_realtime_session_factory(&config).await
-    {
-        Ok(factory) => Some(factory),
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "OpenAI realtime sideband factory unavailable; realtime websocket host will expose text-only runtime attachment unless credentials are configured"
-            );
-            None
-        }
-    };
+    let realtime_factory_source = factory.clone();
+    let realtime_config = config.clone();
 
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
@@ -302,6 +292,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Some(manifest.backend.as_str().to_string()),
     );
     runtime.set_config_runtime(config_runtime);
+    let realtime_openai_factory = match realtime_factory_source
+        .build_openai_realtime_session_factory(&realtime_config, Some(runtime.auth_lease_handle()))
+        .await
+    {
+        Ok(factory) => Some(factory),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "OpenAI realtime sideband factory unavailable; realtime websocket host will expose text-only runtime attachment unless credentials are configured"
+            );
+            None
+        }
+    };
     let runtime = Arc::new(runtime);
 
     let lease = meerkat_store::start_realm_lease_in(

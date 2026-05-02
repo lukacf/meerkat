@@ -837,6 +837,24 @@ fn persist_registry_payloads(
     )
 }
 
+fn persist_existing_registry_payloads(
+    registry: &OAuthFlowRegistry,
+    store: &StoreSlot,
+    operation: &'static str,
+) -> Result<(), OAuthFlowError> {
+    let now_millis = current_time_millis();
+    let snapshot = registry.snapshot_for_persistence(now_millis);
+    persist_registry_snapshot(
+        &snapshot,
+        store,
+        operation,
+        &[],
+        &[],
+        now_millis,
+        SnapshotPersistPolicy::merge_existing(),
+    )
+}
+
 fn persist_registry_payloads_claiming_removal(
     registry: &OAuthFlowRegistry,
     store: &StoreSlot,
@@ -887,6 +905,7 @@ enum SnapshotRemovalMode {
 struct SnapshotPersistPolicy {
     removal_mode: SnapshotRemovalMode,
     admission_capacity: Option<usize>,
+    admit_local_payloads: bool,
 }
 
 impl SnapshotPersistPolicy {
@@ -894,6 +913,15 @@ impl SnapshotPersistPolicy {
         Self {
             removal_mode: SnapshotRemovalMode::Merge,
             admission_capacity: None,
+            admit_local_payloads: true,
+        }
+    }
+
+    fn merge_existing() -> Self {
+        Self {
+            removal_mode: SnapshotRemovalMode::Merge,
+            admission_capacity: None,
+            admit_local_payloads: false,
         }
     }
 
@@ -901,6 +929,7 @@ impl SnapshotPersistPolicy {
         Self {
             removal_mode: SnapshotRemovalMode::Claim,
             admission_capacity: None,
+            admit_local_payloads: true,
         }
     }
 
@@ -908,6 +937,7 @@ impl SnapshotPersistPolicy {
         Self {
             removal_mode: SnapshotRemovalMode::Merge,
             admission_capacity: Some(max_outstanding),
+            admit_local_payloads: true,
         }
     }
 }
@@ -943,6 +973,7 @@ fn persist_registry_snapshot(
             now_millis,
             policy.removal_mode,
             policy.admission_capacity,
+            policy.admit_local_payloads,
         )?;
         serde_json::to_vec(&merged)
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))
@@ -1054,6 +1085,7 @@ fn merge_oauth_registry_snapshot(
     now_millis: u64,
     removal_mode: SnapshotRemovalMode,
     admission_capacity: Option<usize>,
+    admit_local_payloads: bool,
 ) -> Result<OAuthFlowRegistrySnapshot, crate::store::RuntimeStoreError> {
     let mut merged = match current {
         Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(bytes)
@@ -1065,6 +1097,18 @@ fn merge_oauth_registry_snapshot(
     if removal_mode == SnapshotRemovalMode::Claim {
         ensure_removed_flows_are_active(&merged, &removed_browser, &removed_device, now_millis)?;
     }
+    let current_browser = merged
+        .browser
+        .iter()
+        .filter(|flow| flow.expires_at_millis > now_millis)
+        .map(persisted_browser_snapshot_key)
+        .collect::<BTreeSet<_>>();
+    let current_device = merged
+        .device
+        .iter()
+        .filter(|flow| flow.expires_at_millis > now_millis)
+        .map(persisted_device_snapshot_key)
+        .collect::<BTreeSet<_>>();
     let local_browser = local
         .browser
         .iter()
@@ -1091,8 +1135,10 @@ fn merge_oauth_registry_snapshot(
             .browser
             .iter()
             .filter(|flow| {
+                let key = persisted_browser_snapshot_key(flow);
                 flow.expires_at_millis > now_millis
-                    && !removed_browser.contains(&persisted_browser_snapshot_key(flow))
+                    && !removed_browser.contains(&key)
+                    && (admit_local_payloads || current_browser.contains(&key))
             })
             .cloned(),
     );
@@ -1101,8 +1147,10 @@ fn merge_oauth_registry_snapshot(
             .device
             .iter()
             .filter(|flow| {
+                let key = persisted_device_snapshot_key(flow);
                 flow.expires_at_millis > now_millis
-                    && !removed_device.contains(&persisted_device_snapshot_key(flow))
+                    && !removed_device.contains(&key)
+                    && (admit_local_payloads || current_device.contains(&key))
             })
             .cloned(),
     );
@@ -1263,12 +1311,10 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
     }
 
     fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
-        persist_registry_payloads(
+        persist_existing_registry_payloads(
             &self.registry,
             &self.store,
             "persist_oauth_device_flow_payloads",
-            &[],
-            &[],
         )
     }
 
@@ -2335,6 +2381,84 @@ mod tests {
         restarted
             .verify_device_code(stale_device_code, &stale_target, provider)
             .expect("new stale-authority device flow survives restart");
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn persistent_oauth_device_poll_finish_does_not_resurrect_consumed_payload() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store_path = temp_dir.path().join("runtime.sqlite");
+        let creator_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let stale_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let consumer_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &creator_store,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "pending-finish-device-code";
+        creator
+            .admit_device_code(
+                target.clone(),
+                provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("creator admits device flow");
+
+        let stale_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &stale_store,
+        );
+        let stale_poll = stale_authority
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("stale authority begins pending poll");
+        let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &consumer_store,
+        );
+        consumer
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("consumer begins independent poll")
+            .consume()
+            .expect("consumer consumes durable payload");
+
+        stale_poll
+            .finish()
+            .expect("stale pending poll finish is local cleanup only");
+
+        let snapshot_json = stale_store
+            .load_auth_oauth_flow_snapshot()
+            .expect("durable OAuth snapshot loads")
+            .expect("durable OAuth snapshot exists");
+        let snapshot = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&snapshot_json)
+            .expect("durable OAuth snapshot decodes");
+        assert!(
+            !snapshot
+                .device
+                .iter()
+                .any(|flow| flow.device_code == device_code),
+            "a stale pending poll finish must not resurrect a consumed device flow"
+        );
+
+        let restarted_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &restarted_store,
+        );
+        assert!(matches!(
+            restarted.verify_device_code(device_code, &target, provider),
+            Err(OAuthFlowError::Missing)
+        ));
     }
 
     #[cfg(feature = "sqlite-store")]

@@ -148,11 +148,14 @@ where
         Err(error) => return Err(SurfaceRuntimeMaterializeError::Session(error)),
     };
 
+    let runtime_entry_existed_before_prepare = adapter.contains_session(session_id).await;
     let bindings = adapter.prepare_bindings(session_id.clone()).await?;
     if let Err(error) =
         install_prepared_runtime_interrupt_handle(service, adapter, session_id).await
     {
-        adapter.unregister_session(session_id).await;
+        if !runtime_entry_existed_before_prepare {
+            adapter.unregister_session(session_id).await;
+        }
         return Err(error.into());
     }
     recovery_context.runtime_build_mode = Some(RuntimeBuildMode::SessionOwned(bindings));
@@ -161,7 +164,9 @@ where
     let recovered = match build_recovered_session(session, &recovery_overrides, recovery_context) {
         Ok(recovered) => recovered,
         Err(error) => {
-            adapter.unregister_session(session_id).await;
+            if !runtime_entry_existed_before_prepare {
+                adapter.unregister_session(session_id).await;
+            }
             return Err(error.into());
         }
     };
@@ -169,7 +174,9 @@ where
     match service.discard_live_session(session_id).await {
         Ok(()) | Err(SessionError::NotFound { .. }) => {}
         Err(error) => {
-            adapter.unregister_session(session_id).await;
+            if !runtime_entry_existed_before_prepare {
+                adapter.unregister_session(session_id).await;
+            }
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
     }
@@ -936,6 +943,67 @@ mod tests {
             message.contains("RuntimeTurnMetadata") && message.contains("provider"),
             "unexpected error: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn rematerialize_failure_preserves_preexisting_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "test precondition: runtime entry should exist"
+        );
+
+        let error = Box::pin(rematerialize_session_for_runtime_turn(
+            &service,
+            &adapter,
+            &result.session_id,
+            SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    provider: Some(meerkat_core::Provider::OpenAI),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("provider-only recovery should fail validation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("provider override requires model"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "failed rematerialization must not unregister a pre-existing runtime"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
     }
 
     #[tokio::test]

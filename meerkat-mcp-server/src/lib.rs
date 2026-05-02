@@ -3035,11 +3035,8 @@ async fn handle_meerkat_resume(
         ));
     }
 
-    let runtime_entry_existed_before_prepare = state
-        .runtime_adapter
-        .meerkat_machine_spine_snapshot(&session_id)
-        .await
-        .is_some();
+    let runtime_entry_existed_before_prepare =
+        state.runtime_adapter.contains_session(&session_id).await;
     let resume_bindings = state
         .runtime_adapter
         .prepare_bindings(session_id.clone())
@@ -3049,13 +3046,20 @@ async fn handle_meerkat_resume(
                 "failed to prepare bindings for session {session_id}: {e}"
             ))
         })?;
-    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
-        .await
-        .map_err(|e| {
-            ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}"
-            ))
-        })?;
+    if let Err(e) = install_prepared_runtime_interrupt_handle(
+        &state.service,
+        &state.runtime_adapter,
+        &session_id,
+    )
+    .await
+    {
+        if !runtime_entry_existed_before_prepare {
+            state.runtime_adapter.unregister_session(&session_id).await;
+        }
+        return Err(ToolCallError::internal(format!(
+            "failed to install prepared interrupt handle for session {session_id}: {e}"
+        )));
+    }
 
     // Build composed external tools:
     // - callback tools supplied by the MCP client
@@ -3074,8 +3078,16 @@ async fn handle_meerkat_resume(
         ))
     });
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
-        .map_err(ToolCallError::internal)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools)) {
+            Ok(external_tools) => external_tools,
+            Err(error) => {
+                if !runtime_entry_existed_before_prepare {
+                    state.runtime_adapter.unregister_session(&session_id).await;
+                }
+                return Err(ToolCallError::internal(error));
+            }
+        };
 
     // Decide the branch before moving any owned request fields.
     let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
@@ -3095,13 +3107,20 @@ async fn handle_meerkat_resume(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let output_schema =
-        match input.output_schema.clone() {
-            Some(schema) => Some(OutputSchema::from_json_value(schema).map_err(|e| {
-                ToolCallError::invalid_params(format!("Invalid output_schema: {e}"))
-            })?),
-            None => None,
-        };
+    let output_schema = match input.output_schema.clone() {
+        Some(schema) => match OutputSchema::from_json_value(schema) {
+            Ok(schema) => Some(schema),
+            Err(error) => {
+                if !runtime_entry_existed_before_prepare {
+                    state.runtime_adapter.unregister_session(&session_id).await;
+                }
+                return Err(ToolCallError::invalid_params(format!(
+                    "Invalid output_schema: {error}"
+                )));
+            }
+        },
+        None => None,
+    };
     let recovery_overrides = SurfaceSessionRecoveryOverrides {
         turn_metadata: turn_metadata.clone(),
         max_tokens: input.max_tokens,
@@ -3120,7 +3139,7 @@ async fn handle_meerkat_resume(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         ..Default::default()
     };
-    let recovered = build_recovered_session(
+    let recovered = match build_recovered_session(
         session,
         &recovery_overrides,
         SurfaceSessionRecoveryContext {
@@ -3134,8 +3153,15 @@ async fn handle_meerkat_resume(
             config_generation: current_generation,
             ..Default::default()
         },
-    )
-    .map_err(|e| ToolCallError::internal(format!("{e}")))?;
+    ) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            if !runtime_entry_existed_before_prepare {
+                state.runtime_adapter.unregister_session(&session_id).await;
+            }
+            return Err(ToolCallError::internal(format!("{error}")));
+        }
+    };
     let keep_alive = recovered.keep_alive;
     let mut create_req = recovered.into_deferred_create_request();
     create_req.prompt = prompt.clone().into();
@@ -3211,6 +3237,9 @@ async fn handle_meerkat_resume(
     let session_exists = state.service.read(&session_id).await.is_ok();
     if result.is_err() && !session_exists {
         ingress.clear_session(&session_id).await;
+        if !runtime_entry_existed_before_prepare {
+            state.runtime_adapter.unregister_session(&session_id).await;
+        }
     }
 
     drop(event_tx);

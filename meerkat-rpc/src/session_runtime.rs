@@ -1430,6 +1430,8 @@ impl SessionRuntime {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
+        let runtime_entry_existed_before_prepare =
+            self.runtime_adapter.contains_session(session_id).await;
         let bindings = self
             .runtime_adapter
             .prepare_bindings(session_id.clone())
@@ -1441,7 +1443,7 @@ impl SessionRuntime {
                 ),
                 data: None,
             })?;
-        let recovered = build_recovered_session(
+        let recovered = match build_recovered_session(
             session,
             &overrides,
             SurfaceSessionRecoveryContext {
@@ -1458,8 +1460,15 @@ impl SessionRuntime {
                 backend: self.backend.clone(),
                 config_generation: current_generation,
             },
-        )
-        .map_err(Self::recovery_error_to_rpc)?;
+        ) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                if !runtime_entry_existed_before_prepare {
+                    self.runtime_adapter.unregister_session(session_id).await;
+                }
+                return Err(Self::recovery_error_to_rpc(error));
+            }
+        };
         Ok(recovered.into_deferred_create_request())
     }
 

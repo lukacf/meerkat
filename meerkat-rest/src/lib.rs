@@ -506,6 +506,16 @@ async fn cleanup_prepared_rest_runtime(state: &AppState, session_id: &SessionId)
     state.runtime_adapter.unregister_session(session_id).await;
 }
 
+async fn cleanup_prepared_rest_runtime_if_new(
+    state: &AppState,
+    session_id: &SessionId,
+    existed_before_prepare: bool,
+) {
+    if !existed_before_prepare {
+        cleanup_prepared_rest_runtime(state, session_id).await;
+    }
+}
+
 #[cfg(feature = "comms")]
 fn comms_runtime_for_peer_ingress(
     keep_alive: bool,
@@ -660,6 +670,15 @@ fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> S
     }
 }
 
+fn surface_recovery_error_to_session(error: SurfaceSessionRecoveryError) -> SessionError {
+    match error {
+        SurfaceSessionRecoveryError::InvalidOverride(message) => SessionError::Unsupported(message),
+        other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            other.to_string(),
+        )),
+    }
+}
+
 async fn apply_runtime_turn(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
@@ -730,6 +749,8 @@ async fn apply_runtime_turn(
                     .await
                     .ok()
                     .map(|s| s.generation);
+                let runtime_entry_existed_before_prepare =
+                    context.runtime_adapter.contains_session(session_id).await;
                 let bindings = context
                     .runtime_adapter
                     .prepare_bindings(session_id.clone())
@@ -741,7 +762,7 @@ async fn apply_runtime_turn(
                             ),
                         ))
                     })?;
-                let recovered = build_recovered_session(
+                let recovered = match build_recovered_session(
                     session,
                     &recovery_overrides,
                     SurfaceSessionRecoveryContext {
@@ -761,19 +782,25 @@ async fn apply_runtime_turn(
                         backend: Some(context.backend.clone()),
                         config_generation: current_generation,
                     },
-                )
-                .map_err(|error| match error {
-                    SurfaceSessionRecoveryError::InvalidOverride(message) => {
-                        SessionError::Unsupported(message)
+                ) {
+                    Ok(recovered) => recovered,
+                    Err(error) => {
+                        if !runtime_entry_existed_before_prepare {
+                            context.runtime_adapter.unregister_session(session_id).await;
+                        }
+                        return Err(surface_recovery_error_to_session(error));
                     }
-                    other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        other.to_string(),
-                    )),
-                })?;
-                context
+                };
+                if let Err(error) = context
                     .session_service
                     .create_session(recovered.into_deferred_create_request())
-                    .await?;
+                    .await
+                {
+                    if !runtime_entry_existed_before_prepare {
+                        context.runtime_adapter.unregister_session(session_id).await;
+                    }
+                    return Err(error);
+                }
                 #[cfg(feature = "comms")]
                 update_rest_peer_ingress_context(
                     &context.runtime_adapter,
@@ -960,6 +987,8 @@ async fn apply_runtime_turn(
                 .await
                 .ok()
                 .map(|s| s.generation);
+            let runtime_entry_existed_before_prepare =
+                context.runtime_adapter.contains_session(session_id).await;
             let bindings = context
                 .runtime_adapter
                 .prepare_bindings(session_id.clone())
@@ -969,7 +998,7 @@ async fn apply_runtime_turn(
                         "failed to prepare runtime bindings for session {session_id}: {e}"
                     )))
                 })?;
-            let recovered = build_recovered_session(
+            let recovered = match build_recovered_session(
                 session,
                 &recovery_overrides,
                 SurfaceSessionRecoveryContext {
@@ -989,19 +1018,25 @@ async fn apply_runtime_turn(
                     backend: Some(context.backend.clone()),
                     config_generation: current_generation,
                 },
-            )
-            .map_err(|error| match error {
-                SurfaceSessionRecoveryError::InvalidOverride(message) => {
-                    SessionError::Unsupported(message)
+            ) {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    if !runtime_entry_existed_before_prepare {
+                        context.runtime_adapter.unregister_session(session_id).await;
+                    }
+                    return Err(surface_recovery_error_to_session(error));
                 }
-                other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    other.to_string(),
-                )),
-            })?;
-            context
+            };
+            if let Err(error) = context
                 .session_service
                 .create_session(recovered.into_deferred_create_request())
-                .await?;
+                .await
+            {
+                if !runtime_entry_existed_before_prepare {
+                    context.runtime_adapter.unregister_session(session_id).await;
+                }
+                return Err(error);
+            }
             #[cfg(feature = "comms")]
             update_rest_peer_ingress_context(
                 &context.runtime_adapter,
@@ -4016,6 +4051,8 @@ async fn continue_session_inner(
                 ))));
             }
         };
+        let runtime_entry_existed_before_prepare =
+            state.runtime_adapter.contains_session(&session_id).await;
         let bindings = match state
             .runtime_adapter
             .prepare_bindings(session_id.clone())
@@ -4053,7 +4090,12 @@ async fn continue_session_inner(
             Err(error) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                cleanup_prepared_rest_runtime(state, &session_id).await;
+                cleanup_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 return RequestTerminal::RespondWithoutPublish(Err(surface_recovery_error_to_api(
                     error,
                 )));
@@ -4074,7 +4116,12 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                cleanup_prepared_rest_runtime(state, &session_id).await;
+                cleanup_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
             }
         };
@@ -4087,8 +4134,33 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            cleanup_prepared_rest_runtime(state, &session_id).await;
+            cleanup_prepared_rest_runtime_if_new(
+                state,
+                &session_id,
+                runtime_entry_existed_before_prepare,
+            )
+            .await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+        }
+        match state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+        {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                cleanup_prepared_rest_runtime_if_new(
+                    state,
+                    &session_id,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "Failed to replace live session: {error}"
+                ))));
+            }
         }
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
@@ -7461,6 +7533,173 @@ mod tests {
         assert!(
             !adapter.contains_session(&created.session_id).await,
             "failed recovery must unregister the prepared runtime session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_live_materialization_rebuild_replaces_live_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let adapter = state.runtime_adapter.clone();
+        let pre_session = Session::new();
+        let bindings = adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "test precondition: runtime should already be registered"
+        );
+
+        let session_id = created.session_id.to_string();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "prompt": "Continue",
+                            "turn_metadata": {
+                                "model": "gpt-5.4-mini"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "live materialization continue must replace, not duplicate, the live session: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "successful rebuild must keep the runtime registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_live_rebuild_validation_failure_preserves_runtime() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let adapter = state.runtime_adapter.clone();
+        let pre_session = Session::new();
+        let bindings = adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "test precondition: runtime should already be registered"
+        );
+
+        let session_id = created.session_id.to_string();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "prompt": [{
+                                "type": "video",
+                                "media_type": "video/mp4",
+                                "duration_ms": 1000,
+                                "source": "inline",
+                                "data": "AAAA"
+                            }],
+                            "turn_metadata": {
+                                "model": "gpt-5.4-mini"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            adapter.contains_session(&created.session_id).await,
+            "failed live rebuild validation must not unregister the existing runtime"
+        );
+        assert!(
+            session_service.read(&created.session_id).await.is_ok(),
+            "failed live rebuild validation must leave the live session available"
         );
     }
 

@@ -6,9 +6,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut path = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     path.pop();
-    path
+    if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path
+    }
 }
 
 fn repo_file(relative: &str) -> String {
@@ -90,17 +96,25 @@ fn bazel_cargo_check_env() -> Vec<(&'static str, OsString)> {
     }
 
     if std::env::var_os("CARGO").is_none() {
-        if let Some(cargo) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/cargo") {
+        if let Some(cargo) = find_runfile_tool(&runfiles_dir, "bin/cargo") {
             env.push(("CARGO", cargo.into_os_string()));
         } else {
-            env.push(("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO", OsString::from("1")));
+            panic!(
+                "Bazel downstream AgentBuilder canaries require rules_rust Cargo runfiles; \
+                 missing cargo would silently skip downstream spoof fixtures"
+            );
         }
     }
 
-    if std::env::var_os("RUSTC").is_none()
-        && let Some(rustc) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/rustc")
-    {
-        env.push(("RUSTC", rustc.into_os_string()));
+    if std::env::var_os("RUSTC").is_none() {
+        if let Some(rustc) = find_runfile_tool(&runfiles_dir, "bin/rustc") {
+            env.push(("RUSTC", rustc.into_os_string()));
+        } else {
+            panic!(
+                "Bazel downstream AgentBuilder canaries require rules_rust rustc runfiles; \
+                 missing rustc would silently skip downstream spoof fixtures"
+            );
+        }
     }
 
     if std::env::var_os("CARGO_HOME").is_none()
@@ -962,6 +976,7 @@ fn downstream_validator_symbol_cannot_enter_core_factory_policy_finalizer() -> s
 name = "agent-builder-policy-downstream-validator-symbol-core"
 version = "0.0.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 async-trait = "0.1"
@@ -970,6 +985,43 @@ meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build
 "#,
             repo_root().join("meerkat-core").display()
         ),
+    )?;
+    fs::write(
+        temp.path().join("build.rs"),
+        r##"fn main() {
+    let suffix = std::env::var("DEP_MEERKAT_CORE_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+        .expect("meerkat-core must not publish a readable factory bridge symbol suffix");
+    let symbols = format!(
+        r#"
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_{suffix}")]
+pub extern "Rust" fn spoofed_agent_factory_policy_bridge_token_is_valid(
+    _factory_bridge_token: &(dyn Any + Send + Sync),
+) -> bool {{
+    true
+}}
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {{
+    #[link_name = "__meerkat_agent_factory_policy_build_v3_{suffix}"]
+    fn exported_agent_factory_policy_build(
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> FactoryPolicyBuildFuture;
+}}
+"#
+    );
+    std::fs::write(
+        std::path::Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR set"))
+            .join("agent_factory_policy_bridge_symbols.rs"),
+        symbols,
+    )
+    .expect("write generated suffix-aware bridge symbols");
+}
+"##,
     )?;
     fs::write(
         src_dir.join("main.rs"),
@@ -1003,6 +1055,8 @@ meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build
     assert!(
         stderr.contains("__meerkat_agent_factory_policy_build_v3")
             || stderr.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
+            || stderr.contains("DEP_MEERKAT_CORE_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+            || stderr.contains("must not publish a readable factory bridge symbol suffix")
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name")
             || stderr.contains("undefined symbol")
@@ -1708,6 +1762,12 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
              from dependency metadata; direct downstream dependents can read \
              the same DEP_* values"
         );
+        assert!(
+            !facade_build.contains("DEP_MEERKAT_CORE_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX"),
+            "facade build script must not consume the core factory bridge \
+             suffix from public Cargo DEP_* metadata; direct downstream \
+             dependents can read the same value and spoof suffixed symbols"
+        );
     }
     for (name, build_script) in [
         ("meerkat-core/build.rs", core_build.as_deref()),
@@ -1724,6 +1784,12 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
             "{name} must not accept caller-supplied factory bridge symbols; a \
              downstream build can otherwise choose the exported symbol and link \
              the core finalizer directly"
+        );
+        assert!(
+            !build_script.contains("cargo:agent_factory_policy_bridge_symbol_suffix"),
+            "{name} must not publish the factory bridge suffix through Cargo \
+             metadata; public direct dependents can read DEP_* metadata and \
+             generate matching validator/finalizer symbols"
         );
     }
 }
@@ -1818,12 +1884,57 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
         "the Bazel AgentFactory core variant must carry the internal factory \
          cfg but be visible only to the facade package"
     );
+    for forbidden_package in [
+        "//meerkat-cli:__pkg__",
+        "//meerkat-comms:__pkg__",
+        "//meerkat-runtime:__pkg__",
+        "//tests/integration:__pkg__",
+    ] {
+        assert!(
+            !internal_core.contains(forbidden_package),
+            "the actual Bazel AgentFactory core variant must be visible only \
+             to the facade package; {forbidden_package} can otherwise select \
+             the internal finalizer graph directly"
+        );
+    }
 
     if let Some(facade_bazel) = try_repo_file("meerkat/BUILD.bazel") {
+        assert!(
+            facade_bazel.contains("name = \"meerkat_core_agent_factory_build\"")
+                && facade_bazel
+                    .contains("actual = \"//meerkat-core:meerkat_core_agent_factory_build\""),
+            "the facade package must own the Bazel alias that routes private \
+             core factory-build graph consumers through the canonical facade \
+             package"
+        );
         assert!(
             !facade_bazel.contains("//meerkat:meerkat_agent_factory_build"),
             "the facade package must not rewrite self-dependencies to a \
              nonexistent private facade variant"
+        );
+    }
+}
+
+#[test]
+fn non_facade_bazel_targets_do_not_directly_select_core_factory_variant() {
+    let root = repo_root();
+    for entry in
+        fs::read_dir(&root).unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+    {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read repo entry: {err}"));
+        let path = entry.path().join("BUILD.bazel");
+        if path == root.join("meerkat/BUILD.bazel") || path == root.join("meerkat-core/BUILD.bazel")
+        {
+            continue;
+        }
+        let Ok(build_file) = fs::read_to_string(&path) else {
+            continue;
+        };
+        assert!(
+            !build_file.contains("\"//meerkat-core:meerkat_core_agent_factory_build\""),
+            "non-facade Bazel package must not depend on the actual core \
+             AgentFactory bridge target directly: {}",
+            path.display()
         );
     }
 }
@@ -1931,9 +2042,10 @@ fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
         }
 
         assert!(
-            build_target.contains("\"//meerkat-core:meerkat_core_agent_factory_build\""),
-            "{target} consumes the facade and must use the same private core \
-             variant as the facade to avoid duplicate meerkat_core types"
+            build_target.contains("\"//meerkat:meerkat_core_agent_factory_build\""),
+            "{target} consumes the facade and must use the same facade-owned \
+             private core variant alias as the facade to avoid duplicate \
+             meerkat_core types"
         );
         assert!(
             !build_target.contains("\"//meerkat-core:meerkat_core\","),
@@ -2086,6 +2198,17 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
                 path.display()
             );
         }
+        if path != root.join("meerkat/src/factory.rs")
+            && path != root.join("meerkat-core/src/agent/builder.rs")
+        {
+            assert!(
+                !source.contains("__meerkat_agent_factory_policy_build_v3")
+                    && !source.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1"),
+                "production source must not name AgentFactory bridge symbols \
+                 outside the canonical facade factory/core bridge: {}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -2108,11 +2231,16 @@ fn bazel_canary_runfiles_include_required_production_crates() {
         "//meerkat-runtime:package_runfiles",
         "//meerkat-rest:package_runfiles",
         "//meerkat-rpc:package_runfiles",
+        "@rules_rust//rust/toolchain:current_cargo_files",
+        "@rules_rust//rust/toolchain:current_rust_stdlib_files",
+        "@rules_rust//rust/toolchain:current_rustc_files",
+        "@rules_rust//rust/toolchain:current_rustc_lib_files",
     ] {
         assert!(
             bazel.contains(label),
             "Bazel canary must explicitly include {label} so BuildBuddy scans \
-             production crates that can host factory bypasses"
+             production crates that can host factory bypasses and has the \
+             Cargo/Rust toolchain needed to execute downstream compile canaries"
         );
     }
 }

@@ -87,25 +87,10 @@ fn forged_agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync
     &FORGED_AGENT_FACTORY_POLICY_BRIDGE_TOKEN
 }
 
-#[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1")]
-pub extern "Rust" fn spoofed_agent_factory_policy_bridge_token_is_valid(
-    _factory_bridge_token: &(dyn Any + Send + Sync),
-) -> bool {
-    true
-}
-
-#[allow(improper_ctypes_definitions, unsafe_code)]
-unsafe extern "Rust" {
-    #[link_name = "__meerkat_agent_factory_policy_build_v3"]
-    fn exported_agent_factory_policy_build(
-        factory_bridge_token: &'static (dyn Any + Send + Sync),
-        builder: AgentBuilder,
-        client: Arc<dyn AgentLlmClient>,
-        tools: Arc<dyn AgentToolDispatcher>,
-        store: Arc<dyn AgentSessionStore>,
-    ) -> FactoryPolicyBuildFuture;
-}
+include!(concat!(
+    env!("OUT_DIR"),
+    "/agent_factory_policy_bridge_symbols.rs"
+));
 
 fn forged_factory_policy_session() -> Session {
     let mut session = Session::new();

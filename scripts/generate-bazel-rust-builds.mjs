@@ -315,20 +315,28 @@ function agentFactoryVariantName(pkg) {
   return `${crateName(pkg.name)}_agent_factory_build`;
 }
 
-function agentFactoryVariantLabel(pkg) {
+function agentFactoryActualVariantLabel(pkg) {
   return `//${relative(root, packageDir(pkg))}:${agentFactoryVariantName(pkg)}`;
 }
 
+function agentFactoryFacadeVariantAliasLabel(pkg) {
+  return `//meerkat:${agentFactoryVariantName(pkg)}`;
+}
+
+const agentFactoryVariantPackages = [...localPackages.values()]
+  .filter((pkg) =>
+    shouldGenerateAgentFactoryVariantForKey(packageKey(pkg))
+    && hasRustLibraryTarget(pkg)
+  );
+
 const agentFactoryVariantByPublicLabel = new Map(
-  [...localPackages.values()]
-    .filter((pkg) =>
-      shouldGenerateAgentFactoryVariantForKey(packageKey(pkg))
-      && hasRustLibraryTarget(pkg)
-    )
-    .map((pkg) => [packageLabel(pkg), agentFactoryVariantLabel(pkg)]),
+  agentFactoryVariantPackages
+    .map((pkg) => [packageLabel(pkg), agentFactoryFacadeVariantAliasLabel(pkg)]),
 );
 
-const agentFactoryVariantVisibility = listExpr(
+const agentFactoryActualVariantVisibility = listExpr(["//meerkat:__pkg__"]);
+
+const agentFactoryFacadeVariantAliasVisibility = listExpr(
   [...new Set([
     ...agentFactoryGraphKeys,
     ...agentFactoryConsumerKeys,
@@ -806,6 +814,16 @@ for (const pkg of localPackages.values()) {
   );
   const key = packageKey(pkg);
 
+  if (key === "meerkat") {
+    for (const variantPkg of agentFactoryVariantPackages) {
+      rules.push(`alias(
+    name = ${q(agentFactoryVariantName(variantPkg))},
+    actual = ${q(agentFactoryActualVariantLabel(variantPkg))},
+    visibility = ${agentFactoryFacadeVariantAliasVisibility},
+)`);
+    }
+  }
+
   for (const target of pkg.targets) {
     const rule = targetRule(target);
     if (!rule) continue;
@@ -944,7 +962,9 @@ for (const pkg of localPackages.values()) {
       }
       const env = [`        "RUST_MIN_STACK": "16777216",`];
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
-      if (tags.includes("fast")) {
+      if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
+        attrs.splice(attrs.length - 1, 0, `    size = "large",`);
+      } else if (tags.includes("fast")) {
         attrs.splice(attrs.length - 1, 0, `    size = "small",`);
       }
       if (usesTrybuild) {
@@ -964,6 +984,10 @@ for (const pkg of localPackages.values()) {
           "//meerkat-rest:package_runfiles",
           "//meerkat-rpc:package_runfiles",
           "//meerkat-runtime:package_runfiles",
+          "@rules_rust//rust/toolchain:current_cargo_files",
+          "@rules_rust//rust/toolchain:current_rust_stdlib_files",
+          "@rules_rust//rust/toolchain:current_rustc_files",
+          "@rules_rust//rust/toolchain:current_rustc_lib_files",
         );
       }
       if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
@@ -1026,7 +1050,7 @@ for (const pkg of localPackages.values()) {
           return `    name = ${q(agentFactoryVariantName(pkg))},`;
         }
         if (line === `    visibility = ${rustTargetVisibility(key)},`) {
-          return `    visibility = ${agentFactoryVariantVisibility},`;
+          return `    visibility = ${agentFactoryActualVariantVisibility},`;
         }
         if (line === `    deps = ${depsExpr},`) {
           return `    deps = ${internalDepsExpr},`;
@@ -1275,8 +1299,8 @@ for (const pkg of localPackages.values()) {
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core_agent_factory_build",
-        "//meerkat-machine-schema:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,

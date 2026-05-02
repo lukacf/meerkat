@@ -510,10 +510,27 @@ impl RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let to_phase = if let Some(mut restored_state) = previous_state {
-            let to_phase = map_phase(restored_state.lifecycle_phase);
             if let Some(current) = guard.authorities.get(lease_key) {
+                if current.state.credential_present {
+                    let mut current_state = current.state.clone();
+                    merge_oauth_membership(&mut current_state, &restored_state);
+                    let to_phase = map_phase(current_state.lifecycle_phase);
+                    guard.authorities.insert(
+                        lease_key.clone(),
+                        auth_dsl::AuthMachineAuthority::from_state(current_state),
+                    );
+                    drop(guard);
+                    emit_audit(
+                        lease_key,
+                        "rollback_release_lease",
+                        AuthLeasePhase::Released,
+                        to_phase,
+                    );
+                    return;
+                }
                 merge_oauth_membership(&mut restored_state, &current.state);
             }
+            let to_phase = map_phase(restored_state.lifecycle_phase);
             guard.authorities.insert(
                 lease_key.clone(),
                 auth_dsl::AuthMachineAuthority::from_state(restored_state),
@@ -1147,6 +1164,68 @@ mod tests {
         );
         assert_eq!(snap.expires_at, Some(1_800_000_000));
         assert_eq!(snap.generation, acquired_generation);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct FailingReleaseObserver;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl AuthLeaseReleaseObserver for FailingReleaseObserver {
+        fn auth_lease_released(
+            &self,
+            _released: &ReleasedOAuthFlows,
+        ) -> Result<(), DslTransitionError> {
+            Err(DslTransitionError::new(
+                "test_release_observer",
+                "injected release observer failure",
+            ))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn release_observer_failure_does_not_overwrite_concurrent_reacquire() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared_failure");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+
+        let observer: Arc<dyn AuthLeaseReleaseObserver> = Arc::new(FailingReleaseObserver);
+        h.add_release_observer(Arc::downgrade(&observer));
+
+        let acquire_handle = h.clone();
+        let acquire_key = key.clone();
+        let hook_key = key.clone();
+        let acquired_transition = Arc::new(Mutex::new(None));
+        let hook_transition = Arc::clone(&acquired_transition);
+        set_release_after_accept_hook_for_test(Some(Arc::new(move |released_key| {
+            if released_key != &hook_key {
+                return;
+            }
+            let transition = acquire_handle
+                .acquire_lease(&acquire_key, 1_900_000_000)
+                .unwrap();
+            *hook_transition.lock().unwrap() = Some(transition);
+        })));
+
+        assert!(h.release_lease(&key).is_err());
+        set_release_after_accept_hook_for_test(None);
+
+        let acquired_transition = acquired_transition
+            .lock()
+            .unwrap()
+            .expect("release hook should reacquire the lease");
+        let snap = h.snapshot(&key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            snap.expires_at,
+            Some(1_900_000_000),
+            "observer-failure rollback must not restore the stale released credential snapshot"
+        );
+        assert_eq!(snap.generation, acquired_transition.generation);
+        assert_eq!(
+            snap.credential_published_at_millis,
+            acquired_transition.credential_published_at_millis
+        );
     }
 
     #[test]

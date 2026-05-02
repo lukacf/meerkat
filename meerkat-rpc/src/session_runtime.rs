@@ -754,6 +754,12 @@ pub struct SessionRuntime {
     approval_service: meerkat_core::ApprovalService,
 }
 
+struct RecoveredCreateRequest {
+    request: CreateSessionRequest,
+    session_id: SessionId,
+    runtime_entry_existed_before_prepare: bool,
+}
+
 fn session_metadata_marks_archived(session: &Session) -> bool {
     session
         .metadata()
@@ -1009,10 +1015,7 @@ impl SessionRuntime {
                     },
                 )
                 .await?;
-            self.service
-                .create_session(create_request)
-                .await
-                .map_err(session_error_to_rpc)?;
+            self.create_recovered_session(create_request).await?;
             comms_rt = self.service.comms_runtime(session_id).await;
         }
 
@@ -1425,7 +1428,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         session: Session,
         overrides: SurfaceSessionRecoveryOverrides,
-    ) -> Result<CreateSessionRequest, RpcError> {
+    ) -> Result<RecoveredCreateRequest, RpcError> {
         let current_generation = match self.config_runtime() {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
@@ -1469,7 +1472,39 @@ impl SessionRuntime {
                 return Err(Self::recovery_error_to_rpc(error));
             }
         };
-        Ok(recovered.into_deferred_create_request())
+        Ok(RecoveredCreateRequest {
+            request: recovered.into_deferred_create_request(),
+            session_id: session_id.clone(),
+            runtime_entry_existed_before_prepare,
+        })
+    }
+
+    async fn cleanup_recovered_runtime_if_new(&self, recovered: &RecoveredCreateRequest) {
+        if !recovered.runtime_entry_existed_before_prepare {
+            self.runtime_adapter
+                .unregister_session(&recovered.session_id)
+                .await;
+        }
+    }
+
+    async fn create_recovered_session(
+        &self,
+        recovered: RecoveredCreateRequest,
+    ) -> Result<(), RpcError> {
+        let RecoveredCreateRequest {
+            request,
+            session_id,
+            runtime_entry_existed_before_prepare,
+        } = recovered;
+        match self.service.create_session(request).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if !runtime_entry_existed_before_prepare {
+                    self.runtime_adapter.unregister_session(&session_id).await;
+                }
+                Err(session_error_to_rpc(error))
+            }
+        }
     }
 
     pub fn schedule_service(&self) -> ScheduleService {
@@ -2648,10 +2683,7 @@ impl SessionRuntime {
                     let create_request = self
                         .recovered_create_request(session_id, stored_session, recovery_overrides)
                         .await?;
-                    self.service
-                        .create_session(create_request)
-                        .await
-                        .map_err(session_error_to_rpc)?;
+                    self.create_recovered_session(create_request).await?;
                     #[cfg(feature = "comms")]
                     {
                         let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
@@ -3067,10 +3099,7 @@ impl SessionRuntime {
         let create_request = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
-        self.service
-            .create_session(create_request)
-            .await
-            .map_err(session_error_to_rpc)?;
+        self.create_recovered_session(create_request).await?;
         #[cfg(feature = "comms")]
         {
             // W2-G: never reconfigure a mob-owned drain during recovery
@@ -3666,21 +3695,28 @@ impl SessionRuntime {
         }
 
         let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata.as_ref());
-        let create_request = self
+        let recovered_create = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
-        let build = create_request.build.clone().ok_or_else(|| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!(
-                "recovered create request for session {session_id} is missing build options"
-            ),
-            data: None,
-        })?;
-        let model = create_request.model.clone();
+        let build = match recovered_create.request.build.clone() {
+            Some(build) => build,
+            None => {
+                self.cleanup_recovered_runtime_if_new(&recovered_create)
+                    .await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "recovered create request for session {session_id} is missing build options"
+                    ),
+                    data: None,
+                });
+            }
+        };
+        let model = recovered_create.request.model.clone();
         let mut build_config = AgentBuildConfig::new(model);
         build_config.apply_session_build_options(&build);
-        build_config.system_prompt = create_request.system_prompt.clone();
-        build_config.max_tokens = create_request.max_tokens;
+        build_config.system_prompt = recovered_create.request.system_prompt.clone();
+        build_config.max_tokens = recovered_create.request.max_tokens;
 
         // Stage as pending and re-enter the materialization path.
         // Labels are managed by the session service — pass None so
@@ -3690,9 +3726,17 @@ impl SessionRuntime {
 
         {
             let effective_llm_identity =
-                self.llm_identity_from_pending_build(&build_config).await?;
+                match self.llm_identity_from_pending_build(&build_config).await {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        self.cleanup_recovered_runtime_if_new(&recovered_create)
+                            .await;
+                        return Err(error);
+                    }
+                };
             let now = now_unix_secs();
-            self.staged_sessions
+            if let Err(error) = self
+                .staged_sessions
                 .stage(
                     session_id.clone(),
                     StagedSlot {
@@ -3707,11 +3751,15 @@ impl SessionRuntime {
                     },
                 )
                 .await
-                .map_err(|e| RpcError {
+            {
+                self.cleanup_recovered_runtime_if_new(&recovered_create)
+                    .await;
+                return Err(RpcError {
                     code: error::INTERNAL_ERROR,
-                    message: format!("failed to stage recovered session {session_id}: {e}"),
+                    message: format!("failed to stage recovered session {session_id}: {error}"),
                     data: None,
-                })?;
+                });
+            }
         }
 
         // Recursively call start_turn which will now find the pending session.
@@ -5601,6 +5649,102 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn context_only_recovery_create_failure_cleans_prepared_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (initial_tx, _initial_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize target for recovery".into(),
+                initial_tx,
+                None,
+            )
+            .await
+            .expect("materialize target session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live target session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            runtime
+                .load_persisted_session(&session_id)
+                .await
+                .expect("load persisted target")
+                .is_some(),
+            "test precondition: target session must remain persisted"
+        );
+
+        let blocker_build = mock_build_config();
+        runtime
+            .service
+            .create_session(CreateSessionRequest {
+                model: blocker_build.model.clone(),
+                prompt: "capacity blocker".to_string().into(),
+                system_prompt: blocker_build.system_prompt.clone(),
+                max_tokens: blocker_build.max_tokens,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(blocker_build.to_session_build_options()),
+                labels: None,
+            })
+            .await
+            .expect("capacity blocker session should be admitted");
+
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-create-failure-cleanup".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context after stale live session"
+                            .to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let error = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect_err("service create failure should be returned");
+
+        assert!(
+            error.message.contains("Max sessions"),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed RPC recovery create must not leak a newly prepared runtime"
+        );
     }
 
     #[tokio::test]

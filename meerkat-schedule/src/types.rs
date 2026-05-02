@@ -2,12 +2,13 @@ use chrono::{DateTime, Duration, Utc};
 use meerkat_core::connection::ConnectionRef;
 use meerkat_core::lifecycle::run_primitive::{
     KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
-    TurnInstruction, TurnMetadataOverride,
+    TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
 };
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::skills::SkillKey;
+use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::{HandlingMode, RenderMetadata};
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId, TurnToolOverlay};
+use serde::de;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -421,7 +422,7 @@ impl SessionTargetBinding {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScheduledSessionAction {
     Prompt {
@@ -431,8 +432,7 @@ pub enum ScheduledSessionAction {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialize_optional_public_runtime_turn_metadata",
-            deserialize_with = "deserialize_optional_public_runtime_turn_metadata"
+            serialize_with = "serialize_optional_public_runtime_turn_metadata"
         )]
         #[cfg_attr(
             feature = "schema",
@@ -446,6 +446,79 @@ pub enum ScheduledSessionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_metadata: Option<RenderMetadata>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduledPromptActionFields {
+    prompt: ContentInput,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    turn_metadata: Option<PublicRuntimeTurnMetadata>,
+    #[serde(default)]
+    render_metadata: Option<RenderMetadata>,
+    #[serde(default)]
+    skill_refs: Vec<SkillRef>,
+    #[serde(default)]
+    additional_instructions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduledEventActionFields {
+    event_type: String,
+    payload: serde_json::Value,
+    #[serde(default)]
+    render_metadata: Option<RenderMetadata>,
+}
+
+impl<'de> Deserialize<'de> for ScheduledSessionAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| de::Error::custom("scheduled session action must be an object"))?;
+        let action_type = object
+            .remove("type")
+            .ok_or_else(|| de::Error::missing_field("type"))?;
+        let action_type = action_type
+            .as_str()
+            .ok_or_else(|| de::Error::custom("scheduled session action type must be a string"))?;
+        let payload = serde_json::Value::Object(std::mem::take(object));
+
+        match action_type {
+            "prompt" => {
+                let fields: ScheduledPromptActionFields =
+                    serde_json::from_value(payload).map_err(de::Error::custom)?;
+                let turn_metadata = prompt_turn_metadata_from_fields(
+                    fields.turn_metadata,
+                    fields.render_metadata,
+                    fields.skill_refs,
+                    fields.additional_instructions,
+                )
+                .map_err(de::Error::custom)?;
+                Ok(Self::Prompt {
+                    prompt: fields.prompt,
+                    system_prompt: fields.system_prompt,
+                    turn_metadata,
+                })
+            }
+            "event" => {
+                let fields: ScheduledEventActionFields =
+                    serde_json::from_value(payload).map_err(de::Error::custom)?;
+                Ok(Self::Event {
+                    event_type: fields.event_type,
+                    payload: fields.payload,
+                    render_metadata: fields.render_metadata,
+                })
+            }
+            other => Err(de::Error::unknown_variant(other, &["prompt", "event"])),
+        }
+    }
 }
 
 impl ScheduledSessionAction {
@@ -541,6 +614,151 @@ fn core_keep_alive_override_from_public(
     }
 }
 
+fn default_legacy_keep_alive_policy() -> KeepAlivePolicy {
+    KeepAlivePolicy {
+        ttl: std::time::Duration::from_secs(30),
+        policy: KeepAliveMode::Pinned,
+    }
+}
+
+fn legacy_instruction_strings(instructions: Vec<String>) -> Option<Vec<TurnInstruction>> {
+    let instructions = instructions
+        .into_iter()
+        .filter_map(|body| {
+            let body = body.trim();
+            (!body.is_empty()).then(|| TurnInstruction {
+                kind: TurnInstructionKind::Host,
+                body: body.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    (!instructions.is_empty()).then_some(instructions)
+}
+
+fn fold_legacy_field<T: PartialEq>(
+    target: &mut Option<T>,
+    value: Option<T>,
+    legacy_field: &'static str,
+    metadata_field: &'static str,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    match target.as_ref() {
+        Some(existing) if existing != &value => Err(format!(
+            "split {legacy_field} diverges from turn_metadata.{metadata_field}"
+        )),
+        Some(_) => Ok(()),
+        None => {
+            *target = Some(value);
+            Ok(())
+        }
+    }
+}
+
+fn fold_legacy_keep_alive(
+    target: &mut Option<TurnMetadataOverride<KeepAlivePolicy>>,
+    value: Option<bool>,
+) -> Result<(), String> {
+    if value != Some(true) {
+        return Ok(());
+    }
+    fold_legacy_field(
+        target,
+        Some(TurnMetadataOverride::Set(default_legacy_keep_alive_policy())),
+        "keep_alive",
+        "keep_alive",
+    )
+}
+
+fn fold_legacy_provider_params(
+    metadata: &mut RuntimeTurnMetadata,
+    value: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let provider = metadata
+        .provider
+        .or_else(|| {
+            metadata
+                .model
+                .as_ref()
+                .and_then(|model| Provider::infer_from_model(model.as_str()))
+        })
+        .unwrap_or(Provider::Other);
+    fold_legacy_field(
+        &mut metadata.provider_params,
+        Some(TurnMetadataOverride::Set(
+            ProviderParamsOverride::from_legacy_provider_value(provider.as_str(), &value),
+        )),
+        "provider_params",
+        "provider_params",
+    )
+}
+
+fn fold_legacy_materialization_metadata(
+    metadata: &mut RuntimeTurnMetadata,
+    model: Option<String>,
+    provider: Option<Provider>,
+    provider_params: Option<serde_json::Value>,
+    preload_skills: Vec<SkillKey>,
+    additional_instructions: Vec<String>,
+    keep_alive: Option<bool>,
+) -> Result<(), String> {
+    fold_legacy_field(
+        &mut metadata.model,
+        model.map(ModelId::new),
+        "model",
+        "model",
+    )?;
+    fold_legacy_field(&mut metadata.provider, provider, "provider", "provider")?;
+    fold_legacy_provider_params(metadata, provider_params)?;
+    fold_legacy_field(
+        &mut metadata.skill_references,
+        (!preload_skills.is_empty()).then_some(preload_skills),
+        "preload_skills",
+        "skill_references",
+    )?;
+    fold_legacy_field(
+        &mut metadata.additional_instructions,
+        legacy_instruction_strings(additional_instructions),
+        "additional_instructions",
+        "additional_instructions",
+    )?;
+    fold_legacy_keep_alive(&mut metadata.keep_alive, keep_alive)?;
+    Ok(())
+}
+
+fn prompt_turn_metadata_from_fields(
+    turn_metadata: Option<PublicRuntimeTurnMetadata>,
+    render_metadata: Option<RenderMetadata>,
+    skill_refs: Vec<SkillRef>,
+    additional_instructions: Vec<String>,
+) -> Result<Option<Box<RuntimeTurnMetadata>>, String> {
+    let had_turn_metadata = turn_metadata.is_some();
+    let mut metadata: RuntimeTurnMetadata = turn_metadata.map(Into::into).unwrap_or_default();
+    fold_legacy_field(
+        &mut metadata.render_metadata,
+        render_metadata,
+        "render_metadata",
+        "render_metadata",
+    )?;
+    fold_legacy_field(
+        &mut metadata.skill_references,
+        (!skill_refs.is_empty()).then(|| skill_refs.into_iter().map(SkillRef::into_key).collect()),
+        "skill_refs",
+        "skill_references",
+    )?;
+    fold_legacy_field(
+        &mut metadata.additional_instructions,
+        legacy_instruction_strings(additional_instructions),
+        "additional_instructions",
+        "additional_instructions",
+    )?;
+    Ok((had_turn_metadata || !metadata.is_empty()).then(|| Box::new(metadata)))
+}
+
 impl From<PublicRuntimeTurnMetadata> for RuntimeTurnMetadata {
     fn from(value: PublicRuntimeTurnMetadata) -> Self {
         Self {
@@ -593,15 +811,6 @@ pub fn public_runtime_turn_metadata(metadata: &RuntimeTurnMetadata) -> RuntimeTu
     PublicRuntimeTurnMetadata::from(metadata.clone()).into()
 }
 
-fn deserialize_public_runtime_turn_metadata<'de, D>(
-    deserializer: D,
-) -> Result<RuntimeTurnMetadata, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    PublicRuntimeTurnMetadata::deserialize(deserializer).map(Into::into)
-}
-
 fn serialize_public_runtime_turn_metadata<S>(
     metadata: &RuntimeTurnMetadata,
     serializer: S,
@@ -610,16 +819,6 @@ where
     S: serde::Serializer,
 {
     PublicRuntimeTurnMetadata::from(metadata.clone()).serialize(serializer)
-}
-
-fn deserialize_optional_public_runtime_turn_metadata<'de, D>(
-    deserializer: D,
-) -> Result<Option<Box<RuntimeTurnMetadata>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<PublicRuntimeTurnMetadata>::deserialize(deserializer)
-        .map(|metadata| metadata.map(|metadata| Box::new(metadata.into())))
 }
 
 fn serialize_optional_public_runtime_turn_metadata<S>(
@@ -637,13 +836,10 @@ where
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMaterializationSpec {
-    #[serde(
-        serialize_with = "serialize_public_runtime_turn_metadata",
-        deserialize_with = "deserialize_public_runtime_turn_metadata"
-    )]
+    #[serde(serialize_with = "serialize_public_runtime_turn_metadata")]
     #[cfg_attr(feature = "schema", schemars(with = "PublicRuntimeTurnMetadata"))]
     pub turn_metadata: RuntimeTurnMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -674,6 +870,90 @@ pub struct SessionMaterializationSpec {
     pub config_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionMaterializationSpecFields {
+    #[serde(default)]
+    turn_metadata: Option<PublicRuntimeTurnMetadata>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<Provider>,
+    #[serde(default)]
+    provider_params: Option<serde_json::Value>,
+    #[serde(default)]
+    preload_skills: Vec<SkillKey>,
+    #[serde(default)]
+    additional_instructions: Vec<String>,
+    #[serde(default)]
+    keep_alive: Option<bool>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default, alias = "output_schema_json")]
+    output_schema: Option<OutputSchema>,
+    #[serde(default)]
+    structured_output_retries: u32,
+    #[serde(default)]
+    comms_name: Option<String>,
+    #[serde(default)]
+    peer_meta: Option<PeerMeta>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    realm_id: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    config_generation: Option<u64>,
+    #[serde(default)]
+    app_context: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for SessionMaterializationSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = SessionMaterializationSpecFields::deserialize(deserializer)?;
+        let had_turn_metadata = fields.turn_metadata.is_some();
+        let mut turn_metadata: RuntimeTurnMetadata =
+            fields.turn_metadata.map(Into::into).unwrap_or_default();
+        fold_legacy_materialization_metadata(
+            &mut turn_metadata,
+            fields.model,
+            fields.provider,
+            fields.provider_params,
+            fields.preload_skills,
+            fields.additional_instructions,
+            fields.keep_alive,
+        )
+        .map_err(de::Error::custom)?;
+        if !had_turn_metadata && turn_metadata.is_empty() {
+            return Err(de::Error::missing_field("turn_metadata"));
+        }
+
+        Ok(Self {
+            turn_metadata,
+            system_prompt: fields.system_prompt,
+            max_tokens: fields.max_tokens,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            comms_name: fields.comms_name,
+            peer_meta: fields.peer_meta,
+            labels: fields.labels,
+            realm_id: fields.realm_id,
+            instance_id: fields.instance_id,
+            backend: fields.backend,
+            config_generation: fields.config_generation,
+            app_context: fields.app_context,
+        })
+    }
 }
 
 impl SessionMaterializationSpec {
@@ -1833,23 +2113,68 @@ mod tests {
     }
 
     #[test]
-    fn session_materialization_rejects_legacy_string_preload_skills() {
+    fn session_materialization_deserializes_legacy_split_metadata_fields() {
+        let skill = fixture_skill_key("email");
         let json = serde_json::json!({
-            "turn_metadata": {
-                "model": "claude-sonnet-4-6"
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "provider_params": {
+                "thinking": { "budget_tokens": 4096 }
             },
-            "preload_skills": ["email"]
+            "preload_skills": [skill],
+            "additional_instructions": ["use the daily ledger", " "],
+            "keep_alive": true,
+            "system_prompt": "You are a scheduled worker",
+            "max_tokens": 1024
         });
 
-        let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
+        let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
+
+        assert_eq!(
+            parsed.turn_metadata.model.as_ref().map(ToString::to_string),
+            Some("claude-sonnet-4-6".to_string())
+        );
+        assert_eq!(parsed.turn_metadata.provider, Some(Provider::Anthropic));
+        assert_eq!(
+            parsed.turn_metadata.skill_references,
+            Some(vec![fixture_skill_key("email")])
+        );
+        assert_eq!(
+            parsed
+                .turn_metadata
+                .additional_instructions
+                .as_ref()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            parsed
+                .turn_metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("use the daily ledger")
+        );
+        assert!(matches!(
+            parsed.turn_metadata.keep_alive,
+            Some(TurnMetadataOverride::Set(_))
+        ));
+
+        let canonical = serde_json::to_value(&parsed).unwrap();
         assert!(
-            err.to_string().contains("preload_skills"),
-            "unexpected error: {err}"
+            canonical.get("model").is_none()
+                && canonical.get("provider").is_none()
+                && canonical.get("provider_params").is_none()
+                && canonical.get("preload_skills").is_none()
+                && canonical.get("additional_instructions").is_none()
+                && canonical.get("keep_alive").is_none(),
+            "legacy split fields must serialize back only through turn_metadata: {canonical}"
         );
     }
 
     #[test]
-    fn session_materialization_rejects_split_metadata_fields() {
+    fn session_materialization_rejects_divergent_legacy_split_metadata_fields() {
         let json = serde_json::json!({
             "model": "split-model",
             "provider": "anthropic",
@@ -1930,15 +2255,47 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_prompt_action_rejects_split_metadata_fields() {
+    fn scheduled_prompt_action_deserializes_legacy_split_metadata_fields() {
+        let skill = fixture_skill_key("summarize");
         let json = serde_json::json!({
             "type": "prompt",
             "prompt": "scheduled hello",
-            "render_metadata": {},
-            "skill_refs": [],
+            "render_metadata": { "class": "peer_message" },
+            "skill_refs": [{ "kind": "structured", "source_uuid": skill.source_uuid, "skill_name": skill.skill_name }],
+            "additional_instructions": ["prefer short answers", ""]
+        });
+
+        let parsed: ScheduledSessionAction = serde_json::from_value(json).unwrap();
+        let ScheduledSessionAction::Prompt { turn_metadata, .. } = parsed else {
+            panic!("expected prompt action");
+        };
+        let metadata = turn_metadata.expect("legacy split fields should fold into turn_metadata");
+
+        assert!(metadata.render_metadata.is_some());
+        assert_eq!(
+            metadata.skill_references,
+            Some(vec![fixture_skill_key("summarize")])
+        );
+        assert_eq!(
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("prefer short answers")
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_action_rejects_divergent_legacy_split_metadata_fields() {
+        let json = serde_json::json!({
+            "type": "prompt",
+            "prompt": "scheduled hello",
             "additional_instructions": ["legacy"],
             "turn_metadata": {
-                "render_metadata": {}
+                "additional_instructions": [
+                    { "kind": "host", "body": "canonical" }
+                ]
             }
         });
 

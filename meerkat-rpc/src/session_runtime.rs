@@ -3696,8 +3696,11 @@ impl SessionRuntime {
         }
 
         // Recursively call start_turn which will now find the pending session.
+        // recovered_create_request already consumed the caller's metadata into
+        // the recovered build's initial_turn_metadata, so the recursive call
+        // must only contribute the fresh runtime prompt stamp.
         // Use Box::pin to avoid infinite recursion concerns in async.
-        Box::pin(self.start_turn(session_id, prompt, event_tx, turn_metadata)).await
+        Box::pin(self.start_turn(session_id, prompt, event_tx, None)).await
     }
 
     async fn take_promoting_system_context_state(
@@ -5283,6 +5286,62 @@ mod tests {
 
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingLlmClient {
+        requests: Arc<std::sync::Mutex<Vec<meerkat_client::LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingLlmClient {
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.requests
+                .lock()
+                .expect("recording request lock")
+                .push(request.clone());
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Hello from recorder".to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn message_visible_text(message: &Message) -> String {
+        match message {
+            Message::System(message) => message.content.clone(),
+            Message::SystemNotice(message) => message.rendered_text(),
+            Message::User(message) => message.text_content(),
+            Message::Assistant(message) => message.content.clone(),
+            Message::BlockAssistant(message) => {
+                message.text_blocks().collect::<Vec<_>>().join("\n")
+            }
+            Message::ToolResults { results, .. } => results
+                .iter()
+                .map(|result| result.text_content())
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -9624,6 +9683,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_live_recovery_applies_turn_metadata_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(RecordingLlmClient {
+            requests: Arc::clone(&requests),
+        })));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
+            .await
+            .expect("initial materialization");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before recovery");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let marker = "recover exactly once marker";
+        let turn_metadata = RuntimeTurnMetadata {
+            additional_instructions: Some(vec![
+                meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                    body: marker.to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Recover with metadata".into(),
+                event_tx,
+                Some(turn_metadata),
+            )
+            .await
+            .expect("recovery turn should apply metadata");
+
+        let requests = requests.lock().expect("recorded requests");
+        let recovery_request = requests
+            .last()
+            .expect("recovery request should be recorded");
+        let text = recovery_request
+            .messages
+            .iter()
+            .map(message_visible_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            text.matches(marker).count(),
+            1,
+            "recovery turn_metadata must be consumed into the recovered build once, not replayed through the pending merge: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn missing_live_recovery_applies_turn_clear_and_connection_overrides() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
@@ -10330,6 +10456,10 @@ mod tests {
         let split_start_signature = concat!("flow_", "tool_", "overlay: Option<");
         let eager_pending_start = concat!("InitialTurnPolicy::", "RunImmediately");
         let split_skill_projection = concat!("skill_references: skill_", "references");
+        let replay_recovered_metadata = concat!(
+            "self.start_turn(session_id, prompt, event_tx, turn_",
+            "metadata)"
+        );
 
         assert!(
             !source.contains(shadow_type),
@@ -10350,6 +10480,10 @@ mod tests {
         assert!(
             !source.contains(split_skill_projection),
             "pending runtime materialization must not peel skill_references out of RuntimeTurnMetadata"
+        );
+        assert!(
+            !source.contains(replay_recovered_metadata),
+            "recovered turn_metadata must be consumed into recovered initial_turn_metadata, not replayed into the pending merge"
         );
     }
 

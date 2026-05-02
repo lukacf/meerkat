@@ -2859,10 +2859,11 @@ fn extract_request_context(
 }
 
 /// Drive a `RequestTerminal` outcome through the canonical surface request
-/// executor: `Publish(val)` must claim committed publication before the
-/// response is returned; if cancel arrived first, the cancellation response
-/// wins. `RespondWithoutPublish(val)` routes through `finish_unpublished` so
-/// any late cancel that arrived first still supersedes the response.
+/// executor: `Publish(val)` / committed terminals must complete through the
+/// committed path before the response is returned, so late cancel cannot replace
+/// committed work. `RespondWithoutPublish(val)` routes through
+/// `finish_unpublished` so any late cancel that arrived first still supersedes
+/// the response.
 async fn with_request_lifecycle(
     executor: &SurfaceRequestExecutor,
     ctx: Option<RequestContext>,
@@ -3971,7 +3972,15 @@ async fn continue_session_inner(
     #[cfg(feature = "mcp")]
     {
         let mut mcp_text = String::new();
-        match apply_mcp_boundary(state, &session_id, &caller_event_tx, &mut mcp_text).await {
+        match apply_mcp_boundary(
+            state,
+            &session_id,
+            &caller_event_tx,
+            &mut mcp_text,
+            req_ctx.as_ref(),
+        )
+        .await
+        {
             Ok(()) => {}
             Err(e) => {
                 if requires_rebuild {
@@ -4530,7 +4539,14 @@ async fn apply_mcp_boundary(
     session_id: &SessionId,
     event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
     prompt: &mut String,
+    req_ctx: Option<&RequestContext>,
 ) -> Result<(), ApiError> {
+    if let Some(ctx) = req_ctx
+        && ctx.cancel_already_requested()
+    {
+        return Err(ApiError::RequestCancelled { details: None });
+    }
+
     let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
         let mut map = state.mcp_sessions.write().await;
         let mcp_state = match map.get_mut(session_id) {
@@ -7743,6 +7759,56 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_cancel_before_mcp_boundary_does_not_mutate_mcp_state() {
+            let (state, _temp) = make_test_state().await;
+            let session_id = SessionId::new();
+            {
+                let mut map = state.mcp_sessions.write().await;
+                let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+                let (tx, rx) = mpsc::unbounded_channel();
+                map.insert(
+                    session_id.clone(),
+                    SessionMcpState {
+                        adapter,
+                        turn_counter: 0,
+                        lifecycle_tx: tx,
+                        lifecycle_rx: rx,
+                        drain_task_running: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request(
+                    "rest-cancel-before-mcp-boundary",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+            let (event_tx, _event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(4);
+            let mut prompt = String::new();
+
+            let err = apply_mcp_boundary(&state, &session_id, &event_tx, &mut prompt, Some(&ctx))
+                .await
+                .expect_err("cancel before MCP boundary must stop staged side effects");
+
+            assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+            let map = state.mcp_sessions.read().await;
+            assert_eq!(
+                map.get(&session_id)
+                    .expect("MCP session should remain registered")
+                    .turn_counter,
+                0,
+                "cancel before the MCP boundary must not advance turn-scoped MCP state"
+            );
+        }
+
+        #[tokio::test]
         async fn test_mcp_routes_registered() {
             // With mcp feature enabled, the routes should exist.
             let (state, _temp) = make_test_state().await;
@@ -8086,7 +8152,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_success_publish_terminal_after_cancel_returns_request_cancelled() {
+        async fn test_success_publish_terminal_after_cancel_preserves_payload() {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
@@ -8096,6 +8162,16 @@ mod tests {
                     noop_request_action(),
                 )
                 .expect("test request key should be unique");
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            ctx.set_unpublished_cleanup(request_action({
+                let cleanup_count = Arc::clone(&cleanup_count);
+                move || {
+                    let cleanup_count = Arc::clone(&cleanup_count);
+                    async move {
+                        cleanup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
 
             assert_eq!(
                 executor.cancel_request(ctx.key()).await,
@@ -8110,10 +8186,17 @@ mod tests {
             );
             let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
 
-            assert!(matches!(
-                result,
-                Err(ApiError::RequestCancelled { details: None })
-            ));
+            let response =
+                result.expect("committed success payload must survive late cancellation");
+            assert_eq!(
+                response.0.text,
+                "publish response must not leak after cancel"
+            );
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "committed REST successes must not run unpublished cleanup after admission"
+            );
             assert_eq!(executor.phase("rest-cancel-before-publish"), None);
         }
 
@@ -8283,7 +8366,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_success_publish_terminal_after_cancel_returns_http_499() {
+        async fn test_success_publish_terminal_after_cancel_returns_http_success() {
             let app = Router::new()
                 .route("/probe", post(publish_after_cancel_probe))
                 .with_state(RequestLifecycleProbeState {
@@ -8304,13 +8387,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(
-                response.status(),
-                StatusCode::from_u16(499).expect("499 should be a valid status")
-            );
+            assert_eq!(response.status(), StatusCode::OK);
             let body = response.into_body().collect().await.unwrap().to_bytes();
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(payload["code"], "REQUEST_CANCELLED");
+            assert_eq!(
+                payload["text"],
+                "publish response must not cross HTTP after cancel"
+            );
         }
     }
 

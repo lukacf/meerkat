@@ -850,6 +850,13 @@ mod tests {
         );
         assert!(server.write_long_running_response(response).await);
         assert_eq!(server.request_executor.phase(&request_key), None);
+        let written = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(written.trim()).expect("RPC response should be JSON");
+        assert!(
+            payload.get("result").is_some() && payload.get("error").is_none(),
+            "late cancel after runtime admission must not replace committed success payload: {payload}"
+        );
 
         let sessions = runtime
             .list_sessions_rich(meerkat_core::service::SessionQuery::default())
@@ -1630,7 +1637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_completion_after_cancel_writes_cancel_response() {
+    async fn publish_completion_after_cancel_writes_committed_response() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1682,11 +1689,16 @@ mod tests {
         let response: RpcResponse =
             serde_json::from_str(line.trim()).expect("response should parse");
         assert_eq!(response.id, Some(request_id));
-        assert!(response.result.is_none());
-        assert_eq!(
-            response.error.expect("expected cancel error").code,
-            crate::error::REQUEST_CANCELLED
-        );
+        let result: serde_json::Value = serde_json::from_str(
+            response
+                .result
+                .as_ref()
+                .expect("expected committed success result")
+                .get(),
+        )
+        .expect("result should parse");
+        assert_eq!(result, serde_json::json!({"ok": true}));
+        assert!(matches!(response.error, None));
     }
 
     // -----------------------------------------------------------------------

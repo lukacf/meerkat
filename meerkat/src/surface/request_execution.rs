@@ -143,7 +143,7 @@ impl<T> RequestTerminal<T> {
 pub enum RequestTerminalResolution<T> {
     /// The surface may emit or return the request's terminal payload.
     Emit(T),
-    /// Cancel won before terminal publication. The surface should emit its
+    /// Cancel won before an uncommitted terminal. The surface should emit its
     /// protocol-specific cancellation response instead of the stale payload.
     Cancelled,
     /// The lifecycle machine rejected a committed publication transition.
@@ -634,18 +634,6 @@ impl SurfaceRequestMechanics {
         Ok(outcome)
     }
 
-    async fn publish_or_cancelled_for_lifecycle_key(
-        &self,
-        key: &str,
-        lifecycle_key: &str,
-    ) -> Result<PublishOutcome, RequestTransitionError> {
-        let (outcome, cleanup) = self.publish_or_cancelled_decision(key, Some(lifecycle_key))?;
-        if let Some(cleanup) = cleanup {
-            cleanup().await;
-        }
-        Ok(outcome)
-    }
-
     fn finish_unpublished_decision(
         &self,
         key: &str,
@@ -870,11 +858,12 @@ impl SurfaceRequestExecutor {
         self.mechanics.publish_and_complete(key)
     }
 
-    /// Committed-terminal publication gate.
+    /// Explicit cancellable publication gate.
     ///
-    /// Surfaces call this before writing or returning a publish response. If a
-    /// cancel already won, unpublished cleanup is still run and the caller gets
-    /// a typed cancellation outcome instead of a publish response.
+    /// Most surfaces should resolve a machine-classified [`RequestTerminal`]
+    /// through [`Self::resolve_terminal`]. This lower-level gate is retained for
+    /// callers that intentionally want cancellation to supersede publication
+    /// before committed work is known to have landed.
     pub async fn publish_or_cancelled(
         &self,
         key: &str,
@@ -951,22 +940,16 @@ impl SurfaceRequestExecutor {
             RequestTerminalKind::Publish {
                 lifecycle_key,
                 payload,
-            } => {
-                match self
-                    .mechanics
-                    .publish_or_cancelled_for_lifecycle_key(key, &lifecycle_key)
-                    .await
-                {
-                    Ok(PublishOutcome::Published) => RequestTerminalResolution::Emit(payload),
-                    Ok(PublishOutcome::CancelledBeforePublish) => {
-                        RequestTerminalResolution::Cancelled
-                    }
-                    Err(err) => {
-                        let _ = self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key);
-                        RequestTerminalResolution::LifecycleError(err)
-                    }
+            } => match self
+                .mechanics
+                .complete_committed_for_lifecycle_key(key, &lifecycle_key)
+            {
+                Ok(()) => RequestTerminalResolution::Emit(payload),
+                Err(err) => {
+                    let _ = self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key);
+                    RequestTerminalResolution::LifecycleError(err)
                 }
-            }
+            },
             RequestTerminalKind::Commit {
                 lifecycle_key,
                 payload,
@@ -1294,7 +1277,7 @@ mod tests {
                             .classify_success_terminal(format!("{surface}-stale-publish")),
                     )
                     .await,
-                RequestTerminalResolution::Cancelled
+                RequestTerminalResolution::Emit(format!("{surface}-stale-publish"))
             );
             assert_eq!(executor.phase(&cancel_publish_key), None);
 
@@ -1336,12 +1319,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_resolution_runs_cancelled_cleanup_once() {
+    async fn committed_success_terminal_after_cancel_emits_without_unpublished_cleanup() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let cleanup_count = Arc::new(AtomicUsize::new(0));
         let context = begin_test_request_with_kind(
             &executor,
-            "cancelled-terminal-cleanup",
+            "committed-success-after-cancel",
             SurfaceRequestKind::SessionTurn,
             noop_request_action(),
         );
@@ -1366,7 +1349,7 @@ mod tests {
                     context.classify_success_terminal("cancelled-publish"),
                 )
                 .await,
-            RequestTerminalResolution::Cancelled
+            RequestTerminalResolution::Emit("cancelled-publish")
         );
         assert_eq!(
             executor
@@ -1377,7 +1360,12 @@ mod tests {
                 .await,
             RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable)
         );
-        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            0,
+            "committed successes must not run unpublished cleanup after admission"
+        );
+        assert_eq!(executor.phase("committed-success-after-cancel"), None);
     }
 
     #[tokio::test]
@@ -1936,13 +1924,13 @@ mod tests {
         );
     }
 
-    struct BlockingPublishLifecycle {
+    struct BlockingCommittedLifecycle {
         inner: Arc<dyn SurfaceRequestLifecycleHandle>,
-        publish_entered: mpsc::Sender<()>,
-        release_publish: Arc<(Mutex<bool>, Condvar)>,
+        commit_entered: mpsc::Sender<()>,
+        release_commit: Arc<(Mutex<bool>, Condvar)>,
     }
 
-    impl SurfaceRequestLifecycleHandle for BlockingPublishLifecycle {
+    impl SurfaceRequestLifecycleHandle for BlockingCommittedLifecycle {
         fn try_begin_request(
             &self,
             key: String,
@@ -1972,18 +1960,18 @@ mod tests {
         }
 
         fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-            let _ = self.publish_entered.send(());
-            let (release_flag, release_cvar) = &*self.release_publish;
+            self.inner.publish_and_complete(key)
+        }
+
+        fn complete_committed(&self, key: &str) -> Result<(), RequestTransitionError> {
+            let _ = self.commit_entered.send(());
+            let (release_flag, release_cvar) = &*self.release_commit;
             let mut released = lock_or_recover(release_flag);
             while !*released {
                 released = release_cvar
                     .wait(released)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
-            self.inner.publish_and_complete(key)
-        }
-
-        fn complete_committed(&self, key: &str) -> Result<(), RequestTransitionError> {
             self.inner.complete_committed(key)
         }
 
@@ -2001,12 +1989,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn terminal_resolution_does_not_remove_reused_key_after_publish_race() {
-        let (publish_entered_tx, publish_entered_rx) = mpsc::channel();
-        let release_publish = Arc::new((Mutex::new(false), Condvar::new()));
-        let lifecycle = Arc::new(BlockingPublishLifecycle {
+        let (commit_entered_tx, commit_entered_rx) = mpsc::channel();
+        let release_commit = Arc::new((Mutex::new(false), Condvar::new()));
+        let lifecycle = Arc::new(BlockingCommittedLifecycle {
             inner: meerkat_runtime::handles::standalone_surface_request_lifecycle_handle(),
-            publish_entered: publish_entered_tx,
-            release_publish: Arc::clone(&release_publish),
+            commit_entered: commit_entered_tx,
+            release_commit: Arc::clone(&release_commit),
         });
         let executor = SurfaceRequestExecutor::from_lifecycle(Duration::from_millis(1), lifecycle);
 
@@ -2025,9 +2013,9 @@ mod tests {
                 .resolve_terminal(Some("race-reused-terminal-key"), terminal)
                 .await
         });
-        publish_entered_rx
+        commit_entered_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("publish transition should be entered");
+            .expect("committed terminal transition should be entered");
 
         let reusing_executor = executor.clone();
         let reuser = tokio::spawn(async move {
@@ -2044,7 +2032,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         {
-            let (release_flag, release_cvar) = &*release_publish;
+            let (release_flag, release_cvar) = &*release_commit;
             *lock_or_recover(release_flag) = true;
             release_cvar.notify_all();
         }

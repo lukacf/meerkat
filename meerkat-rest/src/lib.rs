@@ -2908,6 +2908,30 @@ fn committed_terminal(
     }
 }
 
+fn cancelled_terminal(
+    ctx: Option<&RequestContext>,
+    committed_surface_effects: bool,
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+    let err = ApiError::RequestCancelled { details: None };
+    if committed_surface_effects {
+        committed_terminal(ctx, Err(err))
+    } else {
+        failed_terminal(ctx, err)
+    }
+}
+
+#[cfg(feature = "mcp")]
+fn mcp_boundary_error_terminal(
+    ctx: Option<&RequestContext>,
+    err: ApiError,
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+    if matches!(err, ApiError::RequestCancelled { .. }) {
+        failed_terminal(ctx, err)
+    } else {
+        committed_terminal(ctx, Err(err))
+    }
+}
+
 async fn unregister_prepared_rest_runtime_if_new(
     state: &AppState,
     session_id: &SessionId,
@@ -3970,6 +3994,10 @@ async fn continue_session_inner(
     // text-only system notices; extract a String for it, then fold any
     // additions back into the final ContentInput.
     #[cfg(feature = "mcp")]
+    let mcp_boundary_committed: bool;
+    #[cfg(not(feature = "mcp"))]
+    let mcp_boundary_committed = false;
+    #[cfg(feature = "mcp")]
     {
         let mut mcp_text = String::new();
         match apply_mcp_boundary(
@@ -3981,7 +4009,9 @@ async fn continue_session_inner(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(committed) => {
+                mcp_boundary_committed = committed;
+            }
             Err(e) => {
                 if requires_rebuild {
                     unregister_prepared_rest_runtime_if_new(
@@ -3993,7 +4023,7 @@ async fn continue_session_inner(
                 }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(req_ctx.as_ref(), e);
+                return mcp_boundary_error_terminal(req_ctx.as_ref(), e);
             }
         }
         // If the MCP boundary appended notices, prepend as a text block
@@ -4213,10 +4243,7 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(
-                req_ctx.as_ref(),
-                ApiError::RequestCancelled { details: None },
-            );
+            return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
         }
         let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
             Box::new(move || ctx.cancel_already_requested())
@@ -4333,10 +4360,7 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(
-                req_ctx.as_ref(),
-                ApiError::RequestCancelled { details: None },
-            );
+            return cancelled_terminal(req_ctx.as_ref(), mcp_boundary_committed);
         }
         let pre_admission_cancel_check = req_ctx.clone().map(|ctx| {
             Box::new(move || ctx.cancel_already_requested())
@@ -4531,8 +4555,11 @@ async fn session_events(
 ///
 /// Mirrors RPC's `apply_mcp_boundary()`: drain queued lifecycle actions,
 /// call `apply_staged()`, spawn drain task if removals started, emit events.
-/// Returns an error if staged operations fail to apply — the caller should
-/// fail the turn to match RPC semantics.
+/// Returns `Ok(true)` when a session-scoped boundary was reached, even if no
+/// staged operations existed. Returns an error if staged operations fail to
+/// apply — the caller should treat non-cancel errors as committed surface
+/// effects because `apply_staged()` can partially apply earlier intents before
+/// surfacing a later error.
 #[cfg(feature = "mcp")]
 async fn apply_mcp_boundary(
     state: &AppState,
@@ -4540,7 +4567,7 @@ async fn apply_mcp_boundary(
     event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
     prompt: &mut String,
     req_ctx: Option<&RequestContext>,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     if let Some(ctx) = req_ctx
         && ctx.cancel_already_requested()
     {
@@ -4549,9 +4576,14 @@ async fn apply_mcp_boundary(
 
     let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
         let mut map = state.mcp_sessions.write().await;
+        if let Some(ctx) = req_ctx
+            && ctx.cancel_already_requested()
+        {
+            return Err(ApiError::RequestCancelled { details: None });
+        }
         let mcp_state = match map.get_mut(session_id) {
             Some(s) => s,
-            None => return Ok(()),
+            None => return Ok(false),
         };
         mcp_state.turn_counter = mcp_state.turn_counter.saturating_add(1);
         let mut queued = Vec::new();
@@ -4608,7 +4640,7 @@ async fn apply_mcp_boundary(
         .await;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Spawn a background task that monitors removing MCP servers.
@@ -7806,6 +7838,96 @@ mod tests {
                 0,
                 "cancel before the MCP boundary must not advance turn-scoped MCP state"
             );
+        }
+
+        #[tokio::test]
+        async fn test_cancel_while_waiting_for_mcp_boundary_lock_does_not_mutate_mcp_state() {
+            let (state, _temp) = make_test_state().await;
+            let session_id = SessionId::new();
+            {
+                let mut map = state.mcp_sessions.write().await;
+                let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+                let (tx, rx) = mpsc::unbounded_channel();
+                map.insert(
+                    session_id.clone(),
+                    SessionMcpState {
+                        adapter,
+                        turn_counter: 0,
+                        lifecycle_tx: tx,
+                        lifecycle_rx: rx,
+                        drain_task_running: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request(
+                    "rest-cancel-during-mcp-boundary-lock",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+            let (event_tx, _event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(4);
+            let mut prompt = String::new();
+
+            let guard = state.mcp_sessions.write().await;
+            let boundary =
+                apply_mcp_boundary(&state, &session_id, &event_tx, &mut prompt, Some(&ctx));
+            tokio::pin!(boundary);
+            tokio::select! {
+                result = &mut boundary => panic!("boundary should wait on the held MCP write lock, got {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+            drop(guard);
+
+            let err = boundary
+                .await
+                .expect_err("cancel while waiting on the MCP lock must stop staged side effects");
+            assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+            let map = state.mcp_sessions.read().await;
+            assert_eq!(
+                map.get(&session_id)
+                    .expect("MCP session should remain registered")
+                    .turn_counter,
+                0,
+                "cancel observed after lock wait must not advance turn-scoped MCP state"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_mcp_boundary_apply_error_uses_committed_terminal_after_cancel() {
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request(
+                    "rest-mcp-boundary-partial-apply-error",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+            let terminal = mcp_boundary_error_terminal(
+                Some(&ctx),
+                ApiError::Internal("failed to apply staged MCP operations: later op failed".into()),
+            );
+
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+            let resolution = executor.resolve_terminal(Some(ctx.key()), terminal).await;
+            match resolution {
+                RequestTerminalResolution::Emit(Err(ApiError::Internal(message))) => {
+                    assert!(message.contains("staged MCP operations"));
+                }
+                other => panic!(
+                    "partial MCP boundary failures must be emitted as committed failures, got {other:?}"
+                ),
+            }
         }
 
         #[tokio::test]

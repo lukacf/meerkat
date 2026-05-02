@@ -1114,6 +1114,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Some(session_tx)
     }
 
+    async fn install_create_session_sidecars(
+        &self,
+        id: &SessionId,
+        gate: Arc<CheckpointerGate>,
+        create_projection_session_tx: Option<watch::Sender<Option<SessionId>>>,
+    ) {
+        self.checkpointer_gates
+            .lock()
+            .await
+            .insert(id.clone(), gate);
+        if let Some(session_tx) = create_projection_session_tx {
+            let _ = session_tx.send(Some(id.clone()));
+        }
+        self.spawn_event_projection_task(id).await;
+    }
+
     async fn spawn_event_projection_task(&self, id: &SessionId) {
         let (Some(event_store), Some(projector)) =
             (self.event_store.clone(), self.projector.clone())
@@ -1570,23 +1586,28 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     let _ = self.persist_full_session(&session_id).await;
                 }
                 if let SessionError::PostAdmissionFailure { id: session_id, .. } = &error {
-                    let _ = self.persist_full_session(session_id).await;
+                    self.install_create_session_sidecars(
+                        session_id,
+                        Arc::clone(&gate),
+                        create_projection_session_tx,
+                    )
+                    .await;
+                    if let Ok(saved_len) = self.persist_full_session(session_id).await {
+                        checkpointer
+                            .last_saved_len
+                            .store(saved_len, std::sync::atomic::Ordering::Release);
+                    }
                 }
                 return Err(error);
             }
         };
 
-        // Track the gate so archive() can cancel checkpoint writes.
-        {
-            self.checkpointer_gates
-                .lock()
-                .await
-                .insert(result.session_id.clone(), gate);
-        }
-        if let Some(session_tx) = create_projection_session_tx {
-            let _ = session_tx.send(Some(result.session_id.clone()));
-        }
-        self.spawn_event_projection_task(&result.session_id).await;
+        self.install_create_session_sidecars(
+            &result.session_id,
+            gate,
+            create_projection_session_tx,
+        )
+        .await;
 
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
@@ -3228,6 +3249,33 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: Some("synthetic run failure".to_string()),
+            })
+        }
+    }
+
+    struct EventfulFailingRunBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for EventfulFailingRunBuilder {
+        type Agent = EventfulDummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(EventfulDummyAgent {
+                inner: DummyAgent {
+                    session: Arc::new(std::sync::Mutex::new(session)),
+                    system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                    run_failure: Some("synthetic create turn failure".to_string()),
+                },
             })
         }
     }
@@ -6671,6 +6719,72 @@ mod tests {
 
         event_store.wait_for_seq(&session_id, 2).await;
         assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
+        let events_path = dir
+            .path()
+            .join(".rkat")
+            .join("sessions")
+            .join(session_id.to_string())
+            .join("events.jsonl");
+        let projected = read_projected_events_after(&events_path, "run_completed").await;
+        assert!(projected.contains("run_started"));
+        assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_post_admission_create_failure_installs_projection_and_checkpointer() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            EventfulFailingRunBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let error = service
+            .create_session(create_request_with_metadata(
+                "fail after admission",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect_err("first turn failure should surface as a post-admission create error");
+        let session_id = match error {
+            SessionError::PostAdmissionFailure { id, .. } => id,
+            other => panic!("expected post-admission failure, got {other:?}"),
+        };
+
+        assert!(
+            service
+                .checkpointer_gates
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "post-admission create failures must install the same checkpointer gate as successful creates"
+        );
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "project future post-admission event".to_string(),
+                    source: Some("test".to_string()),
+                    idempotency_key: Some("post-admission-create-projection".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("post-admission session should retain live projection machinery");
+
+        event_store.wait_for_seq(&session_id, 2).await;
         let events_path = dir
             .path()
             .join(".rkat")

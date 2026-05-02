@@ -264,6 +264,21 @@ impl RuntimeTurnStartError {
         }
     }
 
+    pub(crate) fn after_committed_surface_effect(rpc_error: RpcError) -> Self {
+        Self::after_admission(rpc_error)
+    }
+
+    pub(crate) fn from_rpc_error_with_surface_commit(
+        rpc_error: RpcError,
+        surface_effect_committed: bool,
+    ) -> Self {
+        if surface_effect_committed {
+            Self::after_committed_surface_effect(rpc_error)
+        } else {
+            rpc_error.into()
+        }
+    }
+
     pub(crate) fn admission_committed(&self) -> bool {
         self.admission_committed
     }
@@ -291,6 +306,14 @@ pub(crate) fn runtime_accept_error_to_turn_start(err: RuntimeDriverError) -> Run
     RuntimeTurnStartError {
         rpc_error: runtime_accept_error_to_rpc(err),
         admission_committed,
+    }
+}
+
+fn request_cancelled_rpc_error() -> RpcError {
+    RpcError {
+        code: error::REQUEST_CANCELLED,
+        message: "request cancelled before start".to_string(),
+        data: None,
     }
 }
 
@@ -2351,10 +2374,22 @@ impl SessionRuntime {
         // (from mcp/add, mcp/remove, mcp/reload) must be connected and made
         // visible to the agent before the turn starts.
         #[cfg(feature = "mcp")]
-        {
+        let mcp_boundary_committed = {
+            if pre_admission_cancelled
+                .as_ref()
+                .is_some_and(|check| check())
+            {
+                return Err(request_cancelled_rpc_error().into());
+            }
             let mut mcp_text = String::new();
-            self.apply_mcp_boundary(session_id, &mcp_event_tx, &mut mcp_text)
-                .await?;
+            let committed = match self
+                .apply_mcp_boundary(session_id, &mcp_event_tx, &mut mcp_text)
+                .await
+            {
+                Ok(committed) => committed,
+                Err(err) if err.code == error::REQUEST_CANCELLED => return Err(err.into()),
+                Err(err) => return Err(RuntimeTurnStartError::after_committed_surface_effect(err)),
+            };
             if !mcp_text.is_empty() {
                 let mut blocks = prompt.into_blocks();
                 blocks.insert(
@@ -2363,7 +2398,10 @@ impl SessionRuntime {
                 );
                 prompt = ContentInput::Blocks(blocks);
             }
-        }
+            committed
+        };
+        #[cfg(not(feature = "mcp"))]
+        let mcp_boundary_committed = false;
 
         // Reject build-only overrides that cannot be applied via runtime turn
         // metadata. These fields only apply during pending→materialized
@@ -2379,16 +2417,18 @@ impl SessionRuntime {
             ];
             let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
             if !rejected.is_empty() {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a runtime-routed turn; \
-                         set these at session/create time or use a deferred session",
-                        rejected.join(", ")
-                    ),
-                    data: None,
-                }
-                .into());
+                return Err(RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+                    RpcError {
+                        code: error::INVALID_PARAMS,
+                        message: format!(
+                            "Cannot override {} on a runtime-routed turn; \
+                             set these at session/create time or use a deferred session",
+                            rejected.join(", ")
+                        ),
+                        data: None,
+                    },
+                    mcp_boundary_committed,
+                ));
             }
         }
 
@@ -2402,18 +2442,23 @@ impl SessionRuntime {
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
 
-        self.ensure_runtime_executor(session_id).await?;
+        self.ensure_runtime_executor(session_id)
+            .await
+            .map_err(|err| {
+                RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+                    err,
+                    mcp_boundary_committed,
+                )
+            })?;
 
         if pre_admission_cancelled
             .as_ref()
             .is_some_and(|check| check())
         {
-            return Err(RpcError {
-                code: error::REQUEST_CANCELLED,
-                message: "request cancelled before start".to_string(),
-                data: None,
-            }
-            .into());
+            return Err(RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+                request_cancelled_rpc_error(),
+                mcp_boundary_committed,
+            ));
         }
 
         // Validate and capture keep_alive/comms intent before admission, but
@@ -2426,7 +2471,13 @@ impl SessionRuntime {
                 Some(val) => val,
                 None => self
                     .load_persisted_session(session_id)
-                    .await?
+                    .await
+                    .map_err(|err| {
+                        RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+                            err,
+                            mcp_boundary_committed,
+                        )
+                    })?
                     .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
                     .unwrap_or(false),
             };
@@ -2441,13 +2492,15 @@ impl SessionRuntime {
                     let adapter_has_comms =
                         self.runtime_adapter.session_has_comms(session_id).await;
                     if !adapter_has_comms {
-                        return Err(RpcError {
-                            code: error::INVALID_PARAMS,
-                            message: "keep_alive requires a session created with comms_name"
-                                .to_string(),
-                            data: None,
-                        }
-                        .into());
+                        return Err(RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+                            RpcError {
+                                code: error::INVALID_PARAMS,
+                                message: "keep_alive requires a session created with comms_name"
+                                    .to_string(),
+                                data: None,
+                            },
+                            mcp_boundary_committed,
+                        ));
                     }
                 }
             }
@@ -2463,7 +2516,14 @@ impl SessionRuntime {
                 pre_admission_cancelled,
             )
             .await
-            .map_err(runtime_accept_error_to_turn_start)?;
+            .map_err(|err| {
+                let err = runtime_accept_error_to_turn_start(err);
+                if mcp_boundary_committed && !err.admission_committed() {
+                    RuntimeTurnStartError::after_committed_surface_effect(err.into_rpc_error())
+                } else {
+                    err
+                }
+            })?;
         let admission_committed = outcome.is_accepted();
 
         // Commit keep_alive/comms side effects only after runtime admission.
@@ -4768,12 +4828,12 @@ impl SessionRuntime {
         session_id: &SessionId,
         event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
         prompt: &mut String,
-    ) -> Result<(), RpcError> {
+    ) -> Result<bool, RpcError> {
         let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
             let mut map = self.mcp_sessions.write().await;
             let state = match map.get_mut(session_id) {
                 Some(state) => state,
-                None => return Ok(()),
+                None => return Ok(false),
             };
             state.turn_counter = state.turn_counter.saturating_add(1);
             let mut queued = Vec::new();
@@ -4810,12 +4870,12 @@ impl SessionRuntime {
 
         queued_actions.extend(result.delta.lifecycle_actions);
         if queued_actions.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
 
         self.emit_mcp_lifecycle_actions(session_id, event_tx, prompt, turn_number, queued_actions)
             .await;
-        Ok(())
+        Ok(true)
     }
 
     #[cfg(feature = "mcp")]
@@ -5071,6 +5131,23 @@ mod tests {
         .expect("additional instructions should produce metadata");
 
         assert_eq!(metadata.execution_kind, None);
+    }
+
+    #[test]
+    fn committed_surface_effect_errors_are_committed_turn_start_failures() {
+        let err = RuntimeTurnStartError::from_rpc_error_with_surface_commit(
+            RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "failed to apply staged MCP operations: later op failed".to_string(),
+                data: None,
+            },
+            true,
+        );
+
+        assert!(
+            err.admission_committed(),
+            "partial MCP boundary failures must not be downgraded to cancellable turn-start failures"
+        );
     }
 
     #[test]

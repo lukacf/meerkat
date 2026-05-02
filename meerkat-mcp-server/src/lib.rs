@@ -1296,6 +1296,20 @@ fn post_commit_turn_error(session_id: &meerkat::SessionId, err: &SessionError) -
     )
 }
 
+fn post_commit_turn_internal_error(
+    session_id: &meerkat::SessionId,
+    message: impl Into<String>,
+) -> ToolCallError {
+    ToolCallError::committed_internal_with_data(
+        message,
+        json!({
+            "session_id": session_id.to_string(),
+            "session_ref": session_id.to_string(),
+            "resumable": true,
+        }),
+    )
+}
+
 fn request_cancelled_tool_error() -> ToolCallError {
     ToolCallError::new(
         meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
@@ -3407,12 +3421,13 @@ async fn handle_meerkat_resume(
                 if let Some(comms_rt) = post_admission_keep_alive_update {
                     if let Err(err) = state
                         .service
-                        .update_session_keep_alive(&session_id, keep_alive)
+                        .apply_runtime_session_keep_alive(&session_id, keep_alive)
                         .await
                     {
-                        return Err(ToolCallError::internal(format!(
-                            "failed to persist keep_alive: {err}"
-                        )));
+                        return Err(post_commit_turn_internal_error(
+                            &session_id,
+                            format!("failed to persist keep_alive: {err}"),
+                        ));
                     }
                     state
                         .runtime_adapter
@@ -3649,6 +3664,62 @@ mod tests {
         let session_id = session.id().to_string();
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    struct FailSaveStore {
+        inner: meerkat::MemoryStore,
+        save_calls: AtomicUsize,
+        fail_from_save_call: AtomicUsize,
+    }
+
+    impl FailSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                save_calls: AtomicUsize::new(0),
+                fail_from_save_call: AtomicUsize::new(0),
+            }
+        }
+
+        fn fail_from_save_call(&self, call: usize) {
+            self.fail_from_save_call.store(call, Ordering::Release);
+        }
+
+        fn next_save_call(&self) -> usize {
+            self.save_calls.load(Ordering::Acquire) + 1
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat::SessionStoreError> {
+            let call = self.save_calls.fetch_add(1, Ordering::AcqRel) + 1;
+            let fail_from = self.fail_from_save_call.load(Ordering::Acquire);
+            if fail_from != 0 && call >= fail_from {
+                return Err(meerkat::SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(
+            &self,
+            id: &meerkat::SessionId,
+        ) -> Result<Option<Session>, meerkat::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &meerkat::SessionId) -> Result<(), meerkat::SessionStoreError> {
+            self.inner.delete(id).await
+        }
     }
 
     struct SucceedsThenFailsClient {
@@ -5069,6 +5140,95 @@ mod tests {
                 .contains_key(&session_id.to_string()),
             "resolving a resumable resume error must not unregister the MCP adapter"
         );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn post_commit_meerkat_resume_keep_alive_persist_failure_uses_committed_terminal_outcome()
+    {
+        let store = Arc::new(FailSaveStore::new());
+        let state = MeerkatMcpState::new_with_store_and_llm_client(
+            store.clone() as Arc<dyn SessionStore>,
+            Arc::new(meerkat_client::TestClient::default()),
+        )
+        .await;
+        let seed_result = Box::pin(handle_meerkat_run(
+            &state,
+            test_run_input("seed live resume session"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed session create should succeed");
+        let seed_payload = unwrap_payload(seed_result);
+        let session_id = meerkat::SessionId::parse(
+            seed_payload["session_id"]
+                .as_str()
+                .expect("seed response includes session id"),
+        )
+        .expect("seed session id should parse");
+        let request_executor = state.surface_request_executor(Duration::from_millis(1));
+        let context = request_executor
+            .try_begin_request(
+                "mcp-resume-keep-alive-post-commit-error",
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+
+        // Let the resume turn's own checkpoint/persist saves complete; the
+        // failure is targeted at the post-turn keep_alive persistence below.
+        store.fail_from_save_call(store.next_save_call() + 4);
+        let mut resume = test_resume_input(
+            &session_id.to_string(),
+            "persist keep_alive failure after resume admission",
+        );
+        resume.keep_alive = Some(false);
+        let result = Box::pin(handle_meerkat_resume(
+            &state,
+            resume,
+            None,
+            Some(context.clone()),
+        ))
+        .await;
+
+        let err = result.expect_err("post-turn keep_alive persistence should fail visibly");
+        assert_eq!(
+            err.terminal_outcome(),
+            SurfaceRequestTerminalOutcome::CommittedFailure,
+            "post-turn resume side-effect failures must use committed terminal authority after {} save calls: {}",
+            store.save_calls.load(Ordering::Acquire),
+            err.message
+        );
+        let data = err.data.as_ref().expect("post-commit error data");
+        assert_eq!(data.get("resumable").and_then(Value::as_bool), Some(true));
+        let session_id_string = session_id.to_string();
+        assert_eq!(
+            data.get("session_id").and_then(Value::as_str),
+            Some(session_id_string.as_str())
+        );
+
+        assert_eq!(
+            request_executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel after the committed side-effect failure must not replace it"
+        );
+        let terminal_response = json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "error": {
+                "code": err.code,
+                "message": err.message.clone(),
+                "data": data,
+            }
+        });
+        let resolution = request_executor
+            .resolve_terminal(
+                Some(context.key()),
+                context.classify_terminal(err.terminal_outcome(), terminal_response),
+            )
+            .await;
+        assert!(matches!(resolution, RequestTerminalResolution::Emit(_)));
     }
 
     #[cfg(feature = "comms")]

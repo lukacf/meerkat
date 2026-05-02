@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -97,42 +97,6 @@ fn try_repo_file(relative: &str) -> Option<String> {
     fs::read_to_string(&path).ok()
 }
 
-fn workspace_manifest_for_members(members: &[&str]) -> String {
-    let manifest = repo_file("Cargo.toml");
-    let start = manifest
-        .find("members = [")
-        .expect("workspace manifest must declare members");
-    let exclude = manifest[start..]
-        .find("\nexclude = ")
-        .map(|offset| start + offset)
-        .expect("workspace manifest must declare exclude after members");
-    let members = members
-        .iter()
-        .map(|member| format!("    \"{member}\",\n"))
-        .collect::<String>();
-    format!(
-        "{}members = [\n{}]\n{}",
-        &manifest[..start],
-        members,
-        &manifest[exclude..]
-    )
-}
-
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let source = entry.path();
-        let destination = to.join(entry.file_name());
-        if source.is_dir() {
-            copy_dir_recursive(&source, &destination)?;
-        } else {
-            fs::copy(&source, &destination)?;
-        }
-    }
-    Ok(())
-}
-
 fn find_runfile_tool(root: &Path, suffix: &str) -> Option<PathBuf> {
     let mut queue = VecDeque::from([root.to_path_buf()]);
     while let Some(dir) = queue.pop_front() {
@@ -224,6 +188,66 @@ fn downstream_cargo_command(cargo: OsString) -> Command {
     command
 }
 
+#[derive(Clone, Copy)]
+enum DownstreamCargoAction {
+    Check,
+    Run,
+}
+
+impl DownstreamCargoAction {
+    fn arg(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Run => "run",
+        }
+    }
+}
+
+fn run_downstream_cargo_fixture(
+    test_name: &'static str,
+    package_name: &str,
+    dependencies: &str,
+    source: &str,
+    action: DownstreamCargoAction,
+) -> std::io::Result<Option<Output>> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(None);
+    }
+
+    if run_in_configured_bazel_child(test_name, bazel_cargo_check_env())? {
+        return Ok(None);
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{package_name}"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+{dependencies}
+"#,
+        ),
+    )?;
+    fs::write(src_dir.join("main.rs"), source)?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = downstream_cargo_command(cargo)
+        .arg(action.arg())
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+
+    Ok(Some(output))
+}
+
 fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in
         fs::read_dir(dir).unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
@@ -306,47 +330,22 @@ fn bazel_target_block<'a>(source: &'a str, name: &str) -> Option<&'a str> {
 
 #[test]
 fn downstream_safe_code_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
+    let dependencies = format!(
+        r#"meerkat-core = {{ path = "{}" }}"#,
+        repo_root().join("meerkat-core").display()
+    );
+    let Some(output) = run_downstream_cargo_fixture(
         "downstream_safe_code_cannot_forge_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat-core").display()
+        "agent-builder-policy-downstream",
+        &dependencies,
+        &repo_file(
+            "meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
         ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_forged_factory_policy.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("check")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
+        DownstreamCargoAction::Check,
+    )?
+    else {
+        return Ok(());
+    };
     assert!(
         !output.status.success(),
         "downstream core-only fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
@@ -369,181 +368,26 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
-fn downstream_meerkat_graph_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_meerkat_graph_cannot_forge_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-meerkat"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("check")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream meerkat + core fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("build_agent_after_factory_policy"),
-        "downstream fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_authority_dep_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_forge_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-direct-authority"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_direct_authority_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream direct-authority fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("__meerkat_agent_factory_build_authority_new")
-            || stderr.contains("mint_agent_factory_build_authority")
-            || stderr.contains("link_name")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named"),
-        "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
 fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-unsafe-finalizer"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-async-trait = "0.1"
+    let dependencies = format!(
+        r#"async-trait = "0.1"
 futures = "0.3"
 inventory = "0.3"
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat-core").display()
+meerkat-core = {{ path = "{}" }}"#,
+        repo_root().join("meerkat-core").display()
+    );
+    let Some(output) = run_downstream_cargo_fixture(
+        "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
+        "agent-builder-policy-downstream-unsafe-finalizer",
+        &dependencies,
+        &repo_file(
+            "meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
+        DownstreamCargoAction::Run,
+    )?
+    else {
+        return Ok(());
+    };
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -576,764 +420,27 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
-fn downstream_package_spoof_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_package_spoof_cannot_enter_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let workspace_dir = temp.path().join("repo");
-    fs::create_dir_all(&workspace_dir)?;
-    fs::write(
-        workspace_dir.join("Cargo.toml"),
-        workspace_manifest_for_members(&["meerkat-core", "meerkat"]),
-    )?;
-    copy_dir_recursive(
-        &repo_root().join("meerkat-core"),
-        &workspace_dir.join("meerkat-core"),
-    )?;
-
-    let project_dir = workspace_dir.join("meerkat");
-    let src_dir = project_dir.join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        project_dir.join("Cargo.toml"),
-        r#"[package]
-name = "meerkat"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
-categories.workspace = true
-
-[dependencies]
-async-trait = { workspace = true }
-futures = { workspace = true }
-inventory = { workspace = true }
-meerkat-core = { path = "../meerkat-core" }
-"#,
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        "mod factory;\nfn main() { factory::run(); }\n",
-    )?;
-    let fixture =
-        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace(
-                "fn main() {",
-                r#"pub fn run() {
-    std::fs::remove_file(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/factory.rs"))
-        .expect("remove spoofed factory source before bridge validation");
-"#,
-            );
-    let fixture = fixture.replace(
-        r"inventory::submit! {
-    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
-",
-        r#"inventory::submit! {
-    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
-        "meerkat",
-        env!("CARGO_MANIFEST_DIR"),
-        0xa9de_0aae_2b8a_98aa,
-        forged_agent_factory_policy_bridge_token_type_id,
-    )
-}
-
-"#,
-    );
-    fs::write(src_dir.join("factory.rs"), fixture)?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(project_dir.join("Cargo.toml"))
-        .current_dir(repo_root())
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env(
-            "RUSTFLAGS",
-            format!("--remap-path-prefix={}=meerkat", project_dir.display()),
-        )
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-            "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream package-spoof finalizer reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("AgentFactoryPolicyBridgeRegistration")
-            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
-            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
-            || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name")
-            || stderr.contains("undefined symbol")
-            || stderr.contains("not found in")
-            || stderr.contains("couldn't read")
-            || stderr.contains("No such file or directory"),
-        "downstream package-spoof finalizer fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_package_spoof_macro_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_package_spoof_macro_cannot_enter_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let workspace_dir = temp.path().join("repo");
-    fs::create_dir_all(&workspace_dir)?;
-    fs::write(
-        workspace_dir.join("Cargo.toml"),
-        workspace_manifest_for_members(&["meerkat-core", "meerkat"]),
-    )?;
-    copy_dir_recursive(
-        &repo_root().join("meerkat-core"),
-        &workspace_dir.join("meerkat-core"),
-    )?;
-
-    let project_dir = workspace_dir.join("meerkat");
-    let src_dir = project_dir.join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        project_dir.join("Cargo.toml"),
-        r#"[package]
-name = "meerkat"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
-categories.workspace = true
-
-[dependencies]
-async-trait = { workspace = true }
-futures = { workspace = true }
-inventory = { workspace = true }
-meerkat-core = { path = "../meerkat-core" }
-"#,
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        "mod factory;\nfn main() { factory::run(); }\n",
-    )?;
-    let fixture =
-        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace(
-                "fn main() {",
-                r#"pub fn run() {
-    std::fs::remove_file(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/factory.rs"))
-        .expect("remove spoofed factory source before bridge validation");
-"#,
-            );
-    fs::write(src_dir.join("factory.rs"), fixture)?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(project_dir.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-            "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream package-spoof finalizer reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_bridge_registration_cannot_build_agent() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_bridge_registration_cannot_build_agent",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let workspace_dir = temp.path().join("repo");
-    fs::create_dir_all(&workspace_dir)?;
-    fs::write(
-        workspace_dir.join("Cargo.toml"),
-        workspace_manifest_for_members(&["meerkat-core", "meerkat"]),
-    )?;
-    copy_dir_recursive(
-        &repo_root().join("meerkat-core"),
-        &workspace_dir.join("meerkat-core"),
-    )?;
-
-    let project_dir = workspace_dir.join("meerkat");
-    let src_dir = project_dir.join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        project_dir.join("Cargo.toml"),
-        r#"[package]
-name = "meerkat"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
-categories.workspace = true
-
-[dependencies]
-async-trait = { workspace = true }
-futures = { workspace = true }
-inventory = { workspace = true }
-meerkat-core = { path = "../meerkat-core" }
-"#,
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        "mod factory;\nfn main() { factory::run(); }\n",
-    )?;
-    let fixture =
-        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace("fn main() {", "pub fn run() {");
-    let fixture = fixture.replace(
-        r"inventory::submit! {
-    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
-",
-        r#"inventory::submit! {
-    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
-        "meerkat",
-        env!("CARGO_MANIFEST_DIR"),
-        0xa9de_0aae_2b8a_98aa,
-        forged_agent_factory_policy_bridge_token_type_id,
-    )
-}
-
-"#,
-    );
-    fs::write(src_dir.join("factory.rs"), fixture)?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(project_dir.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-            "downstream direct bridge-registration fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream direct bridge-registration fixture reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("AgentFactoryPolicyBridgeRegistration")
-            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
-            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
-            || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name")
-            || stderr.contains("undefined symbol")
-            || stderr.contains("not found in")
-            || stderr.contains("couldn't read")
-            || stderr.contains("No such file or directory"),
-        "downstream direct bridge-registration fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_bridge_registration_cannot_borrow_real_facade_source() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_bridge_registration_cannot_borrow_real_facade_source",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-real-facade-source"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-async-trait = "0.1"
-futures = "0.3"
-inventory = "0.3"
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        "mod factory;\nfn main() { factory::run(); }\n",
-    )?;
-    let fixture =
-        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
-            .replace("fn main() {", "pub fn run() {");
-    let fixture = fixture.replace(
-        r"inventory::submit! {
-    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
-        forged_agent_factory_policy_bridge_token_type_id
-    )
-}
-
-",
-        &format!(
-            r#"inventory::submit! {{
-    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
-        "meerkat",
-        "{}",
-        0xa9de_0aae_2b8a_98aa,
-        forged_agent_factory_policy_bridge_token_type_id,
-    )
-}}
-
-"#,
-            repo_root().join("meerkat").display()
-        ),
-    );
-    fs::write(src_dir.join("factory.rs"), fixture)?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env(
-            "RUSTFLAGS",
-            format!("--remap-path-prefix={}=meerkat", temp.path().display()),
-        )
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-            "downstream real-facade-source fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("unsafe downstream finalizer call constructed an agent"),
-        "downstream real-facade-source fixture reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("AgentFactoryPolicyBridgeRegistration")
-            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
-            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
-            || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name")
-            || stderr.contains("undefined symbol")
-            || stderr.contains("not found in")
-            || stderr.contains("couldn't read")
-            || stderr.contains("No such file or directory"),
-        "downstream real-facade-source fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_validator_symbol_cannot_enter_core_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_validator_symbol_cannot_enter_core_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-validator-symbol-core"
-version = "0.0.0"
-edition = "2024"
-build = "build.rs"
-
-[dependencies]
-async-trait = "0.1"
-futures = "0.3"
-meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build"] }}
-"#,
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        temp.path().join("build.rs"),
-        r##"fn main() {
-    let suffix = std::env::var("DEP_MEERKAT_CORE_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
-        .expect("meerkat-core must not publish a readable factory bridge symbol suffix");
-    let symbols = format!(
-        r#"
-#[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_{suffix}")]
-pub extern "Rust" fn spoofed_agent_factory_policy_bridge_token_is_valid(
-    _factory_bridge_token: &(dyn Any + Send + Sync),
-) -> bool {{
-    true
-}}
-
-#[allow(improper_ctypes_definitions, unsafe_code)]
-unsafe extern "Rust" {{
-    #[link_name = "__meerkat_agent_factory_policy_build_v3_{suffix}"]
-    fn exported_agent_factory_policy_build(
-        factory_bridge_token: &'static (dyn Any + Send + Sync),
-        builder: AgentBuilder,
-        client: Arc<dyn AgentLlmClient>,
-        tools: Arc<dyn AgentToolDispatcher>,
-        store: Arc<dyn AgentSessionStore>,
-    ) -> FactoryPolicyBuildFuture;
-}}
-"#
-    );
-    std::fs::write(
-        std::path::Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR set"))
-            .join("agent_factory_policy_bridge_symbols.rs"),
-        symbols,
-    )
-    .expect("write generated suffix-aware bridge symbols");
-}
-"##,
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("validator-symbol downstream finalizer rejected forged bridge token"),
-            "downstream validator-symbol fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("validator-symbol downstream finalizer call constructed an agent"),
-        "downstream validator-symbol fixture reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("__meerkat_agent_factory_policy_build_v3")
-            || stderr.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
-            || stderr.contains("DEP_MEERKAT_CORE_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
-            || stderr.contains("must not publish a readable factory bridge symbol suffix")
-            || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name")
-            || stderr.contains("undefined symbol")
-            || stderr.contains("not found in")
-            || stderr.contains("does not have these features")
-            || stderr.contains("does not have feature")
-            || stderr.contains("does not have that feature"),
-        "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_target_marker_suffix_cannot_enter_core_factory_policy_finalizer()
--> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_target_marker_suffix_cannot_enter_core_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-target-marker-core"
-version = "0.0.0"
-edition = "2024"
-build = "build.rs"
-
-[dependencies]
-async-trait = "0.1"
-futures = "0.3"
-meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build"] }}
-"#,
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        temp.path().join("build.rs"),
-        r##"use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-
-fn find_marker(root: &Path) -> Option<PathBuf> {
-    let mut queue = VecDeque::from([root.to_path_buf()]);
-    while let Some(dir) = queue.pop_front() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                queue.push_back(path);
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == "agent_factory_policy_bridge_symbol_suffix")
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-fn marker_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
-    contents
-        .lines()
-        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
-}
-
-fn main() {
-    let target_dir = PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is set by canary"),
-    );
-    let marker = find_marker(&target_dir)
-        .expect("factory bridge suffix marker must not be discoverable in target dir");
-    let contents = std::fs::read_to_string(&marker).expect("read suffix marker");
-    let suffix = marker_value(&contents, "suffix").expect("suffix marker value");
-    let symbols = format!(
-        r#"
-#[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_{suffix}")]
-pub extern "Rust" fn spoofed_agent_factory_policy_bridge_token_is_valid(
-    _factory_bridge_token: &(dyn Any + Send + Sync),
-) -> bool {{
-    true
-}}
-
-#[allow(improper_ctypes_definitions, unsafe_code)]
-unsafe extern "Rust" {{
-    #[link_name = "__meerkat_agent_factory_policy_build_v3_{suffix}"]
-    fn exported_agent_factory_policy_build(
-        factory_bridge_token: &'static (dyn Any + Send + Sync),
-        builder: AgentBuilder,
-        client: Arc<dyn AgentLlmClient>,
-        tools: Arc<dyn AgentToolDispatcher>,
-        store: Arc<dyn AgentSessionStore>,
-    ) -> FactoryPolicyBuildFuture;
-}}
-"#
-    );
-    std::fs::write(
-        Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR set"))
-            .join("agent_factory_policy_bridge_symbols.rs"),
-        symbols,
-    )
-    .expect("write generated suffix-aware bridge symbols");
-}
-"##,
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("validator-symbol downstream finalizer rejected forged bridge token"),
-            "downstream target-marker fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(());
-    }
-    assert!(
-        !String::from_utf8_lossy(&output.stderr)
-            .contains("validator-symbol downstream finalizer call constructed an agent"),
-        "downstream target-marker fixture reached the live factory-policy bridge and constructed an agent:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("factory bridge suffix marker must not be discoverable")
-            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
-            || stderr.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
-            || stderr.contains("exported_agent_factory_policy_build")
-            || stderr.contains("link_name")
-            || stderr.contains("undefined symbol")
-            || stderr.contains("not found in")
-            || stderr.contains("does not have these features")
-            || stderr.contains("does not have feature")
-            || stderr.contains("does not have that feature"),
-        "downstream target-marker fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
 fn downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-public-facade-smoke"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-async-trait = "0.1"
+    let dependencies = format!(
+        r#"async-trait = "0.1"
 futures = "0.3"
 meerkat = {{ path = "{}", default-features = false }}
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-core").display()
+meerkat-core = {{ path = "{}" }}"#,
+        repo_root().join("meerkat").display(),
+        repo_root().join("meerkat-core").display()
+    );
+    let Some(output) = run_downstream_cargo_fixture(
+        "downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg",
+        "agent-builder-policy-downstream-public-facade-smoke",
+        &dependencies,
+        &repo_file(
+            "meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs",
         ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
+        DownstreamCargoAction::Run,
+    )?
+    else {
+        return Ok(());
+    };
     assert!(
         output.status.success(),
         "public downstream facade AgentBuilder build must compile, link, and \
@@ -1346,67 +453,6 @@ meerkat-core = {{ path = "{}" }}
         stdout.contains("public facade AgentBuilder constructed an agent"),
         "public downstream facade AgentBuilder smoke passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_cannot_forge_session_runtime_bindings_for_public_factory_mode() -> std::io::Result<()>
-{
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_cannot_forge_session_runtime_bindings_for_public_factory_mode",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-runtime-bindings"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-core = {{ path = "{}", default-features = false }}
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_forged_session_runtime_bindings.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("check")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream fake SessionRuntimeBindings fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("private field") || stderr.contains("cannot construct"),
-        "downstream fake SessionRuntimeBindings fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }
@@ -1459,455 +505,6 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         Err(error) => panic!("public facade returned wrong error for forged authority: {error}"),
         Ok(_) => panic!("public facade accepted forged session runtime authority"),
     }
-}
-
-#[tokio::test]
-async fn public_facade_rejects_local_session_runtime_bindings() {
-    let session = Session::default();
-    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
-    let local_bindings = runtime
-        .prepare_local_session_bindings(session.id().clone())
-        .await
-        .expect("prepare local session resources");
-
-    let result = meerkat::AgentBuilder::new()
-        .resume_session(session)
-        .runtime_build_mode(meerkat_core::RuntimeBuildMode::SessionOwned(local_bindings))
-        .build(
-            Arc::new(CanaryClient),
-            Arc::new(CanaryTools),
-            Arc::new(CanaryStore),
-        )
-        .await;
-
-    match result {
-        Err(meerkat::BuildAgentError::Config(message)) => assert!(
-            message.contains("SessionRuntimeBindings were not prepared by MeerkatMachine"),
-            "public facade rejected local session bindings for the wrong reason: {message}"
-        ),
-        Err(error) => panic!("public facade returned wrong error for local bindings: {error}"),
-        Ok(_) => panic!("public facade accepted local session bindings as machine authority"),
-    }
-}
-
-#[test]
-fn downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer() -> std::io::Result<()>
-{
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-direct-authority-transmute"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream direct-authority transmute fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("transmute")
-            || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named")
-            || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("assertion failed"),
-        "downstream direct-authority transmute fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_authority_dep_cannot_spoof_validator_symbol_for_factory_policy_finalizer()
--> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_spoof_validator_symbol_for_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-validator-symbol"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-"#,
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream validator-symbol fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        (stderr.contains("assertion failed") && stderr.contains("is_canonical_factory_authority"))
-            || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named"),
-        "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_cannot_feature_enable_standalone_builder_bypass() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_cannot_feature_enable_standalone_builder_bypass",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-standalone-feature"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat-core = {{ path = "{}", features = ["standalone-agent-builder"] }}
-"#,
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!("fixtures/agent_builder_policy/downstream_standalone_feature_build.rs"),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("check")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream standalone-feature fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("standalone-agent-builder")
-            || stderr.contains("build_standalone")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("feature"),
-        "downstream standalone-feature fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_authority_dep_cannot_mirror_factory_policy_finalizer() -> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_mirror_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-direct-authority-mirror"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-inventory = "0.3"
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_mirror_authority_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream direct-authority mirror fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("assertion failed")
-            || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named")
-            || stderr.contains("cannot transmute between types of different sizes")
-            || stderr.contains("cannot find type")
-            || stderr.contains("not found in")
-            || stderr.contains("private"),
-        "downstream direct-authority mirror fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_authority_dep_cannot_steal_inventory_factory_policy_finalizer()
--> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_steal_inventory_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-direct-authority-inventory-steal"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat = {{ path = "{}", default-features = false }}
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-inventory = "0.3"
-"#,
-            repo_root().join("meerkat").display(),
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_inventory_steal_authority_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream inventory-steal fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("assertion failed")
-            || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named")
-            || stderr.contains("cannot find type")
-            || stderr.contains("not found in")
-            || stderr.contains("private"),
-        "downstream inventory-steal fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
-}
-
-#[test]
-fn downstream_direct_authority_dep_without_facade_cannot_register_factory_policy_finalizer()
--> std::io::Result<()> {
-    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
-        return Ok(());
-    }
-
-    if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_without_facade_cannot_register_factory_policy_finalizer",
-        bazel_cargo_check_env(),
-    )? {
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir)?;
-    fs::write(
-        temp.path().join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "agent-builder-policy-downstream-direct-authority-no-facade"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-meerkat-agent-build-authority = {{ path = "{}" }}
-meerkat-core = {{ path = "{}" }}
-inventory = "0.3"
-"#,
-            repo_root().join("meerkat-agent-build-authority").display(),
-            repo_root().join("meerkat-core").display()
-        ),
-    )?;
-    fs::write(
-        src_dir.join("main.rs"),
-        include_str!(
-            "fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs"
-        ),
-    )?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = downstream_cargo_command(cargo)
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(temp.path().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .output()?;
-    assert!(
-        !output.status.success(),
-        "downstream no-facade forged-registration fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("assertion failed")
-            || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("this function takes")
-            || stderr.contains("unsafe function")
-            || stderr.contains("requires unsafe")
-            || stderr.contains("no method named")
-            || stderr.contains("cannot find type")
-            || stderr.contains("not found in")
-            || stderr.contains("private"),
-        "downstream no-facade fixture failed for the wrong reason:\n{stderr}"
-    );
-    Ok(())
 }
 
 #[test]

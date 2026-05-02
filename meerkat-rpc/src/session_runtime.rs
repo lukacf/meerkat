@@ -115,6 +115,17 @@ type RecoverableServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot::Re
 type ActiveCapacityGuard = meerkat::RuntimeContextAdmissionGuard;
 type StagedCapacityAdmissions = Arc<StdMutex<HashMap<SessionId, ActiveCapacityGuard>>>;
 
+#[derive(Clone)]
+struct StagedAdmissionRestore {
+    admissions: StagedCapacityAdmissions,
+    session_id: SessionId,
+}
+
+pub(crate) struct RuntimePreAdmission {
+    admission: Option<ActiveCapacityGuard>,
+    staged_restore: Option<StagedAdmissionRestore>,
+}
+
 #[derive(Debug)]
 struct RecoveredCreateRequest {
     request: CreateSessionRequest,
@@ -235,12 +246,12 @@ fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToo
 }
 
 struct RuntimePreAdmissionGuard {
-    admission: Option<ActiveCapacityGuard>,
+    admission: Option<RuntimePreAdmission>,
 }
 
 struct RuntimePreAdmissionEntry {
     input_id: InputId,
-    admission: ActiveCapacityGuard,
+    admission: RuntimePreAdmission,
 }
 
 struct RuntimePreAdmissionRegistration {
@@ -277,13 +288,13 @@ struct PendingPromotionPreTurnHook {
 }
 
 impl RuntimePreAdmissionGuard {
-    fn new(admission: ActiveCapacityGuard) -> Self {
+    fn new(admission: impl Into<RuntimePreAdmission>) -> Self {
         Self {
-            admission: Some(admission),
+            admission: Some(admission.into()),
         }
     }
 
-    fn take(&mut self) -> Option<ActiveCapacityGuard> {
+    fn take(&mut self) -> Option<RuntimePreAdmission> {
         self.admission.take()
     }
 }
@@ -373,6 +384,55 @@ fn restore_staged_capacity_admission(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     admissions.insert(session_id, admission);
+}
+
+impl RuntimePreAdmission {
+    fn fresh(admission: ActiveCapacityGuard) -> Self {
+        Self {
+            admission: Some(admission),
+            staged_restore: None,
+        }
+    }
+
+    fn staged(
+        session_id: SessionId,
+        admissions: StagedCapacityAdmissions,
+        admission: ActiveCapacityGuard,
+    ) -> Self {
+        Self {
+            admission: Some(admission),
+            staged_restore: Some(StagedAdmissionRestore {
+                admissions,
+                session_id,
+            }),
+        }
+    }
+
+    fn into_admission(mut self) -> ActiveCapacityGuard {
+        self.staged_restore = None;
+        self.admission
+            .take()
+            .expect("runtime pre-admission should not be consumed twice")
+    }
+}
+
+impl From<ActiveCapacityGuard> for RuntimePreAdmission {
+    fn from(admission: ActiveCapacityGuard) -> Self {
+        Self::fresh(admission)
+    }
+}
+
+impl Drop for RuntimePreAdmission {
+    fn drop(&mut self) {
+        let Some(admission) = self.admission.take() else {
+            return;
+        };
+        if let Some(restore) = self.staged_restore.take() {
+            restore_staged_capacity_admission(&restore.admissions, restore.session_id, admission);
+        } else {
+            drop(admission);
+        }
+    }
 }
 
 async fn await_guarded_session_cleanup(
@@ -1997,7 +2057,7 @@ impl SessionRuntime {
     fn take_runtime_pre_admission_guard(
         pre_admission: &mut RuntimePreAdmissionGuard,
         session_id: &SessionId,
-    ) -> Result<ActiveCapacityGuard, RpcError> {
+    ) -> Result<RuntimePreAdmission, RpcError> {
         pre_admission.take().ok_or_else(|| RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime pre-admission guard already consumed for {session_id}"),
@@ -2493,26 +2553,36 @@ impl SessionRuntime {
     async fn reserve_active_turn(
         &self,
         session_id: &SessionId,
-    ) -> Result<ActiveCapacityGuard, RpcError> {
+    ) -> Result<RuntimePreAdmission, RpcError> {
         if let Some(admission) = self.take_staged_capacity_admission(session_id) {
-            return Ok(admission);
+            return Ok(RuntimePreAdmission::staged(
+                session_id.clone(),
+                Arc::clone(&self.staged_capacity_admissions),
+                admission,
+            ));
         }
         self.service
             .reserve_runtime_turn_admission(session_id)
             .await
+            .map(RuntimePreAdmission::fresh)
             .map_err(session_error_to_rpc)
     }
 
     async fn reserve_or_join_active_turn(
         &self,
         session_id: &SessionId,
-    ) -> Result<ActiveCapacityGuard, RpcError> {
+    ) -> Result<RuntimePreAdmission, RpcError> {
         if let Some(admission) = self.take_staged_capacity_admission(session_id) {
-            return Ok(admission);
+            return Ok(RuntimePreAdmission::staged(
+                session_id.clone(),
+                Arc::clone(&self.staged_capacity_admissions),
+                admission,
+            ));
         }
         self.service
             .reserve_runtime_turn_admission(session_id)
             .await
+            .map(RuntimePreAdmission::fresh)
             .map_err(session_error_to_rpc)
     }
 
@@ -2561,7 +2631,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         input_ids: &[InputId],
-    ) -> Option<ActiveCapacityGuard> {
+    ) -> Option<RuntimePreAdmission> {
         if input_ids.is_empty() {
             return None;
         }
@@ -2584,7 +2654,7 @@ impl SessionRuntime {
         &self,
         session_id: SessionId,
         input_id: InputId,
-        admission: ActiveCapacityGuard,
+        admission: impl Into<RuntimePreAdmission>,
     ) -> Result<(), RpcError> {
         let mut pre_admissions = self
             .runtime_pre_admissions
@@ -2600,7 +2670,7 @@ impl SessionRuntime {
         }
         entries.push(RuntimePreAdmissionEntry {
             input_id,
-            admission,
+            admission: admission.into(),
         });
         Ok(())
     }
@@ -2618,7 +2688,7 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: SessionId,
         input_id: InputId,
-        admission: ActiveCapacityGuard,
+        admission: impl Into<RuntimePreAdmission>,
     ) -> Result<RuntimePreAdmissionRegistration, RpcError> {
         self.insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)?;
         Ok(RuntimePreAdmissionRegistration::new(
@@ -4216,7 +4286,7 @@ impl SessionRuntime {
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
-        pre_admission: Option<ActiveCapacityGuard>,
+        pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::service::SessionError,
@@ -4243,7 +4313,7 @@ impl SessionRuntime {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
-        pre_admission: Option<ActiveCapacityGuard>,
+        pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, crate::protocol::RpcError>
     {
         if self
@@ -4256,8 +4326,8 @@ impl SessionRuntime {
             self.discard_stale_live_session(session_id).await;
         }
         let admission = match pre_admission {
-            Some(admission) => admission,
-            None => self.reserve_active_turn(session_id).await?,
+            Some(admission) => admission.into_admission(),
+            None => self.reserve_active_turn(session_id).await?.into_admission(),
         };
         let result = self
             .service
@@ -5283,7 +5353,7 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
-        pre_admission: Option<ActiveCapacityGuard>,
+        pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<CoreApplyOutput, RpcError> {
         let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
@@ -5387,8 +5457,10 @@ impl SessionRuntime {
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             let active_turn = match pre_admission.as_mut() {
-                Some(admission) => Self::take_runtime_pre_admission_guard(admission, session_id)?,
-                None => self.reserve_active_turn(session_id).await?,
+                Some(admission) => {
+                    Self::take_runtime_pre_admission_guard(admission, session_id)?.into_admission()
+                }
+                None => self.reserve_active_turn(session_id).await?.into_admission(),
             };
             // Hot-swap LLM client if model/provider overrides are present.
             if let Some(ref ov) = overrides
@@ -5447,9 +5519,9 @@ impl SessionRuntime {
 
         if let Some(slot) = pending_session {
             let staged_capacity_admission = match pre_admission.as_mut() {
-                Some(admission) => Some(Self::take_runtime_pre_admission_guard(
-                    admission, session_id,
-                )?),
+                Some(admission) => Some(
+                    Self::take_runtime_pre_admission_guard(admission, session_id)?.into_admission(),
+                ),
                 None => self.take_staged_capacity_admission(session_id),
             };
             let mut promotion_cleanup = PendingPromotionCleanup::new(
@@ -5624,8 +5696,10 @@ impl SessionRuntime {
         let recovery_overrides =
             self.recovery_overrides_from_turn(overrides.as_ref(), keep_alive)?;
         let active_turn = match pre_admission.as_mut() {
-            Some(admission) => Self::take_runtime_pre_admission_guard(admission, session_id)?,
-            None => self.reserve_active_turn(session_id).await?,
+            Some(admission) => {
+                Self::take_runtime_pre_admission_guard(admission, session_id)?.into_admission()
+            }
+            None => self.reserve_active_turn(session_id).await?.into_admission(),
         };
         let recovered_create = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
@@ -6128,7 +6202,7 @@ impl SessionRuntime {
         let result_rx = self.spawn_service_start_turn_with_admission_guard(
             session_id.clone(),
             req,
-            active_turn,
+            active_turn.into_admission(),
         );
         let result = Self::await_service_start_turn(session_id, result_rx).await;
         match result {
@@ -6265,7 +6339,9 @@ impl SessionRuntime {
                 });
             }
         }
-        if let Err(err) = self.insert_staged_capacity_admission(session_id.clone(), admission) {
+        if let Err(err) =
+            self.insert_staged_capacity_admission(session_id.clone(), admission.into_admission())
+        {
             let _ = self.staged_sessions.abandon(session_id).await;
             self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
                 .await;
@@ -12526,6 +12602,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_pre_admission_registration_drop_restores_staged_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("staged session should reserve active capacity");
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("runtime-routed staged turn should consume staged admission");
+        let registration = runtime
+            .register_runtime_pre_admission(session_id.clone(), InputId::new(), admission)
+            .expect("register staged-origin runtime pre-admission");
+
+        drop(registration);
+
+        assert!(
+            runtime.has_staged_capacity_admission(&session_id),
+            "dropping staged-origin pre-admission registration must restore staged capacity"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "restored staged capacity must still occupy the original slot: {blocked:?}"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                ContentInput::Text("materialize after restored pre-admission".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("restored staged session should still materialize");
+    }
+
+    #[tokio::test]
     async fn stale_runtime_pre_admission_cleanup_does_not_remove_newer_input_guard() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
@@ -14863,7 +14988,7 @@ mod tests {
             service_start_turn_request("recover after archive"),
             RunApplyBoundary::Immediate,
             vec![meerkat_core::lifecycle::InputId::new()],
-            admission,
+            admission.into_admission(),
             false,
         );
         let rejected =
@@ -15847,7 +15972,7 @@ mod tests {
             service_start_turn_request("live missing after pre-admission"),
             RunApplyBoundary::Immediate,
             vec![InputId::new()],
-            admission,
+            admission.into_admission(),
         );
         let (result, recovered_admission) =
             SessionRuntime::await_service_apply_runtime_turn_with_recoverable_admission(

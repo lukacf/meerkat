@@ -84,9 +84,14 @@ use std::any::Any;
 use std::sync::Arc;
 
 struct SessionRuntimeBindingsAuthority;
+struct LocalSessionRuntimeBindingsAuthority;
 
 pub(crate) fn session_runtime_bindings_authority() -> Arc<dyn Any + Send + Sync> {
     Arc::new(SessionRuntimeBindingsAuthority)
+}
+
+pub(crate) fn local_session_runtime_bindings_authority() -> Arc<dyn Any + Send + Sync> {
+    Arc::new(LocalSessionRuntimeBindingsAuthority)
 }
 
 pub fn session_runtime_bindings_have_machine_authority(

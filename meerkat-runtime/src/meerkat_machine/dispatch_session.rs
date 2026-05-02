@@ -175,6 +175,15 @@ impl MeerkatMachine {
             dsl_authority_shared,
         ));
         let auth_lease = self.auth_lease_handle();
+        let runtime_authority = match preparation {
+            SessionBindingPreparation::AuthoritativeRuntimeBinding => {
+                crate::session_runtime_bindings_authority()
+            }
+            SessionBindingPreparation::LocalSessionResources => {
+                crate::local_session_runtime_bindings_authority()
+            }
+        };
+
         Ok(MeerkatMachineCommandResult::Bindings(
             meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
                 session_id,
@@ -217,7 +226,7 @@ impl MeerkatMachine {
                 Arc::new(crate::handles::RuntimeRealtimeProductTurnHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                crate::session_runtime_bindings_authority(),
+                runtime_authority,
             ),
         ))
     }

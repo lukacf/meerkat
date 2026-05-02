@@ -1137,6 +1137,157 @@ unsafe extern "Rust" {{
 }
 
 #[test]
+fn downstream_target_marker_suffix_cannot_enter_core_factory_policy_finalizer()
+-> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_target_marker_suffix_cannot_enter_core_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-target-marker-core"
+version = "0.0.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build"] }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        temp.path().join("build.rs"),
+        r##"use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+
+fn find_marker(root: &Path) -> Option<PathBuf> {
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                queue.push_back(path);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "agent_factory_policy_bridge_symbol_suffix")
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn marker_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+}
+
+fn main() {
+    let target_dir = PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR is set by canary"),
+    );
+    let marker = find_marker(&target_dir)
+        .expect("factory bridge suffix marker must not be discoverable in target dir");
+    let contents = std::fs::read_to_string(&marker).expect("read suffix marker");
+    let suffix = marker_value(&contents, "suffix").expect("suffix marker value");
+    let symbols = format!(
+        r#"
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_{suffix}")]
+pub extern "Rust" fn spoofed_agent_factory_policy_bridge_token_is_valid(
+    _factory_bridge_token: &(dyn Any + Send + Sync),
+) -> bool {{
+    true
+}}
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {{
+    #[link_name = "__meerkat_agent_factory_policy_build_v3_{suffix}"]
+    fn exported_agent_factory_policy_build(
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> FactoryPolicyBuildFuture;
+}}
+"#
+    );
+    std::fs::write(
+        Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR set"))
+            .join("agent_factory_policy_bridge_symbols.rs"),
+        symbols,
+    )
+    .expect("write generated suffix-aware bridge symbols");
+}
+"##,
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = downstream_cargo_command(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("validator-symbol downstream finalizer rejected forged bridge token"),
+            "downstream target-marker fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("validator-symbol downstream finalizer call constructed an agent"),
+        "downstream target-marker fixture reached the live factory-policy bridge and constructed an agent:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("factory bridge suffix marker must not be discoverable")
+            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in")
+            || stderr.contains("does not have these features")
+            || stderr.contains("does not have feature")
+            || stderr.contains("does not have that feature"),
+        "downstream target-marker fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg() -> std::io::Result<()> {
     if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
         return Ok(());
@@ -1307,6 +1458,35 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         ),
         Err(error) => panic!("public facade returned wrong error for forged authority: {error}"),
         Ok(_) => panic!("public facade accepted forged session runtime authority"),
+    }
+}
+
+#[tokio::test]
+async fn public_facade_rejects_local_session_runtime_bindings() {
+    let session = Session::default();
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let local_bindings = runtime
+        .prepare_local_session_bindings(session.id().clone())
+        .await
+        .expect("prepare local session resources");
+
+    let result = meerkat::AgentBuilder::new()
+        .resume_session(session)
+        .runtime_build_mode(meerkat_core::RuntimeBuildMode::SessionOwned(local_bindings))
+        .build(
+            Arc::new(CanaryClient),
+            Arc::new(CanaryTools),
+            Arc::new(CanaryStore),
+        )
+        .await;
+
+    match result {
+        Err(meerkat::BuildAgentError::Config(message)) => assert!(
+            message.contains("SessionRuntimeBindings were not prepared by MeerkatMachine"),
+            "public facade rejected local session bindings for the wrong reason: {message}"
+        ),
+        Err(error) => panic!("public facade returned wrong error for local bindings: {error}"),
+        Ok(_) => panic!("public facade accepted local session bindings as machine authority"),
     }
 }
 
@@ -1967,6 +2147,14 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
             !build_script.contains("cargo:agent_factory_policy_bridge_symbol_suffix"),
             "{name} must not publish the factory bridge suffix through Cargo \
              metadata; public direct dependents can read DEP_* metadata and \
+             generate matching validator/finalizer symbols"
+        );
+        assert!(
+            !build_script.contains("join(\"agent_factory_policy_bridge_symbol_suffix\")")
+                && !build_script.contains("std::fs::read_to_string(&marker)")
+                && !build_script.contains("std::fs::write(&marker"),
+            "{name} must not read or write a target-dir factory bridge suffix \
+             marker; public direct dependents can scan the same target tree and \
              generate matching validator/finalizer symbols"
         );
     }

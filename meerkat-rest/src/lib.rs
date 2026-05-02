@@ -519,9 +519,11 @@ async fn cleanup_prepared_rest_runtime_if_new(
 async fn cleanup_prepared_rest_runtime_after_create_error(
     state: &AppState,
     session_id: &SessionId,
-) {
+) -> bool {
+    // true means committed/unknown live state was preserved; callers must not
+    // run unpublished cleanup that would archive or unregister the session.
     match state.session_service.export_live_session(session_id).await {
-        Ok(_) => return,
+        Ok(_) => return true,
         Err(SessionError::NotFound { .. }) => {}
         Err(error) => {
             tracing::warn!(
@@ -529,11 +531,12 @@ async fn cleanup_prepared_rest_runtime_after_create_error(
                 error = %error,
                 "preserving REST runtime registration after create error because live session state is unknown"
             );
-            return;
+            return true;
         }
     }
 
     cleanup_prepared_rest_runtime(state, session_id).await;
+    false
 }
 
 async fn cleanup_rest_runtime_context_after_create_error(
@@ -3431,7 +3434,11 @@ async fn create_session_inner(
     let create_result = match state.session_service.create_session(svc_req).await {
         Ok(result) => result,
         Err(err) => {
-            cleanup_prepared_rest_runtime_after_create_error(state, &session_id).await;
+            let runtime_state_preserved =
+                cleanup_prepared_rest_runtime_after_create_error(state, &session_id).await;
+            if runtime_state_preserved && let Some(ctx) = req_ctx.as_ref() {
+                ctx.set_unpublished_cleanup(noop_request_action());
+            }
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             let api_err = match err {
@@ -3442,7 +3449,11 @@ async fn create_session_inner(
                 }
                 _ => ApiError::Agent(err.to_string()),
             };
-            return RequestTerminal::RespondWithoutPublish(Err(api_err));
+            return if runtime_state_preserved {
+                RequestTerminal::Publish(Err(api_err))
+            } else {
+                RequestTerminal::RespondWithoutPublish(Err(api_err))
+            };
         }
     };
 
@@ -7314,8 +7325,8 @@ mod tests {
         .await;
 
         let api_error = match outcome {
-            RequestTerminal::RespondWithoutPublish(Err(err)) => err,
-            other => panic!("expected REST create to return an unpublished error, got {other:?}"),
+            RequestTerminal::Publish(Err(err)) => err,
+            other => panic!("expected REST create to return a committed error, got {other:?}"),
         };
         match api_error {
             ApiError::Agent(message) => assert!(
@@ -7345,6 +7356,100 @@ mod tests {
         assert!(
             state.mcp_sessions.read().await.contains_key(&session_id),
             "REST create post-commit errors must not clear committed MCP adapter state"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_tracked_create_post_commit_error_preserves_runtime_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&fail_store) as Arc<dyn meerkat::SessionStore>;
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::clone(&store),
+            None,
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let factory = AgentFactory::new(temp.path().join("runtime-sessions")).session_store(store);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient));
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
+        state.session_service = Arc::new(service);
+        state.runtime_adapter = runtime_adapter;
+
+        fail_store.set_fail_save(true);
+        let ctx = state
+            .request_executor
+            .begin_request("tracked-post-commit-create-error", noop_request_action());
+        let outcome = Box::pin(create_session_inner(
+            &state,
+            CreateSessionRequest {
+                prompt: "Trigger tracked post-commit persistence failure"
+                    .to_string()
+                    .into(),
+                system_prompt: None,
+                turn_metadata: None,
+                max_tokens: None,
+                output_schema: None,
+                structured_output_retries: None,
+                verbose: false,
+                comms_name: None,
+                peer_meta: None,
+                hooks_override: None,
+                enable_builtins: None,
+                enable_shell: None,
+                enable_memory: None,
+                enable_mob: None,
+                budget_limits: None,
+                labels: None,
+                app_context: None,
+                shell_env: None,
+            },
+            Some(ctx.clone()),
+        ))
+        .await;
+
+        let api_error = with_request_lifecycle(&state.request_executor, Some(ctx), outcome)
+            .await
+            .expect_err("post-commit save failure should surface");
+        match api_error {
+            ApiError::Agent(message) => assert!(
+                message.contains("forced save failure"),
+                "unexpected error: {message}"
+            ),
+            other => panic!("expected post-commit save failure as agent error, got {other:?}"),
+        }
+
+        assert_eq!(
+            state
+                .request_executor
+                .phase("tracked-post-commit-create-error"),
+            None
+        );
+        let summaries = state
+            .session_service
+            .list(Default::default())
+            .await
+            .expect("live session should remain listable");
+        assert_eq!(summaries.len(), 1, "post-commit live session should remain");
+        let session_id = summaries[0].session_id.clone();
+        state
+            .session_service
+            .export_live_session(&session_id)
+            .await
+            .expect("post-commit live session must remain committed");
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "tracked REST create post-commit errors must not clear committed runtime registration"
+        );
+        #[cfg(feature = "mcp")]
+        assert!(
+            state.mcp_sessions.read().await.contains_key(&session_id),
+            "tracked REST create post-commit errors must not clear committed MCP adapter state"
         );
     }
 

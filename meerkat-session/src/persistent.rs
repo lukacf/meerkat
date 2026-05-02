@@ -1169,6 +1169,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<crate::ephemeral::RuntimeContextAdmissionGuard, SessionError> {
+        match self.inner.join_active_runtime_context_admission(id).await {
+            Ok(Some(admission)) => return Ok(admission),
+            Ok(None) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
@@ -3495,6 +3501,7 @@ mod tests {
         session: Arc<std::sync::Mutex<Session>>,
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
         run_failure: Option<String>,
+        flow_overlay_failure: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -3545,6 +3552,9 @@ mod tests {
             &mut self,
             _overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
+            if let Some(message) = self.flow_overlay_failure.clone() {
+                return Err(meerkat_core::error::AgentError::InternalError(message));
+            }
             Ok(())
         }
 
@@ -3850,6 +3860,33 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
+                flow_overlay_failure: None,
+            })
+        }
+    }
+
+    struct FailingOverlayBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for FailingOverlayBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
+                flow_overlay_failure: Some("synthetic flow overlay failure".to_string()),
             })
         }
     }
@@ -3919,6 +3956,7 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
+                flow_overlay_failure: None,
             })
         }
     }
@@ -3967,6 +4005,7 @@ mod tests {
                     session: Arc::new(std::sync::Mutex::new(session)),
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
+                    flow_overlay_failure: None,
                 },
                 entered_runs: Arc::clone(&self.entered_runs),
                 entered_notify: Arc::clone(&self.entered_notify),
@@ -4094,6 +4133,7 @@ mod tests {
                     session: Arc::new(std::sync::Mutex::new(session)),
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
+                    flow_overlay_failure: None,
                 },
             })
         }
@@ -4120,6 +4160,7 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: Some("synthetic run failure".to_string()),
+                flow_overlay_failure: None,
             })
         }
     }
@@ -4158,6 +4199,7 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
+                flow_overlay_failure: None,
             })
         }
     }
@@ -4361,6 +4403,7 @@ mod tests {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
+                flow_overlay_failure: None,
             })
         }
     }
@@ -5780,6 +5823,120 @@ mod tests {
             .create_session_with_reserved_admission(resume_request(persisted), recovered_admission)
             .await
             .expect("fallback materialization should reuse recovered admission");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_turn_admission_joins_existing_live_session_capacity() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("joiner", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create live session");
+        let first = service
+            .reserve_runtime_turn_admission(&created.session_id)
+            .await
+            .expect("first active admission should reserve capacity");
+        let second = service
+            .reserve_runtime_turn_admission(&created.session_id)
+            .await
+            .expect("second same-session admission should join existing capacity");
+
+        let blocker = Session::new();
+        let blocker_id = blocker.id().clone();
+        store.save(&blocker).await.expect("persist blocker");
+        let blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "joined same-session admission must still consume only one active slot"
+        );
+
+        drop(first);
+        let still_blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
+        assert!(
+            still_blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "capacity must remain held until the final same-session lease drops"
+        );
+
+        drop(second);
+        service
+            .reserve_runtime_turn_admission(&blocker_id)
+            .await
+            .expect("dropping all same-session leases should release capacity");
+    }
+
+    #[tokio::test]
+    async fn test_deferred_runtime_admission_restore_survives_joined_active_lease() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            FailingOverlayBuilder,
+            1,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("staged", InitialTurnPolicy::Defer))
+            .await
+            .expect("create deferred session");
+        let promoted = service
+            .reserve_runtime_turn_admission(&created.session_id)
+            .await
+            .expect("promote staged admission");
+        let joined = service
+            .reserve_runtime_turn_admission(&created.session_id)
+            .await
+            .expect("join promoted active admission");
+
+        let mut start_req = start_turn_request("resume staged");
+        start_req.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay {
+            allowed_tools: Some(vec!["blocked-before-run".to_string()]),
+            blocked_tools: None,
+        });
+        let error = service
+            .start_turn_with_reserved_admission(&created.session_id, start_req, promoted)
+            .await
+            .expect_err("flow overlay setup should fail before the staged turn runs");
+        assert!(
+            error.to_string().contains("synthetic flow overlay failure"),
+            "unexpected start_turn error: {error:?}"
+        );
+
+        let blocker = Session::new();
+        let blocker_id = blocker.id().clone();
+        store.save(&blocker).await.expect("persist blocker");
+        let blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "joined active lease should keep capacity busy until it drops"
+        );
+
+        drop(joined);
+        let still_blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
+        assert!(
+            still_blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "final joined release should restore the staged session capacity instead of freeing it"
+        );
     }
 
     #[tokio::test]

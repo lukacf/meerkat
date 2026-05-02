@@ -251,7 +251,7 @@ impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
 
 #[doc(hidden)]
 pub type RestRuntimePreAdmissions =
-    Arc<tokio::sync::Mutex<HashMap<SessionId, RestRuntimePreAdmissionEntry>>>;
+    Arc<tokio::sync::Mutex<HashMap<SessionId, Vec<RestRuntimePreAdmissionEntry>>>>;
 #[doc(hidden)]
 pub type RestRuntimeRegistrationLocks =
     Arc<StdMutex<HashMap<SessionId, Weak<tokio::sync::Mutex<()>>>>>;
@@ -704,16 +704,14 @@ async fn insert_rest_runtime_pre_admission(
     admission: meerkat::RuntimeContextAdmissionGuard,
 ) -> Result<(), SessionError> {
     let mut pre_admissions = pre_admissions.lock().await;
-    if pre_admissions.contains_key(&session_id) {
+    let entries = pre_admissions.entry(session_id.clone()).or_default();
+    if entries.iter().any(|entry| entry.input_id == input_id) {
         return Err(SessionError::Busy { id: session_id });
     }
-    pre_admissions.insert(
-        session_id,
-        RestRuntimePreAdmissionEntry {
-            input_id,
-            admission,
-        },
-    );
+    entries.push(RestRuntimePreAdmissionEntry {
+        input_id,
+        admission,
+    });
     Ok(())
 }
 
@@ -726,13 +724,15 @@ async fn take_rest_runtime_pre_admission(
         return None;
     }
     let mut pre_admissions = pre_admissions.lock().await;
-    let matches = pre_admissions
-        .get(session_id)
-        .is_some_and(|entry| input_ids.contains(&entry.input_id));
-    matches
-        .then(|| pre_admissions.remove(session_id))
-        .flatten()
-        .map(|entry| entry.admission)
+    let entries = pre_admissions.get_mut(session_id)?;
+    let index = entries
+        .iter()
+        .position(|entry| input_ids.contains(&entry.input_id))?;
+    let entry = entries.remove(index);
+    if entries.is_empty() {
+        pre_admissions.remove(session_id);
+    }
+    Some(entry.admission)
 }
 
 async fn discard_rest_runtime_pre_admission(
@@ -741,10 +741,13 @@ async fn discard_rest_runtime_pre_admission(
     input_id: &meerkat_core::lifecycle::InputId,
 ) {
     let mut pre_admissions = pre_admissions.lock().await;
-    if pre_admissions
-        .get(session_id)
-        .is_some_and(|entry| &entry.input_id == input_id)
-    {
+    let Some(entries) = pre_admissions.get_mut(session_id) else {
+        return;
+    };
+    if let Some(index) = entries.iter().position(|entry| &entry.input_id == input_id) {
+        entries.remove(index);
+    }
+    if entries.is_empty() {
         pre_admissions.remove(session_id);
     }
 }
@@ -863,8 +866,10 @@ async fn rekey_rest_runtime_pre_admission(
         return;
     }
     let mut pre_admissions = pre_admissions.lock().await;
-    if let Some(entry) = pre_admissions.get_mut(session_id)
-        && &entry.input_id == from_input_id
+    if let Some(entries) = pre_admissions.get_mut(session_id)
+        && let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| &entry.input_id == from_input_id)
     {
         entry.input_id = to_input_id;
     }
@@ -2866,180 +2871,238 @@ async fn admit_runtime_input_via_webhook(
     input: meerkat_runtime::Input,
     mode: WebhookAdmissionMode,
 ) -> Result<(StatusCode, Json<Value>), Response> {
-    match state
-        .session_service
-        .load_authoritative_session(session_id)
-        .await
-    {
-        Ok(Some(session)) if session_metadata_marks_archived(&session) => {
-            cleanup_archived_session_runtime(state, session_id).await;
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("session not found: {session_id}")})),
-            )
-                .into_response());
-        }
-        Ok(_) => {}
-        Err(err) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to load session: {err}")})),
-            )
-                .into_response());
-        }
-    }
-
     let outcome = match mode {
         WebhookAdmissionMode::WithoutWake => {
+            match state
+                .session_service
+                .load_authoritative_session(session_id)
+                .await
+            {
+                Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+                    cleanup_archived_session_runtime(state, session_id).await;
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": format!("session not found: {session_id}")})),
+                    )
+                        .into_response());
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("failed to load session: {err}")})),
+                    )
+                        .into_response());
+                }
+            }
             state
                 .runtime_adapter
                 .accept_input_without_wake(session_id, input)
                 .await
         }
         WebhookAdmissionMode::Wakeful => {
-            let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
-            let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-            let runtime_was_registered = state.runtime_adapter.contains_session(session_id).await;
-            let runtime_is_already_running = matches!(
-                state.runtime_adapter.runtime_state(session_id).await,
-                Ok(meerkat_runtime::RuntimeState::Running)
-            );
-            let result = if runtime_is_already_running {
-                state.runtime_adapter.accept_input(session_id, input).await
-            } else {
-                let input_id = input.id().clone();
-                let admission = state
-                    .session_service
-                    .reserve_runtime_turn_admission(session_id)
-                    .await
-                    .map_err(|err| {
-                        (
-                            StatusCode::CONFLICT,
-                            Json(json!({"error": err.to_string()})),
-                        )
-                            .into_response()
-                    })?;
-                insert_rest_runtime_pre_admission(
-                    &state.runtime_pre_admissions,
-                    session_id.clone(),
-                    input_id.clone(),
-                    admission,
-                )
+            let input_id = input.id().clone();
+            let admission = match state
+                .session_service
+                .reserve_runtime_turn_admission(session_id)
                 .await
-                .map_err(|err| {
-                    (
+            {
+                Ok(admission) => admission,
+                Err(err) => {
+                    match state
+                        .session_service
+                        .load_authoritative_session(session_id)
+                        .await
+                    {
+                        Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+                            cleanup_archived_session_runtime(state, session_id).await;
+                            return Err((
+                                StatusCode::NOT_FOUND,
+                                Json(json!({"error": format!("session not found: {session_id}")})),
+                            )
+                                .into_response());
+                        }
+                        Ok(_) => {}
+                        Err(load_err) => {
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(
+                                    json!({"error": format!("failed to load session: {load_err}")}),
+                                ),
+                            )
+                                .into_response());
+                        }
+                    }
+                    return Err((
                         StatusCode::CONFLICT,
                         Json(json!({"error": err.to_string()})),
                     )
-                        .into_response()
-                })?;
-                let mut pre_admission_registration =
-                    Some(RestRuntimePreAdmissionRegistration::new(
-                        state.runtime_pre_admissions.clone(),
-                        session_id.clone(),
-                        input_id.clone(),
-                    ));
+                        .into_response());
+                }
+            };
+            insert_rest_runtime_pre_admission(
+                &state.runtime_pre_admissions,
+                session_id.clone(),
+                input_id.clone(),
+                admission,
+            )
+            .await
+            .map_err(|err| {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": err.to_string()})),
+                )
+                    .into_response()
+            })?;
+            let mut pre_admission_registration = Some(RestRuntimePreAdmissionRegistration::new(
+                state.runtime_pre_admissions.clone(),
+                session_id.clone(),
+                input_id.clone(),
+            ));
 
-                ensure_rest_session_runtime_executor(state, session_id).await;
+            match state
+                .session_service
+                .load_authoritative_session(session_id)
+                .await
+            {
+                Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+                    discard_rest_runtime_pre_admission(
+                        &state.runtime_pre_admissions,
+                        session_id,
+                        &input_id,
+                    )
+                    .await;
+                    if let Some(registration) = pre_admission_registration.take() {
+                        registration.disarm();
+                    }
+                    cleanup_archived_session_runtime(state, session_id).await;
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": format!("session not found: {session_id}")})),
+                    )
+                        .into_response());
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    discard_rest_runtime_pre_admission(
+                        &state.runtime_pre_admissions,
+                        session_id,
+                        &input_id,
+                    )
+                    .await;
+                    if let Some(registration) = pre_admission_registration.take() {
+                        registration.disarm();
+                    }
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("failed to load session: {err}")})),
+                    )
+                        .into_response());
+                }
+            }
 
-                match state
-                    .runtime_adapter
-                    .accept_input_with_completion(session_id, input)
-                    .await
-                {
-                    Ok((outcome, handle)) => {
-                        match (&outcome, handle) {
-                            (
-                                meerkat_runtime::AcceptOutcome::Accepted {
-                                    input_id: accepted_input_id,
-                                    ..
-                                },
-                                Some(handle),
-                            ) => {
-                                if let Some(registration) = pre_admission_registration.as_mut() {
-                                    registration.track_input_id(accepted_input_id.clone());
-                                }
-                                spawn_rest_runtime_pre_admission_rekey_and_cleanup(
-                                    state.clone(),
-                                    session_id.clone(),
-                                    input_id.clone(),
-                                    accepted_input_id.clone(),
-                                    handle,
-                                );
-                                if let Some(registration) = pre_admission_registration.take() {
-                                    registration.disarm();
-                                }
+            let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
+            let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+            let runtime_was_registered = state.runtime_adapter.contains_session(session_id).await;
+            ensure_rest_session_runtime_executor(state, session_id).await;
+
+            let result = match state
+                .runtime_adapter
+                .accept_input_with_completion(session_id, input)
+                .await
+            {
+                Ok((outcome, handle)) => {
+                    match (&outcome, handle) {
+                        (
+                            meerkat_runtime::AcceptOutcome::Accepted {
+                                input_id: accepted_input_id,
+                                ..
+                            },
+                            Some(handle),
+                        ) => {
+                            if let Some(registration) = pre_admission_registration.as_mut() {
+                                registration.track_input_id(accepted_input_id.clone());
                             }
-                            (
-                                meerkat_runtime::AcceptOutcome::Accepted {
-                                    input_id: accepted_input_id,
-                                    ..
-                                },
-                                None,
-                            ) => {
-                                if let Some(registration) = pre_admission_registration.as_mut() {
-                                    registration.track_input_id(accepted_input_id.clone());
-                                }
-                                discard_rest_runtime_pre_admission(
-                                    &state.runtime_pre_admissions,
-                                    session_id,
-                                    &input_id,
-                                )
-                                .await;
-                                discard_rest_runtime_pre_admission(
-                                    &state.runtime_pre_admissions,
-                                    session_id,
-                                    accepted_input_id,
-                                )
-                                .await;
-                                if let Some(registration) = pre_admission_registration.take() {
-                                    registration.disarm();
-                                }
-                                unregister_rest_runtime_if_new_idle_locked(
-                                    state,
-                                    session_id,
-                                    runtime_was_registered,
-                                )
-                                .await;
-                            }
-                            _ => {
-                                discard_rest_runtime_pre_admission(
-                                    &state.runtime_pre_admissions,
-                                    session_id,
-                                    &input_id,
-                                )
-                                .await;
-                                if let Some(registration) = pre_admission_registration.take() {
-                                    registration.disarm();
-                                }
-                                unregister_rest_runtime_if_new_idle_locked(
-                                    state,
-                                    session_id,
-                                    runtime_was_registered,
-                                )
-                                .await;
+                            spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+                                state.clone(),
+                                session_id.clone(),
+                                input_id.clone(),
+                                accepted_input_id.clone(),
+                                handle,
+                            );
+                            if let Some(registration) = pre_admission_registration.take() {
+                                registration.disarm();
                             }
                         }
-                        Ok(outcome)
-                    }
-                    Err(err) => {
-                        discard_rest_runtime_pre_admission(
-                            &state.runtime_pre_admissions,
-                            session_id,
-                            &input_id,
-                        )
-                        .await;
-                        if let Some(registration) = pre_admission_registration.take() {
-                            registration.disarm();
+                        (
+                            meerkat_runtime::AcceptOutcome::Accepted {
+                                input_id: accepted_input_id,
+                                ..
+                            },
+                            None,
+                        ) => {
+                            if let Some(registration) = pre_admission_registration.as_mut() {
+                                registration.track_input_id(accepted_input_id.clone());
+                            }
+                            discard_rest_runtime_pre_admission(
+                                &state.runtime_pre_admissions,
+                                session_id,
+                                &input_id,
+                            )
+                            .await;
+                            discard_rest_runtime_pre_admission(
+                                &state.runtime_pre_admissions,
+                                session_id,
+                                accepted_input_id,
+                            )
+                            .await;
+                            if let Some(registration) = pre_admission_registration.take() {
+                                registration.disarm();
+                            }
+                            unregister_rest_runtime_if_new_idle_locked(
+                                state,
+                                session_id,
+                                runtime_was_registered,
+                            )
+                            .await;
                         }
-                        unregister_rest_runtime_if_new_idle_locked(
-                            state,
-                            session_id,
-                            runtime_was_registered,
-                        )
-                        .await;
-                        Err(err)
+                        _ => {
+                            discard_rest_runtime_pre_admission(
+                                &state.runtime_pre_admissions,
+                                session_id,
+                                &input_id,
+                            )
+                            .await;
+                            if let Some(registration) = pre_admission_registration.take() {
+                                registration.disarm();
+                            }
+                            unregister_rest_runtime_if_new_idle_locked(
+                                state,
+                                session_id,
+                                runtime_was_registered,
+                            )
+                            .await;
+                        }
                     }
+                    Ok(outcome)
+                }
+                Err(err) => {
+                    discard_rest_runtime_pre_admission(
+                        &state.runtime_pre_admissions,
+                        session_id,
+                        &input_id,
+                    )
+                    .await;
+                    if let Some(registration) = pre_admission_registration.take() {
+                        registration.disarm();
+                    }
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    Err(err)
                 }
             };
             drop(runtime_registration_guard);
@@ -5007,35 +5070,28 @@ async fn continue_session_inner(
             }
         }
 
-        let runtime_is_already_running = matches!(
-            adapter.runtime_state(&session_id).await,
-            Ok(meerkat_runtime::RuntimeState::Running)
+        let mut pending_pre_admission = Some(
+            match state
+                .session_service
+                .reserve_runtime_turn_admission(&session_id)
+                .await
+            {
+                Ok(admission) => admission,
+                Err(err) => {
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        &session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
+                        err.to_string(),
+                    )));
+                }
+            },
         );
-        let mut pending_pre_admission = None;
-        if !runtime_is_already_running {
-            pending_pre_admission = Some(
-                match state
-                    .session_service
-                    .reserve_runtime_turn_admission(&session_id)
-                    .await
-                {
-                    Ok(admission) => admission,
-                    Err(err) => {
-                        unregister_rest_runtime_if_new_idle_locked(
-                            state,
-                            &session_id,
-                            runtime_was_registered,
-                        )
-                        .await;
-                        drop(caller_event_tx);
-                        drain_event_forwarder(&session_id, forward_task).await;
-                        return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
-                            err.to_string(),
-                        )));
-                    }
-                },
-            );
-        }
         // Recheck cancellation before any admitted side effects.
         if let Some(ctx) = req_ctx.as_ref()
             && ctx.cancel_already_requested()
@@ -6758,6 +6814,22 @@ mod tests {
         panic!("runtime did not enter Running state: {state:?}");
     }
 
+    async fn wait_for_rest_runtime_pre_admission(state: &AppState, session_id: &SessionId) {
+        for _ in 0..200 {
+            let has_pre_admission = state
+                .runtime_pre_admissions
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|entries| !entries.is_empty());
+            if has_pre_admission {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("runtime pre-admission was not registered for {session_id}");
+    }
+
     #[tokio::test]
     async fn rest_archived_runtime_input_webhooks_reject_and_unregister_stale_runtime() {
         let temp = TempDir::new().unwrap();
@@ -6883,17 +6955,20 @@ mod tests {
             meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
             json!({"capacity": "full", "target": "running"}),
         );
-        let admitted = admit_runtime_input_via_webhook(
-            &state,
-            &target_session_id,
-            peer_input,
-            WebhookAdmissionMode::Wakeful,
-        )
-        .await
-        .expect("running target peer terminal webhook should bypass new-session capacity precheck");
-        assert_eq!(admitted.0, StatusCode::ACCEPTED);
+        let webhook_state = state.clone();
+        let webhook_session_id = target_session_id.clone();
+        let webhook_task = tokio::spawn(async move {
+            admit_runtime_input_via_webhook(
+                &webhook_state,
+                &webhook_session_id,
+                peer_input,
+                WebhookAdmissionMode::Wakeful,
+            )
+            .await
+        });
+        wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        release.notify_one();
+        release.notify_waiters();
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
@@ -6902,6 +6977,17 @@ mod tests {
             matches!(completed, RequestTerminal::Publish(Ok(_))),
             "running turn should publish successfully: {completed:?}"
         );
+
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), webhook_task)
+            .await
+            .expect("peer terminal webhook should finish after the running turn releases")
+            .expect("peer terminal webhook task should not panic")
+            .expect(
+                "running target peer terminal webhook should bypass new-session capacity precheck",
+            );
+        assert_eq!(admitted.0, StatusCode::ACCEPTED);
+
+        release.notify_waiters();
     }
 
     #[tokio::test]
@@ -6955,7 +7041,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_peer_terminal_webhook_waits_for_registration_lock_before_active_admission() {
+    async fn rest_peer_terminal_webhook_reserves_active_admission_before_registration_lock() {
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 1).await;
         state.llm_client_override = Some(Arc::new(MockLlmClient));
@@ -6989,19 +7075,25 @@ mod tests {
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
+        wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        let _capacity_filler = try_create_deferred_rest_runtime_session(&state)
-            .await
-            .expect("blocked wakeful webhook must not reserve active capacity before lock");
+        let capacity_filler = try_create_deferred_rest_runtime_session(&state).await;
+        assert!(
+            capacity_filler
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "blocked wakeful webhook must reserve active capacity before lock release: {capacity_filler:?}"
+        );
 
         drop(registration_guard);
         drop(registration_lock);
-        let rejected = tokio::time::timeout(std::time::Duration::from_secs(5), webhook_task)
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), webhook_task)
             .await
             .expect("wakeful webhook should finish after lock release")
             .expect("wakeful webhook task should not panic")
-            .expect_err("capacity filler should make webhook reject after lock release");
-        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+            .expect("wakeful webhook should keep its reserved capacity after lock release");
+        assert_eq!(admitted.0, StatusCode::ACCEPTED);
     }
 
     #[tokio::test]

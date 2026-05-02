@@ -234,7 +234,7 @@ fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToo
 
 #[derive(Default)]
 struct ActiveSessionAdmissions {
-    sessions: StdMutex<HashMap<SessionId, ActiveAdmissionState>>,
+    sessions: StdMutex<HashMap<SessionId, ActiveAdmissionRecord>>,
 }
 
 #[derive(Debug)]
@@ -249,6 +249,23 @@ enum ActiveAdmissionState {
     Staged,
     Running,
     Closing,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveAdmissionRecord {
+    state: ActiveAdmissionState,
+    leases: usize,
+    restore_to_staged_on_final_release: bool,
+}
+
+impl ActiveAdmissionRecord {
+    fn new(state: ActiveAdmissionState) -> Self {
+        Self {
+            state,
+            leases: 1,
+            restore_to_staged_on_final_release: false,
+        }
+    }
 }
 
 pub(crate) struct ActiveSessionAdmissionGuard {
@@ -327,7 +344,7 @@ impl ActiveSessionAdmissions {
                 max: max_sessions,
             });
         }
-        sessions.insert(session_id.clone(), state);
+        sessions.insert(session_id.clone(), ActiveAdmissionRecord::new(state));
         Ok(ActiveSessionAdmissionGuard {
             admissions: Arc::clone(self),
             session_id,
@@ -346,8 +363,9 @@ impl ActiveSessionAdmissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match sessions.get_mut(&session_id) {
-            Some(state @ ActiveAdmissionState::Staged) => {
-                *state = ActiveAdmissionState::Running;
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
                 return Ok(ActiveSessionAdmissionGuard {
                     admissions: Arc::clone(self),
                     session_id,
@@ -355,11 +373,17 @@ impl ActiveSessionAdmissions {
                     release_on_drop: true,
                 });
             }
-            Some(
-                ActiveAdmissionState::Preparing
-                | ActiveAdmissionState::Running
-                | ActiveAdmissionState::Closing,
-            ) => return Err(ActiveAdmissionError::Busy),
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                return Err(ActiveAdmissionError::Busy);
+            }
+            Some(_) => return Err(ActiveAdmissionError::Busy),
             None => {}
         }
         let active = sessions.len();
@@ -369,7 +393,69 @@ impl ActiveSessionAdmissions {
                 max: max_sessions,
             });
         }
-        sessions.insert(session_id.clone(), ActiveAdmissionState::Running);
+        sessions.insert(
+            session_id.clone(),
+            ActiveAdmissionRecord::new(ActiveAdmissionState::Running),
+        );
+        Ok(ActiveSessionAdmissionGuard {
+            admissions: Arc::clone(self),
+            session_id,
+            promoted_from_staged: false,
+            release_on_drop: true,
+        })
+    }
+
+    fn try_join_or_reserve_running(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        max_sessions: usize,
+    ) -> Result<ActiveSessionAdmissionGuard, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sessions.get_mut(&session_id) {
+            Some(record) if record.state == ActiveAdmissionState::Running => {
+                record.leases = record.leases.saturating_add(1);
+                return Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id,
+                    promoted_from_staged: false,
+                    release_on_drop: true,
+                });
+            }
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
+                return Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id,
+                    promoted_from_staged: true,
+                    release_on_drop: true,
+                });
+            }
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing | ActiveAdmissionState::Closing
+                ) =>
+            {
+                return Err(ActiveAdmissionError::Busy);
+            }
+            Some(_) => return Err(ActiveAdmissionError::Busy),
+            None => {}
+        }
+        let active = sessions.len();
+        if active >= max_sessions {
+            return Err(ActiveAdmissionError::Full {
+                active,
+                max: max_sessions,
+            });
+        }
+        sessions.insert(
+            session_id.clone(),
+            ActiveAdmissionRecord::new(ActiveAdmissionState::Running),
+        );
         Ok(ActiveSessionAdmissionGuard {
             admissions: Arc::clone(self),
             session_id,
@@ -387,8 +473,9 @@ impl ActiveSessionAdmissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match sessions.get_mut(session_id) {
-            Some(state @ ActiveAdmissionState::Staged) => {
-                *state = ActiveAdmissionState::Running;
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
                 Ok(ActiveSessionAdmissionGuard {
                     admissions: Arc::clone(self),
                     session_id: session_id.clone(),
@@ -396,12 +483,17 @@ impl ActiveSessionAdmissions {
                     release_on_drop: true,
                 })
             }
-            Some(
-                ActiveAdmissionState::Preparing
-                | ActiveAdmissionState::Running
-                | ActiveAdmissionState::Closing,
-            )
-            | None => Err(ActiveAdmissionError::Busy),
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                Err(ActiveAdmissionError::Busy)
+            }
+            Some(_) | None => Err(ActiveAdmissionError::Busy),
         }
     }
 
@@ -414,19 +506,25 @@ impl ActiveSessionAdmissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match sessions.get_mut(session_id) {
-            Some(state @ ActiveAdmissionState::Staged) => {
-                *state = ActiveAdmissionState::Closing;
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Closing;
                 Ok(Some(ActiveSessionClosingGuard {
                     admissions: Arc::clone(self),
                     session_id: session_id.clone(),
                     restore_on_drop: true,
                 }))
             }
-            Some(
-                ActiveAdmissionState::Preparing
-                | ActiveAdmissionState::Running
-                | ActiveAdmissionState::Closing,
-            ) => Err(ActiveAdmissionError::Busy),
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                Err(ActiveAdmissionError::Busy)
+            }
+            Some(_) => Err(ActiveAdmissionError::Busy),
             None => Ok(None),
         }
     }
@@ -450,10 +548,13 @@ impl ActiveSessionAdmissions {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state @ ActiveAdmissionState::Closing) = sessions.get_mut(session_id) else {
+        let Some(record) = sessions.get_mut(session_id) else {
             return false;
         };
-        *state = ActiveAdmissionState::Staged;
+        if record.state != ActiveAdmissionState::Closing {
+            return false;
+        }
+        record.state = ActiveAdmissionState::Staged;
         true
     }
 
@@ -462,10 +563,18 @@ impl ActiveSessionAdmissions {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state @ ActiveAdmissionState::Running) = sessions.get_mut(session_id) else {
+        let Some(record) = sessions.get_mut(session_id) else {
             return false;
         };
-        *state = ActiveAdmissionState::Staged;
+        if record.state != ActiveAdmissionState::Running || record.leases != 1 {
+            if record.state == ActiveAdmissionState::Running && record.leases > 1 {
+                record.restore_to_staged_on_final_release = true;
+                return true;
+            }
+            return false;
+        }
+        record.state = ActiveAdmissionState::Staged;
+        record.restore_to_staged_on_final_release = false;
         true
     }
 
@@ -474,7 +583,7 @@ impl ActiveSessionAdmissions {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if sessions.get(session_id).copied() == Some(state) {
+        if sessions.get(session_id).map(|record| record.state) == Some(state) {
             sessions.remove(session_id);
             return true;
         }
@@ -489,16 +598,37 @@ impl ActiveSessionAdmissions {
         let Some(existing) = sessions.get_mut(session_id) else {
             return false;
         };
-        *existing = state;
+        existing.state = state;
+        existing.restore_to_staged_on_final_release = false;
         true
     }
 
     fn release(&self, session_id: &SessionId) -> bool {
-        self.sessions
+        let mut sessions = self
+            .sessions
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session_id)
-            .is_some()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.restore_to_staged_on_final_release {
+            if record.leases > 1 {
+                record.leases -= 1;
+            }
+            if record.leases <= 1 {
+                record.leases = 1;
+                record.state = ActiveAdmissionState::Staged;
+                record.restore_to_staged_on_final_release = false;
+            }
+            return true;
+        }
+        if record.leases > 1 {
+            record.leases -= 1;
+            true
+        } else {
+            sessions.remove(session_id);
+            true
+        }
     }
 
     fn state(&self, session_id: &SessionId) -> Option<ActiveAdmissionState> {
@@ -506,7 +636,16 @@ impl ActiveSessionAdmissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
-            .copied()
+            .map(|record| record.state)
+    }
+
+    #[cfg(test)]
+    fn lease_count(&self, session_id: &SessionId) -> Option<usize> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .map(|record| record.leases)
     }
 
     fn clear(&self) {
@@ -2391,7 +2530,7 @@ pub struct SessionRuntime {
     /// sessions, and currently running turns are counted here; persisted
     /// history and idle live handles are not.
     active_session_admissions: Arc<ActiveSessionAdmissions>,
-    runtime_pre_admissions: Arc<StdMutex<HashMap<SessionId, RuntimePreAdmissionEntry>>>,
+    runtime_pre_admissions: Arc<StdMutex<HashMap<SessionId, Vec<RuntimePreAdmissionEntry>>>>,
     runtime_registration_locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
     #[cfg(test)]
     pending_promotion_pre_turn_hook: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
@@ -3079,11 +3218,41 @@ impl SessionRuntime {
             })
     }
 
+    async fn reserve_or_join_active_turn_for_service(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, SessionError> {
+        let max_sessions = self.active_session_capacity().await.map_err(|err| {
+            SessionError::Agent(meerkat_core::AgentError::InternalError(err.message))
+        })?;
+        self.active_session_admissions
+            .try_join_or_reserve_running(session_id.clone(), max_sessions)
+            .map_err(|err| match err {
+                ActiveAdmissionError::Busy => SessionError::Busy {
+                    id: session_id.clone(),
+                },
+                ActiveAdmissionError::Full { active, max } => {
+                    SessionError::Agent(meerkat_core::AgentError::InternalError(format!(
+                        "Max sessions reached ({active}/{max})"
+                    )))
+                }
+            })
+    }
+
     async fn reserve_active_turn(
         &self,
         session_id: &SessionId,
     ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
         self.reserve_active_turn_for_service(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    async fn reserve_or_join_active_turn(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        self.reserve_or_join_active_turn_for_service(session_id)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -3100,13 +3269,15 @@ impl SessionRuntime {
             .runtime_pre_admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let matches = pre_admissions
-            .get(session_id)
-            .is_some_and(|entry| input_ids.contains(&entry.input_id));
-        matches
-            .then(|| pre_admissions.remove(session_id))
-            .flatten()
-            .map(|entry| entry.admission)
+        let entries = pre_admissions.get_mut(session_id)?;
+        let index = entries
+            .iter()
+            .position(|entry| input_ids.contains(&entry.input_id))?;
+        let entry = entries.remove(index);
+        if entries.is_empty() {
+            pre_admissions.remove(session_id);
+        }
+        Some(entry.admission)
     }
 
     fn insert_runtime_pre_admission(
@@ -3119,7 +3290,8 @@ impl SessionRuntime {
             .runtime_pre_admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pre_admissions.contains_key(&session_id) {
+        let entries = pre_admissions.entry(session_id.clone()).or_default();
+        if entries.iter().any(|entry| entry.input_id == input_id) {
             drop(pre_admissions);
             if admission.promoted_from_staged() {
                 admission.restore_staged_and_keep();
@@ -3130,13 +3302,10 @@ impl SessionRuntime {
                 data: None,
             });
         }
-        pre_admissions.insert(
-            session_id,
-            RuntimePreAdmissionEntry {
-                input_id,
-                admission,
-            },
-        );
+        entries.push(RuntimePreAdmissionEntry {
+            input_id,
+            admission,
+        });
         Ok(())
     }
 
@@ -3322,6 +3491,33 @@ impl SessionRuntime {
             let _ = outcome_tx.send(outcome);
         });
         outcome_rx
+    }
+
+    fn spawn_runtime_pre_admission_idle_cleanup(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        input_id: InputId,
+    ) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let runtime_running = runtime
+                    .runtime_adapter
+                    .runtime_state(&session_id)
+                    .await
+                    .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
+                let input_still_active = runtime
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .is_ok_and(|inputs| inputs.contains(&input_id));
+                if !runtime_running || !input_still_active {
+                    runtime.restore_or_release_runtime_pre_admission(&session_id, &input_id);
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        });
     }
 
     fn promote_pending_active_turn(
@@ -5455,9 +5651,6 @@ impl SessionRuntime {
 
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
-        if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
-        }
 
         if event_type.trim().is_empty() {
             return Err(RpcError {
@@ -5468,12 +5661,6 @@ impl SessionRuntime {
         }
 
         let blocks = decode_wire_content_blocks(blocks)?;
-
-        let runtime_registration_lock = self.runtime_registration_lock(session_id);
-        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let staged_session_existed = self.staged_sessions.contains(session_id).await;
-        self.ensure_runtime_executor(session_id).await?;
 
         let input = Input::ExternalEvent(ExternalEventInput {
             header: InputHeader {
@@ -5494,6 +5681,69 @@ impl SessionRuntime {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         });
+        let input_id = input.id().clone();
+
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
+        let staged_session_existed = self.staged_sessions.contains(session_id).await;
+        let runtime_is_already_running = self
+            .runtime_adapter
+            .runtime_state(session_id)
+            .await
+            .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
+        let mut pre_admission = if runtime_is_already_running {
+            Some(RuntimePreAdmissionGuard::new(
+                self.reserve_or_join_active_turn(session_id).await?,
+            ))
+        } else {
+            None
+        };
+        let cleanup_protects_active_admission = pre_admission.is_none();
+
+        if self.live_session_is_stale(session_id).await? {
+            self.discard_stale_live_session(session_id).await;
+        }
+        self.ensure_runtime_executor(session_id).await?;
+
+        let mut pre_admission_registration = None;
+        if let Some(admission) = pre_admission.as_mut() {
+            let admission_guard =
+                match Self::take_runtime_pre_admission_guard(admission, session_id) {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                };
+            pre_admission_registration = Some(
+                match self.register_runtime_pre_admission(
+                    session_id.clone(),
+                    input_id.clone(),
+                    admission_guard,
+                ) {
+                    Ok(registration) => registration,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                },
+            );
+        }
 
         let result = self
             .runtime_adapter
@@ -5510,9 +5760,22 @@ impl SessionRuntime {
                 session_id,
                 runtime_was_registered,
                 staged_session_existed,
-                true,
+                cleanup_protects_active_admission,
             )
             .await;
+        }
+        if let Some(registration) = pre_admission_registration {
+            let keep_admission_for_active_input =
+                matches!(result, Ok(meerkat_runtime::AcceptOutcome::Accepted { .. }))
+                    && self
+                        .runtime_adapter
+                        .list_active_inputs(session_id)
+                        .await
+                        .is_ok_and(|inputs| inputs.contains(&input_id));
+            if keep_admission_for_active_input {
+                self.spawn_runtime_pre_admission_idle_cleanup(session_id.clone(), input_id.clone());
+                registration.disarm();
+            }
         }
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
@@ -5527,28 +5790,24 @@ impl SessionRuntime {
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
-        if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
-        }
         let input_id = input.id().clone();
-
-        let runtime_registration_lock = self.runtime_registration_lock(session_id);
-        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let runtime_is_already_running = matches!(
-            adapter.runtime_state(session_id).await,
-            Ok(meerkat_runtime::RuntimeState::Running)
-        );
-        let should_pre_admit = Self::runtime_input_requires_active_pre_admission(&input)
-            && !runtime_is_already_running;
+        let should_pre_admit = Self::runtime_input_requires_active_pre_admission(&input);
         let cleanup_protects_active_admission = !should_pre_admit;
-        let mut pre_admission_registration = None;
         let mut pre_admission = if should_pre_admit {
             Some(RuntimePreAdmissionGuard::new(
-                self.reserve_active_turn(session_id).await?,
+                self.reserve_or_join_active_turn(session_id).await?,
             ))
         } else {
             None
         };
+
+        if self.live_session_is_stale(session_id).await? {
+            self.discard_stale_live_session(session_id).await;
+        }
+
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let mut pre_admission_registration = None;
 
         let runtime_was_registered = adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
@@ -5654,12 +5913,6 @@ impl SessionRuntime {
         status: meerkat_contracts::PeerResponseTerminalStatusWire,
         result: serde_json::Value,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        self.reject_archived_persisted_session_without_live(session_id)
-            .await?;
-        if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
-        }
-
         let input = meerkat_runtime::peer_response_terminal_input(
             peer_id,
             display_name,
@@ -8432,6 +8685,76 @@ mod tests {
         assert_eq!(admissions.state(&session_id), None);
     }
 
+    #[test]
+    fn active_admission_running_join_keeps_capacity_until_all_leases_drop() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        let first = admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Running)
+            .expect("reserve running admission");
+        let joined = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("join existing running session admission");
+
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        drop(first);
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running),
+            "joined admission must keep the session active after the first lease drops"
+        );
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        drop(joined);
+        assert_eq!(admissions.state(&session_id), None);
+    }
+
+    #[test]
+    fn active_admission_restore_staged_waits_for_joined_running_leases() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Staged)
+            .expect("reserve staged admission")
+            .keep();
+        let promoted = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("promote staged admission");
+        let joined = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("join promoted running admission");
+
+        assert_eq!(admissions.lease_count(&session_id), Some(2));
+        promoted.restore_staged_and_keep();
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running)
+        );
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+
+        drop(joined);
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Staged)
+        );
+        assert_eq!(admissions.lease_count(&session_id), Some(1));
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("restored staged admission should promote again");
+    }
+
     // -----------------------------------------------------------------------
     // Mock LLM client
     // -----------------------------------------------------------------------
@@ -8814,6 +9137,29 @@ mod tests {
         }
     }
 
+    async fn wait_for_active_leases(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        expected: usize,
+        description: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime
+                .active_session_admissions
+                .lease_count(session_id)
+                .is_some_and(|leases| leases >= expected)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{description} did not reach {expected} active admission leases before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_for_runtime_unregistered(
         runtime: &SessionRuntime,
         session_id: &SessionId,
@@ -8874,6 +9220,51 @@ mod tests {
         }
 
         (session_id, turn, release)
+    }
+
+    async fn start_runtime_prompt_without_registration_lock(
+        runtime: &Arc<SessionRuntime>,
+        session_id: &SessionId,
+        prompt: &str,
+    ) -> tokio::task::JoinHandle<meerkat_runtime::CompletionOutcome> {
+        let runtime = Arc::clone(runtime);
+        let session_id = session_id.clone();
+        let prompt = prompt.to_string();
+        tokio::spawn(async move {
+            let input = meerkat_runtime::Input::Prompt(
+                meerkat_runtime::PromptInput::from_content_input(ContentInput::Text(prompt), None),
+            );
+            let input_id = input.id().clone();
+            let admission = runtime
+                .reserve_active_turn(&session_id)
+                .await
+                .expect("reserve active runtime prompt");
+            runtime
+                .ensure_runtime_executor(&session_id)
+                .await
+                .expect("ensure runtime executor");
+            let registration = runtime
+                .register_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+                .expect("register active runtime prompt pre-admission");
+            let (outcome, handle) = runtime
+                .runtime_adapter
+                .accept_input_with_completion(&session_id, input)
+                .await
+                .expect("accept active runtime prompt");
+            assert!(
+                matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+                "active runtime prompt should be accepted: {outcome:?}"
+            );
+            let Some(handle) = handle else {
+                return meerkat_runtime::CompletionOutcome::CompletedWithoutResult;
+            };
+            let cleanup = runtime
+                .spawn_runtime_pre_admission_cleanup_with_outcome(session_id, input_id, handle);
+            registration.disarm();
+            cleanup
+                .await
+                .expect("active runtime prompt cleanup should report completion")
+        })
     }
 
     #[tokio::test]
@@ -12502,6 +12893,159 @@ mod tests {
             active_after.is_empty(),
             "capacity rejection must not enqueue runtime input: {active_after:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_submit_queued_same_session_input_extends_active_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let (build_config, calls, release) = blocking_build_config();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create staged blocking session");
+        let first_turn = start_runtime_prompt_without_registration_lock(
+            &runtime,
+            &session_id,
+            "first runtime turn blocks",
+        )
+        .await;
+        wait_for_llm_calls(&calls, 1, "first runtime-routed turn").await;
+
+        let queued_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"token": "queued runtime submit should keep capacity"}),
+        );
+        let queued_runtime = Arc::clone(&runtime);
+        let queued_session_id = session_id.clone();
+        let queued_accept = tokio::spawn(async move {
+            queued_runtime
+                .accept_runtime_input_with_active_admission(
+                    &queued_runtime.runtime_adapter,
+                    &queued_session_id,
+                    queued_input,
+                )
+                .await
+        });
+        wait_for_active_leases(
+            &runtime,
+            &session_id,
+            2,
+            "queued same-session runtime submit",
+        )
+        .await;
+
+        release.notify_one();
+
+        let blocked = runtime.reserve_active_turn(&SessionId::new()).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "queued same-session runtime input must keep active capacity after the first turn releases"
+        );
+        first_turn
+            .await
+            .expect("first runtime prompt task should not panic");
+        let accepted = queued_accept
+            .await
+            .expect("queued runtime submit task should not panic")
+            .expect("runtime submit should join running session admission");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "runtime submit should accept queued same-session input: {accepted:?}"
+        );
+
+        release.notify_one();
+        wait_for_llm_calls(&calls, 2, "queued runtime submit turn").await;
+        let replacement_id = SessionId::new();
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                match runtime.reserve_active_turn(&replacement_id).await {
+                    Ok(guard) => break guard,
+                    Err(err) if err.message.contains("Max sessions") => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                    Err(err) => panic!("unexpected replacement admission error: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("queued runtime submit should eventually release active capacity");
+    }
+
+    #[tokio::test]
+    async fn external_event_queued_while_running_extends_active_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let (build_config, calls, release) = blocking_build_config();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create staged blocking session");
+        let first_turn = start_runtime_prompt_without_registration_lock(
+            &runtime,
+            &session_id,
+            "first runtime turn blocks before external event",
+        )
+        .await;
+        wait_for_llm_calls(&calls, 1, "first runtime-routed turn").await;
+
+        let event_runtime = Arc::clone(&runtime);
+        let event_session_id = session_id.clone();
+        let event_accept = tokio::spawn(async move {
+            event_runtime
+                .accept_external_event_via_runtime(
+                    &event_session_id,
+                    "review.event".to_string(),
+                    serde_json::json!({"status": "queued"}),
+                    None,
+                )
+                .await
+        });
+        wait_for_active_leases(&runtime, &session_id, 2, "queued external event").await;
+
+        release.notify_one();
+
+        let blocked = runtime.reserve_active_turn(&SessionId::new()).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "queued external event must keep active capacity after the first turn releases"
+        );
+        first_turn
+            .await
+            .expect("first runtime prompt task should not panic");
+        let accepted = event_accept
+            .await
+            .expect("queued external event task should not panic")
+            .expect("external event should queue behind running runtime");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "external event should be accepted: {accepted:?}"
+        );
+        let replacement_id = SessionId::new();
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                match runtime.reserve_active_turn(&replacement_id).await {
+                    Ok(guard) => break guard,
+                    Err(err) if err.message.contains("Max sessions") => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                    Err(err) => panic!("unexpected replacement admission error: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("queued external event should eventually release active capacity");
     }
 
     #[tokio::test]

@@ -37,7 +37,7 @@ pub(crate) type SharedMcpRuntimeSessions =
     Arc<RwLock<HashMap<SessionId, Arc<McpRuntimeSessionState>>>>;
 pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapter>>>>;
 pub(crate) type SharedMcpRuntimePreAdmissions =
-    Arc<Mutex<HashMap<SessionId, McpRuntimePreAdmissionEntry>>>;
+    Arc<Mutex<HashMap<SessionId, Vec<McpRuntimePreAdmissionEntry>>>>;
 pub(crate) type SharedMcpRuntimeRegistrationLocks =
     Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>;
 
@@ -123,10 +123,13 @@ async fn discard_mcp_runtime_pre_admission(
     input_id: &meerkat_core::lifecycle::InputId,
 ) {
     let mut pre_admissions = pre_admissions.lock().await;
-    if pre_admissions
-        .get(session_id)
-        .is_some_and(|entry| &entry.input_id == input_id)
-    {
+    let Some(entries) = pre_admissions.get_mut(session_id) else {
+        return;
+    };
+    if let Some(index) = entries.iter().position(|entry| &entry.input_id == input_id) {
+        entries.remove(index);
+    }
+    if entries.is_empty() {
         pre_admissions.remove(session_id);
     }
 }
@@ -141,8 +144,10 @@ async fn rekey_mcp_runtime_pre_admission(
         return;
     }
     let mut pre_admissions = pre_admissions.lock().await;
-    if let Some(entry) = pre_admissions.get_mut(session_id)
-        && &entry.input_id == from_input_id
+    if let Some(entries) = pre_admissions.get_mut(session_id)
+        && let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| &entry.input_id == from_input_id)
     {
         entry.input_id = to_input_id;
     }
@@ -368,16 +373,14 @@ impl McpRuntimeIngressContext {
         admission: meerkat::RuntimeContextAdmissionGuard,
     ) -> Result<(), SessionError> {
         let mut pre_admissions = self.runtime_pre_admissions.lock().await;
-        if pre_admissions.contains_key(&session_id) {
+        let entries = pre_admissions.entry(session_id.clone()).or_default();
+        if entries.iter().any(|entry| entry.input_id == input_id) {
             return Err(SessionError::Busy { id: session_id });
         }
-        pre_admissions.insert(
-            session_id,
-            McpRuntimePreAdmissionEntry {
-                input_id,
-                admission,
-            },
-        );
+        entries.push(McpRuntimePreAdmissionEntry {
+            input_id,
+            admission,
+        });
         Ok(())
     }
 
@@ -390,13 +393,15 @@ impl McpRuntimeIngressContext {
             return None;
         }
         let mut pre_admissions = self.runtime_pre_admissions.lock().await;
-        let matches = pre_admissions
-            .get(session_id)
-            .is_some_and(|entry| input_ids.contains(&entry.input_id));
-        matches
-            .then(|| pre_admissions.remove(session_id))
-            .flatten()
-            .map(|entry| entry.admission)
+        let entries = pre_admissions.get_mut(session_id)?;
+        let index = entries
+            .iter()
+            .position(|entry| input_ids.contains(&entry.input_id))?;
+        let entry = entries.remove(index);
+        if entries.is_empty() {
+            pre_admissions.remove(session_id);
+        }
+        Some(entry.admission)
     }
 
     async fn discard_runtime_pre_admission(
@@ -507,24 +512,16 @@ impl McpRuntimeIngressContext {
         let requested_input_id = input.id().clone();
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let runtime_is_already_running = matches!(
-            self.runtime_adapter.runtime_state(session_id).await,
-            Ok(meerkat_runtime::RuntimeState::Running)
-        );
-        let pre_admission = if runtime_is_already_running {
-            None
-        } else {
-            match self
-                .service
-                .reserve_runtime_turn_admission(session_id)
-                .await
-            {
-                Ok(admission) => Some(admission),
-                Err(error) => {
-                    return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
-                        reason: error.to_string(),
-                    });
-                }
+        let pre_admission = match self
+            .service
+            .reserve_runtime_turn_admission(session_id)
+            .await
+        {
+            Ok(admission) => Some(admission),
+            Err(error) => {
+                return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                    reason: error.to_string(),
+                });
             }
         };
         let mut pre_admission_registration = None;

@@ -366,6 +366,73 @@ async fn immediate_session_create_keep_alive_policy_runs_first_turn_once() {
 }
 
 #[tokio::test]
+async fn immediate_session_create_keep_alive_without_comms_name_errors() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/create",
+            "params": {
+                "prompt": "This create should be rejected before first turn dispatch.",
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false,
+                "turn_metadata": {
+                    "keep_alive": {
+                        "action": "set",
+                        "value": {
+                            "ttl_secs": 75,
+                            "policy": "policy_driven"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["result"].is_null(),
+        "session/create should not return a successful placeholder result: {create_resp}"
+    );
+    let message = create_resp["error"]["message"]
+        .as_str()
+        .expect("error message should be present");
+    assert!(
+        message.contains("keep_alive requires a session created with comms_name"),
+        "unexpected error: {create_resp}"
+    );
+    assert!(
+        client.seen_tools().is_empty(),
+        "invalid keep_alive create must not reach the LLM"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_turn() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());

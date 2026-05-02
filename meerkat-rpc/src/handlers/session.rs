@@ -322,6 +322,13 @@ pub async fn handle_create(
     build_config.initial_turn_metadata = initial_turn_metadata.clone();
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
+    if build_config.keep_alive && build_config.comms_name.is_none() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "keep_alive requires a session created with comms_name",
+        );
+    }
 
     // Wire callback tools backed by the live registered_tools list.
     // Tools added later via tools/register are picked up dynamically at each

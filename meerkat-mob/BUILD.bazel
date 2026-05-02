@@ -41,6 +41,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -90,6 +91,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -156,6 +158,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -225,6 +228,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -292,6 +296,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -359,6 +364,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -426,6 +432,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -493,6 +500,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -560,6 +568,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",
@@ -627,6 +636,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
+        "src/runtime/actor_turn_executor.rs",
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/handle.rs",

@@ -59,14 +59,6 @@ pub enum RequestTerminal<T> {
 }
 
 impl<T> RequestTerminal<T> {
-    /// Borrow the terminal payload without exposing whether it was classified as
-    /// committed or observational.
-    pub fn payload(&self) -> &T {
-        match self {
-            Self::Publish(payload) | Self::RespondWithoutPublish(payload) => payload,
-        }
-    }
-
     fn into_payload(self) -> T {
         match self {
             Self::Publish(payload) | Self::RespondWithoutPublish(payload) => payload,
@@ -135,19 +127,6 @@ impl SurfaceRequestSemantics {
 
     pub const fn requires_long_running_executor(self) -> bool {
         matches!(self.execution, SurfaceRequestExecution::LongRunning)
-    }
-
-    pub fn classify_terminal<T>(self, success: bool, response: T) -> RequestTerminal<T> {
-        if success
-            && matches!(
-                self.terminal_policy,
-                SurfaceRequestTerminalPolicy::PublishOnSuccess
-            )
-        {
-            RequestTerminal::Publish(response)
-        } else {
-            RequestTerminal::RespondWithoutPublish(response)
-        }
     }
 }
 
@@ -268,15 +247,20 @@ pub enum PublishOutcome {
 
 struct RequestEntry {
     phase: Mutex<SurfaceRequestPhase>,
+    terminal_policy: SurfaceRequestTerminalPolicy,
     cancel_action: Mutex<RequestAsyncAction>,
     unpublished_cleanup: Mutex<Option<RequestAsyncAction>>,
     task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RequestEntry {
-    fn new(initial_cancel: RequestAsyncAction) -> Self {
+    fn new(
+        initial_cancel: RequestAsyncAction,
+        terminal_policy: SurfaceRequestTerminalPolicy,
+    ) -> Self {
         Self {
             phase: Mutex::new(SurfaceRequestPhase::Pending),
+            terminal_policy,
             cancel_action: Mutex::new(initial_cancel),
             unpublished_cleanup: Mutex::new(None),
             task_handle: Mutex::new(None),
@@ -374,8 +358,21 @@ impl SurfaceRequestLifecycleMachine {
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
     ) -> RequestContext {
+        self.begin_request_with_semantics(
+            key,
+            initial_cancel,
+            SurfaceRequestSemantics::long_running_observation(),
+        )
+    }
+
+    fn begin_request_with_semantics(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+        semantics: SurfaceRequestSemantics,
+    ) -> RequestContext {
         let key = key.into();
-        let entry = Arc::new(RequestEntry::new(initial_cancel));
+        let entry = Arc::new(RequestEntry::new(initial_cancel, semantics.terminal_policy));
         let mut entries = lock_or_recover(&self.entries);
         entries.insert(key.clone(), Arc::clone(&entry));
         RequestContext { key, entry }
@@ -386,14 +383,50 @@ impl SurfaceRequestLifecycleMachine {
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
     ) -> Result<RequestContext, RequestAlreadyExists> {
+        self.try_begin_request_with_semantics(
+            key,
+            initial_cancel,
+            SurfaceRequestSemantics::long_running_observation(),
+        )
+    }
+
+    fn try_begin_request_with_semantics(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+        semantics: SurfaceRequestSemantics,
+    ) -> Result<RequestContext, RequestAlreadyExists> {
         let key = key.into();
         let mut entries = lock_or_recover(&self.entries);
         if entries.contains_key(&key) {
             return Err(RequestAlreadyExists);
         }
-        let entry = Arc::new(RequestEntry::new(initial_cancel));
+        let entry = Arc::new(RequestEntry::new(initial_cancel, semantics.terminal_policy));
         entries.insert(key.clone(), Arc::clone(&entry));
         Ok(RequestContext { key, entry })
+    }
+
+    fn classify_terminal<T>(
+        &self,
+        key: &str,
+        success: bool,
+        response: T,
+    ) -> Result<RequestTerminal<T>, RequestTransitionError> {
+        let terminal_policy = lock_or_recover(&self.entries)
+            .get(key)
+            .map(|entry| entry.terminal_policy)
+            .ok_or(RequestTransitionError::NotFound)?;
+
+        if success
+            && matches!(
+                terminal_policy,
+                SurfaceRequestTerminalPolicy::PublishOnSuccess
+            )
+        {
+            Ok(RequestTerminal::Publish(response))
+        } else {
+            Ok(RequestTerminal::RespondWithoutPublish(response))
+        }
     }
 
     fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
@@ -537,6 +570,20 @@ impl SurfaceRequestExecutor {
         self.lifecycle.begin_request(key, initial_cancel)
     }
 
+    /// Register a request together with its terminal publication semantics.
+    ///
+    /// This is the admission path for surfaces whose terminal response should
+    /// be classified by the lifecycle owner instead of by the transport task.
+    pub fn begin_request_with_semantics(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+        semantics: SurfaceRequestSemantics,
+    ) -> RequestContext {
+        self.lifecycle
+            .begin_request_with_semantics(key, initial_cancel, semantics)
+    }
+
     /// Fallible variant of `begin_request` that rejects duplicate in-flight keys.
     ///
     /// Returns `Err(RequestAlreadyExists)` if a request with the same key is
@@ -548,6 +595,17 @@ impl SurfaceRequestExecutor {
         initial_cancel: RequestAsyncAction,
     ) -> Result<RequestContext, RequestAlreadyExists> {
         self.lifecycle.try_begin_request(key, initial_cancel)
+    }
+
+    /// Fallible admission variant that stores terminal publication semantics.
+    pub fn try_begin_request_with_semantics(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+        semantics: SurfaceRequestSemantics,
+    ) -> Result<RequestContext, RequestAlreadyExists> {
+        self.lifecycle
+            .try_begin_request_with_semantics(key, initial_cancel, semantics)
     }
 
     /// Attach the task handle for later forced abort during shutdown.
@@ -642,6 +700,27 @@ impl SurfaceRequestExecutor {
                 }
             }
         }
+    }
+
+    /// Resolve a raw surface completion through the admitted request semantics.
+    ///
+    /// The committed-publish vs cancellable-observation split is read from the
+    /// lifecycle entry created at admission, then resolved through the same
+    /// publish/cancel/complete transitions as [`Self::resolve_terminal`].
+    pub async fn resolve_admitted_terminal<T>(
+        &self,
+        key: Option<&str>,
+        success: bool,
+        response: T,
+    ) -> RequestTerminalResolution<T> {
+        let Some(key) = key else {
+            return RequestTerminalResolution::Emit(response);
+        };
+        let terminal = match self.lifecycle.classify_terminal(key, success, response) {
+            Ok(terminal) => terminal,
+            Err(err) => return RequestTerminalResolution::LifecycleError(err),
+        };
+        self.resolve_terminal(Some(key), terminal).await
     }
 
     /// Cancel every tracked request. Honours the same typed transitions as
@@ -743,23 +822,76 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_policy_publishes_only_successful_commits() {
-        assert!(matches!(
-            SurfaceRequestSemantics::long_running_publish_on_success()
-                .classify_terminal(true, "committed"),
-            RequestTerminal::Publish("committed")
-        ));
-        assert!(matches!(
-            SurfaceRequestSemantics::long_running_publish_on_success()
-                .classify_terminal(false, "failed"),
-            RequestTerminal::RespondWithoutPublish("failed")
-        ));
-        assert!(matches!(
-            SurfaceRequestSemantics::long_running_observation()
-                .classify_terminal(true, "observation"),
-            RequestTerminal::RespondWithoutPublish("observation")
-        ));
+    #[tokio::test]
+    async fn terminal_policy_publishes_only_successful_commits() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+
+        let publish_context = executor.begin_request_with_semantics(
+            "publish-success",
+            noop_request_action(),
+            SurfaceRequestSemantics::long_running_publish_on_success(),
+        );
+        publish_context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        assert_eq!(
+            executor
+                .resolve_admitted_terminal(Some(publish_context.key()), true, "committed")
+                .await,
+            RequestTerminalResolution::Emit("committed")
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 0);
+
+        let failed_context = executor.begin_request_with_semantics(
+            "publish-failed",
+            noop_request_action(),
+            SurfaceRequestSemantics::long_running_publish_on_success(),
+        );
+        failed_context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        assert_eq!(
+            executor
+                .resolve_admitted_terminal(Some(failed_context.key()), false, "failed")
+                .await,
+            RequestTerminalResolution::Emit("failed")
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+
+        let observation_context = executor.begin_request_with_semantics(
+            "observation-success",
+            noop_request_action(),
+            SurfaceRequestSemantics::long_running_observation(),
+        );
+        observation_context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        assert_eq!(
+            executor
+                .resolve_admitted_terminal(Some(observation_context.key()), true, "observation")
+                .await,
+            RequestTerminalResolution::Emit("observation")
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

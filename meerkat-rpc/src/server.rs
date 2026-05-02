@@ -9,8 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics,
-    noop_request_action,
+    RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
 };
 use meerkat_contracts::rpc_request_lifecycle;
 use tokio::io::{AsyncBufRead, BufReader};
@@ -27,7 +26,8 @@ use crate::transport::{BlockingWriter, JsonlTransport, TransportError, Transport
 
 struct LongRunningResponse {
     request_key: String,
-    terminal: RequestTerminal<RpcResponse>,
+    success: bool,
+    response: RpcResponse,
 }
 
 /// Errors from the RPC server.
@@ -340,9 +340,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let context = self
-            .request_executor
-            .begin_request(request_key.clone(), noop_request_action());
+        let context = self.request_executor.begin_request_with_semantics(
+            request_key.clone(),
+            noop_request_action(),
+            semantics,
+        );
         let router = self.router.clone();
         let long_running_tx = self.long_running_tx.clone();
         let request = request.clone();
@@ -351,11 +353,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             if let Some(response) =
                 Box::pin(router.dispatch_with_request_context(request, Some(context))).await
             {
-                let terminal = classify_long_running_response(&response, semantics);
+                let success = response.error.is_none();
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
-                        terminal,
+                        success,
+                        response,
                     })
                     .await;
             }
@@ -364,10 +367,14 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
-        let cancel_id = response.terminal.payload().id.clone();
+        let cancel_id = response.response.id.clone();
         let to_write = match self
             .request_executor
-            .resolve_terminal(Some(&response.request_key), response.terminal)
+            .resolve_admitted_terminal(
+                Some(&response.request_key),
+                response.success,
+                response.response,
+            )
             .await
         {
             RequestTerminalResolution::Emit(rpc_response) => rpc_response,
@@ -429,13 +436,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             ),
         }
     }
-}
-
-fn classify_long_running_response(
-    response: &RpcResponse,
-    semantics: SurfaceRequestSemantics,
-) -> RequestTerminal<RpcResponse> {
-    semantics.classify_terminal(response.error.is_none(), response.clone())
 }
 
 fn request_key(id: &RpcId) -> String {
@@ -639,8 +639,8 @@ mod tests {
         assert!(request_semantics(&request).requires_long_running_executor());
     }
 
-    #[test]
-    fn turn_start_is_publish_on_success() {
+    #[tokio::test]
+    async fn turn_start_is_publish_on_success() {
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(RpcId::Num(1)),
@@ -653,11 +653,26 @@ mod tests {
 
         let semantics = request_semantics(&request);
         assert!(semantics.requires_long_running_executor());
+        let executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_millis(1));
+        let request_key = request_key(request.id.as_ref().expect("request id"));
+        let context = executor.begin_request_with_semantics(
+            request_key.clone(),
+            noop_request_action(),
+            semantics,
+        );
         let response = RpcResponse::success(request.id, serde_json::json!({"ok": true}));
+
         assert!(matches!(
-            classify_long_running_response(&response, semantics),
-            RequestTerminal::Publish(_)
+            executor
+                .resolve_admitted_terminal(Some(context.key()), response.error.is_none(), response)
+                .await,
+            RequestTerminalResolution::Emit(_)
         ));
+        assert_eq!(executor.phase(&request_key), None);
+        assert_eq!(
+            executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::NotFound
+        );
     }
 
     #[derive(Clone)]
@@ -685,9 +700,11 @@ mod tests {
         let mut server = RpcServer::new(reader, writer, runtime, config_store);
         let request_id = RpcId::Num(42);
         let request_key = request_key(&request_id);
-        let _ctx = server
-            .request_executor
-            .begin_request(request_key.clone(), noop_request_action());
+        let _ctx = server.request_executor.begin_request_with_semantics(
+            request_key.clone(),
+            noop_request_action(),
+            SurfaceRequestSemantics::long_running_publish_on_success(),
+        );
 
         assert_eq!(
             server.request_executor.cancel_request(&request_key).await,
@@ -700,7 +717,8 @@ mod tests {
             server
                 .write_long_running_response(LongRunningResponse {
                     request_key: request_key.clone(),
-                    terminal: RequestTerminal::Publish(publish_response),
+                    success: publish_response.error.is_none(),
+                    response: publish_response,
                 })
                 .await
         );

@@ -2,8 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
-    RequestTerminal, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
-    SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
+    RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor, SurfaceRequestSemantics,
+    noop_request_action, spawn_stdio_json_writer,
 };
 use meerkat_contracts::{ErrorCode, mcp_tool_request_lifecycle};
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -63,7 +63,8 @@ impl From<RealmBackendArg> for RealmBackend {
 
 struct ToolCompletion {
     request_key: String,
-    terminal: RequestTerminal<Value>,
+    success: bool,
+    response: Value,
 }
 
 #[tokio::main]
@@ -196,9 +197,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| json!({}));
 
-                        let context = request_executor.begin_request(
+                        let semantics =
+                            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(&name));
+                        let context = request_executor.begin_request_with_semantics(
                             request_key.clone(),
                             noop_request_action(),
+                            semantics,
                         );
 
                         let notifier_writer = writer.clone();
@@ -231,12 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let state = Arc::clone(&state);
                         let completion_tx = completion_tx.clone();
                         let tool_name = name.clone();
-                        let semantics =
-                            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(&tool_name));
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
                         let handle = tokio::spawn(async move {
-                            let terminal = match meerkat_mcp_server::handle_tools_call_with_notifier(
+                            let (success, response) = match meerkat_mcp_server::handle_tools_call_with_notifier(
                                 &state,
                                 &tool_name,
                                 &arguments,
@@ -249,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "id": request_id_for_task,
                                         "result": result
                                     });
-                                    semantics.classify_terminal(true, response)
+                                    (true, response)
                                 }
                                 Err(err) => {
                                     let mut error = json!({
@@ -259,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(data) = err.data {
                                         error["data"] = data;
                                     }
-                                    RequestTerminal::RespondWithoutPublish(json!({
+                                    (false, json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
                                         "error": error
@@ -267,7 +269,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             };
                             let _ = completion_tx
-                                .send(ToolCompletion { request_key: request_key_for_task, terminal })
+                                .send(ToolCompletion {
+                                    request_key: request_key_for_task,
+                                    success,
+                                    response,
+                                })
                                 .await;
                         });
                         request_executor.attach_task(&request_key, handle);
@@ -321,9 +327,13 @@ async fn write_tool_completion(
     request_executor: &SurfaceRequestExecutor,
     completion: ToolCompletion,
 ) -> bool {
-    let cancel_id = completion.terminal.payload().get("id").cloned();
+    let cancel_id = completion.response.get("id").cloned();
     let to_write = match request_executor
-        .resolve_terminal(Some(&completion.request_key), completion.terminal)
+        .resolve_admitted_terminal(
+            Some(&completion.request_key),
+            completion.success,
+            completion.response,
+        )
         .await
     {
         RequestTerminalResolution::Emit(response) => response,
@@ -370,23 +380,46 @@ fn request_lifecycle_error_response(
 mod tests {
     use super::*;
 
-    #[test]
-    fn meerkat_run_and_resume_publish_on_success() {
-        assert!(matches!(
-            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_run"))
-                .classify_terminal(true, ()),
-            RequestTerminal::Publish(())
-        ));
-        assert!(matches!(
-            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_resume"))
-                .classify_terminal(true, ()),
-            RequestTerminal::Publish(())
-        ));
-        assert!(matches!(
-            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_sessions"))
-                .classify_terminal(true, ()),
-            RequestTerminal::RespondWithoutPublish(())
-        ));
+    #[tokio::test]
+    async fn meerkat_run_and_resume_publish_on_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for (tool_name, expected_cleanup_count) in [
+            ("meerkat_run", 0),
+            ("meerkat_resume", 0),
+            ("meerkat_sessions", 1),
+        ] {
+            let executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_millis(1));
+            let cleanup_count = Arc::new(AtomicUsize::new(0));
+            let request_key = format!("{tool_name}-request");
+            let context = executor.begin_request_with_semantics(
+                request_key.clone(),
+                noop_request_action(),
+                SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(tool_name)),
+            );
+            context.set_unpublished_cleanup(meerkat::surface::request_action({
+                let cleanup_count = Arc::clone(&cleanup_count);
+                move || {
+                    let cleanup_count = Arc::clone(&cleanup_count);
+                    async move {
+                        cleanup_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            assert!(matches!(
+                executor
+                    .resolve_admitted_terminal(Some(context.key()), true, ())
+                    .await,
+                RequestTerminalResolution::Emit(())
+            ));
+            assert_eq!(
+                cleanup_count.load(Ordering::SeqCst),
+                expected_cleanup_count,
+                "{tool_name} should let the executor choose publish vs observation"
+            );
+            assert_eq!(executor.phase(&request_key), None);
+        }
     }
 
     #[tokio::test]
@@ -398,7 +431,11 @@ mod tests {
         let request_executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_millis(1));
         let request_id = json!(42);
         let request_key = request_key(&request_id);
-        let _ctx = request_executor.begin_request(request_key.clone(), noop_request_action());
+        let _ctx = request_executor.begin_request_with_semantics(
+            request_key.clone(),
+            noop_request_action(),
+            SurfaceRequestSemantics::long_running_publish_on_success(),
+        );
 
         assert_eq!(
             request_executor.cancel_request(&request_key).await,
@@ -411,11 +448,12 @@ mod tests {
                 &request_executor,
                 ToolCompletion {
                     request_key: request_key.clone(),
-                    terminal: RequestTerminal::Publish(json!({
+                    success: true,
+                    response: json!({
                         "jsonrpc": "2.0",
                         "id": request_id,
                         "result": {"ok": true}
-                    })),
+                    }),
                 },
             )
             .await

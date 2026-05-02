@@ -135,6 +135,14 @@ fn run_in_configured_bazel_child(
     Ok(true)
 }
 
+fn downstream_cargo_command(cargo: OsString) -> Command {
+    let mut command = Command::new(cargo);
+    command
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    command
+}
+
 fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in
         fs::read_dir(dir).unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
@@ -251,7 +259,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("check")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -319,7 +327,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("check")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -382,7 +390,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -448,7 +456,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -571,7 +579,7 @@ meerkat-core = { path = "../meerkat-core" }
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -681,7 +689,7 @@ meerkat-core = { path = "../meerkat-core" }
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -785,7 +793,7 @@ meerkat-core = { path = "../meerkat-core" }
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -888,7 +896,7 @@ meerkat-core = {{ path = "{}" }}
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -958,7 +966,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-meerkat-core = {{ path = "{}" }}
+meerkat-core = {{ path = "{}", features = ["internal-agent-factory-build"] }}
 "#,
             repo_root().join("meerkat-core").display()
         ),
@@ -969,7 +977,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -998,7 +1006,10 @@ meerkat-core = {{ path = "{}" }}
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name")
             || stderr.contains("undefined symbol")
-            || stderr.contains("not found in"),
+            || stderr.contains("not found in")
+            || stderr.contains("does not have these features")
+            || stderr.contains("does not have feature")
+            || stderr.contains("does not have that feature"),
         "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -1047,7 +1058,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1116,7 +1127,7 @@ meerkat-core = {{ path = "{}" }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1178,7 +1189,7 @@ meerkat-core = {{ path = "{}", features = ["standalone-agent-builder"] }}
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("check")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1247,7 +1258,7 @@ inventory = "0.3"
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1322,7 +1333,7 @@ inventory = "0.3"
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1394,7 +1405,7 @@ inventory = "0.3"
     )?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(cargo)
+    let output = downstream_cargo_command(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -1496,6 +1507,7 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && !builder.contains("pub enum AgentFactoryPolicyBridgeRegistrationKind")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")
+            && !builder.contains("feature = \"internal-agent-factory-build\"")
             && !builder.contains("__meerkat_core_agent_factory_policy_build")
             && builder.contains("pub(crate) unsafe extern \"Rust\" fn")
             && !builder.contains("is_canonical_factory_authority()")
@@ -1656,6 +1668,7 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
 #[test]
 fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
     let cargo = repo_file("meerkat/Cargo.toml");
+    let core_cargo = repo_file("meerkat-core/Cargo.toml");
 
     assert!(
         !cargo.contains("meerkat-core/standalone-agent-builder"),
@@ -1671,8 +1684,20 @@ fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
                  meerkat-core/standalone-agent-builder through its normal or \
                  dev meerkat-core dependency"
             );
+            assert!(
+                !line.contains("internal-agent-factory-build"),
+                "the facade Cargo graph must not enable a public \
+                 meerkat-core/internal-agent-factory-build feature through \
+                 normal feature unification"
+            );
         }
     }
+    assert!(
+        !core_cargo.contains("internal-agent-factory-build"),
+        "meerkat-core must not publish an internal factory-build feature; \
+         downstream crates can enable public features and compile the hidden \
+         finalizer"
+    );
 }
 
 #[test]
@@ -1690,16 +1715,12 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     );
     assert!(
         !public_core.contains("\"standalone-agent-builder\"")
+            && !public_core.contains("\"internal-agent-factory-build\"")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
-         features or recoverable factory bridge proof material in Bazel builds"
-    );
-    assert!(
-        public_core.contains("\"internal-agent-factory-build\""),
-        "Bazel must use one coherent core crate graph for facade factory \
-         builds; a second internal core target would make public API types \
-         diverge"
+         features, public factory-build features, or recoverable factory \
+         bridge proof material in Bazel builds"
     );
 
     assert!(

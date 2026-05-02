@@ -21,6 +21,25 @@ if [[ -z "${cargo_bin}" || -z "${rustc_bin}" ]]; then
   exit 127
 fi
 
+append_rust_cfg() {
+  local cfg="$1"
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    local unit_separator
+    unit_separator=$'\x1f'
+    case "${CARGO_ENCODED_RUSTFLAGS}" in
+      *"${cfg}"*) ;;
+      *)
+        export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${unit_separator}--cfg${unit_separator}${cfg}"
+        ;;
+    esac
+  else
+    case " ${RUSTFLAGS:-} " in
+      *" --cfg ${cfg} "* | *" --cfg=${cfg} "*) ;;
+      *) export RUSTFLAGS="${RUSTFLAGS:-} --cfg ${cfg}" ;;
+    esac
+  fi
+}
+
 rm -rf "${work_root}"
 mkdir -p "${work_root}"
 rsync -aL \
@@ -51,6 +70,7 @@ export CARGO_HOME="${TEST_TMPDIR}/cargo-home"
 export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target"
 export CARGO_INCREMENTAL=0
 export CARGO_TERM_COLOR=always
+append_rust_cfg "meerkat_internal_agent_factory_build"
 
 cd "${work_root}"
 

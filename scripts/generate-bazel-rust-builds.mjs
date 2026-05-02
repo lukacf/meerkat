@@ -731,6 +731,9 @@ for (const pkg of localPackages.values()) {
       `    crate_root = ${q(relative(dir, target.src_path))},`,
       `    crate_features = ${listExpr(isCorePublicLibrary ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg))},`,
       `    edition = "2024",`,
+      ...(key === "meerkat-core"
+        ? [`    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],`]
+        : []),
       `    compile_data = ${compileDataExpr},`,
       `    srcs = ${srcsExpr},`,
       `    visibility = ${rustTargetVisibility(key)},`,

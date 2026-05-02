@@ -34,6 +34,22 @@ fi
 export CARGO_HOME="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${lane_key}}"
 
+internal_factory_cfg="meerkat_internal_agent_factory_build"
+if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+  unit_separator=$'\x1f'
+  case "${CARGO_ENCODED_RUSTFLAGS}" in
+    *"${internal_factory_cfg}"*) ;;
+    *)
+      export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${unit_separator}--cfg${unit_separator}${internal_factory_cfg}"
+      ;;
+  esac
+else
+  case " ${RUSTFLAGS:-} " in
+    *" --cfg ${internal_factory_cfg} "* | *" --cfg=${internal_factory_cfg} "*) ;;
+    *) export RUSTFLAGS="${RUSTFLAGS:-} --cfg ${internal_factory_cfg}" ;;
+  esac
+fi
+
 mkdir -p "${CARGO_HOME}" "${CARGO_TARGET_DIR}"
 
 if [[ "${1-}" == "--print-env" ]]; then

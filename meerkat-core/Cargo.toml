@@ -44,9 +44,6 @@ uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
 default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
-# Retained for compatibility with older workspace selectors. The factory
-# finalizer is compiled only for the facade-owned factory graph.
-internal-agent-factory-build = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

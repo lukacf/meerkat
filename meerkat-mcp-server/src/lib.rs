@@ -3116,7 +3116,9 @@ async fn handle_meerkat_resume(
                 runtime_entry_existed_before_prepare,
             )
             .await;
-            ingress.clear_session(&session_id).await;
+            if !runtime_entry_existed_before_prepare {
+                ingress.clear_session(&session_id).await;
+            }
             return Err(request_cancelled_tool_error());
         }
     }
@@ -3323,7 +3325,9 @@ async fn handle_meerkat_resume(
                     runtime_entry_existed_before_prepare,
                 )
                 .await;
-                ingress.clear_session(&session_id).await;
+                if !runtime_entry_existed_before_prepare {
+                    ingress.clear_session(&session_id).await;
+                }
                 return Err(ToolCallError::invalid_params(
                     "keep_alive requires a session created with comms_name",
                 ));
@@ -5383,25 +5387,29 @@ mod tests {
     fn test_resume_cancel_cleanup_preserves_existing_runtime_ingress() {
         let source = include_str!("lib.rs");
         let start = source
-            .find("let service_admission_cancelled =")
-            .expect("resume should classify service admission cancellation");
+            .find("async fn handle_meerkat_resume")
+            .expect("resume handler should exist");
         let body = &source[start
             ..start
                 + source[start..]
-                    .find("    drop(event_tx);")
-                    .expect("resume cancellation cleanup should precede event drain")];
-        let cancelled = body
-            .find("if service_admission_cancelled")
-            .expect("resume should have a cancellation cleanup branch");
-        let branch = &body[cancelled
-            ..cancelled
-                + body[cancelled..]
-                    .find("let session_exists")
-                    .expect("session_exists should follow cancellation cleanup")];
-
+                    .find("fn wrap_tool_payload")
+                    .expect("resume handler should end before payload wrapper")];
+        let mut cursor = 0;
+        let mut clear_calls = 0;
+        while let Some(offset) = body[cursor..].find("ingress.clear_session(&session_id).await;") {
+            let absolute = cursor + offset;
+            clear_calls += 1;
+            let guard_window_start = absolute.saturating_sub(120);
+            let guard_window = &body[guard_window_start..absolute];
+            assert!(
+                guard_window.contains("if !runtime_entry_existed_before_prepare"),
+                "resume cleanup must only clear ingress for newly prepared runtime state"
+            );
+            cursor = absolute + "ingress.clear_session(&session_id).await;".len();
+        }
         assert!(
-            branch.contains("if !runtime_entry_existed_before_prepare"),
-            "resume cancellation cleanup must only clear ingress for newly prepared runtime state"
+            clear_calls >= 4,
+            "resume should have guarded cleanup paths for cancellation and validation failures"
         );
     }
 

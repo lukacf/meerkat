@@ -110,7 +110,7 @@ The session's default model can be set in config (`~/.rkat/config.toml` or proje
 
 If a session was started on one model and later needs another, send the next turn with `turn_metadata.model` and, when needed, `turn_metadata.provider` / `turn_metadata.provider_params`. JSON-RPC `turn/start`, REST continue, and host SDK turn helpers all route that canonical metadata through the runtime so the live LLM identity is updated for the turn. Realtime transport attachment is still host-orchestrated through `MeerkatMachine::reconfigure_live_topology` when a host needs to bring up or tear down a realtime binding (see [Live-topology reconfigure](#live-topology-reconfigure) below).
 
-When the swap targets a realtime-capable model, the runtime mints a fresh authority epoch and brings the binding up. When it targets a non-realtime model, the existing binding is torn down and the response surfaces `ValidationFailed` so the caller knows the binding is gone.
+When a host performs that live-topology reconfigure for a realtime-capable model, the runtime mints a fresh authority epoch and brings the binding up. When the host reconfigures to a non-realtime model, the existing binding is torn down and the response surfaces `ValidationFailed` so the caller knows the binding is gone.
 
 ## Observing attachment status
 

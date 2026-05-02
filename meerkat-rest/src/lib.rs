@@ -498,6 +498,14 @@ async fn ensure_rest_session_runtime_executor(state: &AppState, session_id: &Ses
         .await;
 }
 
+async fn cleanup_prepared_rest_runtime(state: &AppState, session_id: &SessionId) {
+    #[cfg(feature = "mcp")]
+    cleanup_mcp_session(state, session_id).await;
+    #[cfg(feature = "comms")]
+    state.runtime_adapter.abort_comms_drain(session_id).await;
+    state.runtime_adapter.unregister_session(session_id).await;
+}
+
 #[cfg(feature = "comms")]
 fn comms_runtime_for_peer_ingress(
     keep_alive: bool,
@@ -3208,6 +3216,7 @@ async fn create_session_inner(
         if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
+            cleanup_prepared_rest_runtime(state, &session_id).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
                 details: None,
             }));
@@ -3228,6 +3237,7 @@ async fn create_session_inner(
         Err(err) => {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
+            cleanup_prepared_rest_runtime(state, &session_id).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
     };
@@ -3324,6 +3334,9 @@ async fn create_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                cleanup_prepared_rest_runtime(state, &session_id).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
             }
         };
@@ -3331,6 +3344,9 @@ async fn create_session_inner(
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
     {
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        cleanup_prepared_rest_runtime(state, &session_id).await;
         return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
     }
 
@@ -3340,9 +3356,7 @@ async fn create_session_inner(
     let create_result = match state.session_service.create_session(svc_req).await {
         Ok(result) => result,
         Err(err) => {
-            #[cfg(feature = "mcp")]
-            cleanup_mcp_session(state, &session_id).await;
-            state.runtime_adapter.unregister_session(&session_id).await;
+            cleanup_prepared_rest_runtime(state, &session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             let api_err = match err {
@@ -3945,9 +3959,11 @@ async fn continue_session_inner(
         Some(val) => val,
         None => stored_metadata.as_ref().is_some_and(|m| m.keep_alive),
     };
-    let effective_comms_name = stored_metadata
-        .as_ref()
-        .and_then(|meta| meta.comms_name.clone());
+    let effective_comms_name = req.comms_name.clone().or_else(|| {
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone())
+    });
     if keep_alive
         && effective_comms_name
             .as_ref()
@@ -4037,6 +4053,7 @@ async fn continue_session_inner(
             Err(error) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
+                cleanup_prepared_rest_runtime(state, &session_id).await;
                 return RequestTerminal::RespondWithoutPublish(Err(surface_recovery_error_to_api(
                     error,
                 )));
@@ -4057,6 +4074,7 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
+                cleanup_prepared_rest_runtime(state, &session_id).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
             }
         };
@@ -4069,6 +4087,7 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
+            cleanup_prepared_rest_runtime(state, &session_id).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
         let create_result = match state.session_service.create_session(create_req).await {
@@ -4076,6 +4095,7 @@ async fn continue_session_inner(
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
+                cleanup_prepared_rest_runtime(state, &session_id).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                     "Failed to rebuild session: {e}"
                 ))));
@@ -7284,6 +7304,164 @@ mod tests {
             "failed request must not persist keep_alive"
         );
         assert!(metadata.comms_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_request_comms_name_satisfies_keep_alive_recovery() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let adapter = state.runtime_adapter.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        session_service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&created.session_id).await;
+
+        let session_id = created.session_id.to_string();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "prompt": "Continue",
+                            "comms_name": "rest-recovered-agent",
+                            "turn_metadata": {
+                                "keep_alive": {
+                                    "action": "set",
+                                    "value": {
+                                        "ttl_secs": 30,
+                                        "policy": "pinned"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "request comms_name must satisfy keep_alive during recovery: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_rebuild_validation_failure_cleans_prepared_runtime() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let adapter = state.runtime_adapter.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        session_service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&created.session_id).await;
+        assert!(
+            !adapter.contains_session(&created.session_id).await,
+            "test precondition: runtime must not be registered before recovery"
+        );
+
+        let session_id = created.session_id.to_string();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "prompt": [{
+                                "type": "video",
+                                "media_type": "video/mp4",
+                                "duration_ms": 1000,
+                                "source": "inline",
+                                "data": "AAAA"
+                            }],
+                            "turn_metadata": {
+                                "model": "gpt-5.4-mini"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !adapter.contains_session(&created.session_id).await,
+            "failed recovery must unregister the prepared runtime session"
+        );
     }
 
     #[cfg(feature = "comms")]

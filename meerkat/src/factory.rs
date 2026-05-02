@@ -3197,14 +3197,15 @@ impl AgentFactory {
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
+        let runtime_owned_build = matches!(
+            &build_config.runtime_build_mode,
+            meerkat_core::RuntimeBuildMode::SessionOwned(_)
+        );
         let persisted_system_prompt = build_config.system_prompt.clone();
         let per_request_prompt = build_config.system_prompt.take();
-        let persisted_initial_turn_metadata = matches!(
-            build_config.runtime_build_mode,
-            meerkat_core::RuntimeBuildMode::SessionOwned(_)
-        )
-        .then(|| build_config.initial_turn_metadata_for_service())
-        .flatten();
+        let persisted_initial_turn_metadata = runtime_owned_build
+            .then(|| build_config.initial_turn_metadata_for_service())
+            .flatten();
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
@@ -3770,10 +3771,14 @@ impl AgentFactory {
         // instructions. These are canonical build-state and must survive into
         // persisted recovery / realtime reconstruction, so prompt assembly may
         // read them but must not consume them.
-        let additional_instruction_storage: Vec<String> = build_config
-            .additional_instructions
-            .clone()
-            .unwrap_or_default();
+        let additional_instruction_storage: Vec<String> = if runtime_owned_build {
+            Vec::new()
+        } else {
+            build_config
+                .additional_instructions
+                .clone()
+                .unwrap_or_default()
+        };
         for instruction in &additional_instruction_storage {
             if !instruction.is_empty() {
                 extra_sections.push(instruction.as_str());
@@ -3869,7 +3874,11 @@ impl AgentFactory {
             max_inline_peer_notifications: build_config.max_inline_peer_notifications,
             app_context: build_config.app_context.clone(),
             initial_turn_metadata: persisted_initial_turn_metadata,
-            additional_instructions: build_config.additional_instructions.clone(),
+            additional_instructions: if runtime_owned_build {
+                None
+            } else {
+                build_config.additional_instructions.clone()
+            },
             shell_env: build_config.shell_env.clone(),
             mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),
             call_timeout_override: build_config.call_timeout_override.clone(),
@@ -4219,6 +4228,59 @@ mod tests {
                 .and_then(|instructions| instructions.first())
                 .map(|instruction| instruction.body.as_str()),
             Some("persist this host instruction")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_owned_session_build_state_keeps_additional_instructions_canonical() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.additional_instructions = Some(vec![
+            "runtime owned split instruction must stay canonical".to_string(),
+        ]);
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("runtime-owned agent should build");
+        let build_state = agent
+            .session()
+            .build_state()
+            .expect("build state should persist");
+
+        assert!(
+            build_state.additional_instructions.is_none(),
+            "runtime-owned split additional_instructions must not persist beside initial_turn_metadata"
+        );
+        assert_eq!(
+            build_state
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.additional_instructions.as_ref())
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("runtime owned split instruction must stay canonical")
+        );
+        let Some(meerkat_core::Message::System(message)) = agent.session().messages().first()
+        else {
+            unreachable!("expected system prompt");
+        };
+        assert!(
+            !message
+                .content
+                .contains("runtime owned split instruction must stay canonical"),
+            "runtime-owned additional instructions must not be mirrored into the split seed prompt"
         );
     }
 

@@ -84,7 +84,12 @@ where
     let bindings = adapter
         .prepare_bindings(prepared_session_id.clone())
         .await?;
-    install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await?;
+    if let Err(error) =
+        install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
+    {
+        adapter.unregister_session(&prepared_session_id).await;
+        return Err(error.into());
+    }
 
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);

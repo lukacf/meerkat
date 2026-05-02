@@ -256,6 +256,7 @@ rust_test(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:cargo_manifest",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
+        "//tools/buildbuddy:lane_scripts",
         "//:workspace_runfiles",
     ],
     env = {

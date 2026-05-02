@@ -171,7 +171,6 @@ configure_wasm_pack() {
 
 copy_workspace
 cd "${work_root}"
-append_rust_cfg "meerkat_internal_agent_factory_build"
 
 case "${lane}" in
   security-audit)

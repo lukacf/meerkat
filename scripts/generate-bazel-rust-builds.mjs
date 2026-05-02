@@ -516,6 +516,9 @@ function workspaceDataLabels(target) {
   if (source.includes("scripts/")) {
     labels.add("//:repo_governance_files");
   }
+  if (source.includes("tools/buildbuddy/")) {
+    labels.add("//tools/buildbuddy:lane_scripts");
+  }
   if (source.includes("test-fixtures")) {
     labels.add("//:test_fixtures");
     labels.add("//test-fixtures/machine-dsl-tests:package_runfiles");

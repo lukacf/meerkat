@@ -1,5 +1,14 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+filegroup(
+    name = "lane_scripts",
+    srcs = [
+        "cargo_lane_test.sh",
+        "full_lane_test.sh",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 RUST_TOOLCHAIN_DATA = [
     "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:cargo",
     "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:cargo_clippy_bin",
@@ -44,6 +53,7 @@ sh_test(
         srcs = ["cargo_lane_test.sh"],
         args = [lane],
         data = [
+            ":lane_scripts",
             "//:workspace_runfiles",
         ] + RUST_TOOLCHAIN_DATA,
         size = "enormous",

@@ -1733,6 +1733,8 @@ fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
     let cargo = repo_file("meerkat/Cargo.toml");
     let core_cargo = repo_file("meerkat-core/Cargo.toml");
     let repo_cargo = repo_file("scripts/repo-cargo");
+    let buildbuddy_cargo_lane = repo_file("tools/buildbuddy/cargo_lane_test.sh");
+    let buildbuddy_full_lane = repo_file("tools/buildbuddy/full_lane_test.sh");
 
     assert!(
         !cargo.contains("meerkat-core/standalone-agent-builder"),
@@ -1768,6 +1770,17 @@ fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
          every Cargo invocation; pure public-core checks must exercise the \
          finalizer-free graph"
     );
+    for (path, script) in [
+        ("tools/buildbuddy/cargo_lane_test.sh", buildbuddy_cargo_lane),
+        ("tools/buildbuddy/full_lane_test.sh", buildbuddy_full_lane),
+    ] {
+        assert!(
+            !script.contains("meerkat_internal_agent_factory_build"),
+            "{path} must not inject the internal AgentFactory cfg into \
+             cargo-equivalent BuildBuddy lanes; those lanes must exercise the \
+             same public-core graph as normal Cargo"
+        );
+    }
 }
 
 #[test]

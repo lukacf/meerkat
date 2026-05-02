@@ -155,6 +155,22 @@ impl McpRuntimeIngressContext {
             .remove(&session_id.to_string());
     }
 
+    async fn clear_session_after_materialize_error(&self, session_id: &SessionId) {
+        match self.service.export_live_session(session_id).await {
+            Ok(_) => {}
+            Err(SessionError::NotFound { .. }) => {
+                self.clear_session(session_id).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "preserving MCP runtime ingress state after materialize error because live session state is unknown"
+                );
+            }
+        }
+    }
+
     pub(crate) async fn accept_input_with_completion(
         &self,
         session_id: &SessionId,
@@ -266,7 +282,8 @@ impl McpRuntimeIngressContext {
                 Ok(result)
             }
             Err(error) => {
-                self.clear_session(&session_id).await;
+                self.clear_session_after_materialize_error(&session_id)
+                    .await;
                 Err(surface_materialize_session_error(error))
             }
         }
@@ -844,12 +861,20 @@ mod tests {
     use meerkat_core::lifecycle::{InputId, RunId};
     use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
     use meerkat_core::{MemoryConfigStore, RealmId};
-    use meerkat_store::{JsonlStore, MemoryBlobStore};
+    use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStoreError};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     async fn build_test_context(temp: &tempfile::TempDir) -> McpRuntimeIngressContext {
         let session_store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
         session_store.init().await.expect("init jsonl store");
         let session_store: Arc<dyn meerkat::SessionStore> = session_store;
+        build_test_context_with_store(temp, session_store).await
+    }
+
+    async fn build_test_context_with_store(
+        temp: &tempfile::TempDir,
+        session_store: Arc<dyn meerkat::SessionStore>,
+    ) -> McpRuntimeIngressContext {
         let persistence =
             PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
 
@@ -872,6 +897,51 @@ mod tests {
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    struct FailingSaveSessionStore {
+        inner: meerkat::MemoryStore,
+        fail_save: AtomicBool,
+    }
+
+    impl FailingSaveSessionStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                fail_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::SessionStore for FailingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
     }
 
     fn context_append() -> ConversationContextAppend {
@@ -1094,6 +1164,67 @@ mod tests {
         assert!(
             output.terminal.is_none(),
             "context-only apply must not synthesize a turn terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_ingress_post_commit_materialize_error_preserves_live_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let context = build_test_context_with_store(
+            &temp,
+            Arc::clone(&fail_store) as Arc<dyn meerkat::SessionStore>,
+        )
+        .await;
+        let created = context
+            .service
+            .create_session(deferred_create_request("seed prompt"))
+            .await
+            .expect("create deferred persisted session");
+        let session_id = created.session_id;
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before rematerialization");
+        context
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        fail_store.set_fail_save(true);
+        let state = Arc::new(McpRuntimeSessionState::default());
+        let error = Box::pin(context.rematerialize_persisted_session(
+            &session_id,
+            state,
+            SurfaceSessionRecoveryOverrides::default(),
+        ))
+        .await
+        .expect_err("forced post-commit save failure should surface");
+
+        assert!(
+            error.to_string().contains("forced save failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            context
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "post-commit create error should leave the committed live session"
+        );
+        assert!(
+            context.runtime_adapter.contains_session(&session_id).await,
+            "MCP ingress cleanup must preserve committed runtime registration"
+        );
+        assert!(
+            context
+                .runtime_sessions
+                .read()
+                .await
+                .contains_key(&session_id),
+            "MCP ingress cleanup must preserve committed runtime session state"
         );
     }
 

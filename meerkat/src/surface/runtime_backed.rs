@@ -104,7 +104,12 @@ where
     let result = match service.create_session(request).await {
         Ok(result) => result,
         Err(error) => {
-            adapter.unregister_session(&prepared_session_id).await;
+            cleanup_rematerialized_runtime_after_create_error(
+                service,
+                adapter,
+                &prepared_session_id,
+            )
+            .await;
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
     };
@@ -1033,6 +1038,52 @@ mod tests {
         assert!(
             message.contains("RuntimeTurnMetadata") && message.contains("provider"),
             "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_post_commit_create_error_preserves_live_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&fail_store) as Arc<dyn SessionStore>,
+            None,
+            Arc::new(MemoryBlobStore::new()),
+        );
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        fail_store.set_fail_save(true);
+
+        let error = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            session,
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("forced post-commit save failure should surface");
+
+        assert!(
+            error.to_string().contains("forced save failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            service.export_live_session(&session_id).await.is_ok(),
+            "post-commit create error should leave the committed live session"
+        );
+        assert!(
+            adapter.contains_session(&session_id).await,
+            "post-commit create error must preserve runtime registration"
         );
     }
 

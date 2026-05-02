@@ -314,6 +314,8 @@ pub struct SessionBuildState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_turn_metadata: Option<crate::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<HashMap<String, String>>,

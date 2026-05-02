@@ -506,6 +506,23 @@ fn comms_runtime_for_peer_ingress(
     if keep_alive { comms_rt } else { None }
 }
 
+#[cfg(feature = "comms")]
+async fn update_rest_peer_ingress_context(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: &SessionId,
+    keep_alive: bool,
+) {
+    if adapter.peer_ingress_owner(session_id).await.is_mob_owned() {
+        return;
+    }
+    let comms_rt = service.comms_runtime(session_id).await;
+    let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+    adapter
+        .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+        .await;
+}
+
 async fn require_rest_session_exists_for_read(
     state: &AppState,
     session_id: &SessionId,
@@ -750,14 +767,13 @@ async fn apply_runtime_turn(
                     .create_session(recovered.into_deferred_create_request())
                     .await?;
                 #[cfg(feature = "comms")]
-                {
-                    let comms_rt = context.session_service.comms_runtime(session_id).await;
-                    let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-                    context
-                        .runtime_adapter
-                        .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-                        .await;
-                }
+                update_rest_peer_ingress_context(
+                    &context.runtime_adapter,
+                    &context.session_service,
+                    session_id,
+                    keep_alive,
+                )
+                .await;
                 context
                     .session_service
                     .apply_runtime_context_appends_with_boundary(
@@ -895,15 +911,13 @@ async fn apply_runtime_turn(
             .await
             .map_err(surface_materialize_session_error)?;
         #[cfg(feature = "comms")]
-        {
-            let keep_alive = _rematerialized_keep_alive;
-            let comms_rt = context.session_service.comms_runtime(session_id).await;
-            let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-            context
-                .runtime_adapter
-                .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-                .await;
-        }
+        update_rest_peer_ingress_context(
+            &context.runtime_adapter,
+            &context.session_service,
+            session_id,
+            keep_alive,
+        )
+        .await;
     }
     let live_result = if build_only_requires_recovery {
         Err(SessionError::NotFound {
@@ -981,14 +995,13 @@ async fn apply_runtime_turn(
                 .create_session(recovered.into_deferred_create_request())
                 .await?;
             #[cfg(feature = "comms")]
-            {
-                let comms_rt = context.session_service.comms_runtime(session_id).await;
-                let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-                context
-                    .runtime_adapter
-                    .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-                    .await;
-            }
+            update_rest_peer_ingress_context(
+                &context.runtime_adapter,
+                &context.session_service,
+                session_id,
+                keep_alive,
+            )
+            .await;
             let output = context
                 .session_service
                 .apply_runtime_turn_outcome(
@@ -3349,13 +3362,8 @@ async fn create_session_inner(
     // Update peer-ingress context so live sessions always get attached ingress
     // and idle keep_alive sessions retain a persistent host drain.
     #[cfg(feature = "comms")]
-    {
-        let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-        adapter
-            .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
-    }
+    update_rest_peer_ingress_context(&adapter, &state.session_service, &session_id, keep_alive)
+        .await;
 
     // Create input and route through runtime
     let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
@@ -4116,13 +4124,8 @@ async fn continue_session_inner(
         }
 
         #[cfg(feature = "comms")]
-        {
-            let comms_rt = state.session_service.comms_runtime(&session_id).await;
-            let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-            adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
-        }
+        update_rest_peer_ingress_context(&adapter, &state.session_service, &session_id, keep_alive)
+            .await;
         ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
         let input =
             meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
@@ -4200,10 +4203,13 @@ async fn continue_session_inner(
                     }
                 }
             }
-            let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-            adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+            let owner = adapter.peer_ingress_owner(&session_id).await;
+            if !owner.is_mob_owned() {
+                let comms_rt = comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+                adapter
+                    .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+                    .await;
+            }
         }
 
         let fallback_identity =

@@ -30,7 +30,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.6.0"
+    meerkat = { version = "0.6.0", features = ["sqlite-store", "session-store"] }
     meerkat-core = "0.6.0"
     meerkat-store = "0.6.0"
     tokio = { version = "1", features = ["full"] }
@@ -182,6 +182,7 @@ let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
     system_prompt: None,
     event_tx: None,
+    pre_turn_context_appends: Vec::new(),
     turn_metadata: None,
 }).await?;
 

@@ -220,8 +220,51 @@ pub fn resolve_resume_llm_binding(
     }
 }
 
+fn fill_missing_runtime_turn_metadata(
+    metadata: &mut RuntimeTurnMetadata,
+    defaults: RuntimeTurnMetadata,
+) {
+    if metadata.handling_mode.is_none() {
+        metadata.handling_mode = defaults.handling_mode;
+    }
+    if metadata.skill_references.is_none() {
+        metadata.skill_references = defaults.skill_references;
+    }
+    if metadata.flow_tool_overlay.is_none() {
+        metadata.flow_tool_overlay = defaults.flow_tool_overlay;
+    }
+    if metadata.additional_instructions.is_none() {
+        metadata.additional_instructions = defaults.additional_instructions;
+    }
+    if metadata.model.is_none() {
+        metadata.model = defaults.model;
+    }
+    if metadata.provider.is_none() {
+        metadata.provider = defaults.provider;
+    }
+    if metadata.provider_params.is_none() {
+        metadata.provider_params = defaults.provider_params;
+    }
+    if metadata.connection_ref.is_none() {
+        metadata.connection_ref = defaults.connection_ref;
+    }
+    if metadata.keep_alive.is_none() {
+        metadata.keep_alive = defaults.keep_alive;
+    }
+    if metadata.render_metadata.is_none() {
+        metadata.render_metadata = defaults.render_metadata;
+    }
+    if metadata.execution_kind.is_none() {
+        metadata.execution_kind = defaults.execution_kind;
+    }
+    if metadata.peer_response_terminal_apply_intent.is_none() {
+        metadata.peer_response_terminal_apply_intent = defaults.peer_response_terminal_apply_intent;
+    }
+}
+
 fn recovery_initial_turn_metadata(
     turn_metadata: Option<RuntimeTurnMetadata>,
+    persisted_turn_metadata: Option<RuntimeTurnMetadata>,
     preload_skills: Option<Vec<SkillKey>>,
     additional_instructions: Option<Vec<String>>,
     keep_alive: bool,
@@ -232,7 +275,11 @@ fn recovery_initial_turn_metadata(
         return turn_metadata;
     }
 
-    let mut metadata = turn_metadata.unwrap_or_default();
+    let mut metadata = persisted_turn_metadata.unwrap_or_default();
+    if let Some(mut turn_metadata) = turn_metadata {
+        fill_missing_runtime_turn_metadata(&mut turn_metadata, metadata);
+        metadata = turn_metadata;
+    }
     if let Some(preload_skills) = preload_skills
         && metadata.skill_references.is_none()
     {
@@ -356,6 +403,7 @@ pub fn build_recovered_session(
     let recovered_additional_instructions = build_state.additional_instructions.clone();
     let initial_turn_metadata = recovery_initial_turn_metadata(
         overrides.turn_metadata.clone(),
+        build_state.initial_turn_metadata.clone(),
         recovered_preload_skills.clone(),
         recovered_additional_instructions.clone(),
         keep_alive,
@@ -557,6 +605,7 @@ mod tests {
                 silent_comms_intents: vec!["peer-b".to_string()],
                 max_inline_peer_notifications: Some(4),
                 app_context: Some(json!({ "surface": "rpc" })),
+                initial_turn_metadata: None,
                 additional_instructions: Some(vec!["be precise".to_string()]),
                 shell_env: Some(HashMap::from([(
                     "MEERKAT_MODE".to_string(),
@@ -973,6 +1022,7 @@ mod tests {
                 ]),
                 ..Default::default()
             }),
+            None,
             Some(vec![skill.clone()]),
             Some(vec!["persisted instruction".to_string(), " ".to_string()]),
             true,
@@ -1001,6 +1051,7 @@ mod tests {
 
         let metadata_from_split = recovery_initial_turn_metadata(
             Some(RuntimeTurnMetadata::default()),
+            None,
             Some(vec![skill.clone()]),
             Some(vec!["persisted instruction".to_string(), " ".to_string()]),
             true,
@@ -1030,6 +1081,7 @@ mod tests {
 
         assert!(
             recovery_initial_turn_metadata(
+                None,
                 None,
                 Some(vec![skill_key("standalone-skill")]),
                 Some(vec!["standalone instruction".to_string()]),
@@ -1066,6 +1118,53 @@ mod tests {
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].kind, TurnInstructionKind::Host);
         assert_eq!(instructions[0].body, "be precise");
+    }
+
+    #[test]
+    fn runtime_owned_recovery_preserves_persisted_initial_turn_metadata_without_split_state() {
+        let mut session = sample_session();
+        let mut build_state = session.build_state().expect("sample build state");
+        build_state.additional_instructions = None;
+        build_state.initial_turn_metadata = Some(RuntimeTurnMetadata {
+            skill_references: Some(vec![skill_key("persisted-metadata-skill")]),
+            additional_instructions: Some(vec![TurnInstruction {
+                kind: TurnInstructionKind::User,
+                body: "persisted runtime instruction".to_string(),
+            }]),
+            ..Default::default()
+        });
+        session
+            .set_build_state(build_state)
+            .expect("updated build state");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                runtime_owned_recovery: true,
+                ..Default::default()
+            },
+        )
+        .expect("runtime-owned recovery");
+
+        assert_eq!(
+            recovered.build.additional_instructions, None,
+            "runtime-owned instructions must not be mirrored into split build state"
+        );
+        let metadata = recovered
+            .build
+            .initial_turn_metadata
+            .expect("runtime-owned metadata");
+        assert_eq!(
+            metadata.skill_references,
+            Some(vec![skill_key("persisted-metadata-skill")])
+        );
+        let instructions = metadata
+            .additional_instructions
+            .expect("persisted metadata instructions");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].kind, TurnInstructionKind::User);
+        assert_eq!(instructions[0].body, "persisted runtime instruction");
     }
 
     #[test]

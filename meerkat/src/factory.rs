@@ -581,16 +581,6 @@ impl AgentBuildConfig {
         if metadata.skill_references.is_some() {
             self.preload_skills = metadata.skill_references;
         }
-        if let Some(instructions) = metadata.additional_instructions {
-            let instructions = instructions
-                .into_iter()
-                .map(|instruction| instruction.body.trim().to_string())
-                .filter(|body| !body.is_empty())
-                .collect::<Vec<_>>();
-            if !instructions.is_empty() {
-                self.additional_instructions = Some(instructions);
-            }
-        }
     }
 
     fn initial_turn_metadata_from_internal_build_fields(
@@ -3209,6 +3199,12 @@ impl AgentFactory {
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
         let persisted_system_prompt = build_config.system_prompt.clone();
         let per_request_prompt = build_config.system_prompt.take();
+        let persisted_initial_turn_metadata = matches!(
+            build_config.runtime_build_mode,
+            meerkat_core::RuntimeBuildMode::SessionOwned(_)
+        )
+        .then(|| build_config.initial_turn_metadata_for_service())
+        .flatten();
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
@@ -3872,6 +3868,7 @@ impl AgentFactory {
             silent_comms_intents: build_config.silent_comms_intents.clone(),
             max_inline_peer_notifications: build_config.max_inline_peer_notifications,
             app_context: build_config.app_context.clone(),
+            initial_turn_metadata: persisted_initial_turn_metadata,
             additional_instructions: build_config.additional_instructions.clone(),
             shell_env: build_config.shell_env.clone(),
             mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),
@@ -4197,7 +4194,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_turn_metadata_authority_restores_additional_instructions() {
+    fn initial_turn_metadata_authority_keeps_additional_instructions_canonical() {
         let mut build = AgentBuildConfig::new("gpt-5.4");
         build.initial_turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -4213,9 +4210,15 @@ mod tests {
 
         build.apply_initial_turn_metadata_authority();
 
+        assert_eq!(build.additional_instructions, None);
         assert_eq!(
-            build.additional_instructions,
-            Some(vec!["persist this host instruction".to_string()])
+            build
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.additional_instructions.as_ref())
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("persist this host instruction")
         );
     }
 

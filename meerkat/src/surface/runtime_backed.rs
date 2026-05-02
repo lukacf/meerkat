@@ -144,20 +144,44 @@ where
     };
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await?;
-    install_prepared_runtime_interrupt_handle(service, adapter, session_id).await?;
+    if let Err(error) =
+        install_prepared_runtime_interrupt_handle(service, adapter, session_id).await
+    {
+        adapter.unregister_session(session_id).await;
+        return Err(error.into());
+    }
     recovery_context.runtime_build_mode = Some(RuntimeBuildMode::SessionOwned(bindings));
     recovery_context.require_runtime_build_mode = true;
 
-    let recovered = build_recovered_session(session, &recovery_overrides, recovery_context)?;
+    let recovered = match build_recovered_session(session, &recovery_overrides, recovery_context) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            adapter.unregister_session(session_id).await;
+            return Err(error.into());
+        }
+    };
     let keep_alive = recovered.keep_alive;
     match service.discard_live_session(session_id).await {
         Ok(()) | Err(SessionError::NotFound { .. }) => {}
-        Err(error) => return Err(SurfaceRuntimeMaterializeError::Session(error)),
+        Err(error) => {
+            adapter.unregister_session(session_id).await;
+            return Err(SurfaceRuntimeMaterializeError::Session(error));
+        }
     }
-    let result = service
+    let result = match service
         .create_session(recovered.into_deferred_create_request())
-        .await?;
-    ensure_materialized_session_id_matches(session_id, &result.session_id)?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            adapter.unregister_session(session_id).await;
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = ensure_materialized_session_id_matches(session_id, &result.session_id) {
+        adapter.unregister_session(session_id).await;
+        return Err(error);
+    }
 
     adapter
         .ensure_session_with_executor(
@@ -192,7 +216,14 @@ pub async fn configure_peer_ingress(
     session_id: &SessionId,
     keep_alive: bool,
 ) {
-    let comms_rt = service.comms_runtime(session_id).await;
+    if adapter.peer_ingress_owner(session_id).await.is_mob_owned() {
+        return;
+    }
+    let comms_rt = if keep_alive {
+        service.comms_runtime(session_id).await
+    } else {
+        None
+    };
     adapter
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
         .await;

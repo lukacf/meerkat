@@ -519,6 +519,7 @@ Inject skills into a specific turn on an existing session. The skill content is 
         prompt: "Now format the output".into(),
         system_prompt: None,
         event_tx: None,
+        pre_turn_context_appends: Vec::new(),
         turn_metadata: Some(meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             skill_references: Some(vec![SkillKey {
                 source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,

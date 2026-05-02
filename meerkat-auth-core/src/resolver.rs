@@ -389,39 +389,8 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         {
             match oauth_lifecycle_marker_relation(&tokens, &snapshot) {
                 OAuthLifecycleMarkerRelation::Matches => {}
-                OAuthLifecycleMarkerRelation::TokenNewer => {
-                    let previous_snapshot = snapshot.clone();
-                    let transition = meerkat_core::publish_token_lifecycle_acquired(
-                        auth_lease.as_ref(),
-                        &binding.connection_ref,
-                        &tokens,
-                    )
-                    .map_err(|e| {
-                        ProviderAuthError::SourceResolutionFailed(format!(
-                            "AuthMachine lifecycle acquire failed: {e}"
-                        ))
-                    })?;
-                    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                        &tokens, transition,
-                    );
-                    if marked != tokens {
-                        if let Err(save_error) = store.save(&key, &marked).await {
-                            let rollback = restore_oauth_lifecycle_after_marker_save_failure(
-                                auth_lease.as_ref(),
-                                &lease_key,
-                                &previous_snapshot,
-                                &tokens,
-                            );
-                            return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                                "TokenStore lifecycle marker save failed after shared OAuth credential adoption: {save_error}{rollback}"
-                            )));
-                        }
-                        tokens = marked;
-                    }
-                    snapshot = auth_lease.snapshot(&lease_key);
-                    phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-                }
-                OAuthLifecycleMarkerRelation::TokenStale
+                OAuthLifecycleMarkerRelation::TokenNewer
+                | OAuthLifecycleMarkerRelation::TokenStale
                 | OAuthLifecycleMarkerRelation::Invalid => {
                     return Err(interactive_login_error(binding));
                 }
@@ -2230,33 +2199,54 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_oauth_source_accepts_newer_shared_token_commit() {
+    async fn managed_store_oauth_source_rejects_newer_token_marker_over_existing_lease() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
         let mut tokens = chatgpt_oauth_tokens("newer-shared-access");
         tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
         let newer_expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 2),
+                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &tokens,
+                    AuthLeaseTransition {
+                        generation: 2,
+                        credential_published_at_millis: Some(3_000),
+                    },
+                ),
             )
             .await
             .unwrap();
+        let previous_snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(newer_expires_at - 3600),
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: Some(2_000),
+        };
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(previous_snapshot.clone());
         let env = ResolverEnvironment::testing()
             .with_token_store(store)
-            .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation_with_expiry(
-                1,
-                newer_expires_at - 3600,
-            ));
+            .with_auth_lease_handle(auth_lease.clone());
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
             .await
-            .expect("a newer committed TokenStore credential should not be rejected by a stale local generation counter");
+            .unwrap_err();
 
-        assert_eq!(secret, "newer-shared-access");
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+        ));
+        assert_eq!(
+            auth_lease.acquire_count(),
+            0,
+            "a newer durable marker must not acquire or replace an existing AuthMachine lease"
+        );
+        assert_eq!(auth_lease.snapshot(&lease_key), previous_snapshot);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2487,61 +2477,6 @@ mod tests {
         assert!(!managed_store_oauth_refresh_failure_is_permanent(
             "network error: connection reset"
         ));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn managed_store_oauth_shared_adoption_save_failure_remains_retryable() {
-        let store = Arc::new(SaveFailingTokenStore::new());
-        let binding =
-            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
-        let tokens = chatgpt_oauth_tokens("shared-adoption-access");
-        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
-        let durable = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &tokens,
-            AuthLeaseTransition {
-                generation: 2,
-                credential_published_at_millis: Some(3_000),
-            },
-        );
-        store.seed(&key, &durable).await;
-        let initial_snapshot = AuthLeaseSnapshot {
-            phase: Some(AuthLeasePhase::Valid),
-            expires_at: Some(expires_at),
-            credential_present: true,
-            generation: 1,
-            credential_published_at_millis: Some(2_000),
-        };
-        let auth_lease = MutableAuthLeaseHandle::from_snapshot(initial_snapshot);
-        let store_dyn: Arc<dyn TokenStore> = store.clone();
-        let env = ResolverEnvironment::testing()
-            .with_token_store(store_dyn)
-            .with_auth_lease_handle(auth_lease.clone());
-
-        let err = match load_managed_store_tokens_with_lifecycle(&env, &binding).await {
-            Ok(_) => panic!("shared adoption marker save failure should fail resolution"),
-            Err(err) => err,
-        };
-
-        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
-        let snapshot = auth_lease.snapshot(&lease_key);
-        assert!(
-            snapshot.credential_present,
-            "failed durable marker adoption must restore the previous credential lifecycle"
-        );
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert_eq!(snapshot.credential_published_at_millis, Some(2_000));
-
-        store.allow_saves();
-        let retry = load_managed_store_tokens_with_lifecycle(&env, &binding)
-            .await
-            .expect("marker adoption should be retryable after a transient save failure");
-        assert_eq!(
-            retry.tokens.primary_secret.as_deref(),
-            Some("shared-adoption-access")
-        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

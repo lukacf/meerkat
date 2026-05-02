@@ -2692,7 +2692,7 @@ impl AgentFactory {
                         let auth_lease_handle = if let RuntimeBuildMode::SessionOwned(bindings) =
                             &build_config.runtime_build_mode
                         {
-                            Some(Arc::clone(&bindings.auth_lease))
+                            Some(Arc::clone(bindings.auth_lease()))
                         } else {
                             None
                         };
@@ -2756,7 +2756,7 @@ impl AgentFactory {
                             &build_config.runtime_build_mode
                             && lease_connection_ref.is_some()
                         {
-                            env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+                            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                         }
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2776,7 +2776,7 @@ impl AgentFactory {
                             && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
                         {
                             Self::publish_auth_lease(
-                                &bindings.auth_lease,
+                                bindings.auth_lease(),
                                 lease_connection_ref,
                                 &connection,
                             )
@@ -2886,7 +2886,7 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !connection_ref.is_env_default()
                 {
-                    env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+                    env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                 }
                 for (handle, resolver) in &self.external_auth_resolvers {
                     env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2901,7 +2901,7 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !connection_ref.is_env_default()
                 {
-                    Self::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+                    Self::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
                         .map_err(BuildAgentError::LlmClient)?;
                 }
                 let Ok(Some(executor)) = self
@@ -2927,7 +2927,7 @@ impl AgentFactory {
             &build_config.runtime_build_mode
         {
             bindings
-                .model_routing
+                .model_routing()
                 .set_baseline(
                     meerkat_core::lifecycle::run_primitive::ModelId::new(model.clone()),
                     model_profile
@@ -3101,7 +3101,7 @@ impl AgentFactory {
             let session_claim_handle: Arc<dyn meerkat_core::handles::SessionClaimHandle> =
                 match &build_config.runtime_build_mode {
                     meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
-                        Arc::clone(&bindings.session_claim_handle)
+                        Arc::clone(bindings.session_claim_handle())
                     }
                     meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
                         meerkat_core::handles::DefaultSessionClaimRegistry::global()
@@ -3200,15 +3200,22 @@ impl AgentFactory {
             Option<Arc<RuntimeOpsLifecycleRegistry>>,
         ) = match &resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
-                if bindings.session_id != *session.id() {
+                if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
+                    return Err(BuildAgentError::Config(
+                        "SessionRuntimeBindings were not prepared by MeerkatMachine; \
+                         session-owned runtime builds must use MeerkatMachine::prepare_bindings"
+                            .to_string(),
+                    ));
+                }
+                if bindings.session_id() != session.id() {
                     return Err(BuildAgentError::Config(format!(
                         "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
                          bindings may have been prepared for a different session",
-                        bindings.session_id,
+                        bindings.session_id(),
                         session.id(),
                     )));
                 }
-                (Arc::clone(&bindings.ops_lifecycle), None)
+                (Arc::clone(bindings.ops_lifecycle()), None)
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 let concrete = Arc::new(RuntimeOpsLifecycleRegistry::new());
@@ -3281,14 +3288,14 @@ impl AgentFactory {
         // connection state into MeerkatMachine's `mcp_server_states`. Others
         // are no-ops.
         if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
-            tools.bind_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
-            tools.bind_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+            tools.bind_external_tool_surface_handle(Arc::clone(bindings.external_tool_surface()));
+            tools.bind_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             // LUC-104: classified comms ingress must hand raw external/plain
             // ingress through the session's MeerkatMachine before the comms
             // shell computes compatibility auth/routing projections.
             #[cfg(feature = "comms")]
             if let Some(runtime) = &comms_runtime {
-                runtime.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
+                runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
             }
             // W1-A/U6: install the typed machine authority required before
             // comms can emit semantic peer request/response receipts.
@@ -3296,8 +3303,8 @@ impl AgentFactory {
             if let Some(runtime) = &comms_runtime {
                 runtime.install_peer_request_response_authority(
                     meerkat_comms::PeerRequestResponseAuthority::new(
-                        Arc::clone(&bindings.peer_interaction),
-                        Arc::clone(&bindings.interaction_stream),
+                        Arc::clone(bindings.peer_interaction()),
+                        Arc::clone(bindings.interaction_stream()),
                     ),
                 );
             }
@@ -3933,16 +3940,17 @@ impl AgentFactory {
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
         match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
-                builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
-                builder =
-                    builder.with_tool_visibility_owner(Arc::clone(&bindings.tool_visibility_owner));
-                builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
+                builder = builder.with_epoch_cursor_state(Arc::clone(bindings.cursor_state()));
+                builder = builder
+                    .with_tool_visibility_owner(Arc::clone(bindings.tool_visibility_owner()));
+                builder = builder.with_turn_state_handle(Arc::clone(bindings.turn_state()));
                 builder = builder.require_runtime_execution_kind_stamp();
+                builder = builder.with_external_tool_surface_handle(Arc::clone(
+                    bindings.external_tool_surface(),
+                ));
+                builder = builder.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                 builder = builder
-                    .with_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
-                builder = builder.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
-                builder = builder
-                    .with_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+                    .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 builder =
@@ -4502,7 +4510,7 @@ mod tests {
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default identity must not be admitted to AuthMachine lease truth"
@@ -4607,7 +4615,7 @@ mod tests {
             .build_llm_client_for_identity_with_auth_lease(
                 &Config::default(),
                 &identity,
-                Some(Arc::clone(&bindings.auth_lease)),
+                Some(Arc::clone(bindings.auth_lease())),
             )
             .await
             .expect("env-default hot-swap client should still build");
@@ -4623,7 +4631,7 @@ mod tests {
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default hot-swap identity must not be admitted to AuthMachine lease truth"
@@ -4855,14 +4863,14 @@ mod tests {
             )),
         };
 
-        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
             .expect("first publication");
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
-        let first_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let first_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
-        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
             .expect("second matching publication should be idempotent");
-        let second_snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let second_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
         assert_eq!(
             second_snapshot, first_snapshot,
@@ -5496,7 +5504,7 @@ mod tests {
         );
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
@@ -5552,7 +5560,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let lease_key =
             meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
-        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(snapshot.phase, None);
         assert!(!snapshot.credential_present);
         assert_eq!(snapshot.generation, 0);
@@ -6344,7 +6352,7 @@ mod tests {
         };
         let snapshot =
             bindings
-                .auth_lease
+                .auth_lease()
                 .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
                     &connection_ref,
                 ));
@@ -6486,7 +6494,7 @@ mod tests {
         };
         let snapshot =
             bindings
-                .auth_lease
+                .auth_lease()
                 .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
                     &connection_ref,
                 ));

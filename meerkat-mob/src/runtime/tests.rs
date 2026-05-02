@@ -165,8 +165,8 @@ async fn install_machine_peer_request_response_authority(
         })?;
     runtime.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            bindings.peer_interaction,
-            bindings.interaction_stream,
+            Arc::clone(bindings.peer_interaction()),
+            Arc::clone(bindings.interaction_stream()),
         ),
     );
     Ok(())

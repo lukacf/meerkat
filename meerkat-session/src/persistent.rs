@@ -2504,38 +2504,6 @@ mod tests {
         }
     }
 
-    fn test_runtime_bindings(session_id: SessionId) -> meerkat_core::SessionRuntimeBindings {
-        meerkat_core::SessionRuntimeBindings {
-            session_id,
-            epoch_id: meerkat_core::RuntimeEpochId::new(),
-            ops_lifecycle: Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
-            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
-            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
-            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
-            external_tool_surface: Arc::new(
-                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-            ),
-            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
-            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
-            model_routing: Arc::new(meerkat_runtime::RuntimeModelRoutingHandle::ephemeral()),
-            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
-            mcp_server_lifecycle: Arc::new(
-                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
-            ),
-            peer_interaction: Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::ephemeral()),
-            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
-            session_claim_handle: meerkat_core::handles::DefaultSessionClaimRegistry::global()
-                as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
-            interaction_stream: Arc::new(
-                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
-            ),
-            realtime_product_turn: Arc::new(
-                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
-            ),
-        }
-    }
-
     struct FailSaveStore {
         inner: MemoryStore,
         fail_save: AtomicBool,

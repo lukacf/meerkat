@@ -6462,7 +6462,7 @@ async fn run_agent(
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
             wait_for_mcp,
-            Some(Arc::clone(&bindings.external_tool_surface)),
+            Some(Arc::clone(bindings.external_tool_surface())),
         )
         .await;
         // Mob tools now flow through mob_tools (factory pattern), not external_tools.
@@ -7090,7 +7090,7 @@ async fn resume_session_with_llm_override(
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
             wait_for_mcp,
-            Some(Arc::clone(&resume_bindings.external_tool_surface)),
+            Some(Arc::clone(resume_bindings.external_tool_surface())),
         )
         .await;
         // Mob tools now flow through mob_tools (factory pattern), not external_tools.
@@ -15080,7 +15080,7 @@ capabilities = ["definitely_missing_capability"]
         };
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, u64::MAX)
             .expect("runtime bindings should publish into the bundle auth lease");
         let snapshot = auth_lease.snapshot(&lease_key);

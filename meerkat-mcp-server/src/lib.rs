@@ -2704,7 +2704,7 @@ async fn handle_meerkat_run(
             ))
         })?;
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
-        McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
+        McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
     ));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
     let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
@@ -3024,7 +3024,7 @@ async fn handle_meerkat_resume(
         .cloned();
     let mcp_adapter = existing_adapter.clone().unwrap_or_else(|| {
         Arc::new(meerkat_mcp::McpRouterAdapter::new(
-            McpRouter::new_with_surface_handle(Arc::clone(&resume_bindings.external_tool_surface)),
+            McpRouter::new_with_surface_handle(Arc::clone(resume_bindings.external_tool_surface())),
         ))
     });
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
@@ -4849,12 +4849,14 @@ mod tests {
             .prepare_bindings(parsed.clone())
             .await
             .expect("session runtime bindings");
-        seed_active_external_surface(bindings.external_tool_surface.as_ref(), "demo");
+        seed_active_external_surface(bindings.external_tool_surface().as_ref(), "demo");
         state
             .upsert_mcp_adapter(
                 &parsed,
                 Arc::new(meerkat_mcp::McpRouterAdapter::new(
-                    McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
+                    McpRouter::new_with_surface_handle(Arc::clone(
+                        bindings.external_tool_surface(),
+                    )),
                 )),
             )
             .await;

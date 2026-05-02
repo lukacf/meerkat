@@ -3956,8 +3956,8 @@ async fn resolve_session_realtime_handles(
         .await
         .ok()?;
     Some((
-        Arc::clone(&bindings.session_context),
-        Arc::clone(&bindings.realtime_product_turn),
+        Arc::clone(bindings.session_context()),
+        Arc::clone(bindings.realtime_product_turn()),
     ))
 }
 

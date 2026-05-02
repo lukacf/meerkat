@@ -4532,7 +4532,7 @@ impl SessionRuntime {
     ) -> Result<AgentBuildConfig, RpcError> {
         let router = match &build_config.runtime_build_mode {
             meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
-                McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface))
+                McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface()))
             }
             meerkat_core::RuntimeBuildMode::StandaloneEphemeral => McpRouter::new(),
         };

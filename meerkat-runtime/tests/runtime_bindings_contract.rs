@@ -31,8 +31,9 @@ async fn prepare_bindings_returns_matching_session_id() {
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
 
     assert_eq!(
-        bindings.session_id, session_id,
-        "bindings.session_id must match the requested session_id"
+        bindings.session_id(),
+        &session_id,
+        "bindings.session_id() must match the requested session_id"
     );
 }
 
@@ -47,7 +48,8 @@ async fn prepare_bindings_returns_stable_epoch_id() {
     let second = adapter.prepare_bindings(session_id.clone()).await.unwrap();
 
     assert_eq!(
-        first.epoch_id, second.epoch_id,
+        first.epoch_id(),
+        second.epoch_id(),
         "repeated prepare_bindings for the same session must return the same epoch_id"
     );
 }
@@ -64,7 +66,8 @@ async fn prepare_bindings_returns_different_epoch_for_different_sessions() {
     let bindings_b = adapter.prepare_bindings(session_b).await.unwrap();
 
     assert_ne!(
-        bindings_a.epoch_id, bindings_b.epoch_id,
+        bindings_a.epoch_id(),
+        bindings_b.epoch_id(),
         "different sessions must get different epoch_ids"
     );
 }
@@ -81,11 +84,11 @@ async fn prepare_bindings_returns_same_registry_instance() {
     // Register an operation through the first binding's registry
     let spec = test_op_spec("identity-check");
     let op_id = spec.id.clone();
-    first.ops_lifecycle.register_operation(spec).unwrap();
+    first.ops_lifecycle().register_operation(spec).unwrap();
 
     // Get bindings again — should see the same operation
     let second = adapter.prepare_bindings(session_id.clone()).await.unwrap();
-    let snapshot = second.ops_lifecycle.snapshot(&op_id);
+    let snapshot = second.ops_lifecycle().snapshot(&op_id);
 
     assert!(
         snapshot.is_some(),
@@ -105,12 +108,12 @@ async fn prepare_bindings_idempotent_with_prior_registration() {
 
     // prepare_bindings should reuse the existing entry
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
-    assert_eq!(bindings.session_id, session_id);
+    assert_eq!(bindings.session_id(), &session_id);
 
     // Register an op through prepare_bindings registry
     let spec = test_op_spec("idempotent-check");
     let op_id = spec.id.clone();
-    bindings.ops_lifecycle.register_operation(spec).unwrap();
+    bindings.ops_lifecycle().register_operation(spec).unwrap();
 
     // The direct ops_lifecycle_registry should see it too
     let direct_registry = adapter
@@ -135,20 +138,20 @@ async fn bindings_registry_shares_completion_feed_with_adapter() {
 
     // Get completion feed from bindings registry
     let feed = bindings
-        .ops_lifecycle
+        .ops_lifecycle()
         .completion_feed()
         .expect("runtime registry should have a completion feed");
 
     // Register and complete an operation
     let spec = test_op_spec("feed-check");
     let op_id = spec.id.clone();
-    bindings.ops_lifecycle.register_operation(spec).unwrap();
+    bindings.ops_lifecycle().register_operation(spec).unwrap();
     bindings
-        .ops_lifecycle
+        .ops_lifecycle()
         .provisioning_succeeded(&op_id)
         .unwrap();
     bindings
-        .ops_lifecycle
+        .ops_lifecycle()
         .complete_operation(
             &op_id,
             OperationResult {

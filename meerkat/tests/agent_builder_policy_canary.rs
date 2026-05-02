@@ -4,6 +4,73 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use meerkat_core::types::{AssistantBlock, StopReason, Usage};
+use meerkat_core::{
+    AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Message,
+    Session, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError,
+};
+
+struct CanaryClient;
+
+#[async_trait]
+impl AgentLlmClient for CanaryClient {
+    async fn stream_response(
+        &self,
+        _messages: &[Message],
+        _tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: "done".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        ))
+    }
+
+    fn provider(&self) -> &'static str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        "mock-model"
+    }
+}
+
+struct CanaryTools;
+
+#[async_trait]
+impl AgentToolDispatcher for CanaryTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
+    }
+
+    async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::execution_failed(
+            "agent builder policy canary does not dispatch tools",
+        ))
+    }
+}
+
+struct CanaryStore;
+
+#[async_trait]
+impl AgentSessionStore for CanaryStore {
+    async fn save(&self, _session: &Session) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
+        Ok(None)
+    }
+}
 
 fn repo_root() -> PathBuf {
     let mut path = std::env::var_os("CARGO_MANIFEST_DIR")
@@ -1133,6 +1200,117 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
+fn downstream_cannot_forge_session_runtime_bindings_for_public_factory_mode() -> std::io::Result<()>
+{
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_cannot_forge_session_runtime_bindings_for_public_factory_mode",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-runtime-bindings"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-core = {{ path = "{}", default-features = false }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_forged_session_runtime_bindings.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = downstream_cargo_command(cargo)
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream fake SessionRuntimeBindings fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("private field") || stderr.contains("cannot construct"),
+        "downstream fake SessionRuntimeBindings fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn public_facade_rejects_forged_session_runtime_binding_authority() {
+    let session = Session::default();
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let prepared = runtime
+        .prepare_bindings(session.id().clone())
+        .await
+        .expect("prepare machine-owned bindings");
+    let forged = meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
+        session.id().clone(),
+        prepared.epoch_id().clone(),
+        Arc::clone(prepared.ops_lifecycle()),
+        Arc::clone(prepared.cursor_state()),
+        Arc::clone(prepared.tool_visibility_owner()),
+        Arc::clone(prepared.turn_state()),
+        Arc::clone(prepared.comms_drain()),
+        Arc::clone(prepared.external_tool_surface()),
+        Arc::clone(prepared.peer_comms()),
+        Arc::clone(prepared.session_admission()),
+        Arc::clone(prepared.model_routing()),
+        Arc::clone(prepared.auth_lease()),
+        Arc::clone(prepared.mcp_server_lifecycle()),
+        Arc::clone(prepared.peer_interaction()),
+        Arc::clone(prepared.session_context()),
+        Arc::clone(prepared.session_claim_handle()),
+        Arc::clone(prepared.interaction_stream()),
+        Arc::clone(prepared.realtime_product_turn()),
+        Arc::new(()),
+    );
+
+    let result = meerkat::AgentBuilder::new()
+        .resume_session(session)
+        .runtime_build_mode(meerkat_core::RuntimeBuildMode::SessionOwned(forged))
+        .build(
+            Arc::new(CanaryClient),
+            Arc::new(CanaryTools),
+            Arc::new(CanaryStore),
+        )
+        .await;
+
+    match result {
+        Err(meerkat::BuildAgentError::Config(message)) => assert!(
+            message.contains("SessionRuntimeBindings were not prepared by MeerkatMachine"),
+            "public facade rejected forged session runtime authority for the wrong reason: {message}"
+        ),
+        Err(error) => panic!("public facade returned wrong error for forged authority: {error}"),
+        Ok(_) => panic!("public facade accepted forged session runtime authority"),
+    }
+}
+
+#[test]
 fn downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer() -> std::io::Result<()>
 {
     if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
@@ -2081,7 +2259,9 @@ fn public_downstream_bazel_fixtures_do_not_use_private_factory_targets() {
 fn core_factory_authority_is_not_publicly_forgeable() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
     let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    let runtime_epoch = repo_file("meerkat-core/src/runtime_epoch.rs");
     let factory = repo_file("meerkat/src/factory.rs");
+    let runtime = repo_file("meerkat-runtime/src/lib.rs");
 
     assert!(
         !builder.contains("std::any::type_name")
@@ -2126,6 +2306,29 @@ fn core_factory_authority_is_not_publicly_forgeable() {
         !factory.contains("impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory"),
         "AgentFactory should own a non-forgeable authority value rather than \
          implementing a public core authority trait"
+    );
+    assert!(
+        !runtime_epoch.contains("pub session_id: SessionId")
+            && !runtime_epoch.contains("pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>")
+            && !runtime_epoch.contains("pub turn_state: Arc<dyn TurnStateHandle>")
+            && !runtime_epoch
+                .contains("pub external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>")
+            && runtime_epoch.contains("runtime_authority: Arc<dyn Any + Send + Sync>"),
+        "SessionRuntimeBindings must be opaque and carry a runtime-private \
+         authority witness; public fields let downstream crates forge \
+         RuntimeBuildMode::SessionOwned bindings"
+    );
+    assert!(
+        runtime.contains("struct SessionRuntimeBindingsAuthority")
+            && !runtime.contains("pub struct SessionRuntimeBindingsAuthority")
+            && runtime.contains("session_runtime_bindings_have_machine_authority"),
+        "meerkat-runtime must keep the session binding authority witness private \
+         while exposing only validation for the facade factory"
+    );
+    assert!(
+        factory.contains("session_runtime_bindings_have_machine_authority(bindings)"),
+        "AgentFactory must validate the runtime-private SessionRuntimeBindings \
+         authority before consuming SessionOwned handles"
     );
 }
 

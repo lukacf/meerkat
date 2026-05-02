@@ -161,55 +161,49 @@ impl MeerkatMachine {
         ));
         let auth_lease = self.auth_lease_handle();
         Ok(MeerkatMachineCommandResult::Bindings(
-            meerkat_core::SessionRuntimeBindings {
+            meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
                 session_id,
                 epoch_id,
-                ops_lifecycle: ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+                ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
                 cursor_state,
-                tool_visibility_owner: tool_visibility_owner
-                    as Arc<dyn meerkat_core::ToolVisibilityOwner>,
-                turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
+                tool_visibility_owner as Arc<dyn meerkat_core::ToolVisibilityOwner>,
+                Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
                     &shared_handle_authority,
                 ))),
-                comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
+                Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
                     &shared_handle_authority,
                 ))),
-                external_tool_surface: Arc::new(
-                    crate::handles::RuntimeExternalToolSurfaceHandle::new(Arc::clone(
-                        &shared_handle_authority,
-                    )),
-                ),
-                peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new(Arc::clone(
-                    &shared_handle_authority,
-                ))),
-                session_admission: Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
+                Arc::new(crate::handles::RuntimeExternalToolSurfaceHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                model_routing: Arc::new(crate::handles::RuntimeModelRoutingHandle::new(
+                Arc::new(crate::handles::RuntimePeerCommsHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
+                Arc::new(crate::handles::RuntimeModelRoutingHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
                 auth_lease,
-                mcp_server_lifecycle: Arc::new(
-                    crate::handles::RuntimeMcpServerLifecycleHandle::new(Arc::clone(
-                        &shared_handle_authority,
-                    )),
-                ),
-                peer_interaction: Arc::new(crate::handles::RuntimePeerInteractionHandle::new(
+                Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                session_context: Arc::new(crate::handles::RuntimeSessionContextHandle::new(
+                Arc::new(crate::handles::RuntimePeerInteractionHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                session_claim_handle: self.session_claim_handle(),
-                interaction_stream: Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
+                Arc::new(crate::handles::RuntimeSessionContextHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                realtime_product_turn: Arc::new(
-                    crate::handles::RuntimeRealtimeProductTurnHandle::new(Arc::clone(
-                        &shared_handle_authority,
-                    )),
-                ),
-            },
+                self.session_claim_handle(),
+                Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                Arc::new(crate::handles::RuntimeRealtimeProductTurnHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                crate::session_runtime_bindings_authority(),
+            ),
         ))
     }
 

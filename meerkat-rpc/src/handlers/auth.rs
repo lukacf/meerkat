@@ -3212,7 +3212,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let params = raw_params(serde_json::json!({
@@ -3251,7 +3251,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let params = raw_params(serde_json::json!({
@@ -3304,7 +3304,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let params = raw_params(serde_json::json!({
@@ -3353,7 +3353,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let params = raw_params(serde_json::json!({
@@ -3391,7 +3391,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let params = raw_params(serde_json::json!({
@@ -4220,7 +4220,7 @@ mod tests {
             .await
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
         let status =
@@ -4232,17 +4232,17 @@ mod tests {
             .prepare_bindings(meerkat_core::SessionId::new())
             .await
             .unwrap();
-        bindings.auth_lease.begin_refresh(&lease_key).unwrap();
+        bindings.auth_lease().begin_refresh(&lease_key).unwrap();
         let status =
             handle_auth_status_get(Some(RpcId::Num(2)), Some(params.as_ref()), &runtime).await;
         assert_eq!(auth_status_state(status), "expiring");
 
         bindings
-            .auth_lease
+            .auth_lease()
             .complete_refresh(&lease_key, now + 7200, now)
             .unwrap();
         bindings
-            .auth_lease
+            .auth_lease()
             .mark_reauth_required(&lease_key)
             .unwrap();
         let status =

@@ -80,6 +80,22 @@ pub mod store;
 pub mod traits;
 
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampedTurnMetadata;
+use std::any::Any;
+use std::sync::Arc;
+
+struct SessionRuntimeBindingsAuthority;
+
+pub(crate) fn session_runtime_bindings_authority() -> Arc<dyn Any + Send + Sync> {
+    Arc::new(SessionRuntimeBindingsAuthority)
+}
+
+pub fn session_runtime_bindings_have_machine_authority(
+    bindings: &meerkat_core::SessionRuntimeBindings,
+) -> bool {
+    bindings
+        .__runtime_authority()
+        .is::<SessionRuntimeBindingsAuthority>()
+}
 
 // Re-exports for convenience
 pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};

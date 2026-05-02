@@ -138,7 +138,7 @@ impl McpScheduleContext {
         let output_schema = create.output_schema.clone();
 
         let mcp_adapter = self
-            .seed_realm_mcp_adapter(Arc::clone(&runtime_bindings.external_tool_surface))
+            .seed_realm_mcp_adapter(Arc::clone(runtime_bindings.external_tool_surface()))
             .await?;
         let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
         let external_tools = compose_external_tool_dispatchers(None, Some(mcp_tools))

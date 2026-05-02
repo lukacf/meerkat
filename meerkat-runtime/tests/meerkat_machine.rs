@@ -1167,11 +1167,11 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .prepare_bindings(sid.clone())
         .await
         .expect("prepare runtime bindings");
-    requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
+    requester_comms.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
     requester_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::clone(&bindings.peer_interaction),
-            Arc::clone(&bindings.interaction_stream),
+            Arc::clone(bindings.peer_interaction()),
+            Arc::clone(bindings.interaction_stream()),
         ),
     );
     let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -1182,8 +1182,8 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .expect("prepare responder runtime bindings");
     responder_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::clone(&responder_bindings.peer_interaction),
-            Arc::clone(&responder_bindings.interaction_stream),
+            Arc::clone(responder_bindings.peer_interaction()),
+            Arc::clone(responder_bindings.interaction_stream()),
         ),
     );
 
@@ -1247,7 +1247,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         InteractionContent::Request { .. }
     ));
     responder_bindings
-        .peer_interaction
+        .peer_interaction()
         .request_received(PeerCorrelationId::from_uuid(request_id))
         .expect("seed responder inbound request state");
 

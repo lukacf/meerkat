@@ -1238,6 +1238,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_direct_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_forged_session_runtime_bindings.rs",
         "tests/fixtures/agent_builder_policy/downstream_inventory_steal_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_mirror_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",

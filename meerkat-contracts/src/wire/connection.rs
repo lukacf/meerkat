@@ -84,6 +84,10 @@ pub struct CreateProfileParams {
 pub struct LoginStartParams {
     pub provider: String,
     pub redirect_uri: String,
+    pub realm_id: String,
+    pub binding_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 /// Request payload for `auth/login/complete`.
@@ -94,10 +98,8 @@ pub struct LoginCompleteParams {
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realm_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_id: Option<String>,
+    pub realm_id: String,
+    pub binding_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
 }
@@ -107,6 +109,10 @@ pub struct LoginCompleteParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceStartParams {
     pub provider: String,
+    pub realm_id: String,
+    pub binding_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 /// Request payload for `auth/login/device_complete`.
@@ -115,10 +121,8 @@ pub struct DeviceStartParams {
 pub struct DeviceCompleteParams {
     pub provider: String,
     pub device_code: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realm_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_id: Option<String>,
+    pub realm_id: String,
+    pub binding_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
 }

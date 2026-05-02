@@ -13,7 +13,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use axum::Router;
 use axum::extract::Form;
@@ -27,6 +30,10 @@ use meerkat_auth_core::auth_oauth::OAuthEndpoints;
 use meerkat_auth_core::auth_store::{
     EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
 };
+use meerkat_core::handles::{
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
+};
 use meerkat_core::{
     AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
@@ -34,6 +41,13 @@ use meerkat_core::{
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
 fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
+    realm_with_oauth_binding_source(auth_method, CredentialSourceSpec::PlatformDefault)
+}
+
+fn realm_with_oauth_binding_source(
+    auth_method: &str,
+    source: CredentialSourceSpec,
+) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
     backend.insert(
         "anthropic_api".into(),
@@ -50,7 +64,7 @@ fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
         AuthProfileConfig {
             provider: "anthropic".into(),
             auth_method: auth_method.into(),
-            source: CredentialSourceSpec::PlatformDefault,
+            source,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()
@@ -85,6 +99,86 @@ fn default_connection_ref() -> ConnectionRef {
     }
 }
 
+struct StaticAuthLeaseHandle {
+    expires_at: Option<u64>,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl StaticAuthLeaseHandle {
+    fn valid() -> Arc<Self> {
+        Arc::new(Self {
+            expires_at: None,
+            credential_published_at_millis: None,
+        })
+    }
+
+    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
+        Arc::new(Self {
+            expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
+            credential_published_at_millis: Some(1_000),
+        })
+    }
+}
+
+impl AuthLeaseHandle for StaticAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        _lease_key: &LeaseKey,
+        _expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: self.credential_published_at_millis,
+        })
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: self.credential_published_at_millis,
+        })
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: self.expires_at,
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: self.credential_published_at_millis,
+        }
+    }
+}
+
 // --- Fresh OAuth bundle → inline secret ---------------------
 
 #[tokio::test]
@@ -94,6 +188,55 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("fresh-access-xyz".into()),
+        refresh_token: Some("refresh-xyz".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: oauth::CLAUDE_AI_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: None,
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("claude_ai_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted));
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("fresh OAuth tokens should resolve");
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("fresh-access-xyz".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_rejects_token_without_auth_lifecycle() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ClaudeAiOauth,
+        primary_secret: Some("stale-access-xyz".into()),
         refresh_token: Some("refresh-xyz".into()),
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
@@ -119,20 +262,125 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
 
-    let connection = registry
+    let err = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .expect("fresh OAuth tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-access-xyz".to_string()),
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::InteractiveLoginRequired
+            )
+        ),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_rejects_wrong_persisted_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::OauthToApiKey,
+                primary_secret: Some("sk-ant-api03-stale".into()),
+                refresh_token: None,
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("claude_ai_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("credential mode OauthToApiKey"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ClaudeAiOauth,
+                primary_secret: Some("fresh-access-xyz".into()),
+                refresh_token: Some("refresh-xyz".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: oauth::CLAUDE_AI_SCOPES
+                    .iter()
+                    .map(|s| (*s).into())
+                    .collect(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding_source(
+        "claude_ai_oauth",
+        CredentialSourceSpec::ExternalResolver {
+            handle: "external-claude".into(),
+        },
+    );
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("source 'external_resolver'"),
+        "got {err}"
     );
 }
 
 // --- Expired OAuth bundle → refresh path ------------------------------
 
 #[tokio::test]
-async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
+async fn claude_ai_oauth_runtime_refresh_is_uncommitted() {
     // Mock token endpoint returns a new access_token + refresh_token.
     let app = Router::new().route(
         "/v1/oauth/token",
@@ -199,25 +447,124 @@ async fn claude_ai_oauth_expired_token_refreshes_via_token_endpoint() {
         endpoints,
         TokenKey::parse("dev", "default_claude").expect("valid slugs"),
     );
-    let access = runtime.get_or_refresh_access_token().await.unwrap();
-    assert_eq!(access, "refreshed-access-NEW");
+    let before_refresh = Utc::now();
+    let refreshed = runtime.get_or_refresh_tokens().await.unwrap();
+    assert_eq!(
+        refreshed.primary_secret.as_deref(),
+        Some("refreshed-access-NEW")
+    );
+    assert!(
+        refreshed.expires_at.expect("refreshed expiry")
+            > before_refresh + ChronoDuration::minutes(50),
+        "refreshed lease expiry must be the new provider expiry, not the old expired value"
+    );
 
-    // Verify the new bundle was persisted.
+    // The runtime may refresh, but AuthMachine-owned resolver code owns
+    // publication and durable persistence.
     let updated = store
         .load(&TokenKey::parse("dev", "default_claude").expect("valid slugs"))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        updated.primary_secret.as_deref(),
-        Some("refreshed-access-NEW")
+    assert_eq!(updated.primary_secret.as_deref(), Some("stale-access"));
+    assert_eq!(updated.refresh_token.as_deref(), Some("valid-refresh"));
+    assert_eq!(updated.expires_at, persisted.expires_at);
+    assert!(!meerkat_core::tokens_lifecycle_published(&updated));
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_runtime_force_refresh_hits_endpoint_for_fresh_tokens() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let endpoint_calls = Arc::clone(&calls);
+    let app = Router::new().route(
+        "/v1/oauth/token",
+        post(move |Form(_form): Form<serde_json::Value>| {
+            let endpoint_calls = Arc::clone(&endpoint_calls);
+            async move {
+                endpoint_calls.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "access_token": "forced-claude-access",
+                    "refresh_token": "forced-claude-refresh",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "scope": "user:profile user:inference",
+                }))
+            }
+        }),
     );
-    assert_eq!(
-        updated.refresh_token.as_deref(),
-        Some("rotated-refresh"),
-        "refresh_token must rotate when the server returns one"
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let key = TokenKey::parse("dev", "default_claude").expect("valid slugs");
+    let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &key,
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ClaudeAiOauth,
+                primary_secret: Some("fresh-claude-access".into()),
+                refresh_token: Some("refresh-claude".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let endpoints = OAuthEndpoints {
+        client_id: oauth::CLAUDE_CLIENT_ID.into(),
+        authorize_url: oauth::CLAUDE_AI_AUTHORIZE_URL.into(),
+        token_url: format!("http://{addr}/v1/oauth/token"),
+        device_code_url: None,
+        redirect_uri: oauth::MANUAL_REDIRECT_URL.into(),
+        scopes: oauth::CLAUDE_AI_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        extra_headers: vec![(
+            oauth::OAUTH_BETA_HEADER_NAME.into(),
+            oauth::OAUTH_BETA_HEADER_VALUE.into(),
+        )],
+    };
+    let runtime = oauth::AnthropicOAuthRuntime::new(
+        Arc::clone(&store),
+        Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
+        endpoints,
+        key.clone(),
     );
-    assert!(updated.expires_at.is_some());
+    let commit_store = Arc::clone(&store);
+    let commit_key = key.clone();
+    let refreshed = runtime
+        .force_refresh_tokens_with_commit(Box::new(move |tokens| {
+            Box::pin(async move {
+                commit_store.save(&commit_key, &tokens).await.map_err(|e| {
+                    meerkat_auth_core::auth_store::RefreshError::Refresh(e.to_string())
+                })?;
+                Ok(tokens)
+            })
+        }))
+        .await
+        .expect(
+            "manual force refresh must exchange with provider even when cached tokens are fresh",
+        );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        refreshed.primary_secret.as_deref(),
+        Some("forced-claude-access")
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("forced-claude-access")
+    );
 }
 
 // --- oauth_to_api_key path → persisted api_key ------------------------
@@ -239,13 +586,15 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &persisted,
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
 
     let realm = realm_with_oauth_binding("oauth_to_api_key");
-    let env = ResolverEnvironment::testing().with_token_store(store.clone());
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -257,6 +606,52 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     assert_eq!(
         connection.resolved_secret(),
         Some("sk-ant-api03-xyz".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ClaudeAiOauth,
+                primary_secret: Some("claude-ai-access".into()),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("oauth_to_api_key");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("credential mode ClaudeAiOauth"),
+        "got {err}"
     );
 }
 

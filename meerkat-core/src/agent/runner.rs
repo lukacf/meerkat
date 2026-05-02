@@ -386,6 +386,10 @@ where
         }
         if let Some(target) = target {
             let target_key = crate::handles::LeaseKey::from_connection_ref(target);
+            let target_snapshot = handle.snapshot(&target_key);
+            if target_snapshot.credential_present && target_snapshot.phase.is_some() {
+                return Ok(());
+            }
             handle.acquire_lease(&target_key, u64::MAX).map_err(|err| {
                 AgentError::ConfigError(format!(
                     "failed to rotate auth lease to connection_ref {target_key}: {err}"

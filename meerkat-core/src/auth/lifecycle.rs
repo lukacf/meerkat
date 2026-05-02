@@ -8,12 +8,59 @@
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock, Weak},
+};
+
 use super::status::AuthStatusPhase;
-use super::token_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
+use super::token_store::{
+    PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
+};
 use crate::connection::ConnectionRef;
 use crate::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+type LoginLifecycleLockMap = parking_lot::Mutex<HashMap<LeaseKey, Weak<tokio::sync::Mutex<()>>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static LOGIN_LIFECYCLE_LOCKS: OnceLock<LoginLifecycleLockMap> = OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn login_lifecycle_locks() -> &'static LoginLifecycleLockMap {
+    LOGIN_LIFECYCLE_LOCKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+/// Process-local guard that serializes credential commit, terminal OAuth
+/// consume, and compensating rollback for one auth binding.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct AuthLoginLifecycleGuard {
+    _lease_key: LeaseKey,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn acquire_auth_login_lifecycle_guard(lease_key: &LeaseKey) -> AuthLoginLifecycleGuard {
+    let lock = {
+        let mut locks = login_lifecycle_locks().lock();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(lease_key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(lease_key.clone(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    AuthLoginLifecycleGuard {
+        _lease_key: lease_key.clone(),
+        _guard: lock.lock_owned().await,
+    }
+}
 
 pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
     tokens
@@ -22,14 +69,171 @@ pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+const TOKEN_LIFECYCLE_METADATA_KEY: &str = "meerkat_auth_lifecycle";
+const TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY: &str = "meerkat_previous_metadata";
+
+pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -> bool {
+    matches!(
+        mode,
+        PersistedAuthMode::ChatgptOauth
+            | PersistedAuthMode::ExternalTokens
+            | PersistedAuthMode::ClaudeAiOauth
+            | PersistedAuthMode::OauthToApiKey
+            | PersistedAuthMode::GoogleOauth
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenLifecyclePublication {
+    pub generation: Option<u64>,
+    pub expires_at: u64,
+    pub credential_published_at_millis: Option<u64>,
+}
+
+fn mark_tokens_lifecycle_published_inner(
+    tokens: &PersistedTokens,
+    generation: Option<u64>,
+    credential_published_at_millis: Option<u64>,
+) -> PersistedTokens {
+    if !persisted_auth_mode_uses_oauth_login_lifecycle(tokens.auth_mode) {
+        return tokens.clone();
+    }
+
+    let mut marked = tokens.clone();
+    let mut marker = serde_json::json!({
+        "published": true,
+        "version": 2,
+        "expires_at": persisted_token_expires_at_epoch_secs(tokens),
+    });
+    if let Some(generation) = generation
+        && let Some(marker) = marker.as_object_mut()
+    {
+        marker.insert("generation".to_string(), serde_json::json!(generation));
+    }
+    if let Some(credential_published_at_millis) = credential_published_at_millis
+        && let Some(marker) = marker.as_object_mut()
+    {
+        marker.insert(
+            "credential_published_at_millis".to_string(),
+            serde_json::json!(credential_published_at_millis),
+        );
+    }
+    match &mut marked.metadata {
+        serde_json::Value::Object(map) => {
+            map.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+        }
+        serde_json::Value::Null => {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+        _ => {
+            let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+            metadata.insert(TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY.to_string(), previous);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+    }
+    marked
+}
+
+pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(tokens, None, None)
+}
+
+pub fn mark_tokens_lifecycle_published_for_generation(
+    tokens: &PersistedTokens,
+    generation: u64,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(tokens, Some(generation), None)
+}
+
+pub fn mark_tokens_lifecycle_published_for_transition(
+    tokens: &PersistedTokens,
+    transition: AuthLeaseTransition,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(
+        tokens,
+        Some(transition.generation),
+        transition.credential_published_at_millis,
+    )
+}
+
+pub fn mark_tokens_lifecycle_published_for_snapshot(
+    tokens: &PersistedTokens,
+    snapshot: &AuthLeaseSnapshot,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(
+        tokens,
+        Some(snapshot.generation),
+        snapshot.credential_published_at_millis,
+    )
+}
+
+pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
+    tokens
+        .metadata
+        .get(TOKEN_LIFECYCLE_METADATA_KEY)
+        .and_then(|marker| marker.get("published"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn tokens_lifecycle_published_generation(tokens: &PersistedTokens) -> Option<u64> {
+    tokens_lifecycle_publication(tokens).and_then(|publication| publication.generation)
+}
+
+pub fn tokens_lifecycle_publication(tokens: &PersistedTokens) -> Option<TokenLifecyclePublication> {
+    tokens_lifecycle_publication_inner(tokens, false)
+}
+
+pub fn tokens_lifecycle_publication_with_explicit_expiry(
+    tokens: &PersistedTokens,
+) -> Option<TokenLifecyclePublication> {
+    tokens_lifecycle_publication_inner(tokens, true)
+}
+
+fn tokens_lifecycle_publication_inner(
+    tokens: &PersistedTokens,
+    require_explicit_expiry: bool,
+) -> Option<TokenLifecyclePublication> {
+    if !tokens_lifecycle_published(tokens) {
+        return None;
+    }
+    let marker = tokens.metadata.get(TOKEN_LIFECYCLE_METADATA_KEY)?;
+    let generation = marker.get("generation").and_then(serde_json::Value::as_u64);
+    let explicit_expires_at = marker.get("expires_at").and_then(serde_json::Value::as_u64);
+    let expires_at = match (explicit_expires_at, require_explicit_expiry) {
+        (Some(expires_at), _) => expires_at,
+        (None, true) => return None,
+        (None, false) => persisted_token_expires_at_epoch_secs(tokens),
+    };
+    let credential_published_at_millis = marker
+        .get("credential_published_at_millis")
+        .and_then(serde_json::Value::as_u64);
+    Some(TokenLifecyclePublication {
+        generation,
+        expires_at,
+        credential_published_at_millis,
+    })
+}
+
+pub fn tokens_lifecycle_published_credential_time(tokens: &PersistedTokens) -> Option<u64> {
+    tokens
+        .metadata
+        .get(TOKEN_LIFECYCLE_METADATA_KEY)
+        .and_then(|marker| marker.get("credential_published_at_millis"))
+        .and_then(serde_json::Value::as_u64)
+}
+
 pub fn publish_token_lifecycle_acquired(
     handle: &dyn AuthLeaseHandle,
     connection_ref: &ConnectionRef,
     tokens: &PersistedTokens,
-) -> Result<(), DslTransitionError> {
+) -> Result<AuthLeaseTransition, DslTransitionError> {
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))?;
-    Ok(())
+    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
 }
 
 pub fn publish_token_lifecycle_released(
@@ -111,12 +315,22 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
     Ok(())
 }
 
-fn restore_token_lifecycle_snapshot(
+/// Restore an AuthMachine lease projection from a previously captured
+/// snapshot.
+///
+/// Callers that need to compensate a token write after a later step fails can
+/// use this with the token snapshot captured before the write. If the previous
+/// snapshot had no credential-backed active phase, this helper is a no-op; it
+/// must not recreate credential authority from token bytes alone.
+pub fn restore_token_lifecycle_snapshot(
     handle: &dyn AuthLeaseHandle,
     lease_key: &LeaseKey,
     snapshot: &AuthLeaseSnapshot,
     previous: Option<&PersistedTokens>,
 ) -> Result<(), DslTransitionError> {
+    if !snapshot.credential_present {
+        return Ok(());
+    }
     let Some(phase) = snapshot.phase else {
         return Ok(());
     };
@@ -124,18 +338,13 @@ fn restore_token_lifecycle_snapshot(
         return Ok(());
     }
 
-    let expires_at = snapshot
+    let Some(expires_at) = snapshot
         .expires_at
         .or_else(|| previous.map(persisted_token_expires_at_epoch_secs))
-        .unwrap_or(u64::MAX);
-    handle.acquire_lease(lease_key, expires_at)?;
-    match phase {
-        AuthLeasePhase::Valid => Ok(()),
-        AuthLeasePhase::Expiring => handle.mark_expiring(lease_key),
-        AuthLeasePhase::Refreshing => handle.begin_refresh(lease_key),
-        AuthLeasePhase::ReauthRequired => handle.mark_reauth_required(lease_key),
-        AuthLeasePhase::Released => Ok(()),
-    }
+    else {
+        return Ok(());
+    };
+    handle.restore_auth_lifecycle_snapshot(lease_key, snapshot, Some(expires_at))
 }
 
 pub fn lease_snapshot_expires_at_datetime(snapshot: &AuthLeaseSnapshot) -> Option<DateTime<Utc>> {
@@ -150,6 +359,88 @@ pub struct PublishedAuthStatus<'a> {
     pub phase: AuthStatusPhase,
     pub expires_at: Option<DateTime<Utc>>,
     pub tokens: Option<&'a PersistedTokens>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Error)]
+pub enum AuthStatusRehydrateError {
+    #[error("token store error: {0}")]
+    TokenStore(#[from] TokenStoreError),
+    #[error("AuthMachine lifecycle acquire failed: {0}")]
+    LifecycleAcquire(DslTransitionError),
+    #[error("AuthMachine lifecycle rollback failed after token marker save failure: {0}")]
+    LifecycleRollback(DslTransitionError),
+    #[error("TokenStore lifecycle marker save failed: {0}")]
+    MarkerSave(TokenStoreError),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn oauth_marker_payload_valid_for_status(tokens: &PersistedTokens) -> bool {
+    let Some(publication) = tokens_lifecycle_publication_with_explicit_expiry(tokens) else {
+        return false;
+    };
+    publication.expires_at == persisted_token_expires_at_epoch_secs(tokens)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn auth_status_snapshot_allows_oauth_marker_rehydrate(
+    now: DateTime<Utc>,
+    snapshot: &AuthLeaseSnapshot,
+) -> bool {
+    if AuthStatusPhase::from_lease_snapshot(now, snapshot) != AuthStatusPhase::Unknown
+        || snapshot.credential_present
+    {
+        return false;
+    }
+    if snapshot.generation == 0 && snapshot.phase.is_none() {
+        return true;
+    }
+    snapshot.phase == Some(AuthLeasePhase::ReauthRequired)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_marked_oauth_tokens_for_status(
+    token_store: &dyn TokenStore,
+    auth_lease: &dyn AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+    expected_mode: PersistedAuthMode,
+    now: DateTime<Utc>,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    if !persisted_auth_mode_uses_oauth_login_lifecycle(expected_mode) {
+        return Ok(None);
+    }
+    let key = TokenKey::from_connection_ref(connection_ref);
+    let lease_key = LeaseKey::from_connection_ref(connection_ref);
+    let _guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
+    let Some(mut tokens) = token_store.load(&key).await? else {
+        return Ok(None);
+    };
+    if tokens.auth_mode != expected_mode || !oauth_marker_payload_valid_for_status(&tokens) {
+        return Ok(None);
+    }
+    let previous_snapshot = auth_lease.snapshot(&lease_key);
+    if !auth_status_snapshot_allows_oauth_marker_rehydrate(now, &previous_snapshot) {
+        return Ok(None);
+    }
+    let transition = publish_token_lifecycle_acquired(auth_lease, connection_ref, &tokens)
+        .map_err(AuthStatusRehydrateError::LifecycleAcquire)?;
+    let marked = mark_tokens_lifecycle_published_for_transition(&tokens, transition);
+    if marked != tokens {
+        if let Err(save_error) = token_store.save(&key, &marked).await {
+            if let Err(rollback_error) = auth_lease.restore_auth_lifecycle_snapshot(
+                &lease_key,
+                &previous_snapshot,
+                previous_snapshot
+                    .expires_at
+                    .or_else(|| Some(persisted_token_expires_at_epoch_secs(&tokens))),
+            ) {
+                return Err(AuthStatusRehydrateError::LifecycleRollback(rollback_error));
+            }
+            return Err(AuthStatusRehydrateError::MarkerSave(save_error));
+        }
+        tokens = marked;
+    }
+    Ok(Some(tokens))
 }
 
 pub fn project_published_auth_status<'a>(
@@ -171,6 +462,34 @@ pub fn project_published_auth_status<'a>(
             .or_else(|| stored.and_then(|tokens| tokens.expires_at)),
         tokens: stored,
     }
+}
+
+pub fn oauth_status_projection_snapshot_from_newer_marker(
+    snapshot: &AuthLeaseSnapshot,
+    tokens: &PersistedTokens,
+) -> Option<AuthLeaseSnapshot> {
+    if !snapshot.credential_present {
+        return None;
+    }
+    let publication = tokens_lifecycle_publication_with_explicit_expiry(tokens)?;
+    if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
+        return None;
+    }
+    let snapshot_published_at = snapshot.credential_published_at_millis?;
+    let token_published_at = publication.credential_published_at_millis?;
+    if token_published_at < snapshot_published_at {
+        return None;
+    }
+    if token_published_at == snapshot_published_at {
+        return None;
+    }
+    Some(AuthLeaseSnapshot {
+        phase: Some(AuthLeasePhase::Valid),
+        expires_at: (publication.expires_at != u64::MAX).then_some(publication.expires_at),
+        credential_present: true,
+        generation: publication.generation.unwrap_or(snapshot.generation),
+        credential_published_at_millis: Some(token_published_at),
+    })
 }
 
 #[cfg(test)]
@@ -216,7 +535,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -233,7 +555,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn refresh_failed(
@@ -260,7 +585,9 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: None,
+                credential_present: true,
                 generation: 1,
+                credential_published_at_millis: None,
             }
         }
     }
@@ -284,6 +611,20 @@ mod tests {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn oauth_tokens_with_metadata(metadata: serde_json::Value) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata,
         }
     }
 
@@ -425,6 +766,29 @@ mod tests {
         assert_eq!(handle.acquired()[0].1, u64::MAX);
     }
 
+    #[test]
+    fn lifecycle_marker_is_only_added_to_oauth_login_tokens() {
+        let api_key = PersistedTokens::api_key("sk-test");
+        assert_eq!(mark_tokens_lifecycle_published(&api_key), api_key);
+
+        let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
+        let marked = mark_tokens_lifecycle_published(&oauth);
+        assert!(tokens_lifecycle_published(&marked));
+        assert!(!tokens_lifecycle_published(&oauth));
+    }
+
+    #[test]
+    fn lifecycle_marker_preserves_existing_object_metadata() {
+        let oauth = oauth_tokens_with_metadata(serde_json::json!({
+            "provider": "openai",
+        }));
+
+        let marked = mark_tokens_lifecycle_published(&oauth);
+
+        assert!(tokens_lifecycle_published(&marked));
+        assert_eq!(marked.metadata["provider"], "openai");
+    }
+
     #[tokio::test]
     async fn clear_boundary_restores_lifecycle_when_token_clear_fails() {
         let handle = RecordingAuthLeaseHandle::default();
@@ -507,7 +871,9 @@ mod tests {
         let snapshot = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now + chrono::Duration::hours(1)).timestamp() as u64),
+            credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
 
         let status = project_published_auth_status(now, None, &snapshot);

@@ -36,6 +36,24 @@ pub struct LoopbackHandle {
     receiver: oneshot::Receiver<Result<LoopbackOutcome, OAuthError>>,
 }
 
+pub struct LoopbackBinding {
+    pub redirect_url: String,
+    shutdown: oneshot::Sender<()>,
+    receiver: oneshot::Receiver<Result<LoopbackOutcome, OAuthError>>,
+    expected_state: Arc<Mutex<Option<String>>>,
+}
+
+impl LoopbackBinding {
+    pub fn expect_state(self, expected_state: String) -> LoopbackHandle {
+        *self.expected_state.lock() = Some(expected_state);
+        LoopbackHandle {
+            redirect_url: self.redirect_url,
+            shutdown: self.shutdown,
+            receiver: self.receiver,
+        }
+    }
+}
+
 impl LoopbackHandle {
     /// Await the callback outcome. Fires once on first valid hit; fails
     /// with `StateMismatch` if state doesn't match, `CallbackParse` if the
@@ -60,7 +78,7 @@ type ResultSender = oneshot::Sender<Result<LoopbackOutcome, OAuthError>>;
 
 #[derive(Clone)]
 struct CallbackState {
-    expected_state: String,
+    expected_state: Arc<Mutex<Option<String>>>,
     result_tx: Arc<Mutex<Option<ResultSender>>>,
 }
 
@@ -68,6 +86,12 @@ async fn callback_handler(
     State(state): State<CallbackState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let Some(expected_state) = state.expected_state.lock().clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Html("<h1>Authorization callback is not ready</h1>".to_string()),
+        );
+    };
     let tx = state.result_tx.lock().take();
     match (
         params.get("code"),
@@ -88,7 +112,7 @@ async fn callback_handler(
             )
         }
         (Some(code), Some(actual_state), _, Some(tx)) => {
-            if actual_state == &state.expected_state {
+            if actual_state == &expected_state {
                 let _ = tx.send(Ok(LoopbackOutcome {
                     code: code.clone(),
                     state: actual_state.clone(),
@@ -123,9 +147,21 @@ pub async fn run_loopback_callback(
     expected_state: String,
     path: &str,
 ) -> Result<LoopbackHandle, OAuthError> {
+    Ok(bind_loopback_callback(path)
+        .await?
+        .expect_state(expected_state))
+}
+
+/// Bind a loopback listener before the OAuth authority has minted state.
+///
+/// Some callers need the redirect URL before state can be admitted. They bind
+/// first, use `redirect_url` to ask their authority to start the flow, then
+/// call [`LoopbackBinding::expect_state`] before opening the browser.
+pub async fn bind_loopback_callback(path: &str) -> Result<LoopbackBinding, OAuthError> {
     let (result_tx, result_rx) = oneshot::channel();
+    let expected_state = Arc::new(Mutex::new(None));
     let state = CallbackState {
-        expected_state,
+        expected_state: Arc::clone(&expected_state),
         result_tx: Arc::new(Mutex::new(Some(result_tx))),
     };
 
@@ -149,9 +185,10 @@ pub async fn run_loopback_callback(
             .await;
     });
 
-    Ok(LoopbackHandle {
+    Ok(LoopbackBinding {
         redirect_url,
         shutdown: shutdown_tx,
         receiver: result_rx,
+        expected_state,
     })
 }

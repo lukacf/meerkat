@@ -42,6 +42,10 @@ pub enum RuntimeStoreError {
     Internal(String),
 }
 
+/// Transactional updater for the runtime-owned OAuth login-flow payload snapshot.
+pub type AuthOAuthFlowSnapshotUpdate<'a> =
+    dyn FnMut(Option<&[u8]>) -> Result<Vec<u8>, RuntimeStoreError> + 'a;
+
 /// Describes a serialized session snapshot for boundary and snapshot-only commits.
 #[derive(Debug, Clone)]
 pub struct SessionDelta {
@@ -88,6 +92,48 @@ fn authoritative_receipt(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Stable key for process-local auth/OAuth authority reuse across reopened
+    /// handles for the same durable store.
+    fn auth_authority_key(&self) -> Option<String> {
+        None
+    }
+
+    /// Persist the runtime-owned OAuth login-flow payload snapshot.
+    ///
+    /// The AuthMachine owns admission/consume semantics; this payload snapshot
+    /// carries the PKCE verifier and device-code correlation data needed to
+    /// rehydrate active flows after a persistent runtime process restart.
+    fn persist_auth_oauth_flow_snapshot(
+        &self,
+        snapshot_json: &[u8],
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = snapshot_json;
+        Err(RuntimeStoreError::Unsupported(
+            "persist_auth_oauth_flow_snapshot".into(),
+        ))
+    }
+
+    /// Load the runtime-owned OAuth login-flow payload snapshot, if present.
+    fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "load_auth_oauth_flow_snapshot".into(),
+        ))
+    }
+
+    /// Atomically update the runtime-owned OAuth login-flow payload snapshot.
+    ///
+    /// Stores that support OAuth snapshots must override this with a lock,
+    /// transaction, or compare-and-swap boundary. A load/compute/persist
+    /// fallback is not safe for admission, capacity, or consume claims.
+    fn update_auth_oauth_flow_snapshot(
+        &self,
+        _update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+    ) -> Result<(), RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "update_auth_oauth_flow_snapshot".into(),
+        ))
+    }
+
     /// Atomically persist session delta + authoritative receipt + input state updates.
     ///
     /// The receipt MUST be minted by the durable commit seam itself, not by the

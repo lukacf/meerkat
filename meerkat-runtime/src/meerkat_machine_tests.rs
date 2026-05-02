@@ -66,6 +66,586 @@ fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
     MeerkatMachine::logical_runtime_id(session_id)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn oauth_target() -> meerkat_core::ConnectionRef {
+    meerkat_core::ConnectionRef {
+        realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
+        profile: None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persistent_auth_authority_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct DelegatingCustomAuthLeaseHandle(crate::handles::RuntimeAuthLeaseHandle);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expires_at: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.0.acquire_lease(lease_key, expires_at)
+    }
+
+    fn mark_expiring(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.mark_expiring(lease_key)
+    }
+
+    fn begin_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.begin_refresh(lease_key)
+    }
+
+    fn complete_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.0.complete_refresh(lease_key, new_expires_at, now)
+    }
+
+    fn refresh_failed(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        permanent: bool,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.refresh_failed(lease_key, permanent)
+    }
+
+    fn mark_reauth_required(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.mark_reauth_required(lease_key)
+    }
+
+    fn release_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.release_lease(lease_key)
+    }
+
+    fn release_credential_lifecycle(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.release_credential_lifecycle(lease_key)
+    }
+
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0
+            .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
+    }
+
+    fn snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> meerkat_core::handles::AuthLeaseSnapshot {
+        self.0.snapshot(lease_key)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_flow_authority_is_owned_by_meerkat_machine() {
+    let machine = MeerkatMachine::ephemeral();
+    let redirect_uri = "http://127.0.0.1/callback";
+
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            oauth_target(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+    let flow = machine
+        .oauth_flow_authority()
+        .consume(
+            &state,
+            &oauth_target(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        )
+        .expect("runtime authority consumes OAuth state admitted through another view");
+
+    assert_eq!(flow.pkce_verifier, "verifier");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    let store =
+        Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits OAuth state");
+
+    let recovered = MeerkatMachine::persistent(store, memory_blob_store());
+    let flow = recovered
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect(
+            "persistent runtime authority keeps active OAuth payloads across adapter recreation",
+        );
+
+    assert_eq!(flow.pkce_verifier, "verifier");
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let browser_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let device_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            browser_provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    first
+        .oauth_flow_authority()
+        .admit_device_code(
+            target.clone(),
+            device_provider,
+            "device-code".to_string(),
+            Duration::from_secs(120),
+        )
+        .expect("persistent runtime authority admits device OAuth state");
+    drop(first);
+    drop(store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let recovered = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let browser_flow = recovered
+        .oauth_flow_authority()
+        .consume(&state, &target, browser_provider, redirect_uri)
+        .expect("browser OAuth payload survives process cache restart");
+    assert_eq!(browser_flow.pkce_verifier, "verifier");
+
+    let device_poll = recovered
+        .oauth_flow_authority()
+        .begin_device_code_poll("device-code", &target, device_provider)
+        .expect("device OAuth payload survives process cache restart");
+    let device_flow = device_poll
+        .consume()
+        .expect("recovered device OAuth payload consumes once");
+    assert_eq!(device_flow.device_code, "device-code");
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist;
+
+    machine
+        .oauth_flow_authority()
+        .admit_device_code(
+            target.clone(),
+            provider,
+            "consumed-device-code".to_string(),
+            Duration::from_secs(120),
+        )
+        .expect("persistent runtime authority admits device OAuth state");
+    machine
+        .oauth_flow_authority()
+        .begin_device_code_poll("consumed-device-code", &target, provider)
+        .expect("device OAuth payload can begin polling")
+        .consume()
+        .expect("device OAuth payload consumes once");
+    drop(machine);
+    drop(store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let err = restarted
+        .oauth_flow_authority()
+        .begin_device_code_poll("consumed-device-code", &target, provider)
+        .expect_err("consumed device payload must not rehydrate from durable snapshot");
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
+    let _guard = persistent_auth_authority_test_guard();
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    drop(first);
+    drop(store);
+
+    let reopened_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
+    let flow = reopened
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect("cached durable authority consumes using the reopened store");
+    assert_eq!(flow.pkce_verifier, "verifier");
+    drop(reopened);
+    drop(reopened_store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let final_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens again"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
+    let err = final_machine
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect_err("consumed browser payload must not rehydrate after reopened-store consume");
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let original_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&original_store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    drop(first);
+
+    let reopened_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let reopened = MeerkatMachine::persistent(Arc::clone(&reopened_store), memory_blob_store());
+    drop(original_store);
+
+    reopened
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect("cached durable authority should persist through the reopened store");
+    drop(reopened);
+    drop(reopened_store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let final_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens again"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let final_machine = MeerkatMachine::persistent(final_store, memory_blob_store());
+    let err = final_machine
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect_err("consumed browser payload must not rehydrate after overlapping-store consume");
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let browser_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let device_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist;
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            browser_provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    machine
+        .oauth_flow_authority()
+        .admit_device_code(
+            target.clone(),
+            device_provider,
+            "released-device-code".to_string(),
+            Duration::from_secs(120),
+        )
+        .expect("persistent runtime authority admits device OAuth state");
+    machine
+        .auth_lease_handle()
+        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &target,
+        ))
+        .expect("auth lease release clears OAuth lifecycle authority");
+    drop(machine);
+    drop(store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let browser_err = restarted
+        .oauth_flow_authority()
+        .consume(&state, &target, browser_provider, redirect_uri)
+        .expect_err("released browser payload must not rehydrate from durable snapshot");
+    assert!(matches!(
+        browser_err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+
+    let device_err = restarted
+        .oauth_flow_authority()
+        .begin_device_code_poll("released-device-code", &target, device_provider)
+        .expect_err("released device payload must not rehydrate from durable snapshot");
+    assert!(matches!(
+        device_err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_flow_lifecycle_uses_runtime_authority_seam() {
+    let source = include_str!("meerkat_machine/mod.rs");
+    assert!(
+        !source.contains("OAuthFlowRegistry::default()"),
+        "MeerkatMachine must not install the auth-core registry directly"
+    );
+    assert!(
+        source.contains("RuntimeOAuthFlowHandle::new_with_auth_lease"),
+        "MeerkatMachine should install the runtime OAuth flow authority seam"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_device_expiry_clears_runtime_lifecycle_membership() {
+    use meerkat_auth_core::oauth_flow::OAuthFlowAuthority as _;
+
+    let authority = crate::handles::RuntimeOAuthFlowHandle::new(Duration::from_millis(1));
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let target = oauth_target();
+    let device_code = "provider-device-code";
+
+    authority
+        .admit_device_code(
+            target.clone(),
+            provider,
+            device_code.to_string(),
+            Duration::from_millis(1),
+        )
+        .expect("device flow admitted");
+    std::thread::sleep(Duration::from_millis(10));
+
+    authority
+        .admit_device_code(
+            target,
+            provider,
+            device_code.to_string(),
+            Duration::from_secs(60),
+        )
+        .expect("registry expiry should expire the AuthMachine flow membership");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_lifecycle_shares_auth_machine_release_authority() {
+    let machine = MeerkatMachine::ephemeral();
+    let target = oauth_target();
+    let redirect_uri = "http://127.0.0.1/callback";
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+
+    machine
+        .auth_lease_handle()
+        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &target,
+        ))
+        .expect("auth lease release clears the shared AuthMachine authority");
+
+    assert!(matches!(
+        machine.oauth_flow_authority().consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        ),
+        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::Missing)
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
+    let machine = MeerkatMachine::ephemeral();
+    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())
+        as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    machine.set_auth_lease_handle(external_auth);
+    let target = oauth_target();
+    let redirect_uri = "http://127.0.0.1/callback";
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+
+    machine
+        .auth_lease_handle()
+        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &target,
+        ))
+        .expect("custom auth handle release clears paired OAuth lifecycle");
+
+    assert!(matches!(
+        machine.oauth_flow_authority().consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        ),
+        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::Missing)
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority() {
+    let machine = MeerkatMachine::ephemeral();
+    let custom_auth = Arc::new(DelegatingCustomAuthLeaseHandle(
+        crate::handles::RuntimeAuthLeaseHandle::new(),
+    )) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    machine.set_auth_lease_handle(custom_auth);
+
+    let err = machine
+        .oauth_flow_authority()
+        .start(
+            oauth_target(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            "http://127.0.0.1/callback".to_string(),
+            "verifier".to_string(),
+        )
+        .expect_err("custom auth handles without an OAuth lifecycle seam must not get a hidden runtime flow authority");
+
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. }
+    ));
+}
+
 #[derive(Default)]
 struct RecordingMeerkatSignalSurface {
     log: tokio::sync::Mutex<

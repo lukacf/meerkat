@@ -1014,14 +1014,25 @@ impl std::fmt::Display for LeaseKey {
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
 /// at all, `phase` is `None` and `expires_at` is `None`. `generation`
-/// advances whenever the lease lifecycle accepts a transition, so consumers
-/// can distinguish a stale projection from a freshly reacquired lease even
-/// when the expiry timestamp is unchanged.
+/// advances when credential material is published. Non-publishing lifecycle
+/// transitions, such as marking a lease expiring or a transient refresh failure,
+/// do not advance this credential marker generation. This lets consumers
+/// distinguish a stale projection from a freshly reacquired lease even when the
+/// expiry timestamp is unchanged, without invalidating retryable stored
+/// credentials after state-only transitions. OAuth login-flow membership
+/// transitions also do not advance this credential marker generation.
+/// `credential_present` distinguishes credential lifecycle authority from
+/// OAuth login-flow membership that may keep an AuthMachine instance alive
+/// after credential rollback.
+/// `credential_published_at_millis` advances only when credential material is
+/// acquired/refreshed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
+    pub credential_present: bool,
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
 }
 
 /// Result of an accepted auth lease lifecycle transition.
@@ -1029,9 +1040,21 @@ pub struct AuthLeaseSnapshot {
 /// `generation` is the projection version assigned while the transition is
 /// accepted, so consumers can bind derived material to the exact lease state
 /// that published it without taking a later snapshot.
+/// `credential_published_at_millis` is the durable credential publication
+/// timestamp attached to acquired/refreshed credential material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
+}
+
+impl AuthLeaseTransition {
+    pub fn new(generation: u64, credential_published_at_millis: Option<u64>) -> Self {
+        Self {
+            generation,
+            credential_published_at_millis,
+        }
+    }
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is
@@ -1048,7 +1071,7 @@ pub struct AuthLeaseTransition {
 pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
-pub trait AuthLeaseHandle: Send + Sync {
+pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `AcquireAuthLease { lease_key, expires_at }` — unconditional.
     ///
     /// Moves the binding into `auth_valid_leases` and records its expiry.
@@ -1096,6 +1119,50 @@ pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+
+    /// Clear credential lifecycle authority without treating persisted token
+    /// bytes as a new lease source.
+    ///
+    /// Handles that co-locate short-lived OAuth flow membership with credential
+    /// lifecycle state should preserve those flow memberships when clearing
+    /// only the credential side after a failed login commit.
+    fn release_credential_lifecycle(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        self.release_lease(lease_key)
+    }
+
+    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    ///
+    /// The default implementation can reconstruct credential-present snapshots
+    /// through public lease transitions. Runtime-backed handles override this to
+    /// preserve machine-owned metadata such as credential publication time and to
+    /// restore empty snapshots without leaving an unretryable generation behind.
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        snapshot: &AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), DslTransitionError> {
+        if !snapshot.credential_present {
+            return Ok(());
+        }
+        let Some(phase) = snapshot.phase else {
+            return Ok(());
+        };
+        if phase == AuthLeasePhase::Released {
+            return Ok(());
+        }
+        let Some(expires_at) = expires_at else {
+            return Ok(());
+        };
+        self.acquire_lease(lease_key, expires_at)?;
+        match phase {
+            AuthLeasePhase::Valid => Ok(()),
+            AuthLeasePhase::Expiring => self.mark_expiring(lease_key),
+            AuthLeasePhase::Refreshing => self.begin_refresh(lease_key),
+            AuthLeasePhase::ReauthRequired => self.mark_reauth_required(lease_key),
+            AuthLeasePhase::Released => Ok(()),
+        }
+    }
 
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;

@@ -218,11 +218,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         ),
         machine_manifest_from_schema(
             &dsl_auth_machine(),
-            &[anchor(
-                "auth_lease_handle",
-                "meerkat-runtime/src/handles/auth_lease.rs",
-                "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
-            )],
+            &[
+                anchor(
+                    "auth_lease_handle",
+                    "meerkat-runtime/src/handles/auth_lease.rs",
+                    "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
+                ),
+                anchor(
+                    "oauth_flow_handle",
+                    "meerkat-runtime/src/handles/oauth_flow.rs",
+                    "per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, refreshing, and reauth required phases",
+                ),
+            ],
             &[
                 scenario(
                     "acquire_expire_refresh_complete",
@@ -231,6 +238,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "reauth_release_and_publication",
                     "reauth required from valid/expiring/refreshing, release lease, emit lifecycle event, and wake refresh loop publication",
+                ),
+                scenario(
+                    "oauth_browser_flow_lifecycle",
+                    "OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority",
+                ),
+                scenario(
+                    "oauth_device_flow_lifecycle",
+                    "OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority",
                 ),
             ],
         ),

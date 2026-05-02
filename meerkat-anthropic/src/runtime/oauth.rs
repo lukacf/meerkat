@@ -8,9 +8,10 @@
 //!   `claude-code/src/services/oauth/client.ts:311-321` +
 //!   `claude-code/src/cli/handlers/auth.ts:79-109`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
+use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
@@ -19,8 +20,14 @@ use meerkat_auth_core::auth_oauth::{
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    TokenKey, TokenStore,
+    RefreshFn, TokenKey, TokenStore,
 };
+
+pub type TokenCommitFn = Box<
+    dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
+        + Send
+        + 'static,
+>;
 
 // ---------------------------------------------------------------------
 // Constants (verified against claude-code/src/constants/oauth.ts)
@@ -211,69 +218,148 @@ impl AnthropicOAuthRuntime {
             .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
     }
 
-    async fn save_persisted(&self, tokens: &PersistedTokens) -> Result<(), AnthropicOAuthError> {
-        self.token_store
-            .save(&self.key, tokens)
-            .await
-            .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
+    fn token_is_fresh(tokens: &PersistedTokens) -> bool {
+        tokens
+            .expires_at
+            .is_some_and(|expiry| expiry - Utc::now() > Duration::seconds(60))
+            && tokens.primary_secret.is_some()
     }
 
-    /// Return a valid access token, refreshing if the persisted token is
+    /// Return a valid token bundle, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
     /// tokens are persisted yet.
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
+    async fn get_or_refresh_tokens_with_commit_slot(
+        &self,
+        commit_fn: Option<TokenCommitFn>,
+        force_refresh: bool,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let persisted = self
             .load_persisted()
             .await?
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
 
         // Fresh enough? Use cached.
-        if let Some(expiry) = persisted.expires_at
-            && expiry - Utc::now() > Duration::seconds(60)
-            && let Some(access) = persisted.primary_secret
-        {
-            return Ok(access);
+        if Self::token_is_fresh(&persisted) && commit_fn.is_none() && !force_refresh {
+            return Ok(persisted);
         }
 
-        // Need to refresh. Must have a refresh_token.
-        let refresh_token = persisted
-            .refresh_token
-            .clone()
-            .ok_or(AnthropicOAuthError::MissingRefreshToken)?;
-
+        let commit_slot = Arc::new(Mutex::new(commit_fn));
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let refreshed = self
-            .refresh_coord
-            .with_refresh(
-                self.key.clone(),
-                Box::new(move || {
-                    let http = http.clone();
-                    let endpoints = endpoints.clone();
-                    Box::pin(async move {
-                        let result =
-                            exchange_refresh_token(&http, &endpoints, &refresh_token, None)
-                                .await
-                                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
-                            result,
-                            PersistedAuthMode::ClaudeAiOauth,
-                            Some(refresh_token),
-                        ))
-                    })
-                }),
-            )
-            .await?;
+        let token_store = Arc::clone(&self.token_store);
+        let key = self.key.clone();
+        let commit_slot_for_refresh = Arc::clone(&commit_slot);
+        let refresh_fn: RefreshFn = Box::new(move || {
+            let http = http.clone();
+            let endpoints = endpoints.clone();
+            let token_store = Arc::clone(&token_store);
+            let key = key.clone();
+            let commit_slot = Arc::clone(&commit_slot_for_refresh);
+            Box::pin(async move {
+                let current = token_store
+                    .load(&key)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?
+                    .ok_or_else(|| {
+                        RefreshError::Refresh(
+                            "persisted tokens disappeared before OAuth refresh".into(),
+                        )
+                    })?;
+                if AnthropicOAuthRuntime::token_is_fresh(&current) && !force_refresh {
+                    let commit = commit_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    return match commit {
+                        Some(commit) => commit(current).await,
+                        None => Ok(current),
+                    };
+                }
+                // Need to refresh. Must have a refresh_token.
+                let refresh_token = current
+                    .refresh_token
+                    .clone()
+                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let result = exchange_refresh_token(&http, &endpoints, &refresh_token, None)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                let refreshed = oauth_result_to_persisted(
+                    result,
+                    PersistedAuthMode::ClaudeAiOauth,
+                    Some(refresh_token),
+                )
+                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                let commit = commit_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match commit {
+                    Some(commit) => commit(refreshed).await,
+                    None => Ok(refreshed),
+                }
+            })
+        });
+        let refreshed = if force_refresh {
+            self.refresh_coord
+                .with_forced_refresh(self.key.clone(), refresh_fn)
+                .await?
+        } else {
+            self.refresh_coord
+                .with_refresh(self.key.clone(), refresh_fn)
+                .await?
+        };
 
-        self.save_persisted(&refreshed).await?;
+        let commit = commit_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        match commit {
+            Some(commit) => Ok(commit(refreshed).await?),
+            None => Ok(refreshed),
+        }
+    }
+
+    pub async fn get_or_refresh_tokens_uncommitted(
+        &self,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(None, false)
+            .await
+    }
+
+    pub async fn get_or_refresh_tokens_with_commit(
+        &self,
+        commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), false)
+            .await
+    }
+
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), true)
+            .await
+    }
+
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.get_or_refresh_tokens_uncommitted().await
+    }
+
+    /// Return a valid access token, refreshing if the persisted token is
+    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
+    /// tokens are persisted yet. Refresh persistence belongs to the
+    /// AuthMachine-managed resolver boundary.
+    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
+        let refreshed = self.get_or_refresh_tokens().await?;
         refreshed
             .primary_secret
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)
     }
 
     /// Complete an interactive login: exchange the authorization code for
-    /// tokens and persist them. Caller supplies `code + pkce_verifier`
-    /// from the loopback callback.
+    /// tokens. Caller supplies `code + pkce_verifier` from the loopback
+    /// callback and owns AuthMachine publication plus persistence.
     pub async fn complete_login(
         &self,
         code: &str,
@@ -282,15 +368,14 @@ impl AnthropicOAuthRuntime {
         let result =
             exchange_authorization_code(&self.http, &self.endpoints, code, pkce_verifier, None)
                 .await?;
-        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None);
-        self.save_persisted(&tokens).await?;
+        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None)?;
         Ok(tokens)
     }
 
     /// Console OAuth → API key provisioning. POST to `API_KEY_CREATE_URL`
     /// with `Authorization: Bearer <access_token>`; the response carries
-    /// the new API key. We persist it as an api_key entry.
-    pub async fn provision_api_key(
+    /// the new API key. The caller owns lifecycle admission and persistence.
+    pub async fn provision_api_key_tokens(
         &self,
         access_token: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
@@ -331,8 +416,16 @@ impl AnthropicOAuthRuntime {
             account_id: None,
             metadata: serde_json::Value::Null,
         };
-        self.save_persisted(&tokens).await?;
         Ok(tokens)
+    }
+
+    /// Console OAuth → API key provisioning. The caller owns lifecycle
+    /// admission and persistence.
+    pub async fn provision_api_key(
+        &self,
+        access_token: &str,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.provision_api_key_tokens(access_token).await
     }
 }
 
@@ -340,26 +433,25 @@ fn oauth_result_to_persisted(
     result: OAuthTokenResult,
     mode: PersistedAuthMode,
     fallback_refresh: Option<String>,
-) -> PersistedTokens {
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| Utc::now() + Duration::seconds(s as i64));
+) -> Result<PersistedTokens, OAuthError> {
+    let now = Utc::now();
+    let expires_at = result.expires_at_from(now)?;
     let scopes = result
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
-    PersistedTokens {
+    Ok(PersistedTokens {
         auth_mode: mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token.or(fallback_refresh),
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(Utc::now()),
+        last_refresh: Some(now),
         scopes,
         account_id: None,
         metadata: serde_json::Value::Null,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -392,5 +484,34 @@ impl AnthropicLoginSession {
 impl Default for AnthropicLoginSession {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_result_to_persisted_rejects_expiry_overflow() {
+        let err = oauth_result_to_persisted(
+            OAuthTokenResult {
+                access_token: "access-token".into(),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_in_secs: Some(u64::MAX),
+                scope: None,
+            },
+            PersistedAuthMode::ClaudeAiOauth,
+            None,
+        )
+        .expect_err("oversized expires_in must not be persisted");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
     }
 }

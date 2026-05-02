@@ -62,8 +62,8 @@ use meerkat_contracts::{
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
@@ -88,10 +88,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
@@ -161,6 +161,10 @@ pub struct AppState {
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     /// Optional v9 runtime adapter for runtime/input endpoints.
     pub runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    #[doc(hidden)]
+    pub runtime_pre_admissions: RestRuntimePreAdmissions,
+    #[doc(hidden)]
+    pub runtime_registration_locks: RestRuntimeRegistrationLocks,
     pub schedule_host: Arc<schedule_host::ScheduleHostState>,
     /// Shared in-process mob lifecycle state for protocol mob operations.
     #[cfg(feature = "mob")]
@@ -197,6 +201,7 @@ struct RestRuntimeExecutorContext {
     backend: String,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    runtime_pre_admissions: RestRuntimePreAdmissions,
 }
 
 struct RestSessionRuntimeExecutor {
@@ -241,6 +246,108 @@ impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
                 err => Err(err),
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+}
+
+#[doc(hidden)]
+pub type RestRuntimePreAdmissions =
+    Arc<tokio::sync::Mutex<HashMap<SessionId, RestRuntimePreAdmissionEntry>>>;
+#[doc(hidden)]
+pub type RestRuntimeRegistrationLocks =
+    Arc<StdMutex<HashMap<SessionId, Weak<tokio::sync::Mutex<()>>>>>;
+
+#[doc(hidden)]
+pub struct RestRuntimePreAdmissionEntry {
+    input_id: meerkat_core::lifecycle::InputId,
+    admission: meerkat::RuntimeContextAdmissionGuard,
+}
+
+#[doc(hidden)]
+pub fn default_rest_runtime_pre_admissions() -> RestRuntimePreAdmissions {
+    Arc::new(tokio::sync::Mutex::new(HashMap::new()))
+}
+
+#[doc(hidden)]
+pub fn default_rest_runtime_registration_locks() -> RestRuntimeRegistrationLocks {
+    Arc::new(StdMutex::new(HashMap::new()))
+}
+
+struct RestRuntimePreAdmissionRegistration {
+    pre_admissions: RestRuntimePreAdmissions,
+    session_id: SessionId,
+    input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    release_on_drop: bool,
+}
+
+struct RestRuntimeRegistrationLockLease {
+    locks: RestRuntimeRegistrationLocks,
+    session_id: SessionId,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl RestRuntimePreAdmissionRegistration {
+    fn new(
+        pre_admissions: RestRuntimePreAdmissions,
+        session_id: SessionId,
+        input_id: meerkat_core::lifecycle::InputId,
+    ) -> Self {
+        Self {
+            pre_admissions,
+            session_id,
+            input_ids: vec![input_id],
+            release_on_drop: true,
+        }
+    }
+
+    fn track_input_id(&mut self, input_id: meerkat_core::lifecycle::InputId) {
+        if !self.input_ids.contains(&input_id) {
+            self.input_ids.push(input_id);
+        }
+    }
+
+    fn disarm(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for RestRuntimePreAdmissionRegistration {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        let pre_admissions = Arc::clone(&self.pre_admissions);
+        let session_id = self.session_id.clone();
+        let input_ids = self.input_ids.clone();
+        tokio::spawn(async move {
+            for input_id in input_ids {
+                discard_rest_runtime_pre_admission(&pre_admissions, &session_id, &input_id).await;
+            }
+        });
+    }
+}
+
+impl RestRuntimeRegistrationLockLease {
+    fn mutex(&self) -> &tokio::sync::Mutex<()> {
+        &self.lock
+    }
+}
+
+impl Drop for RestRuntimeRegistrationLockLease {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.lock) != 1 {
+            return;
+        }
+        let this_lock = Arc::downgrade(&self.lock);
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if locks
+            .get(&self.session_id)
+            .is_some_and(|registered| registered.ptr_eq(&this_lock))
+        {
+            locks.remove(&self.session_id);
+        }
     }
 }
 
@@ -329,6 +436,12 @@ impl AppState {
         if let Err(err) = config.apply_env_overrides() {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
+        if let Err(err) = config.validate() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid config: {err}"),
+            )));
+        }
 
         let store_path = persistence
             .store_path()
@@ -380,6 +493,7 @@ impl AppState {
         let skill_runtime = factory.build_skill_runtime(&config).await?;
         let provider_registry = factory.provider_runtime_registry();
 
+        let max_sessions = config.max_sessions();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         // Capture the mob tools slot before the builder is consumed into the session service.
@@ -393,7 +507,7 @@ impl AppState {
             ))),
         );
         let (session_service, runtime_adapter) =
-            meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
+            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         let auth_lease = runtime_adapter.auth_lease_handle();
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
@@ -426,6 +540,8 @@ impl AppState {
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
             runtime_adapter,
+            runtime_pre_admissions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             schedule_host: Arc::new(schedule_host::ScheduleHostState::default()),
             #[cfg(feature = "mob")]
             mob_state: {
@@ -467,6 +583,7 @@ impl AppState {
             backend: self.backend.clone(),
             config_runtime: self.config_runtime.clone(),
             runtime_adapter: self.runtime_adapter.clone(),
+            runtime_pre_admissions: self.runtime_pre_admissions.clone(),
         }
     }
 }
@@ -489,6 +606,268 @@ async fn ensure_rest_session_runtime_executor(state: &AppState, session_id: &Ses
         .runtime_adapter
         .ensure_session_with_executor(session_id.clone(), executor)
         .await;
+}
+
+async fn unregister_rest_runtime_if_new(
+    state: &AppState,
+    session_id: &SessionId,
+    runtime_was_registered: bool,
+) {
+    let lock = rest_runtime_registration_lock(state, session_id);
+    let _guard = lock.mutex().lock().await;
+    unregister_rest_runtime_if_new_idle_locked(state, session_id, runtime_was_registered).await;
+}
+
+async fn discard_rebuilt_rest_session(
+    state: &AppState,
+    session_id: &SessionId,
+    runtime_was_registered: bool,
+) {
+    let _ = state.session_service.discard_live_session(session_id).await;
+    unregister_rest_runtime_if_new(state, session_id, runtime_was_registered).await;
+}
+
+async fn unregister_runtime_adapter_if_new(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+    runtime_was_registered: bool,
+) {
+    if !runtime_was_registered {
+        adapter.unregister_session(session_id).await;
+    }
+}
+
+fn rest_runtime_registration_lock(
+    state: &AppState,
+    session_id: &SessionId,
+) -> RestRuntimeRegistrationLockLease {
+    let lock = {
+        let mut locks = state
+            .runtime_registration_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(session_id.clone(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    RestRuntimeRegistrationLockLease {
+        locks: Arc::clone(&state.runtime_registration_locks),
+        session_id: session_id.clone(),
+        lock,
+    }
+}
+
+async fn unregister_rest_runtime_if_new_idle_locked(
+    state: &AppState,
+    session_id: &SessionId,
+    runtime_was_registered: bool,
+) {
+    if runtime_was_registered {
+        return;
+    }
+    if state
+        .runtime_adapter
+        .list_active_inputs(session_id)
+        .await
+        .is_ok_and(|inputs| !inputs.is_empty())
+    {
+        return;
+    }
+    if state
+        .runtime_pre_admissions
+        .lock()
+        .await
+        .contains_key(session_id)
+    {
+        return;
+    }
+    state.runtime_adapter.unregister_session(session_id).await;
+}
+
+async fn discard_rebuilt_rest_session_locked(
+    state: &AppState,
+    session_id: &SessionId,
+    runtime_was_registered: bool,
+) {
+    let _ = state.session_service.discard_live_session(session_id).await;
+    unregister_rest_runtime_if_new_idle_locked(state, session_id, runtime_was_registered).await;
+}
+
+async fn insert_rest_runtime_pre_admission(
+    pre_admissions: &RestRuntimePreAdmissions,
+    session_id: SessionId,
+    input_id: meerkat_core::lifecycle::InputId,
+    admission: meerkat::RuntimeContextAdmissionGuard,
+) -> Result<(), SessionError> {
+    let mut pre_admissions = pre_admissions.lock().await;
+    if pre_admissions.contains_key(&session_id) {
+        return Err(SessionError::Busy { id: session_id });
+    }
+    pre_admissions.insert(
+        session_id,
+        RestRuntimePreAdmissionEntry {
+            input_id,
+            admission,
+        },
+    );
+    Ok(())
+}
+
+async fn take_rest_runtime_pre_admission(
+    pre_admissions: &RestRuntimePreAdmissions,
+    session_id: &SessionId,
+    input_ids: &[meerkat_core::lifecycle::InputId],
+) -> Option<meerkat::RuntimeContextAdmissionGuard> {
+    if input_ids.is_empty() {
+        return None;
+    }
+    let mut pre_admissions = pre_admissions.lock().await;
+    let matches = pre_admissions
+        .get(session_id)
+        .is_some_and(|entry| input_ids.contains(&entry.input_id));
+    matches
+        .then(|| pre_admissions.remove(session_id))
+        .flatten()
+        .map(|entry| entry.admission)
+}
+
+async fn discard_rest_runtime_pre_admission(
+    pre_admissions: &RestRuntimePreAdmissions,
+    session_id: &SessionId,
+    input_id: &meerkat_core::lifecycle::InputId,
+) {
+    let mut pre_admissions = pre_admissions.lock().await;
+    if pre_admissions
+        .get(session_id)
+        .is_some_and(|entry| &entry.input_id == input_id)
+    {
+        pre_admissions.remove(session_id);
+    }
+}
+
+fn spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+    state: AppState,
+    session_id: SessionId,
+    from_input_id: meerkat_core::lifecycle::InputId,
+    to_input_id: meerkat_core::lifecycle::InputId,
+    handle: meerkat_runtime::completion::CompletionHandle,
+) {
+    tokio::spawn(async move {
+        rekey_rest_runtime_pre_admission(
+            &state.runtime_pre_admissions,
+            &session_id,
+            &from_input_id,
+            to_input_id.clone(),
+        )
+        .await;
+        let outcome = handle.wait().await;
+        cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await;
+        discard_rest_runtime_pre_admission(
+            &state.runtime_pre_admissions,
+            &session_id,
+            &from_input_id,
+        )
+        .await;
+        discard_rest_runtime_pre_admission(
+            &state.runtime_pre_admissions,
+            &session_id,
+            &to_input_id,
+        )
+        .await;
+    });
+}
+
+fn wrap_rest_runtime_completion_cleanup(
+    state: AppState,
+    session_id: SessionId,
+    handle: meerkat_runtime::completion::CompletionHandle,
+) -> meerkat_runtime::completion::CompletionHandle {
+    handle.with_outcome_cleanup(move |outcome| async move {
+        cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await;
+        outcome
+    })
+}
+
+fn completion_outcome_requires_rest_runtime_cleanup(
+    outcome: &meerkat_runtime::completion::CompletionOutcome,
+) -> bool {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
+        | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            reason.contains("runtime boundary commit failed")
+                || reason.contains("runtime loop commit failed")
+        }
+        meerkat_runtime::completion::CompletionOutcome::Completed(_)
+        | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
+    }
+}
+
+fn completion_outcome_is_rest_apply_failure(
+    outcome: &meerkat_runtime::completion::CompletionOutcome,
+) -> bool {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
+        | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            reason.starts_with("apply failed:")
+        }
+        meerkat_runtime::completion::CompletionOutcome::Completed(_)
+        | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
+    }
+}
+
+async fn cleanup_rest_runtime_after_completion_outcome(
+    state: &AppState,
+    session_id: &SessionId,
+    outcome: &meerkat_runtime::completion::CompletionOutcome,
+) {
+    let archived_now = state
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(session_metadata_marks_archived);
+    if archived_now {
+        let _ = state.session_service.discard_live_session(session_id).await;
+        cleanup_archived_session_runtime(state, session_id).await;
+        return;
+    }
+
+    let live_present = state
+        .session_service
+        .has_live_session(session_id)
+        .await
+        .unwrap_or(false);
+    if completion_outcome_requires_rest_runtime_cleanup(outcome)
+        || (!live_present && completion_outcome_is_rest_apply_failure(outcome))
+    {
+        let _ = state.session_service.discard_live_session(session_id).await;
+        cleanup_archived_session_runtime(state, session_id).await;
+    }
+}
+
+async fn rekey_rest_runtime_pre_admission(
+    pre_admissions: &RestRuntimePreAdmissions,
+    session_id: &SessionId,
+    from_input_id: &meerkat_core::lifecycle::InputId,
+    to_input_id: meerkat_core::lifecycle::InputId,
+) {
+    if from_input_id == &to_input_id {
+        return;
+    }
+    let mut pre_admissions = pre_admissions.lock().await;
+    if let Some(entry) = pre_admissions.get_mut(session_id)
+        && &entry.input_id == from_input_id
+    {
+        entry.input_id = to_input_id;
+    }
 }
 
 async fn require_rest_session_exists_for_read(
@@ -623,6 +1002,19 @@ async fn apply_runtime_turn(
         ));
     }
 
+    if context
+        .session_service
+        .load_authoritative_session(session_id)
+        .await?
+        .as_ref()
+        .is_some_and(session_metadata_marks_archived)
+    {
+        context.runtime_adapter.unregister_session(session_id).await;
+        return Err(SessionError::NotFound {
+            id: session_id.clone(),
+        });
+    }
+
     // Context-only staged primitives may land directly as runtime
     // system-context appends, but terminal peer responses carry a typed apply
     // intent that requires a requester reaction turn.
@@ -630,16 +1022,161 @@ async fn apply_runtime_turn(
         let RunPrimitive::StagedInput(staged) = primitive else {
             unreachable!("context-only apply without turn only matches staged primitives");
         };
-        return context
-            .session_service
-            .apply_runtime_context_appends_with_boundary(
-                session_id,
-                run_id,
-                pending_system_context_appends(&staged.context_appends),
-                primitive.apply_boundary(),
-                staged.contributing_input_ids.clone(),
-            )
-            .await;
+        let appends = pending_system_context_appends(&staged.context_appends);
+        let boundary = primitive.apply_boundary();
+        let contributing_input_ids = staged.contributing_input_ids.clone();
+        let mut pre_admission = take_rest_runtime_pre_admission(
+            &context.runtime_pre_admissions,
+            session_id,
+            &contributing_input_ids,
+        )
+        .await;
+        let apply_result = if let Some(admission) = pre_admission.take() {
+            match context
+                .session_service
+                .apply_runtime_context_appends_with_recoverable_reserved_admission(
+                    session_id,
+                    run_id.clone(),
+                    appends.clone(),
+                    boundary,
+                    contributing_input_ids.clone(),
+                    admission,
+                )
+                .await
+            {
+                Ok(output) => Ok(output),
+                Err((error, admission)) => {
+                    pre_admission = admission;
+                    Err(error)
+                }
+            }
+        } else {
+            context
+                .session_service
+                .apply_runtime_context_appends_with_boundary(
+                    session_id,
+                    run_id.clone(),
+                    appends.clone(),
+                    boundary,
+                    contributing_input_ids.clone(),
+                )
+                .await
+        };
+        return match apply_result {
+            Ok(output) => Ok(output),
+            Err(SessionError::NotFound { .. }) => {
+                let session = context
+                    .session_service
+                    .load_authoritative_session(session_id)
+                    .await?
+                    .ok_or(SessionError::NotFound {
+                        id: session_id.clone(),
+                    })?;
+                if session_metadata_marks_archived(&session) {
+                    context.runtime_adapter.unregister_session(session_id).await;
+                    return Err(SessionError::NotFound {
+                        id: session_id.clone(),
+                    });
+                }
+                let current_generation = context
+                    .config_runtime
+                    .get()
+                    .await
+                    .ok()
+                    .map(|s| s.generation);
+                let runtime_was_registered =
+                    context.runtime_adapter.contains_session(session_id).await;
+                let recovery_admission = match pre_admission.take() {
+                    Some(admission) => admission,
+                    None => {
+                        context
+                            .session_service
+                            .reserve_runtime_turn_admission(session_id)
+                            .await?
+                    }
+                };
+                let bindings = match context
+                    .runtime_adapter
+                    .prepare_bindings(session_id.clone())
+                    .await
+                {
+                    Ok(bindings) => bindings,
+                    Err(error) => {
+                        unregister_runtime_adapter_if_new(
+                            &context.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to prepare runtime bindings for session {session_id}: {error}"
+                            )),
+                        ));
+                    }
+                };
+                let recovered = match build_recovered_session(
+                    session,
+                    &SurfaceSessionRecoveryOverrides::default(),
+                    SurfaceSessionRecoveryContext {
+                        llm_client_override: context
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        external_tools: None,
+                        checkpointer: None,
+                        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+                            bindings,
+                        )),
+                        require_runtime_build_mode: true,
+                        realm_id: Some(context.realm.to_string()),
+                        instance_id: context.instance_id.clone(),
+                        backend: Some(context.backend.clone()),
+                        config_generation: current_generation,
+                    },
+                ) {
+                    Ok(recovered) => recovered,
+                    Err(error) => {
+                        unregister_runtime_adapter_if_new(
+                            &context.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(error.to_string()),
+                        ));
+                    }
+                };
+                let create_result = context
+                    .session_service
+                    .create_session_with_reserved_admission(
+                        recovered.into_deferred_create_request(),
+                        recovery_admission,
+                    )
+                    .await;
+                if let Err(error) = create_result {
+                    unregister_runtime_adapter_if_new(
+                        &context.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    return Err(error);
+                }
+                context
+                    .session_service
+                    .apply_runtime_context_appends_with_boundary(
+                        session_id,
+                        run_id,
+                        appends,
+                        boundary,
+                        contributing_input_ids,
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
     }
 
     let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -723,18 +1260,45 @@ async fn apply_runtime_turn(
         _ => RunApplyBoundary::Immediate,
     };
     let contributing_input_ids = primitive.contributing_input_ids().to_vec();
+    let mut pre_admission = take_rest_runtime_pre_admission(
+        &context.runtime_pre_admissions,
+        session_id,
+        &contributing_input_ids,
+    )
+    .await;
+    let apply_result = if let Some(admission) = pre_admission.take() {
+        match context
+            .session_service
+            .apply_runtime_turn_with_recoverable_reserved_admission(
+                session_id,
+                run_id.clone(),
+                svc_req,
+                boundary,
+                contributing_input_ids.clone(),
+                admission,
+            )
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err((error, admission)) => {
+                pre_admission = admission;
+                Err(error)
+            }
+        }
+    } else {
+        context
+            .session_service
+            .apply_runtime_turn(
+                session_id,
+                run_id.clone(),
+                svc_req,
+                boundary,
+                contributing_input_ids.clone(),
+            )
+            .await
+    };
 
-    let result = match context
-        .session_service
-        .apply_runtime_turn(
-            session_id,
-            run_id.clone(),
-            svc_req,
-            boundary,
-            contributing_input_ids.clone(),
-        )
-        .await
-    {
+    let result = match apply_result {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
             let session = context
@@ -744,22 +1308,49 @@ async fn apply_runtime_turn(
                 .ok_or(SessionError::NotFound {
                     id: session_id.clone(),
                 })?;
+            if session_metadata_marks_archived(&session) {
+                context.runtime_adapter.unregister_session(session_id).await;
+                return Err(SessionError::NotFound {
+                    id: session_id.clone(),
+                });
+            }
             let current_generation = context
                 .config_runtime
                 .get()
                 .await
                 .ok()
                 .map(|s| s.generation);
-            let bindings = context
+            let runtime_was_registered = context.runtime_adapter.contains_session(session_id).await;
+            let recovery_admission = match pre_admission.take() {
+                Some(admission) => admission,
+                None => {
+                    context
+                        .session_service
+                        .reserve_runtime_turn_admission(session_id)
+                        .await?
+                }
+            };
+            let bindings = match context
                 .runtime_adapter
                 .prepare_bindings(session_id.clone())
                 .await
-                .map_err(|e| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to prepare runtime bindings for session {session_id}: {e}"
-                    )))
-                })?;
-            let recovered = build_recovered_session(
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unregister_runtime_adapter_if_new(
+                        &context.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to prepare runtime bindings for session {session_id}: {error}"
+                        )),
+                    ));
+                }
+            };
+            let recovered = match build_recovered_session(
                 session,
                 &SurfaceSessionRecoveryOverrides {
                     keep_alive: Some(keep_alive),
@@ -781,16 +1372,36 @@ async fn apply_runtime_turn(
                     backend: Some(context.backend.clone()),
                     config_generation: current_generation,
                 },
-            )
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    error.to_string(),
-                ))
-            })?;
-            context
+            ) {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    unregister_runtime_adapter_if_new(
+                        &context.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(error.to_string()),
+                    ));
+                }
+            };
+            let create_result = context
                 .session_service
-                .create_session(recovered.into_deferred_create_request())
-                .await?;
+                .create_session_with_reserved_admission(
+                    recovered.into_deferred_create_request(),
+                    recovery_admission,
+                )
+                .await;
+            if let Err(error) = create_result {
+                unregister_runtime_adapter_if_new(
+                    &context.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                )
+                .await;
+                return Err(error);
+            }
             let output = context
                 .session_service
                 .apply_runtime_turn_outcome(
@@ -816,6 +1427,13 @@ async fn apply_runtime_turn(
                     contributing_input_ids,
                 )
                 .await?;
+            if matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)) {
+                let _ = context
+                    .session_service
+                    .discard_live_session(session_id)
+                    .await;
+                context.runtime_adapter.unregister_session(session_id).await;
+            }
             Ok(output)
         }
         Err(err) => Err(err),
@@ -2248,6 +2866,29 @@ async fn admit_runtime_input_via_webhook(
     input: meerkat_runtime::Input,
     mode: WebhookAdmissionMode,
 ) -> Result<(StatusCode, Json<Value>), Response> {
+    match state
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+    {
+        Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+            cleanup_archived_session_runtime(state, session_id).await;
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("session not found: {session_id}")})),
+            )
+                .into_response());
+        }
+        Ok(_) => {}
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to load session: {err}")})),
+            )
+                .into_response());
+        }
+    }
+
     let outcome = match mode {
         WebhookAdmissionMode::WithoutWake => {
             state
@@ -2256,7 +2897,154 @@ async fn admit_runtime_input_via_webhook(
                 .await
         }
         WebhookAdmissionMode::Wakeful => {
-            state.runtime_adapter.accept_input(session_id, input).await
+            let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
+            let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+            let runtime_was_registered = state.runtime_adapter.contains_session(session_id).await;
+            let runtime_is_already_running = matches!(
+                state.runtime_adapter.runtime_state(session_id).await,
+                Ok(meerkat_runtime::RuntimeState::Running)
+            );
+            let result = if runtime_is_already_running {
+                state.runtime_adapter.accept_input(session_id, input).await
+            } else {
+                let input_id = input.id().clone();
+                let admission = state
+                    .session_service
+                    .reserve_runtime_turn_admission(session_id)
+                    .await
+                    .map_err(|err| {
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({"error": err.to_string()})),
+                        )
+                            .into_response()
+                    })?;
+                insert_rest_runtime_pre_admission(
+                    &state.runtime_pre_admissions,
+                    session_id.clone(),
+                    input_id.clone(),
+                    admission,
+                )
+                .await
+                .map_err(|err| {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": err.to_string()})),
+                    )
+                        .into_response()
+                })?;
+                let mut pre_admission_registration =
+                    Some(RestRuntimePreAdmissionRegistration::new(
+                        state.runtime_pre_admissions.clone(),
+                        session_id.clone(),
+                        input_id.clone(),
+                    ));
+
+                ensure_rest_session_runtime_executor(state, session_id).await;
+
+                match state
+                    .runtime_adapter
+                    .accept_input_with_completion(session_id, input)
+                    .await
+                {
+                    Ok((outcome, handle)) => {
+                        match (&outcome, handle) {
+                            (
+                                meerkat_runtime::AcceptOutcome::Accepted {
+                                    input_id: accepted_input_id,
+                                    ..
+                                },
+                                Some(handle),
+                            ) => {
+                                if let Some(registration) = pre_admission_registration.as_mut() {
+                                    registration.track_input_id(accepted_input_id.clone());
+                                }
+                                spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+                                    state.clone(),
+                                    session_id.clone(),
+                                    input_id.clone(),
+                                    accepted_input_id.clone(),
+                                    handle,
+                                );
+                                if let Some(registration) = pre_admission_registration.take() {
+                                    registration.disarm();
+                                }
+                            }
+                            (
+                                meerkat_runtime::AcceptOutcome::Accepted {
+                                    input_id: accepted_input_id,
+                                    ..
+                                },
+                                None,
+                            ) => {
+                                if let Some(registration) = pre_admission_registration.as_mut() {
+                                    registration.track_input_id(accepted_input_id.clone());
+                                }
+                                discard_rest_runtime_pre_admission(
+                                    &state.runtime_pre_admissions,
+                                    session_id,
+                                    &input_id,
+                                )
+                                .await;
+                                discard_rest_runtime_pre_admission(
+                                    &state.runtime_pre_admissions,
+                                    session_id,
+                                    accepted_input_id,
+                                )
+                                .await;
+                                if let Some(registration) = pre_admission_registration.take() {
+                                    registration.disarm();
+                                }
+                                unregister_rest_runtime_if_new_idle_locked(
+                                    state,
+                                    session_id,
+                                    runtime_was_registered,
+                                )
+                                .await;
+                            }
+                            _ => {
+                                discard_rest_runtime_pre_admission(
+                                    &state.runtime_pre_admissions,
+                                    session_id,
+                                    &input_id,
+                                )
+                                .await;
+                                if let Some(registration) = pre_admission_registration.take() {
+                                    registration.disarm();
+                                }
+                                unregister_rest_runtime_if_new_idle_locked(
+                                    state,
+                                    session_id,
+                                    runtime_was_registered,
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(outcome)
+                    }
+                    Err(err) => {
+                        discard_rest_runtime_pre_admission(
+                            &state.runtime_pre_admissions,
+                            session_id,
+                            &input_id,
+                        )
+                        .await;
+                        if let Some(registration) = pre_admission_registration.take() {
+                            registration.disarm();
+                        }
+                        unregister_rest_runtime_if_new_idle_locked(
+                            state,
+                            session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                        Err(err)
+                    }
+                }
+            };
+            drop(runtime_registration_guard);
+            drop(runtime_registration_lock);
+            result
         }
     };
 
@@ -2934,6 +3722,18 @@ async fn create_session_inner(
     // and event forwarding before the service call returns).
     let pre_session = Session::new();
     let session_id = pre_session.id().clone();
+    let create_admission = match state
+        .session_service
+        .reserve_create_session_admission()
+        .await
+    {
+        Ok(admission) => admission,
+        Err(err) => {
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
+                err.to_string(),
+            )));
+        }
+    };
     let bindings = match state
         .runtime_adapter
         .prepare_bindings(session_id.clone())
@@ -2987,11 +3787,7 @@ async fn create_session_inner(
             let sid = cleanup_session_id.clone();
             async move {
                 let _ = state.session_service.archive(&sid).await;
-                #[cfg(feature = "mcp")]
-                cleanup_mcp_session(&state, &sid).await;
-                #[cfg(feature = "comms")]
-                state.runtime_adapter.abort_comms_drain(&sid).await;
-                state.runtime_adapter.unregister_session(&sid).await;
+                cleanup_archived_session_runtime(&state, &sid).await;
             }
         }));
 
@@ -3026,6 +3822,7 @@ async fn create_session_inner(
         match resolve_validation_identity(&state.config_runtime, &model, req.provider).await {
             Ok(identity) => identity,
             Err(err) => {
+                cleanup_archived_session_runtime(state, &session_id).await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -3113,6 +3910,9 @@ async fn create_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
+                cleanup_archived_session_runtime(state, &session_id).await;
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
             }
         };
@@ -3120,18 +3920,23 @@ async fn create_session_inner(
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
     {
+        cleanup_archived_session_runtime(state, &session_id).await;
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
         return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
     }
 
     let adapter = state.runtime_adapter.clone();
 
     // Create session with Defer, then route through runtime
-    let create_result = match state.session_service.create_session(svc_req).await {
+    let create_result = match state
+        .session_service
+        .create_session_with_reserved_admission(svc_req, create_admission)
+        .await
+    {
         Ok(result) => result,
         Err(err) => {
-            #[cfg(feature = "mcp")]
-            cleanup_mcp_session(state, &session_id).await;
-            state.runtime_adapter.unregister_session(&session_id).await;
+            cleanup_archived_session_runtime(state, &session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             let api_err = match err {
@@ -3208,6 +4013,8 @@ async fn create_session_inner(
 
     let result = match handle {
         Some(handle) => {
+            let handle =
+                wrap_rest_runtime_completion_cleanup(state.clone(), session_id.clone(), handle);
             completion_outcome_to_api_result(handle.wait().await, &session_id, &state.realm, true)
         }
         None => {
@@ -3557,23 +4364,11 @@ async fn archive_session(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
-    match state.session_service.archive(&session_id).await {
-        Ok(()) => {
-            #[cfg(feature = "mob")]
-            let _ = state
-                .mob_state
-                .destroy_bridge_session_mobs(&session_id.to_string())
-                .await;
-            #[cfg(feature = "mcp")]
-            cleanup_mcp_session(&state, &session_id).await;
-            #[cfg(feature = "comms")]
-            state.runtime_adapter.abort_comms_drain(&session_id).await;
-            state.runtime_adapter.unregister_session(&session_id).await;
-            Ok(Json(json!({
-                "session_id": session_id.to_string(),
-                "archived": true
-            })))
-        }
+    match archive_session_with_runtime_cleanup(state.clone(), session_id.clone()).await {
+        Ok(()) => Ok(Json(json!({
+            "session_id": session_id.to_string(),
+            "archived": true
+        }))),
         Err(SessionError::NotFound { .. }) => {
             Err(ApiError::NotFound(format!("Session not found: {id}")))
         }
@@ -3729,6 +4524,17 @@ async fn continue_session_inner(
             ))));
         }
     };
+    if loaded_session
+        .as_ref()
+        .is_some_and(session_metadata_marks_archived)
+    {
+        state.runtime_adapter.unregister_session(&session_id).await;
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        return RequestTerminal::RespondWithoutPublish(Err(ApiError::NotFound(format!(
+            "Session not found: {session_id}"
+        ))));
+    }
     let stored_metadata = loaded_session
         .as_ref()
         .and_then(meerkat::Session::session_metadata);
@@ -3754,36 +4560,12 @@ async fn continue_session_inner(
         )));
     }
 
-    // Apply staged MCP operations at the turn boundary.
-    // MCP boundary appends text-only system notices; extract a String for it,
-    // then fold any additions back into the final ContentInput.
-    #[allow(unused_mut)]
     let mut turn_prompt = req.prompt.clone();
-    #[cfg(feature = "mcp")]
-    {
-        let mut mcp_text = String::new();
-        match apply_mcp_boundary(state, &session_id, &caller_event_tx, &mut mcp_text).await {
-            Ok(()) => {}
-            Err(e) => {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::RespondWithoutPublish(Err(e));
-            }
-        }
-        // If the MCP boundary appended notices, prepend as a text block
-        // to preserve any multimodal content in the original prompt.
-        if !mcp_text.is_empty() {
-            let mut blocks = turn_prompt.into_blocks();
-            blocks.insert(
-                0,
-                meerkat_core::types::ContentBlock::Text { text: mcp_text },
-            );
-            turn_prompt = ContentInput::Blocks(blocks);
-        }
-    }
 
     let adapter = state.runtime_adapter.clone();
     let final_result = if rest_continue_requires_rebuild(&req) {
+        let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let session = match loaded_session {
             Some(s) => s,
             None => {
@@ -3794,6 +4576,36 @@ async fn continue_session_inner(
                 ))));
             }
         };
+        let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        let rebuild_admission = match state
+            .session_service
+            .reserve_runtime_turn_admission(&session_id)
+            .await
+        {
+            Ok(admission) => admission,
+            Err(err) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
+                    err.to_string(),
+                )));
+            }
+        };
+        #[cfg(feature = "mcp")]
+        if let Err(e) = apply_mcp_boundary_to_turn_prompt(
+            state,
+            &session_id,
+            &caller_event_tx,
+            &mut turn_prompt,
+        )
+        .await
+        {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(e));
+        }
         let bindings = match state
             .runtime_adapter
             .prepare_bindings(session_id.clone())
@@ -3802,6 +4614,12 @@ async fn continue_session_inner(
             Ok(v) => v,
             Err(e) => {
                 let message = format!("failed to prepare runtime bindings: {e}");
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
@@ -3901,6 +4719,12 @@ async fn continue_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -3913,13 +4737,25 @@ async fn continue_session_inner(
         )
         .await
         {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
-        let create_result = match state.session_service.create_session(create_req).await {
+        let create_result = match state
+            .session_service
+            .create_session_with_reserved_admission(create_req, rebuild_admission)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
@@ -3928,19 +4764,24 @@ async fn continue_session_inner(
             }
         };
 
-        // Rebuilt session now exists — install cleanup to archive it if cancel
+        let rebuild_unpublished_cleanup_requested =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Rebuilt session now exists; discard that live rebuild if cancel
         // fires before the turn starts, and interrupt as the running cancel action.
         if let Some(ctx) = req_ctx.as_ref() {
-            let cleanup_svc = state.session_service.clone();
-            let cleanup_adapter = state.runtime_adapter.clone();
+            let cleanup_state = state.clone();
             let cleanup_sid = session_id.clone();
+            let cleanup_runtime_was_registered = runtime_was_registered;
+            let cleanup_requested = Arc::clone(&rebuild_unpublished_cleanup_requested);
             ctx.set_unpublished_cleanup(request_action(move || {
-                let svc = cleanup_svc.clone();
-                let adapter = cleanup_adapter.clone();
+                let state = cleanup_state.clone();
                 let sid = cleanup_sid.clone();
+                let cleanup_requested = Arc::clone(&cleanup_requested);
                 async move {
-                    let _ = svc.archive(&sid).await;
-                    adapter.unregister_session(&sid).await;
+                    cleanup_requested.store(true, std::sync::atomic::Ordering::Release);
+                    discard_rebuilt_rest_session(&state, &sid, cleanup_runtime_was_registered)
+                        .await;
                 }
             }));
 
@@ -3961,6 +4802,8 @@ async fn continue_session_inner(
             // If cancel raced with install, install_cancel_action already ran
             // the newly installed action; bail out with a cancelled terminal.
             if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+                discard_rebuilt_rest_session_locked(state, &session_id, runtime_was_registered)
+                    .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
@@ -3996,6 +4839,7 @@ async fn continue_session_inner(
         if let Some(ctx) = req_ctx.as_ref()
             && ctx.cancel_already_requested()
         {
+            discard_rebuilt_rest_session_locked(state, &session_id, runtime_was_registered).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
@@ -4008,6 +4852,8 @@ async fn continue_session_inner(
         {
             Ok(pair) => pair,
             Err(err) => {
+                discard_rebuilt_rest_session_locked(state, &session_id, runtime_was_registered)
+                    .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
@@ -4015,45 +4861,86 @@ async fn continue_session_inner(
                 )));
             }
         };
+        drop(runtime_registration_guard);
+        drop(runtime_registration_lock);
         match handle {
-            Some(handle) => completion_outcome_to_api_result(
-                handle.wait().await,
-                &session_id,
-                &state.realm,
-                false,
-            ),
-            None => Err(ApiError::DuplicateInput {
-                existing_id: String::new(),
-            }),
+            Some(handle) => {
+                let cleanup_state = state.clone();
+                let cleanup_session_id = session_id.clone();
+                let cleanup_requested = Arc::clone(&rebuild_unpublished_cleanup_requested);
+                let handle = handle.with_outcome_cleanup(move |outcome| async move {
+                    if cleanup_requested.load(std::sync::atomic::Ordering::Acquire) {
+                        discard_rebuilt_rest_session(
+                            &cleanup_state,
+                            &cleanup_session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                    }
+                    cleanup_rest_runtime_after_completion_outcome(
+                        &cleanup_state,
+                        &cleanup_session_id,
+                        &outcome,
+                    )
+                    .await;
+                    outcome
+                });
+                completion_outcome_to_api_result(
+                    handle.wait().await,
+                    &session_id,
+                    &state.realm,
+                    false,
+                )
+            }
+            None => {
+                discard_rebuilt_rest_session(state, &session_id, runtime_was_registered).await;
+                Err(ApiError::DuplicateInput {
+                    existing_id: String::new(),
+                })
+            }
         }
     } else {
-        ensure_rest_session_runtime_executor(state, &session_id).await;
-        #[cfg(feature = "comms")]
+        let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        if state
+            .session_service
+            .load_authoritative_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            .is_some_and(session_metadata_marks_archived)
         {
+            let _ = state
+                .session_service
+                .discard_live_session(&session_id)
+                .await;
+            state.runtime_adapter.unregister_session(&session_id).await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            ))));
+        }
+        #[cfg(feature = "comms")]
+        let comms_rt = {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
                     "keep_alive requires a session created with comms_name".to_string(),
                 )));
             }
-            if keep_alive_override.is_some()
-                && let Err(e) = state
-                    .session_service
-                    .update_session_keep_alive(&session_id, keep_alive)
-                    .await
-            {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
-                    "failed to persist keep_alive: {e}"
-                ))));
-            }
-            adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
-        }
+            comms_rt
+        };
 
         let fallback_identity =
             match resolve_validation_identity(&state.config_runtime, &state.default_model, None)
@@ -4061,6 +4948,12 @@ async fn continue_session_inner(
             {
                 Ok(identity) => identity,
                 Err(err) => {
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        &session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
                     drop(caller_event_tx);
                     drain_event_forwarder(&session_id, forward_task).await;
                     return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -4074,6 +4967,8 @@ async fn continue_session_inner(
             validate_prompt_video_input(&state.config_runtime, &turn_prompt, &current_identity)
                 .await
         {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -4098,6 +4993,12 @@ async fn continue_session_inner(
             // If cancel raced with install, install_cancel_action already ran
             // the newly installed action; bail out with a cancelled terminal.
             if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
@@ -4106,6 +5007,76 @@ async fn continue_session_inner(
             }
         }
 
+        let runtime_is_already_running = matches!(
+            adapter.runtime_state(&session_id).await,
+            Ok(meerkat_runtime::RuntimeState::Running)
+        );
+        let mut pending_pre_admission = None;
+        if !runtime_is_already_running {
+            pending_pre_admission = Some(
+                match state
+                    .session_service
+                    .reserve_runtime_turn_admission(&session_id)
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        unregister_rest_runtime_if_new_idle_locked(
+                            state,
+                            &session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                        drop(caller_event_tx);
+                        drain_event_forwarder(&session_id, forward_task).await;
+                        return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
+                            err.to_string(),
+                        )));
+                    }
+                },
+            );
+        }
+        // Recheck cancellation before any admitted side effects.
+        if let Some(ctx) = req_ctx.as_ref()
+            && ctx.cancel_already_requested()
+        {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
+                details: None,
+            }));
+        }
+        if keep_alive_override.is_some()
+            && let Err(e) = state
+                .session_service
+                .apply_runtime_session_keep_alive(&session_id, keep_alive)
+                .await
+        {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                "failed to persist keep_alive: {e}"
+            ))));
+        }
+        #[cfg(feature = "mcp")]
+        if let Err(e) = apply_mcp_boundary_to_turn_prompt(
+            state,
+            &session_id,
+            &caller_event_tx,
+            &mut turn_prompt,
+        )
+        .await
+        {
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(e));
+        }
         let input =
             meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
@@ -4121,22 +5092,158 @@ async fn continue_session_inner(
                     },
                 ),
             ));
+        let input_id = input.id().clone();
+        let mut pre_admission_registration = None;
+        if let Some(admission) = pending_pre_admission.take() {
+            if let Err(err) = insert_rest_runtime_pre_admission(
+                &state.runtime_pre_admissions,
+                session_id.clone(),
+                input_id.clone(),
+                admission,
+            )
+            .await
+            {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(
+                    err.to_string(),
+                )));
+            }
+            pre_admission_registration = Some(RestRuntimePreAdmissionRegistration::new(
+                state.runtime_pre_admissions.clone(),
+                session_id.clone(),
+                input_id.clone(),
+            ));
+        }
         // Final cancel recheck before submitting input.
         if let Some(ctx) = req_ctx.as_ref()
             && ctx.cancel_already_requested()
         {
+            discard_rest_runtime_pre_admission(
+                &state.runtime_pre_admissions,
+                &session_id,
+                &input_id,
+            )
+            .await;
+            if let Some(registration) = pre_admission_registration.take() {
+                registration.disarm();
+            }
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
                 details: None,
             }));
         }
+        ensure_rest_session_runtime_executor(state, &session_id).await;
+        #[cfg(feature = "comms")]
+        {
+            adapter
+                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+                .await;
+        }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
             .await
         {
-            Ok(pair) => pair,
+            Ok((outcome, handle)) => {
+                match (&outcome, &handle) {
+                    (
+                        meerkat_runtime::AcceptOutcome::Accepted {
+                            input_id: accepted_input_id,
+                            ..
+                        },
+                        Some(_),
+                    ) => {
+                        if let Some(registration) = pre_admission_registration.as_mut() {
+                            registration.track_input_id(accepted_input_id.clone());
+                        }
+                        rekey_rest_runtime_pre_admission(
+                            &state.runtime_pre_admissions,
+                            &session_id,
+                            &input_id,
+                            accepted_input_id.clone(),
+                        )
+                        .await;
+                        if let Some(registration) = pre_admission_registration.take() {
+                            registration.disarm();
+                        }
+                    }
+                    (
+                        meerkat_runtime::AcceptOutcome::Accepted {
+                            input_id: accepted_input_id,
+                            ..
+                        },
+                        None,
+                    ) => {
+                        if let Some(registration) = pre_admission_registration.as_mut() {
+                            registration.track_input_id(accepted_input_id.clone());
+                        }
+                        discard_rest_runtime_pre_admission(
+                            &state.runtime_pre_admissions,
+                            &session_id,
+                            &input_id,
+                        )
+                        .await;
+                        discard_rest_runtime_pre_admission(
+                            &state.runtime_pre_admissions,
+                            &session_id,
+                            accepted_input_id,
+                        )
+                        .await;
+                        if let Some(registration) = pre_admission_registration.take() {
+                            registration.disarm();
+                        }
+                        unregister_rest_runtime_if_new_idle_locked(
+                            state,
+                            &session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                    }
+                    _ => {
+                        discard_rest_runtime_pre_admission(
+                            &state.runtime_pre_admissions,
+                            &session_id,
+                            &input_id,
+                        )
+                        .await;
+                        if let Some(registration) = pre_admission_registration.take() {
+                            registration.disarm();
+                        }
+                        unregister_rest_runtime_if_new_idle_locked(
+                            state,
+                            &session_id,
+                            runtime_was_registered,
+                        )
+                        .await;
+                    }
+                }
+                (outcome, handle)
+            }
             Err(err) => {
+                discard_rest_runtime_pre_admission(
+                    &state.runtime_pre_admissions,
+                    &session_id,
+                    &input_id,
+                )
+                .await;
+                if let Some(registration) = pre_admission_registration.take() {
+                    registration.disarm();
+                }
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
@@ -4145,13 +5252,54 @@ async fn continue_session_inner(
             }
         };
 
+        let completion_cleanup_input_id = match (&outcome, &handle) {
+            (
+                meerkat_runtime::AcceptOutcome::Accepted {
+                    input_id: accepted_input_id,
+                    ..
+                },
+                Some(_),
+            ) => Some(accepted_input_id.clone()),
+            _ => None,
+        };
+        let handle = match (handle, completion_cleanup_input_id) {
+            (Some(handle), Some(accepted_input_id)) => {
+                let pre_admissions = state.runtime_pre_admissions.clone();
+                let cleanup_state = state.clone();
+                let cleanup_session_id = session_id.clone();
+                let cleanup_input_id = input_id.clone();
+                Some(handle.with_outcome_cleanup(move |outcome| async move {
+                    discard_rest_runtime_pre_admission(
+                        &pre_admissions,
+                        &cleanup_session_id,
+                        &cleanup_input_id,
+                    )
+                    .await;
+                    discard_rest_runtime_pre_admission(
+                        &pre_admissions,
+                        &cleanup_session_id,
+                        &accepted_input_id,
+                    )
+                    .await;
+                    cleanup_rest_runtime_after_completion_outcome(
+                        &cleanup_state,
+                        &cleanup_session_id,
+                        &outcome,
+                    )
+                    .await;
+                    outcome
+                }))
+            }
+            (handle, _) => handle,
+        };
+        drop(runtime_registration_guard);
+        drop(runtime_registration_lock);
+
         match handle {
-            Some(handle) => completion_outcome_to_api_result(
-                handle.wait().await,
-                &session_id,
-                &state.realm,
-                false,
-            ),
+            Some(handle) => {
+                let completion = handle.wait().await;
+                completion_outcome_to_api_result(completion, &session_id, &state.realm, false)
+            }
             None => {
                 let existing_id = match &outcome {
                     meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -4173,14 +5321,26 @@ async fn continue_session_inner(
             RequestTerminal::Publish(Ok(Json(run_result_to_response(run_result, &state.realm))))
         }
         Err(err) => {
-            if let ApiError::Internal(message) = &err
-                && message.contains("runtime boundary commit failed")
-            {
+            let runtime_failure_requires_cleanup = matches!(
+                &err,
+                ApiError::Internal(message)
+                    if message.contains("runtime boundary commit failed")
+                        || message.contains("runtime loop commit failed")
+            );
+            let archived_now = state
+                .session_service
+                .load_authoritative_session(&session_id)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                .is_some_and(session_metadata_marks_archived);
+            if runtime_failure_requires_cleanup || archived_now {
                 let _ = state
                     .session_service
                     .discard_live_session(&session_id)
                     .await;
-                state.runtime_adapter.unregister_session(&session_id).await;
+                cleanup_archived_session_runtime(state, &session_id).await;
             }
             // Session exists for continue — this is a Published error.
             RequestTerminal::Publish(Err(err))
@@ -4335,6 +5495,27 @@ async fn apply_mcp_boundary(
     Ok(())
 }
 
+#[cfg(feature = "mcp")]
+async fn apply_mcp_boundary_to_turn_prompt(
+    state: &AppState,
+    session_id: &SessionId,
+    event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
+    turn_prompt: &mut ContentInput,
+) -> Result<(), ApiError> {
+    let mut mcp_text = String::new();
+    apply_mcp_boundary(state, session_id, event_tx, &mut mcp_text).await?;
+    if !mcp_text.is_empty() {
+        let prompt = std::mem::replace(turn_prompt, ContentInput::Text(String::new()));
+        let mut blocks = prompt.into_blocks();
+        blocks.insert(
+            0,
+            meerkat_core::types::ContentBlock::Text { text: mcp_text },
+        );
+        *turn_prompt = ContentInput::Blocks(blocks);
+    }
+    Ok(())
+}
+
 /// Spawn a background task that monitors removing MCP servers.
 #[cfg(feature = "mcp")]
 fn spawn_mcp_drain_task(
@@ -4386,10 +5567,24 @@ async fn resolve_mcp_adapter(
     session_id: &SessionId,
 ) -> Result<Arc<McpRouterAdapter>, ApiError> {
     // Step 1: session must exist.
-    if state.session_service.read(session_id).await.is_err() {
-        return Err(ApiError::NotFound(format!(
-            "Session not found: {session_id}"
-        )));
+    match state
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+    {
+        Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+            cleanup_archived_session_runtime(state, session_id).await;
+            return Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            )));
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            )));
+        }
+        Err(err) => return Err(ApiError::Internal(format!("Failed to load session: {err}"))),
     }
     // Step 2: session must have a live MCP adapter.
     let map = state.mcp_sessions.read().await;
@@ -4577,6 +5772,40 @@ async fn cleanup_mcp_session(state: &AppState, session_id: &SessionId) {
     }
 }
 
+async fn cleanup_archived_session_runtime(state: &AppState, session_id: &SessionId) {
+    #[cfg(feature = "mob")]
+    let _ = state
+        .mob_state
+        .destroy_bridge_session_mobs(&session_id.to_string())
+        .await;
+    #[cfg(feature = "mcp")]
+    cleanup_mcp_session(state, session_id).await;
+    #[cfg(feature = "comms")]
+    state.runtime_adapter.abort_comms_drain(session_id).await;
+    state.runtime_adapter.unregister_session(session_id).await;
+}
+
+async fn archive_session_with_runtime_cleanup(
+    state: AppState,
+    session_id: SessionId,
+) -> Result<(), SessionError> {
+    let service = Arc::clone(&state.session_service);
+    let result_session_id = session_id.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = service.archive(&session_id).await;
+        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            cleanup_archived_session_runtime(&state, &session_id).await;
+        }
+        let _ = result_tx.send(result);
+    });
+    result_rx.await.map_err(|_| {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+            "REST archive task ended before reporting a result for {result_session_id}"
+        )))
+    })?
+}
+
 /// Shut down all MCP adapters (called on server shutdown).
 #[cfg(feature = "mcp")]
 pub async fn shutdown_all_mcp_sessions(state: &AppState) {
@@ -4715,6 +5944,7 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
 
     #[test]
@@ -4897,6 +6127,11 @@ mod tests {
 
     struct MockLlmClient;
 
+    struct BlockingMockLlmClient {
+        calls: Arc<AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
     struct ErrorLlmClient;
 
     #[async_trait]
@@ -4916,6 +6151,38 @@ mod tests {
                     },
                 }),
             ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockingMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let calls = Arc::clone(&self.calls);
+            let release = Arc::clone(&self.release);
+            Box::pin(async_stream::stream! {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                release.notified().await;
+                yield Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                });
+                yield Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                });
+            })
         }
 
         fn provider(&self) -> &'static str {
@@ -5122,6 +6389,1394 @@ mod tests {
             .expect("reopened REST state must preserve persistent OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "rest-persistent-verifier");
+    }
+
+    #[tokio::test]
+    async fn rest_context_only_runtime_apply_recovers_persisted_live_missing_session() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        state.runtime_adapter.unregister_session(&session_id).await;
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "test must remove runtime registration before context-only recovery"
+        );
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-recovered-live-missing".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "rest recovered runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+
+        let output = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect("context-only apply should recover persisted session");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+        assert!(state.runtime_adapter.contains_session(&session_id).await);
+
+        let exported = state
+            .session_service
+            .export_live_session(&session_id)
+            .await
+            .expect("export recovered live session");
+        let system_context = exported
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(
+            system_context.contains("ctx-rest-recovered-live-missing")
+                && system_context.contains("rest recovered runtime context"),
+            "context-only recovery should persist REST runtime context append: {system_context}"
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn rest_create_post_prepare_validation_failure_cleans_unpublished_state_without_request_context()
+     {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let req: CreateSessionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "model": "gpt-5.4",
+            "provider": "anthropic"
+        }))
+        .expect("valid REST create request fixture");
+
+        let outcome = Box::pin(create_session_inner(&state, req, None)).await;
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("provider"),
+                    "expected provider validation failure after prepare: {message}"
+                );
+            }
+            other => panic!("expected bad request validation failure, got {other:?}"),
+        }
+
+        assert!(
+            state.mcp_sessions.read().await.is_empty(),
+            "post-prepare validation failure without request context should clean MCP state"
+        );
+    }
+
+    async fn create_archived_stale_rest_runtime_session(state: &AppState) -> SessionId {
+        let pre_session = Session::new();
+        let session_id = pre_session.id().clone();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should prepare");
+        state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        state
+            .session_service
+            .archive(&session_id)
+            .await
+            .expect("archive should succeed");
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test requires stale runtime registration after service-only archive"
+        );
+        session_id
+    }
+
+    async fn try_create_deferred_rest_runtime_session(
+        state: &AppState,
+    ) -> Result<SessionId, SessionError> {
+        let pre_session = Session::new();
+        let session_id = pre_session.id().clone();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = match state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+        {
+            Ok(created) => created,
+            Err(err) => {
+                state.runtime_adapter.unregister_session(&session_id).await;
+                return Err(err);
+            }
+        };
+        Ok(created.session_id)
+    }
+
+    async fn create_deferred_rest_runtime_session(state: &AppState) -> SessionId {
+        try_create_deferred_rest_runtime_session(state)
+            .await
+            .expect("deferred session create should succeed")
+    }
+
+    async fn load_rest_state_with_capacity(temp: &TempDir, max_sessions: usize) -> AppState {
+        let realm_id = "rest-capacity-test";
+        let realms_root = temp.path().join("realms");
+        let realm_root = realms_root.join(realm_id);
+        tokio::fs::create_dir_all(&realm_root)
+            .await
+            .expect("create realm config dir");
+        tokio::fs::write(
+            realm_root.join("config.toml"),
+            format!("[limits]\nmax_sessions = {max_sessions}\n"),
+        )
+        .await
+        .expect("write rest capacity config");
+
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(realms_root);
+        bootstrap.realm.selection = meerkat_core::RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        };
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
+            .await
+            .expect("load rest app state with capacity")
+    }
+
+    async fn create_completed_rest_runtime_session(state: &AppState) -> SessionId {
+        let pre_session = Session::new();
+        let session_id = pre_session.id().clone();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    initial_turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("completed session create should succeed");
+        ensure_rest_session_runtime_executor(state, &created.session_id).await;
+        created.session_id
+    }
+
+    #[cfg(feature = "comms")]
+    async fn create_completed_rest_runtime_comms_session(state: &AppState) -> SessionId {
+        let pre_session = Session::new();
+        let session_id = pre_session.id().clone();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    comms_name: Some("rest-capacity-target".to_string()),
+                    keep_alive: false,
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    initial_turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("completed comms session create should succeed");
+        ensure_rest_session_runtime_executor(state, &created.session_id).await;
+        created.session_id
+    }
+
+    async fn wait_for_rest_llm_calls(calls: &AtomicUsize, expected: usize, description: &str) {
+        for _ in 0..200 {
+            if calls.load(AtomicOrdering::SeqCst) >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{description}: expected at least {expected} LLM calls");
+    }
+
+    async fn wait_for_rest_runtime_running(state: &AppState, session_id: &SessionId) {
+        for _ in 0..200 {
+            if matches!(
+                state.runtime_adapter.runtime_state(session_id).await,
+                Ok(meerkat_runtime::RuntimeState::Running)
+            ) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let state = state.runtime_adapter.runtime_state(session_id).await;
+        panic!("runtime did not enter Running state: {state:?}");
+    }
+
+    #[tokio::test]
+    async fn rest_archived_runtime_input_webhooks_reject_and_unregister_stale_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let generic_session_id = create_archived_stale_rest_runtime_session(&state).await;
+        let generic_input = make_runtime_external_event_input(
+            "archived_webhook_input",
+            json!({"archived": true}),
+            None,
+        )
+        .expect("external event input");
+        let generic_rejected = admit_runtime_input_via_webhook(
+            &state,
+            &generic_session_id,
+            generic_input,
+            WebhookAdmissionMode::WithoutWake,
+        )
+        .await
+        .expect_err("archived external event webhook should reject");
+        assert_eq!(generic_rejected.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&generic_session_id)
+                .await,
+            "archived external event webhook should unregister stale runtime state"
+        );
+
+        let peer_session_id = create_archived_stale_rest_runtime_session(&state).await;
+        let peer_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            json!({"archived": true}),
+        );
+        let peer_rejected = admit_runtime_input_via_webhook(
+            &state,
+            &peer_session_id,
+            peer_input,
+            WebhookAdmissionMode::Wakeful,
+        )
+        .await
+        .expect_err("archived peer terminal webhook should reject");
+        assert_eq!(peer_rejected.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&peer_session_id)
+                .await,
+            "archived peer terminal webhook should unregister stale runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_peer_terminal_webhook_allows_running_target_when_capacity_full() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        }));
+        let target_session_id = create_deferred_rest_runtime_session(&state).await;
+
+        let state_for_turn = state.clone();
+        let target_for_turn = target_session_id.to_string();
+        let running_turn = tokio::spawn(async move {
+            let body_session_id = target_for_turn.clone();
+            Box::pin(continue_session_inner(
+                &state_for_turn,
+                &target_for_turn,
+                ContinueSessionRequest {
+                    session_id: body_session_id,
+                    prompt: ContentInput::Text("block while peer terminal arrives".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    skill_refs: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        });
+
+        wait_for_rest_llm_calls(&calls, 1, "running target turn should reach LLM").await;
+        wait_for_rest_runtime_running(&state, &target_session_id).await;
+
+        let mut filler_sessions = Vec::new();
+        loop {
+            match try_create_deferred_rest_runtime_session(&state).await {
+                Ok(session_id) => filler_sessions.push(session_id),
+                Err(err) if err.to_string().contains("Max sessions") => break,
+                Err(err) => panic!("unexpected filler create error: {err:?}"),
+            }
+        }
+        assert!(
+            !filler_sessions.is_empty(),
+            "test should fill at least one additional active admission"
+        );
+
+        let peer_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            json!({"capacity": "full", "target": "running"}),
+        );
+        let admitted = admit_runtime_input_via_webhook(
+            &state,
+            &target_session_id,
+            peer_input,
+            WebhookAdmissionMode::Wakeful,
+        )
+        .await
+        .expect("running target peer terminal webhook should bypass new-session capacity precheck");
+        assert_eq!(admitted.0, StatusCode::ACCEPTED);
+
+        release.notify_one();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
+            .await
+            .expect("running turn should complete after releasing mock LLM")
+            .expect("running turn task should not panic");
+        assert!(
+            matches!(completed, RequestTerminal::Publish(Ok(_))),
+            "running turn should publish successfully: {completed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_peer_terminal_webhook_capacity_full_rejects_before_input_accept() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        let mut filler_sessions = Vec::new();
+        loop {
+            match try_create_deferred_rest_runtime_session(&state).await {
+                Ok(session_id) => filler_sessions.push(session_id),
+                Err(err) if err.to_string().contains("Max sessions") => break,
+                Err(err) => panic!("unexpected filler create error: {err:?}"),
+            }
+        }
+        assert!(
+            !filler_sessions.is_empty(),
+            "test should fill at least one additional active admission"
+        );
+
+        let peer_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            json!({"capacity": "full"}),
+        );
+        let rejected = admit_runtime_input_via_webhook(
+            &state,
+            &target_session_id,
+            peer_input,
+            WebhookAdmissionMode::Wakeful,
+        )
+        .await
+        .expect_err("capacity-full peer terminal webhook should reject");
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+
+        let active_inputs = state
+            .runtime_adapter
+            .list_active_inputs(&target_session_id)
+            .await
+            .expect("list active inputs");
+        assert!(
+            active_inputs.is_empty(),
+            "capacity rejection must not enqueue peer terminal input: {active_inputs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_peer_terminal_webhook_waits_for_registration_lock_before_active_admission() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        let registration_lock = rest_runtime_registration_lock(&state, &target_session_id);
+        let registration_guard = registration_lock.mutex().lock().await;
+
+        let webhook_state = state.clone();
+        let webhook_session_id = target_session_id.clone();
+        let peer_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            json!({"capacity": "lock-held"}),
+        );
+        let mut webhook_task = tokio::spawn(async move {
+            admit_runtime_input_via_webhook(
+                &webhook_state,
+                &webhook_session_id,
+                peer_input,
+                WebhookAdmissionMode::Wakeful,
+            )
+            .await
+        });
+
+        tokio::select! {
+            result = &mut webhook_task => {
+                panic!("wakeful webhook completed before registration lock release: {result:?}");
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+
+        let _capacity_filler = try_create_deferred_rest_runtime_session(&state)
+            .await
+            .expect("blocked wakeful webhook must not reserve active capacity before lock");
+
+        drop(registration_guard);
+        drop(registration_lock);
+        let rejected = tokio::time::timeout(std::time::Duration::from_secs(5), webhook_task)
+            .await
+            .expect("wakeful webhook should finish after lock release")
+            .expect("wakeful webhook task should not panic")
+            .expect_err("capacity filler should make webhook reject after lock release");
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn rest_continue_capacity_full_rejects_before_input_accept() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        let _capacity_filler = create_deferred_rest_runtime_session(&state).await;
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &target_session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: target_session_id.to_string(),
+                prompt: ContentInput::Text("must not enter runtime queue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(message))) => {
+                assert!(
+                    message.contains("Max sessions"),
+                    "capacity rejection should mention max sessions: {message}"
+                );
+            }
+            other => panic!("expected capacity conflict before runtime accept, got {other:?}"),
+        }
+
+        let active_inputs = state
+            .runtime_adapter
+            .list_active_inputs(&target_session_id)
+            .await
+            .expect("list active inputs");
+        assert!(
+            active_inputs.is_empty(),
+            "capacity rejection must not enqueue continue input: {active_inputs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_continue_dropped_waiter_cleans_pre_admission_after_completion() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        }));
+
+        let target_session_id = create_deferred_rest_runtime_session(&state).await;
+        let state_for_continue = state.clone();
+        let target_for_continue = target_session_id.to_string();
+        let continue_task = tokio::spawn(async move {
+            Box::pin(continue_session_inner(
+                &state_for_continue,
+                &target_for_continue,
+                ContinueSessionRequest {
+                    session_id: target_for_continue.clone(),
+                    prompt: ContentInput::Text("complete after REST waiter drops".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    skill_refs: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        });
+
+        wait_for_rest_llm_calls(&calls, 1, "continue should reach blocking LLM").await;
+        continue_task.abort();
+        let aborted = continue_task
+            .await
+            .expect_err("aborted REST continue task should report cancellation");
+        assert!(aborted.is_cancelled());
+
+        release.notify_waiters();
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state
+                    .runtime_pre_admissions
+                    .lock()
+                    .await
+                    .get(&target_session_id)
+                    .is_none()
+                {
+                    match try_create_deferred_rest_runtime_session(&state).await {
+                        Ok(session_id) => return session_id,
+                        Err(err) if err.to_string().contains("Max sessions") => {}
+                        Err(err) => panic!("unexpected replacement create error: {err:?}"),
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped REST waiter should not leak pre-admission or active capacity");
+        assert_ne!(
+            replacement, target_session_id,
+            "replacement should be a separate session admitted after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_continue_rebuild_accept_failure_discards_live_capacity() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&target_session_id)
+            .await
+            .expect("discard live target session");
+        state
+            .runtime_adapter
+            .unregister_session(&target_session_id)
+            .await;
+
+        let runtime_store = state
+            .session_service
+            .runtime_store()
+            .expect("REST capacity test state should include runtime store");
+        runtime_store
+            .persist_runtime_state(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&target_session_id),
+                meerkat_runtime::RuntimeState::Stopped,
+            )
+            .await
+            .expect("persist stopped runtime state");
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &target_session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: target_session_id.to_string(),
+                prompt: ContentInput::Text("rebuild against stopped runtime".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: Some(state.max_tokens.saturating_add(1)),
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message))) => {
+                assert!(
+                    message.contains("stopped"),
+                    "expected stopped-runtime accept failure: {message}"
+                );
+            }
+            other => panic!("expected stopped-runtime accept failure, got {other:?}"),
+        }
+
+        assert!(
+            !state
+                .session_service
+                .has_live_session(&target_session_id)
+                .await
+                .expect("check live target session"),
+            "failed rebuild must discard the recreated live session"
+        );
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "failed rebuild must unregister a newly prepared runtime"
+        );
+        let replacement = try_create_deferred_rest_runtime_session(&state)
+            .await
+            .expect("failed rebuild should release active capacity");
+        assert_ne!(
+            replacement, target_session_id,
+            "replacement should be a separate active session admitted after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_continue_rebuild_unpublished_cleanup_retries_after_active_completion() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&target_session_id)
+            .await
+            .expect("discard live target session");
+        state
+            .runtime_adapter
+            .unregister_session(&target_session_id)
+            .await;
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "test requires rebuild to prepare a new runtime registration"
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        }));
+
+        let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+        let ctx = executor.begin_request("rest-rebuild-unpublished-cleanup", noop_request_action());
+        let request_key = ctx.key().to_string();
+        let continue_state = state.clone();
+        let target_for_continue = target_session_id.to_string();
+        let continue_task = tokio::spawn(async move {
+            Box::pin(continue_session_inner(
+                &continue_state,
+                &target_for_continue,
+                ContinueSessionRequest {
+                    session_id: target_for_continue.clone(),
+                    prompt: ContentInput::Text("complete after rebuild cleanup".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    max_tokens: Some(512),
+                    hooks_override: None,
+                    skill_refs: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                Some(ctx),
+            ))
+            .await
+        });
+
+        wait_for_rest_llm_calls(&calls, 1, "rebuild continue should reach blocking LLM").await;
+        assert!(
+            state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "accepted rebuild input should have a live runtime registration"
+        );
+
+        assert!(matches!(
+            executor.finish_unpublished(&request_key).await,
+            meerkat::surface::CompleteOutcome::Completed
+        ));
+        assert!(
+            state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "first cleanup pass should preserve the runtime while input is active"
+        );
+
+        let mut continue_task = continue_task;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                release.notify_waiters();
+                tokio::select! {
+                    result = &mut continue_task => break result,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("rebuild continue should finish after releasing mock LLM")
+        .expect("rebuild continue task should not panic");
+
+        for _ in 0..200 {
+            let runtime_registered = state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await;
+            let live_session = state
+                .session_service
+                .has_live_session(&target_session_id)
+                .await
+                .expect("check live target session");
+            if !runtime_registered && !live_session {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "completion-owned cleanup should retry unregister after active input drains"
+        );
+        assert!(
+            !state
+                .session_service
+                .has_live_session(&target_session_id)
+                .await
+                .expect("check live target session"),
+            "completion-owned cleanup should leave the rebuilt live session discarded"
+        );
+        let replacement = try_create_deferred_rest_runtime_session(&state)
+            .await
+            .expect("rebuild cleanup after completion should release active capacity");
+        assert_ne!(
+            replacement, target_session_id,
+            "replacement should be admitted after completion-owned cleanup"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn rest_continue_capacity_full_rejects_before_keep_alive_persist() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_comms_session(&state).await;
+        let before = state
+            .session_service
+            .load_authoritative_session(&target_session_id)
+            .await
+            .expect("load target session")
+            .expect("target session should exist");
+        let before_metadata = before.session_metadata().expect("metadata should exist");
+        assert!(
+            !before_metadata.keep_alive,
+            "test requires a target whose keep_alive starts disabled"
+        );
+        assert!(
+            before_metadata.comms_name.is_some(),
+            "test requires a comms-enabled target so keep_alive true is valid"
+        );
+
+        let _capacity_filler = create_deferred_rest_runtime_session(&state).await;
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &target_session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: target_session_id.to_string(),
+                prompt: ContentInput::Text("must not persist keep_alive".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: Some(true),
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(message))) => {
+                assert!(
+                    message.contains("Max sessions"),
+                    "capacity rejection should mention max sessions: {message}"
+                );
+            }
+            other => panic!("expected capacity conflict before keep_alive persist, got {other:?}"),
+        }
+
+        let after = state
+            .session_service
+            .load_authoritative_session(&target_session_id)
+            .await
+            .expect("load target session after rejection")
+            .expect("target session should still exist");
+        let after_metadata = after.session_metadata().expect("metadata should exist");
+        assert!(
+            !after_metadata.keep_alive,
+            "capacity-rejected continue must not persist keep_alive"
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn rest_continue_capacity_full_rejects_before_mcp_boundary_apply() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+        let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
+        state.mcp_sessions.write().await.insert(
+            target_session_id.clone(),
+            SessionMcpState {
+                adapter,
+                turn_counter: 0,
+                lifecycle_tx,
+                lifecycle_rx,
+                drain_task_running: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let _capacity_filler = create_deferred_rest_runtime_session(&state).await;
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &target_session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: target_session_id.to_string(),
+                prompt: ContentInput::Text("must not apply MCP boundary".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::Conflict(message))) => {
+                assert!(
+                    message.contains("Max sessions"),
+                    "capacity rejection should mention max sessions: {message}"
+                );
+            }
+            other => panic!("expected capacity conflict before MCP boundary, got {other:?}"),
+        }
+
+        let mcp_sessions = state.mcp_sessions.read().await;
+        let mcp_state = mcp_sessions
+            .get(&target_session_id)
+            .expect("target MCP state should remain registered");
+        assert_eq!(
+            mcp_state.turn_counter, 0,
+            "capacity-rejected continue must not apply the MCP boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_peer_terminal_webhook_recovers_persisted_live_missing_session() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let target_session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&target_session_id)
+            .await
+            .expect("discard live target session");
+        state
+            .runtime_adapter
+            .unregister_session(&target_session_id)
+            .await;
+        assert!(
+            !state
+                .session_service
+                .has_live_session(&target_session_id)
+                .await
+                .expect("check live session"),
+            "test requires a persisted-only target session"
+        );
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&target_session_id)
+                .await,
+            "test requires no runtime registration so webhook admission must recreate it"
+        );
+
+        let peer_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            json!({"target": "persisted-live-missing"}),
+        );
+        let admitted = admit_runtime_input_via_webhook(
+            &state,
+            &target_session_id,
+            peer_input,
+            WebhookAdmissionMode::Wakeful,
+        )
+        .await
+        .expect("persisted-only peer terminal webhook should reserve and accept");
+        assert_eq!(admitted.0, StatusCode::ACCEPTED);
+
+        for _ in 0..200 {
+            let pre_admission_cleared = state
+                .runtime_pre_admissions
+                .lock()
+                .await
+                .get(&target_session_id)
+                .is_none();
+            let active_inputs = state
+                .runtime_adapter
+                .list_active_inputs(&target_session_id)
+                .await
+                .unwrap_or_default();
+            if pre_admission_cleared && active_inputs.is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        panic!("persisted-only webhook input did not finish and clear pre-admission");
+    }
+
+    #[tokio::test]
+    async fn rest_runtime_recovery_no_pending_releases_capacity() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard completed live session before recovery");
+        state.runtime_adapter.unregister_session(&session_id).await;
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![input_id],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+
+        let output = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect("live-missing resume-pending recovery should return no-op output");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "expected no-pending terminal from recovered completed session: {output:?}"
+        );
+        assert!(
+            !state
+                .session_service
+                .has_live_session(&session_id)
+                .await
+                .expect("check recovered live session"),
+            "no-op recovery should discard the rematerialized live session"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "no-op recovery should unregister the rematerialized runtime"
+        );
+
+        try_create_deferred_rest_runtime_session(&state)
+            .await
+            .expect("no-op recovery must release active capacity");
+    }
+
+    #[tokio::test]
+    async fn rest_runtime_apply_archived_session_unregisters_stale_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_archived_stale_rest_runtime_session(&state).await;
+
+        let primitive = RunPrimitive::ImmediateAppend(
+            meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                content: CoreRenderable::Text {
+                    text: "after archive".to_string(),
+                },
+            },
+        );
+        let rejected = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text("after archive".to_string()),
+        )
+        .await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "archived REST runtime apply should reject as not found: {rejected:?}"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "archived REST runtime apply should unregister stale runtime state"
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn rest_mcp_resolver_archived_session_cleans_stale_runtime_and_adapter() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_archived_stale_rest_runtime_session(&state).await;
+        let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+        let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
+        state.mcp_sessions.write().await.insert(
+            session_id.clone(),
+            SessionMcpState {
+                adapter,
+                turn_counter: 0,
+                lifecycle_tx,
+                lifecycle_rx,
+                drain_task_running: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        let rejected = resolve_mcp_adapter(&state, &session_id).await;
+
+        assert!(
+            matches!(rejected, Err(ApiError::NotFound(_))),
+            "archived REST MCP resolver should reject as not found"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "archived REST MCP resolver should unregister stale runtime state"
+        );
+        assert!(
+            !state.mcp_sessions.read().await.contains_key(&session_id),
+            "archived REST MCP resolver should remove stale live MCP adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_runtime_recovery_rejects_archived_session_before_binding() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        state
+            .session_service
+            .archive(&session_id)
+            .await
+            .expect("archive should succeed");
+
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+
+        let rejected = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text("archived".to_string()),
+        )
+        .await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "archived runtime recovery should reject before materialization: {rejected:?}"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "archived runtime recovery must not leave a runtime registration"
+        );
     }
 
     #[tokio::test]
@@ -6413,7 +9068,7 @@ mod tests {
             .uri(format!("/sessions/{session_id}/history"))
             .body(Body::empty())
             .unwrap();
-        let archived_response = app.oneshot(archived_request).await.unwrap();
+        let archived_response = app.clone().oneshot(archived_request).await.unwrap();
         let archived_status = archived_response.status();
         let archived_body = archived_response
             .into_body()
@@ -6430,6 +9085,37 @@ mod tests {
         assert!(
             archived_payload["messages"].as_array().unwrap().len() >= 4,
             "archived history should return the full transcript"
+        );
+
+        ensure_rest_session_runtime_executor(&state, &created.session_id).await;
+        assert!(
+            state
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "test should start with a stale runtime registration"
+        );
+
+        let continue_request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{session_id}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": session_id,
+                    "prompt": "should not resume archived session"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let continue_response = app.oneshot(continue_request).await.unwrap();
+        assert_eq!(continue_response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "archived REST continue must not register runtime state"
         );
     }
 
@@ -6685,6 +9371,567 @@ mod tests {
             "failed request must not persist keep_alive"
         );
         assert!(metadata.comms_name.is_none());
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn test_continue_session_keep_alive_live_missing_failure_unregisters_new_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    comms_name: Some("stale-rest-agent".to_string()),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred comms session create should succeed");
+        let session_id = created.session_id;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        state.runtime_adapter.unregister_session(&session_id).await;
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "test starts with no live runtime registration"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: Some(true),
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("session created with comms_name"),
+                    "expected live-missing keep_alive rejection: {message}"
+                );
+            }
+            other => panic!("expected live-missing keep_alive rejection, got {other:?}"),
+        }
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "failed keep_alive continue must not leave the recovered runtime registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_validation_failure_unregisters_new_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        state.runtime_adapter.unregister_session(&session_id).await;
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "test starts with no runtime registration"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: inline_video_prompt(),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("inline video"),
+                    "expected inline video validation failure: {message}"
+                );
+            }
+            other => panic!("expected bad request validation failure, got {other:?}"),
+        }
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "failed non-rebuild validation must not leave a new runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_validation_failure_preserves_existing_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        ensure_rest_session_runtime_executor(&state, &session_id).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test requires a pre-existing runtime registration"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: inline_video_prompt(),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("inline video"),
+                    "expected inline video validation failure: {message}"
+                );
+            }
+            other => panic!("expected bad request validation failure, got {other:?}"),
+        }
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "failed non-rebuild validation must preserve an existing runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_rebuild_validation_failure_preserves_existing_runtime() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        ensure_rest_session_runtime_executor(&state, &session_id).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test requires a pre-existing runtime registration"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: Some(Cow::Borrowed("gpt-5.4")),
+                provider: Some(Provider::Anthropic),
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("provider"),
+                    "expected provider validation failure after prepare: {message}"
+                );
+            }
+            other => panic!("expected bad request validation failure, got {other:?}"),
+        }
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "failed rebuild validation must preserve an existing runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_session_rebuild_waits_for_runtime_registration_lock_before_prepare() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        state.runtime_adapter.unregister_session(&session_id).await;
+
+        let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+        let registration_guard = registration_lock.mutex().lock().await;
+        let continue_state = state.clone();
+        let continue_session_id = session_id.clone();
+        let mut continue_task = tokio::spawn(async move {
+            Box::pin(continue_session_inner(
+                &continue_state,
+                &continue_session_id.to_string(),
+                ContinueSessionRequest {
+                    session_id: continue_session_id.to_string(),
+                    prompt: ContentInput::Text("Continue".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: Some(Cow::Borrowed("gpt-5.4")),
+                    provider: Some(Provider::Anthropic),
+                    max_tokens: None,
+                    hooks_override: None,
+                    skill_refs: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        });
+
+        tokio::select! {
+            result = &mut continue_task => {
+                panic!("rebuild continue completed before taking the runtime registration lock: {result:?}");
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "rebuild continue must not prepare runtime bindings while registration lock is held"
+        );
+
+        drop(registration_guard);
+        drop(registration_lock);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), continue_task)
+            .await
+            .expect("rebuild continue should finish after lock release")
+            .expect("rebuild continue task should not panic");
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                assert!(
+                    message.contains("provider"),
+                    "expected provider validation failure after lock release: {message}"
+                );
+            }
+            other => panic!("expected bad request validation failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_new_runtime_cleanup_preserves_pending_pre_admission() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        state.runtime_adapter.unregister_session(&session_id).await;
+        let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare new runtime binding");
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let admission = state
+            .session_service
+            .reserve_runtime_turn_admission(&session_id)
+            .await
+            .expect("reserve pending runtime admission");
+        insert_rest_runtime_pre_admission(
+            &state.runtime_pre_admissions,
+            session_id.clone(),
+            input_id.clone(),
+            admission,
+        )
+        .await
+        .expect("insert pending pre-admission");
+
+        unregister_rest_runtime_if_new(&state, &session_id, runtime_was_registered).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "cleanup must preserve a new runtime registration with pending active admission"
+        );
+
+        discard_rest_runtime_pre_admission(&state.runtime_pre_admissions, &session_id, &input_id)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rest_runtime_pre_admission_cleanup_unregisters_after_boundary_commit_failure() {
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 1).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test requires a runtime adapter entry before cleanup"
+        );
+        #[cfg(feature = "mcp")]
+        {
+            let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+            let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
+            state.mcp_sessions.write().await.insert(
+                session_id.clone(),
+                SessionMcpState {
+                    adapter,
+                    turn_counter: 0,
+                    lifecycle_tx,
+                    lifecycle_rx,
+                    drain_task_running: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let admission = state
+            .session_service
+            .reserve_runtime_turn_admission(&session_id)
+            .await
+            .expect("reserve runtime admission");
+        insert_rest_runtime_pre_admission(
+            &state.runtime_pre_admissions,
+            session_id.clone(),
+            input_id.clone(),
+            admission,
+        )
+        .await
+        .expect("insert runtime pre-admission");
+
+        let handle = meerkat_runtime::CompletionHandle::already_resolved(
+            meerkat_runtime::CompletionOutcome::Abandoned(
+                "apply failed: runtime boundary commit failed: injected failure".to_string(),
+            ),
+        );
+        spawn_rest_runtime_pre_admission_rekey_and_cleanup(
+            state.clone(),
+            session_id.clone(),
+            input_id.clone(),
+            input_id,
+            handle,
+        );
+
+        for _ in 0..200 {
+            if !state.runtime_adapter.contains_session(&session_id).await
+                && !state
+                    .runtime_pre_admissions
+                    .lock()
+                    .await
+                    .contains_key(&session_id)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "boundary commit failure cleanup must unregister stale runtime state"
+        );
+        #[cfg(feature = "mcp")]
+        assert!(
+            !state.mcp_sessions.read().await.contains_key(&session_id),
+            "boundary commit failure cleanup must clear REST MCP state"
+        );
+        assert!(
+            !state
+                .runtime_pre_admissions
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "completion cleanup must remove runtime pre-admission"
+        );
+        assert!(
+            !state
+                .session_service
+                .has_live_session(&session_id)
+                .await
+                .expect("check live session"),
+            "boundary commit failure cleanup must discard dirty live state"
+        );
+        state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "capacity replacement".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: Some(encode_llm_client_override_for_service(Arc::new(
+                        MockLlmClient,
+                    ))),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("failed runtime input cleanup should release active admission");
     }
 
     #[tokio::test]

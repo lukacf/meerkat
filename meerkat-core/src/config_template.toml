@@ -23,6 +23,10 @@ port = 8080
 [store]
 # database_dir = "/path/to/db"  # session database directory (server surfaces)
 
+[limits]
+# Live/staged session admission capacity. Persisted history does not count.
+max_sessions = 64
+
 [compaction]
 auto_compact_threshold = 100000
 recent_turn_budget = 4

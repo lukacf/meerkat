@@ -371,8 +371,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     }
                     let mut metadata = AuthMetadata::default();
                     if google_email.is_some() || google_user_id.is_some() {
-                        metadata.account_id =
-                            google_user_id.clone().or_else(|| google_email.clone());
+                        metadata.account_id = google_user_id.or_else(|| google_email.clone());
                         metadata.provider_metadata =
                             Some(meerkat_core::ProviderAuthMetadata::Google(
                                 meerkat_core::GoogleAuthMetadata {

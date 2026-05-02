@@ -13,10 +13,12 @@ use meerkat_contracts::{
 };
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{RpcResponseExt, parse_params};
 use crate::protocol::{RpcId, RpcResponse};
+use crate::session_runtime::SessionRuntime;
 
 fn to_wire_realtime_attachment_status(
     status: meerkat_runtime::RealtimeAttachmentStatus,
@@ -216,7 +218,8 @@ pub async fn handle_runtime_status(
 pub async fn handle_runtime_submit(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
+    runtime: &Arc<SessionRuntime>,
+    adapter: &std::sync::Arc<meerkat_runtime::MeerkatMachine>,
 ) -> RpcResponse {
     let params: RuntimeAcceptParams = match parse_params(params) {
         Ok(p) => p,
@@ -239,12 +242,15 @@ pub async fn handle_runtime_submit(
         }
     };
 
-    match adapter.accept_input(&session_id, input).await {
+    match runtime
+        .accept_runtime_input_with_active_admission(adapter, &session_id, input)
+        .await
+    {
         Ok(outcome) => match to_wire_accept_result(outcome) {
             Ok(result) => RpcResponse::success(id, result),
             Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
         },
-        Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }
 

@@ -176,6 +176,17 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
     .await
 }
 
+fn abandon_completion_waiters(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    for input_id in input_ids {
+        registry.resolve_abandoned(input_id, reason.clone());
+    }
+}
+
 fn primitive_admitted_content_shape(primitive: &RunPrimitive) -> TurnContentShape {
     match primitive {
         RunPrimitive::StagedInput(staged) => TurnContentShape::from_staged_presence(
@@ -752,6 +763,14 @@ async fn process_queue(
                 .await
                 {
                     tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
+                    if let Some(completions) = completions.as_ref() {
+                        let mut completions = completions.lock().await;
+                        abandon_completion_waiters(
+                            &mut completions,
+                            &input_ids,
+                            format!("runtime batch preparation failed: {err}"),
+                        );
+                    }
                     return false;
                 }
                 let primitive = match primitive {
@@ -769,6 +788,14 @@ async fn process_queue(
                             CoreApplyFailureCause::primitive_rejected(conflict.to_string()),
                         )
                         .await;
+                        if let Some(completions) = completions.as_ref() {
+                            let mut completions = completions.lock().await;
+                            abandon_completion_waiters(
+                                &mut completions,
+                                &input_ids,
+                                format!("runtime primitive rejected: {conflict}"),
+                            );
+                        }
                         return false;
                     }
                 };
@@ -782,6 +809,14 @@ async fn process_queue(
                         CoreApplyFailureCause::executor_internal(error.to_string()),
                     )
                     .await;
+                    if let Some(completions) = completions.as_ref() {
+                        let mut completions = completions.lock().await;
+                        abandon_completion_waiters(
+                            &mut completions,
+                            &input_ids,
+                            format!("runtime turn-state preparation failed: {error}"),
+                        );
+                    }
                     return false;
                 }
 
@@ -808,13 +843,22 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
-                            return stop_runtime_loop_executor_from_dsl_effect(
+                            let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
                                 executor,
                                 format!("runtime loop commit failed for run {run_id}: {err}"),
                             )
                             .await;
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                abandon_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("runtime loop commit failed: {err}"),
+                                );
+                            }
+                            return should_stop;
                         }
 
                         // Resolve completion waiters unconditionally
@@ -846,24 +890,22 @@ async fn process_queue(
                             // Resolve waiter before breaking so callers don't hang.
                             if let Some(completions) = completions.as_ref() {
                                 let mut completions = completions.lock().await;
-                                for input_id in &input_ids {
-                                    completions.resolve_abandoned(
-                                        input_id,
-                                        format!("runtime failure snapshot failed: {err}"),
-                                    );
-                                }
+                                abandon_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("runtime failure snapshot failed: {err}"),
+                                );
                             }
                             return should_stop;
                         }
                         // Resolve completion waiter so callers don't hang.
                         if let Some(completions) = completions.as_ref() {
                             let mut completions = completions.lock().await;
-                            for input_id in &input_ids {
-                                completions.resolve_abandoned(
-                                    input_id,
-                                    format!("apply failed: {error_msg}"),
-                                );
-                            }
+                            abandon_completion_waiters(
+                                &mut completions,
+                                &input_ids,
+                                format!("apply failed: {error_msg}"),
+                            );
                         }
                         let mut d = driver.lock().await;
                         let should_continue = d.has_queued_input_outside(&input_ids);
@@ -2094,6 +2136,26 @@ mod tests {
                 assert_eq!(result.text, "terminal authority");
             }
             other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn abandon_completion_waiters_surfaces_abandoned() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        abandon_completion_waiters(
+            &mut registry,
+            std::slice::from_ref(&input_id),
+            "runtime loop failed before executor apply",
+        );
+
+        match handle.wait().await {
+            crate::completion::CompletionOutcome::Abandoned(reason) => {
+                assert_eq!(reason, "runtime loop failed before executor apply");
+            }
+            other => panic!("Expected Abandoned, got {other:?}"),
         }
     }
 

@@ -104,9 +104,16 @@ impl RestScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let create_admission = self
+            .runtime
+            .session_service
+            .reserve_create_session_admission()
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         let prepared = meerkat::surface::prepare_surface_session(&self.runtime.runtime_adapter)
             .await
             .map_err(ScheduleDomainError::Internal)?;
+        let session_id = prepared.session_id;
         let pre_session = prepared.session;
         let runtime_bindings = prepared.bindings;
 
@@ -168,12 +175,21 @@ impl RestScheduleContext {
             build: Some(build_config.to_session_build_options()),
             labels: Some(create.labels.clone()),
         };
-        let result = self
+        let result = match self
             .runtime
             .session_service
-            .create_session(create_req)
+            .create_session_with_reserved_admission(create_req, create_admission)
             .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.runtime
+                    .runtime_adapter
+                    .unregister_session(&session_id)
+                    .await;
+                return Err(ScheduleDomainError::Internal(error.to_string()));
+            }
+        };
         Ok(result.session_id)
     }
 }

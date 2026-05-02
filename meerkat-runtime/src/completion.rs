@@ -10,6 +10,7 @@
 //! runtime truth.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::RunResult;
@@ -70,6 +71,41 @@ impl CompletionHandle {
                 "completion channel closed without result".into(),
             ),
         }
+    }
+
+    /// Relay completion through a cleanup future before resolving the returned
+    /// handle. This lets surfaces transfer cleanup ownership immediately after
+    /// accepting runtime work while still returning a completion handle.
+    pub fn with_cleanup<F, Fut>(self, cleanup: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        crate::tokio::spawn(async move {
+            let outcome = self.wait().await;
+            cleanup().await;
+            let _ = tx.send(outcome);
+        });
+        Self { rx }
+    }
+
+    /// Relay completion through a cleanup future that can inspect the outcome.
+    ///
+    /// The cleanup future owns and returns the outcome so callers can run
+    /// outcome-specific teardown without losing the completion result.
+    pub fn with_outcome_cleanup<F, Fut>(self, cleanup: F) -> Self
+    where
+        F: FnOnce(CompletionOutcome) -> Fut + Send + 'static,
+        Fut: Future<Output = CompletionOutcome> + Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        crate::tokio::spawn(async move {
+            let outcome = self.wait().await;
+            let outcome = cleanup(outcome).await;
+            let _ = tx.send(outcome);
+        });
+        Self { rx }
     }
 
     /// Create a handle from a pre-resolved outcome.
@@ -403,6 +439,33 @@ mod tests {
             CompletionOutcome::CompletedWithoutResult => {}
             other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn outcome_cleanup_observes_and_relays_result() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let cleanup_observed = Arc::clone(&observed);
+        let handle = CompletionHandle::already_resolved(CompletionOutcome::Abandoned(
+            "apply failed: test".to_string(),
+        ))
+        .with_outcome_cleanup(move |outcome| async move {
+            if matches!(&outcome, CompletionOutcome::Abandoned(reason) if reason == "apply failed: test")
+            {
+                cleanup_observed.store(true, Ordering::Release);
+            }
+            outcome
+        });
+
+        match handle.wait().await {
+            CompletionOutcome::Abandoned(reason) => {
+                assert_eq!(reason, "apply failed: test");
+            }
+            other => panic!("Expected Abandoned, got {other:?}"),
+        }
+        assert!(observed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

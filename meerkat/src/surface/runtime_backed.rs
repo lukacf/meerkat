@@ -9,6 +9,9 @@ use meerkat_core::lifecycle::run_primitive::{
 };
 use meerkat_core::service::SessionService;
 use meerkat_core::types::HandlingMode;
+use meerkat_core::{
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
+};
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
 
@@ -21,10 +24,38 @@ use crate::{
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
 
+const DEFAULT_RUNTIME_BACKED_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
+
+fn session_metadata_marks_archived(session: &Session) -> bool {
+    session
+        .metadata()
+        .get("session_archived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 #[cfg(feature = "session-store")]
 pub fn build_runtime_backed_service(
-    mut builder: FactoryAgentBuilder,
+    builder: FactoryAgentBuilder,
     max_sessions: usize,
+    persistence: crate::PersistenceBundle,
+) -> (
+    PersistentSessionService<FactoryAgentBuilder>,
+    Arc<MeerkatMachine>,
+) {
+    build_runtime_backed_service_with_capacities(
+        builder,
+        max_sessions,
+        DEFAULT_RUNTIME_BACKED_ARCHIVED_HISTORY_CAPACITY,
+        persistence,
+    )
+}
+
+#[cfg(feature = "session-store")]
+pub fn build_runtime_backed_service_with_capacities(
+    mut builder: FactoryAgentBuilder,
+    active_session_capacity: usize,
+    archived_history_capacity: usize,
     persistence: crate::PersistenceBundle,
 ) -> (
     PersistentSessionService<FactoryAgentBuilder>,
@@ -39,8 +70,46 @@ pub fn build_runtime_backed_service(
         &store,
     ))));
     builder.default_blob_store = Some(blob_store.clone());
-    let mut service =
-        PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
+    let mut service = PersistentSessionService::new_with_capacities(
+        builder,
+        active_session_capacity,
+        archived_history_capacity,
+        store,
+        runtime_store,
+        blob_store,
+    );
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    if let Some((event_store, projector)) = event_projection {
+        service = service.with_event_projection(event_store, projector);
+    }
+    (service, runtime_adapter)
+}
+
+#[cfg(feature = "session-store")]
+pub fn build_runtime_backed_service_with_unbounded_active_capacity(
+    mut builder: FactoryAgentBuilder,
+    archived_history_capacity: usize,
+    persistence: crate::PersistenceBundle,
+) -> (
+    PersistentSessionService<FactoryAgentBuilder>,
+    Arc<MeerkatMachine>,
+) {
+    let runtime_adapter = persistence.runtime_adapter();
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    let event_projection = persistence.event_projection();
+    let (store, runtime_store, blob_store) = persistence.into_parts();
+    builder = builder.with_image_generation_machine(runtime_adapter.clone());
+    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
+        &store,
+    ))));
+    builder.default_blob_store = Some(blob_store.clone());
+    let mut service = PersistentSessionService::new_with_unbounded_active_capacity(
+        builder,
+        archived_history_capacity,
+        store,
+        runtime_store,
+        blob_store,
+    );
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     if let Some((event_store, projector)) = event_projection {
         service = service.with_event_projection(event_store, projector);
@@ -74,10 +143,25 @@ where
     F: FnOnce(SessionId) -> Box<dyn CoreExecutor>,
 {
     let prepared_session_id = session.id().clone();
-    let bindings = adapter
-        .prepare_bindings(prepared_session_id.clone())
-        .await?;
-    install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await?;
+    let reserved_admission = service.reserve_create_session_admission().await?;
+    let runtime_was_registered = adapter.contains_session(&prepared_session_id).await;
+    let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            if !runtime_was_registered {
+                adapter.unregister_session(&prepared_session_id).await;
+            }
+            return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
+        }
+    };
+    if let Err(error) =
+        install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+    }
 
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
@@ -89,10 +173,15 @@ where
     }
     request.build = Some(build);
 
-    let result = match service.create_session(request).await {
+    let result = match service
+        .create_session_with_reserved_admission(request, reserved_admission)
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
-            adapter.unregister_session(&prepared_session_id).await;
+            if !runtime_was_registered {
+                adapter.unregister_session(&prepared_session_id).await;
+            }
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
     };
@@ -100,7 +189,82 @@ where
     if let Err(error) =
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
-        adapter.unregister_session(&prepared_session_id).await;
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(error);
+    }
+
+    adapter
+        .ensure_session_with_executor(
+            result.session_id.clone(),
+            executor_factory(result.session_id.clone()),
+        )
+        .await;
+
+    Ok(result)
+}
+
+pub async fn materialize_session_with_reserved_admission<F>(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    mut request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+    executor_factory: F,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId) -> Box<dyn CoreExecutor>,
+{
+    let prepared_session_id = session.id().clone();
+    let runtime_was_registered = adapter.contains_session(&prepared_session_id).await;
+    let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            if !runtime_was_registered {
+                adapter.unregister_session(&prepared_session_id).await;
+            }
+            return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
+        }
+    };
+    if let Err(error) =
+        install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+    }
+
+    let mut build = request.build.unwrap_or_default();
+    build.resume_session = Some(session);
+    build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+    if request.initial_turn == meerkat_core::service::InitialTurnPolicy::RunImmediately {
+        build.initial_turn_metadata = Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+            build.initial_turn_metadata.take(),
+        ));
+    }
+    request.build = Some(build);
+
+    let result = match service
+        .create_session_with_reserved_admission(request, reserved_admission)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if !runtime_was_registered {
+                adapter.unregister_session(&prepared_session_id).await;
+            }
+            return Err(SurfaceRuntimeMaterializeError::Session(error));
+        }
+    };
+
+    if let Err(error) =
+        ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
         return Err(error);
     }
 
@@ -293,19 +457,89 @@ impl CoreExecutor for PersistentRuntimeExecutor {
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
-            return self
+            let appends = pending_system_context_appends(&staged.context_appends);
+            let boundary = staged.boundary;
+            let contributing_input_ids = staged.contributing_input_ids.clone();
+            match self
                 .service
                 .apply_runtime_context_appends_with_boundary(
                     &self.session_id,
-                    run_id,
-                    pending_system_context_appends(&staged.context_appends),
-                    staged.boundary,
-                    staged.contributing_input_ids.clone(),
+                    run_id.clone(),
+                    appends.clone(),
+                    boundary,
+                    contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|error| {
-                    CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                });
+            {
+                Ok(output) => return Ok(output),
+                Err(SessionError::NotFound { .. }) => {
+                    let session = self
+                        .service
+                        .load_authoritative_session(&self.session_id)
+                        .await
+                        .map_err(|error| {
+                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                        })?
+                        .ok_or_else(|| {
+                            CoreExecutorError::apply_failed_runtime_context(format!(
+                                "session not found: {}",
+                                self.session_id
+                            ))
+                        })?;
+                    if session_metadata_marks_archived(&session) {
+                        self.adapter.unregister_session(&self.session_id).await;
+                        return Err(CoreExecutorError::apply_failed_runtime_context(format!(
+                            "session not found: {}",
+                            self.session_id
+                        )));
+                    }
+                    let recovered = build_recovered_session(
+                        session.clone(),
+                        &SurfaceSessionRecoveryOverrides::default(),
+                        SurfaceSessionRecoveryContext::default(),
+                    )
+                    .map_err(|error| {
+                        CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                    })?;
+                    let service = Arc::clone(&self.service);
+                    let adapter = Arc::clone(&self.adapter);
+                    materialize_session(
+                        &self.service,
+                        &self.adapter,
+                        session,
+                        recovered.into_deferred_create_request(),
+                        move |session_id| {
+                            default_persistent_executor(
+                                Arc::clone(&service),
+                                Arc::clone(&adapter),
+                                session_id,
+                            )
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                    })?;
+                    return self
+                        .service
+                        .apply_runtime_context_appends_with_boundary(
+                            &self.session_id,
+                            run_id,
+                            appends,
+                            boundary,
+                            contributing_input_ids,
+                        )
+                        .await
+                        .map_err(|error| {
+                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                        });
+                }
+                Err(error) => {
+                    return Err(CoreExecutorError::apply_failed_runtime_context(
+                        error.to_string(),
+                    ));
+                }
+            }
         }
 
         let boundary = primitive.apply_boundary();
@@ -507,6 +741,24 @@ mod tests {
         build_test_service_with_runtime(temp, None).await
     }
 
+    async fn build_test_service_with_capacity(
+        temp: &TempDir,
+        active_session_capacity: usize,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
+        let persistence = build_default_persistence(temp.path().join("sessions"))
+            .await
+            .expect("build default persistence");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, runtime_adapter) =
+            build_runtime_backed_service(builder, active_session_capacity, persistence);
+        (Arc::new(service), runtime_adapter)
+    }
+
     async fn build_test_service_with_runtime(
         temp: &TempDir,
         #[cfg(feature = "comms")] shared_runtime: Option<Arc<CommsRuntime>>,
@@ -652,6 +904,89 @@ mod tests {
             Err(error) => panic!("unexpected runtime error after failed materialization: {error}"),
             Ok(_) => panic!("failed materialization must unregister prepared runtime session"),
         }
+    }
+
+    #[tokio::test]
+    async fn materialize_session_create_failure_preserves_existing_runtime_registration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare existing runtime registration");
+
+        let error = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            session,
+            make_request(SessionBuildOptions {
+                max_inline_peer_notifications: Some(-2),
+                ..Default::default()
+            }),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("invalid build settings must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("max_inline_peer_notifications=-2 is invalid"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            adapter.contains_session(&session_id).await,
+            "failed materialization must not unregister pre-existing runtime registration"
+        );
+        adapter.unregister_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn materialize_session_capacity_full_rejects_before_prepare_bindings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service_with_capacity(&temp, 1).await;
+
+        let existing = service
+            .create_session(make_request(SessionBuildOptions::default()))
+            .await
+            .expect("fill active admission capacity");
+        let candidate = Session::new();
+        let candidate_id = candidate.id().clone();
+
+        let error = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            candidate,
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("capacity-full materialization should fail before runtime prepare");
+
+        assert!(
+            error.to_string().contains("Max sessions"),
+            "unexpected materialization error: {error}"
+        );
+        assert!(
+            !adapter.contains_session(&candidate_id).await,
+            "capacity-full materialization must not prepare runtime bindings"
+        );
+
+        service
+            .discard_live_session(&existing.session_id)
+            .await
+            .expect("cleanup capacity filler");
+        adapter.unregister_session(&existing.session_id).await;
     }
 
     #[tokio::test]
@@ -1154,6 +1489,165 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_recovers_persisted_session_for_context_only_apply() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let output = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "runtime-backed-context-recovery".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "runtime-backed recovered context".to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect("context-only apply should recover persisted session");
+
+        assert_eq!(
+            output.receipt.boundary,
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
+        );
+        assert!(adapter.contains_session(&result.session_id).await);
+
+        let exported = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("export recovered live session");
+        let system_context = exported
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(
+            system_context.contains("runtime-backed-context-recovery")
+                && system_context.contains("runtime-backed recovered context"),
+            "context-only recovery should persist runtime context append: {system_context}"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_archived_context_only_apply_unregisters_runtime() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        service
+            .archive(&result.session_id)
+            .await
+            .expect("archive session through service");
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "service-only archive leaves runtime registration for this regression"
+        );
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let rejected = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "runtime-backed-archived-context".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "archived runtime-backed context".to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await;
+
+        assert!(
+            rejected.is_err(),
+            "archived context-only apply should reject: {rejected:?}"
+        );
+        assert!(
+            !adapter.contains_session(&result.session_id).await,
+            "archived context-only rejection should unregister stale runtime state"
+        );
     }
 
     #[tokio::test]

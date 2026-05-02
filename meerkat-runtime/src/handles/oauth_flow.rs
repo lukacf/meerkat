@@ -1476,7 +1476,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 target.clone(),
                 provider,
                 redirect_uri.clone(),
-                pkce_verifier.clone(),
+                pkce_verifier,
             );
         }
         let pruned = match inserted {

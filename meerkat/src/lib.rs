@@ -236,7 +236,9 @@ pub use meerkat_session::DefaultCompactor;
 // Both implement SessionService. Production paths add MeerkatMachine on top.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::PersistentSessionService;
-pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
+pub use meerkat_session::{
+    EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
+};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

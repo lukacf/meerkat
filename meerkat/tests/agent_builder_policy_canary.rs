@@ -966,7 +966,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-meerkat-core = {{ path = "{}", features = ["internal-agent-factory-build"] }}
+meerkat-core = {{ path = "{}", features = ["__meerkat-facade-agent-factory-build"] }}
 "#,
             repo_root().join("meerkat-core").display()
         ),
@@ -1732,6 +1732,7 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
 fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
     let cargo = repo_file("meerkat/Cargo.toml");
     let core_cargo = repo_file("meerkat-core/Cargo.toml");
+    let repo_cargo = repo_file("scripts/repo-cargo");
 
     assert!(
         !cargo.contains("meerkat-core/standalone-agent-builder"),
@@ -1760,6 +1761,12 @@ fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
         "meerkat-core must not publish an internal factory-build feature; \
          downstream crates can enable public features and compile the hidden \
          finalizer"
+    );
+    assert!(
+        !repo_cargo.contains("meerkat_internal_agent_factory_build"),
+        "repo Cargo lanes must not inject the internal AgentFactory cfg into \
+         every Cargo invocation; pure public-core checks must exercise the \
+         finalizer-free graph"
     );
 }
 
@@ -1919,6 +1926,28 @@ fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
             !build_target.contains("\"//meerkat-core:meerkat_core\","),
             "{target} must not mix the public core target with the facade's \
              private factory dependency graph"
+        );
+    }
+}
+
+#[test]
+fn public_downstream_bazel_fixtures_do_not_use_private_factory_targets() {
+    let Some(bazel) = try_repo_file("test-fixtures/surface-build-fixtures/BUILD.bazel") else {
+        // Cargo-only source layouts may not include generated Bazel files.
+        return;
+    };
+
+    for target in ["embedded_min_bin", "runtime_backed_min_bin"] {
+        let build_target = bazel_target_block(&bazel, target)
+            .unwrap_or_else(|| panic!("surface-build-fixtures BUILD.bazel must contain {target}"));
+        assert!(
+            !build_target.contains("_agent_factory_build"),
+            "{target} models a public downstream Bazel consumer and must not \
+             depend on private AgentFactory build targets"
+        );
+        assert!(
+            build_target.contains("\"//meerkat:meerkat\""),
+            "{target} must still exercise the public facade label"
         );
     }
 }

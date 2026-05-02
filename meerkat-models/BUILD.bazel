@@ -99,7 +99,6 @@ rust_library(
         "//meerkat-tools:__pkg__",
         "//meerkat-web-runtime:__pkg__",
         "//meerkat:__pkg__",
-        "//test-fixtures/surface-build-fixtures:__pkg__",
         "//tests/integration:__pkg__",
     ],
     proc_macro_deps = all_crate_deps(

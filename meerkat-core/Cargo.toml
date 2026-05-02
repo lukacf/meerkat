@@ -4,6 +4,7 @@ description = "Core agent logic for Meerkat (no I/O deps)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+links = "meerkat_core"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

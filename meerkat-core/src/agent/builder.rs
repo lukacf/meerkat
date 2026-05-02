@@ -117,7 +117,10 @@ type AgentFactoryBuildFuture = Pin<
 #[cfg(meerkat_internal_agent_factory_build)]
 #[allow(improper_ctypes, unsafe_code)]
 unsafe extern "Rust" {
-    #[link_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1"]
+    #[link_name = concat!(
+        "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
     fn facade_agent_factory_policy_bridge_token_is_valid(
         factory_bridge_token: &(dyn Any + Send + Sync),
     ) -> bool;
@@ -125,7 +128,10 @@ unsafe extern "Rust" {
 
 #[cfg(meerkat_internal_agent_factory_build)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = "__meerkat_agent_factory_policy_build_v3")]
+#[unsafe(export_name = concat!(
+    "__meerkat_agent_factory_policy_build_v3_",
+    env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+))]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     factory_bridge_token: &'static (dyn Any + Send + Sync),
     builder: AgentBuilder,

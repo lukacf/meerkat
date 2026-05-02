@@ -109,11 +109,11 @@ rust_library(
         "//meerkat-tools:__pkg__",
         "//meerkat-web-runtime:__pkg__",
         "//meerkat:__pkg__",
-        "//test-fixtures/surface-build-fixtures:__pkg__",
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-core",

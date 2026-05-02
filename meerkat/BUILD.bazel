@@ -58,6 +58,7 @@ rust_library(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
     data = [":package_runfiles"],
     proc_macro_deps = all_crate_deps(
@@ -126,6 +127,7 @@ rust_test(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
     },
     tags = [
         "fast",
@@ -229,6 +231,8 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//:repo_governance_files",
+        "//:test_fixtures",
         "//meerkat-agent-build-authority:cargo_manifest",
         "//meerkat-agent-build-authority:package_runfiles",
         "//meerkat-cli:cargo_manifest",
@@ -248,6 +252,10 @@ rust_test(
         "//meerkat-runtime:cargo_manifest",
         "//meerkat-runtime:package_runfiles",
         "//meerkat:cargo_manifest",
+        "//test-fixtures/machine-dsl-tests:package_runfiles",
+        "//test-fixtures/mcp-test-server:package_runfiles",
+        "//test-fixtures/surface-build-fixtures:cargo_manifest",
+        "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//:workspace_runfiles",
     ],
     env = {

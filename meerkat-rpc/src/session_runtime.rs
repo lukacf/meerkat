@@ -1487,6 +1487,30 @@ impl SessionRuntime {
         }
     }
 
+    async fn cleanup_recovered_runtime_after_create_error(
+        &self,
+        session_id: &SessionId,
+        live_session_discarded: bool,
+        runtime_entry_existed_before_prepare: bool,
+    ) {
+        match self.service.export_live_session(session_id).await {
+            Ok(_) => return,
+            Err(SessionError::NotFound { .. }) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "preserving recovered runtime registration after create error because live session state is unknown"
+                );
+                return;
+            }
+        }
+
+        if live_session_discarded || !runtime_entry_existed_before_prepare {
+            self.runtime_adapter.unregister_session(session_id).await;
+        }
+    }
+
     async fn create_recovered_session(
         &self,
         recovered: RecoveredCreateRequest,
@@ -1509,9 +1533,12 @@ impl SessionRuntime {
         match self.service.create_session(request).await {
             Ok(_) => Ok(()),
             Err(error) => {
-                if live_session_discarded || !runtime_entry_existed_before_prepare {
-                    self.runtime_adapter.unregister_session(&session_id).await;
-                }
+                self.cleanup_recovered_runtime_after_create_error(
+                    &session_id,
+                    live_session_discarded,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 Err(session_error_to_rpc(error))
             }
         }
@@ -5149,6 +5176,7 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn provider_params_override(
         provider: &str,
@@ -5170,6 +5198,54 @@ mod tests {
                 TurnMetadataOverride::Clear
             }),
             ..Default::default()
+        }
+    }
+
+    struct FailingSaveSessionStore {
+        inner: meerkat::MemoryStore,
+        fail_save: AtomicBool,
+    }
+
+    impl FailingSaveSessionStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                fail_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, Ordering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for FailingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
         }
     }
 
@@ -5799,6 +5875,40 @@ mod tests {
             runtime.runtime_adapter.contains_session(&session_id).await,
             "successful recovery should keep the runtime registered"
         );
+        let live_state = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("export recovered live session")
+            .system_context_state()
+            .unwrap_or_default();
+        assert!(
+            live_state
+                .pending
+                .iter()
+                .any(|pending| pending.text == "persisted-only stale-live update"),
+            "context-only recovery must preserve durable-only pending system context"
+        );
+        assert!(
+            live_state.applied.iter().any(|applied| {
+                applied.text == "checkpoint-only runtime context after stale live session"
+            }),
+            "context-only recovery must also apply the new runtime context"
+        );
+        let persisted_state = store
+            .load(&session_id)
+            .await
+            .expect("reload recovered persisted session")
+            .expect("recovered persisted session")
+            .system_context_state()
+            .unwrap_or_default();
+        assert!(
+            persisted_state
+                .pending
+                .iter()
+                .any(|pending| pending.text == "persisted-only stale-live update"),
+            "persisted recovery output must retain durable-only pending system context"
+        );
     }
 
     #[tokio::test]
@@ -5989,6 +6099,97 @@ mod tests {
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "failed RPC recovery create must not leak a newly prepared runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_only_recovery_create_post_commit_error_preserves_live_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let store: Arc<dyn meerkat::SessionStore> =
+            Arc::clone(&fail_store) as Arc<dyn meerkat::SessionStore>;
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (initial_tx, _initial_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize target for post-commit failure".into(),
+                initial_tx,
+                None,
+            )
+            .await
+            .expect("materialize target session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live target session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        fail_store.set_fail_save(true);
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-post-commit-create-error".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context before save failure".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let error = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect_err("post-commit persistence failure should be returned");
+
+        assert!(
+            error.message.contains("forced save failure"),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_ok(),
+            "post-commit create error should leave the committed live session"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "post-commit create error must preserve the committed runtime registration"
         );
     }
 

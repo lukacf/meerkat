@@ -365,6 +365,18 @@ impl SessionAgent for FactoryAgent {
         self.agent
             .session_mut()
             .append_system_context_blocks(appends);
+        let next_state = self
+            .agent
+            .session()
+            .system_context_state()
+            .unwrap_or_default();
+        match self.agent.system_context_state().lock() {
+            Ok(mut guard) => *guard = next_state,
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while applying runtime context");
+                *poisoned.into_inner() = next_state;
+            }
+        }
     }
 
     fn append_external_user_content(

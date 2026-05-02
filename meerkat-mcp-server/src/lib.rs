@@ -1279,6 +1279,22 @@ async fn cleanup_prepared_mcp_runtime(
     ingress.clear_session(session_id).await;
 }
 
+async fn cleanup_mcp_recovered_runtime_after_create_error(
+    state: &MeerkatMcpState,
+    ingress: &runtime_ingress::McpRuntimeIngressContext,
+    session_id: &meerkat::SessionId,
+    live_session_discarded: bool,
+    runtime_entry_existed_before_prepare: bool,
+) {
+    if state.service.read(session_id).await.is_ok() {
+        return;
+    }
+
+    if live_session_discarded || !runtime_entry_existed_before_prepare {
+        ingress.clear_session(session_id).await;
+    }
+}
+
 fn request_cancelled_tool_error() -> ToolCallError {
     ToolCallError::new(
         meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
@@ -3241,8 +3257,9 @@ async fn handle_meerkat_resume(
     .await?;
 
     let result = if needs_rebuild {
-        match state.service.discard_live_session(&session_id).await {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+        let live_session_discarded = match state.service.discard_live_session(&session_id).await {
+            Ok(()) => true,
+            Err(SessionError::NotFound { .. }) => false,
             Err(error) => {
                 if !runtime_entry_existed_before_prepare {
                     state.runtime_adapter.unregister_session(&session_id).await;
@@ -3250,7 +3267,7 @@ async fn handle_meerkat_resume(
                 }
                 return Err(ToolCallError::internal(format!("{error}")));
             }
-        }
+        };
         match state.service.create_session(create_req).await {
             Ok(_) => {
                 session_rematerialized = true;
@@ -3260,8 +3277,14 @@ async fn handle_meerkat_resume(
                     .await
             }
             Err(error) => {
-                state.runtime_adapter.unregister_session(&session_id).await;
-                ingress.clear_session(&session_id).await;
+                cleanup_mcp_recovered_runtime_after_create_error(
+                    state,
+                    &ingress,
+                    &session_id,
+                    live_session_discarded,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 Err(error)
             }
         }
@@ -3294,10 +3317,14 @@ async fn handle_meerkat_resume(
                             .await
                     }
                     Err(error) => {
-                        if !runtime_entry_existed_before_prepare {
-                            state.runtime_adapter.unregister_session(&session_id).await;
-                            ingress.clear_session(&session_id).await;
-                        }
+                        cleanup_mcp_recovered_runtime_after_create_error(
+                            state,
+                            &ingress,
+                            &session_id,
+                            false,
+                            runtime_entry_existed_before_prepare,
+                        )
+                        .await;
                         Err(error)
                     }
                 }
@@ -3492,6 +3519,57 @@ mod tests {
         let session_id = session.id().to_string();
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    struct FailingSaveSessionStore {
+        inner: meerkat::MemoryStore,
+        fail_save: AtomicBool,
+    }
+
+    impl FailingSaveSessionStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                fail_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, Ordering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for FailingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(
+            &self,
+            id: &meerkat::SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(
+            &self,
+            id: &meerkat::SessionId,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
+        }
     }
 
     fn seed_active_external_surface(
@@ -5035,6 +5113,72 @@ mod tests {
                 .contains_session(&created.session_id)
                 .await,
             "successful MCP rebuild must keep the runtime registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_resume_rebuild_post_commit_error_preserves_live_runtime() {
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(1024),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        assert!(
+            state
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "test precondition: runtime should already be registered"
+        );
+
+        fail_store.set_fail_save(true);
+        let input: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": created.session_id.to_string(),
+            "prompt": "resume with post-commit save failure",
+            "turn_metadata": {
+                "model": "gpt-5.4-mini"
+            }
+        }))
+        .expect("valid resume input");
+        let result = Box::pin(handle_meerkat_resume(&state, input, None, None)).await;
+
+        assert!(
+            result.is_err(),
+            "forced post-commit persistence failure should be returned"
+        );
+        assert!(
+            state.service.read(&created.session_id).await.is_ok(),
+            "post-commit MCP rebuild error should leave the committed live session"
+        );
+        assert!(
+            state
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "post-commit MCP rebuild error must preserve runtime registration"
         );
     }
 

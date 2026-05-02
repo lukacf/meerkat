@@ -418,6 +418,15 @@ fn runtime_context_base_differs(stored: &Session, live: &Session) -> bool {
         || first_system_prompt_content(stored) != first_system_prompt_content(live)
 }
 
+fn stored_has_unapplied_system_context(stored: &Session, live: &Session) -> bool {
+    let stored_state = stored.system_context_state().unwrap_or_default();
+    let live_state = live.system_context_state().unwrap_or_default();
+    stored_state
+        .pending
+        .iter()
+        .any(|pending| !live_state.pending.contains(pending))
+}
+
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     fn archived_not_found(id: &SessionId) -> SessionControlError {
         SessionControlError::Session(SessionError::NotFound { id: id.clone() })
@@ -959,8 +968,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let stored_is_archived = metadata_marks_archived(stored.metadata());
         let runtime_context_base_changed =
             runtime_backed && runtime_context_base_differs(&stored, &live);
+        let stored_has_unapplied_system_context =
+            stored_has_unapplied_system_context(&stored, &live);
 
-        if !stored_has_more_transcript && !stored_is_archived && !runtime_context_base_changed {
+        if !stored_has_more_transcript
+            && !stored_is_archived
+            && !runtime_context_base_changed
+            && !stored_has_unapplied_system_context
+        {
             return Ok(false);
         }
 
@@ -972,6 +987,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             stored_message_count = stored.messages().len(),
             stored_is_archived,
             runtime_context_base_changed,
+            stored_has_unapplied_system_context,
             "discarding stale live session in favor of newer durable runtime context snapshot"
         );
         self.discard_live_session(id).await?;

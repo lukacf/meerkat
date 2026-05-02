@@ -6107,6 +6107,9 @@ async fn build_deploy_mob_session_service(
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
     match e {
         meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
+        meerkat_core::service::SessionError::PostAdmissionFailure { source, .. } => {
+            anyhow::Error::from(source)
+        }
         other => anyhow::anyhow!("Session service error: {other}"),
     }
 }

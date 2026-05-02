@@ -571,6 +571,9 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
         meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
         meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::PostAdmissionFailure { source, .. } => {
+            err_str("internal_error", source)
+        }
     }
 }
 
@@ -1444,7 +1447,10 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
             });
             Ok(JsValue::from_str(&result_json.to_string()))
         }
-        Err(meerkat_core::SessionError::Agent(err)) => {
+        Err(
+            meerkat_core::SessionError::Agent(err)
+            | meerkat_core::SessionError::PostAdmissionFailure { source: err, .. },
+        ) => {
             let error_msg = format!("{err}");
             let result_json = serde_json::json!({
                 "run_id": run_id,

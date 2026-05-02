@@ -229,7 +229,8 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::Busy { .. } => ErrorCode::SessionBusy,
             meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
             meerkat_core::SessionError::RequestCancelled { .. } => ErrorCode::RequestCancelled,
-            meerkat_core::SessionError::Agent(_) => ErrorCode::AgentError,
+            meerkat_core::SessionError::Agent(_)
+            | meerkat_core::SessionError::PostAdmissionFailure { .. } => ErrorCode::AgentError,
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,

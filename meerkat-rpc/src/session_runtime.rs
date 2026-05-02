@@ -52,8 +52,9 @@ use meerkat_core::{
 };
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
-    RuntimeState, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
-    SessionLlmReconfigureHost, SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
+    RuntimeDriverPostAdmissionOperation, RuntimeState, SessionLlmCapabilitySurface,
+    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
+    SessionServiceRuntimeExt,
 };
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
@@ -185,6 +186,12 @@ fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
         SessionError::NotFound { .. } => RuntimeDriverError::NotReady {
             state: meerkat_runtime::RuntimeState::Destroyed,
         },
+        SessionError::PostAdmissionFailure { source, .. } => {
+            RuntimeDriverError::PostAdmissionFailure {
+                operation: RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+                reason: source.to_string(),
+            }
+        }
         other => RuntimeDriverError::Internal(other.to_string()),
     }
 }
@@ -4911,7 +4918,10 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         SessionError::Busy { .. } => error::SESSION_BUSY,
         SessionError::NotRunning { .. } => error::INTERNAL_ERROR,
         SessionError::RequestCancelled { .. } => error::REQUEST_CANCELLED,
-        SessionError::Agent(agent_err) => match agent_err {
+        SessionError::Agent(agent_err)
+        | SessionError::PostAdmissionFailure {
+            source: agent_err, ..
+        } => match agent_err {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
             | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,

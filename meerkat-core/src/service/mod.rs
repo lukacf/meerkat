@@ -77,6 +77,14 @@ pub enum SessionError {
     #[error("request cancelled before session admission: {id}")]
     RequestCancelled { id: SessionId },
 
+    /// A session turn crossed the service-owned admission point before failing.
+    #[error("post-admission failure on session {id}: {source}")]
+    PostAdmissionFailure {
+        id: SessionId,
+        #[source]
+        source: crate::error::AgentError,
+    },
+
     /// A session store operation failed.
     #[error("store error: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -91,6 +99,31 @@ pub enum SessionError {
 }
 
 impl SessionError {
+    /// Construct an agent error, preserving whether the service had already
+    /// admitted the turn before the error was produced.
+    pub fn from_agent_error_after_admission(
+        id: SessionId,
+        source: crate::error::AgentError,
+    ) -> Self {
+        match source {
+            crate::error::AgentError::CallbackPending { .. }
+            | crate::error::AgentError::NoPendingBoundary => Self::Agent(source),
+            source => Self::PostAdmissionFailure { id, source },
+        }
+    }
+
+    pub fn is_post_admission_failure(&self) -> bool {
+        matches!(self, Self::PostAdmissionFailure { .. })
+    }
+
+    pub fn agent_error(&self) -> Option<&crate::error::AgentError> {
+        match self {
+            Self::Agent(error) => Some(error),
+            Self::PostAdmissionFailure { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -100,6 +133,7 @@ impl SessionError {
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::RequestCancelled { .. } => "REQUEST_CANCELLED",
+            Self::PostAdmissionFailure { .. } => "SESSION_POST_ADMISSION_FAILURE",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::Agent(_) => "AGENT_ERROR",

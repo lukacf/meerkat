@@ -83,7 +83,7 @@ enum SessionCommand {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         handling_mode: meerkat_core::types::HandlingMode,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-        result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
+        result_tx: oneshot::Sender<SessionTurnResult>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
         pre_turn_context_appends: Vec<PendingSystemContextAppend>,
@@ -165,6 +165,37 @@ enum SessionCommand {
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     Shutdown,
+}
+
+struct SessionTurnFailure {
+    error: AgentError,
+    admission_committed: bool,
+}
+
+type SessionTurnResult = Result<RunResult, SessionTurnFailure>;
+
+impl SessionTurnFailure {
+    fn before_admission(error: AgentError) -> Self {
+        Self {
+            error,
+            admission_committed: false,
+        }
+    }
+
+    fn after_admission(error: AgentError) -> Self {
+        Self {
+            error,
+            admission_committed: true,
+        }
+    }
+
+    fn into_session_error(self, id: &SessionId) -> SessionError {
+        if self.admission_committed {
+            SessionError::from_agent_error_after_admission(id.clone(), self.error)
+        } else {
+            SessionError::Agent(self.error)
+        }
+    }
 }
 
 /// Lightweight summary updated after each turn, readable without querying the task.
@@ -1806,7 +1837,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             }
         };
 
-        result.map_err(SessionError::Agent)
+        result.map_err(|failure| failure.into_session_error(&session_id))
     }
 
     async fn start_turn(
@@ -1921,7 +1952,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             ))
         })?;
 
-        result.map_err(SessionError::Agent)
+        result.map_err(|failure| failure.into_session_error(id))
     }
 
     async fn set_session_client(
@@ -2685,7 +2716,9 @@ async fn session_task<A: SessionAgent>(
             } => {
                 let current_phase = lock_turn_admission(&control.turn_admission).phase();
                 if current_phase == TurnAdmissionPhase::ShuttingDown {
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                    let _ = result_tx.send(Err(SessionTurnFailure::before_admission(
+                        AgentError::Cancelled,
+                    )));
                     continue;
                 }
 
@@ -2726,7 +2759,9 @@ async fn session_task<A: SessionAgent>(
                         pending_tool_results,
                     );
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
+                    let _ = result_tx.send(Err(SessionTurnFailure::before_admission(
+                        AgentError::NoPendingBoundary,
+                    )));
                     continue;
                 }
 
@@ -2739,7 +2774,7 @@ async fn session_task<A: SessionAgent>(
                         pending_tool_results,
                     );
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(error));
+                    let _ = result_tx.send(Err(SessionTurnFailure::before_admission(error)));
                     continue;
                 }
                 if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
@@ -2751,7 +2786,7 @@ async fn session_task<A: SessionAgent>(
                         pending_tool_results,
                     );
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(error));
+                    let _ = result_tx.send(Err(SessionTurnFailure::before_admission(error)));
                     continue;
                 }
                 let begin_phase = {
@@ -2772,10 +2807,11 @@ async fn session_task<A: SessionAgent>(
                             pending_initial_prompt,
                             pending_tool_results,
                         );
-                        let _ =
-                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
-                                format!("illegal begin-run transition: {error}"),
-                            )));
+                        let _ = result_tx.send(Err(SessionTurnFailure::before_admission(
+                            AgentError::InternalError(format!(
+                                "illegal begin-run transition: {error}"
+                            )),
+                        )));
                         continue;
                     }
                 }
@@ -2943,7 +2979,7 @@ async fn session_task<A: SessionAgent>(
                         false
                     }
                 };
-                let _ = result_tx.send(result);
+                let _ = result_tx.send(result.map_err(SessionTurnFailure::after_admission));
                 if shutting_down {
                     break;
                 }
@@ -3678,7 +3714,10 @@ mod admission_window_tests {
             })
             .await
             .expect("send start turn");
-        result_rx.await.expect("receive start turn result")
+        result_rx
+            .await
+            .expect("receive start turn result")
+            .map_err(|failure| failure.error)
     }
 
     #[tokio::test]
@@ -3764,10 +3803,12 @@ mod admission_window_tests {
             .start_turn(&result.session_id, start_turn_request())
             .await;
 
-        assert!(matches!(
-            result,
-            Err(SessionError::Agent(AgentError::Cancelled))
-        ));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(SessionError::is_post_admission_failure),
+            "expected post-admission cancellation, got {result:?}"
+        );
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
     }

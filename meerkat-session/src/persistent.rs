@@ -1569,6 +1569,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 {
                     let _ = self.persist_full_session(&session_id).await;
                 }
+                if let SessionError::PostAdmissionFailure { id: session_id, .. } = &error {
+                    let _ = self.persist_full_session(session_id).await;
+                }
                 return Err(error);
             }
         };
@@ -1606,7 +1609,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let result = match self.inner.start_turn(id, req).await {
             Ok(result) => result,
             Err(error) => {
-                if Self::callback_pending_terminal(&error).is_some() {
+                if Self::callback_pending_terminal(&error).is_some()
+                    || error.is_post_admission_failure()
+                {
                     let _ = self.persist_full_session(id).await;
                 }
                 return Err(error);

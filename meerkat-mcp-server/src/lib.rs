@@ -1207,7 +1207,13 @@ fn format_agent_result(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
+        Err(
+            SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })
+            | SessionError::PostAdmissionFailure {
+                source: meerkat::AgentError::CallbackPending { tool_name, args },
+                ..
+            },
+        ) => {
             let payload = json!({
                 "content": [{
                     "type": "text",
@@ -1231,10 +1237,13 @@ fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
 ) -> Result<Value, ToolCallError> {
-    if matches!(&result, Err(SessionError::RequestCancelled { .. })) {
-        return Err(request_cancelled_tool_error());
+    match result {
+        Err(SessionError::RequestCancelled { .. }) => Err(request_cancelled_tool_error()),
+        Err(err) if err.is_post_admission_failure() => {
+            Err(post_commit_turn_error(session_id, &err))
+        }
+        result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
     }
-    format_agent_result(result, session_id).map_err(ToolCallError::internal)
 }
 
 fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
@@ -1271,6 +1280,17 @@ fn post_commit_session_created_error(
             "session_id": session_id.to_string(),
             "session_ref": session_id.to_string(),
             "session_created": true,
+            "resumable": true,
+        }),
+    )
+}
+
+fn post_commit_turn_error(session_id: &meerkat::SessionId, err: &SessionError) -> ToolCallError {
+    ToolCallError::committed_internal_with_data(
+        format!("Agent error: {err}"),
+        json!({
+            "session_id": session_id.to_string(),
+            "session_ref": session_id.to_string(),
             "resumable": true,
         }),
     )
@@ -3609,7 +3629,7 @@ mod tests {
     use meerkat::surface::{RequestTerminalResolution, SurfaceRequestKind};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::time::{Duration, timeout};
 
     fn unwrap_payload(value: Value) -> Value {
@@ -3629,6 +3649,58 @@ mod tests {
         let session_id = session.id().to_string();
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    struct SucceedsThenFailsClient {
+        calls: AtomicUsize,
+    }
+
+    impl SucceedsThenFailsClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::LlmClient for SucceedsThenFailsClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> meerkat_client::types::LlmStream<'a> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = if call == 0 {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "seed ok".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]
+            } else {
+                vec![LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error {
+                        error: LlmError::InvalidRequest {
+                            message: "synthetic post-commit resume failure".to_string(),
+                        },
+                    },
+                }]
+            };
+            Box::pin(stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> &'static str {
+            "test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
     }
 
     fn seed_active_external_surface(
@@ -3711,6 +3783,38 @@ mod tests {
             app_context: None,
             shell_env: None,
             connection_ref: None,
+        }
+    }
+
+    fn test_resume_input(session_id: &str, prompt: &str) -> MeerkatResumeInput {
+        MeerkatResumeInput {
+            session_id: session_id.to_string(),
+            prompt: prompt.to_string(),
+            system_prompt: None,
+            model: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: None,
+            stream: false,
+            verbose: false,
+            tools: vec![],
+            tool_results: vec![],
+            enable_builtins: None,
+            builtin_config: None,
+            keep_alive: None,
+            comms_name: None,
+            peer_meta: None,
+            hooks_override: None,
+            enable_memory: None,
+            enable_mob: None,
+            provider_params: None,
+            budget_limits: None,
+            preload_skills: None,
+            skill_refs: None,
+            skill_references: None,
+            flow_tool_overlay: None,
+            additional_instructions: None,
         }
     }
 
@@ -4837,6 +4941,133 @@ mod tests {
                 .await
                 .contains_key(&session_id.to_string()),
             "resolving a resumable post-commit error must not unregister the MCP adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_commit_meerkat_resume_failure_uses_committed_terminal_outcome() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let failing_client: Arc<dyn meerkat::LlmClient> = Arc::new(SucceedsThenFailsClient::new());
+        let state = MeerkatMcpState::new_with_store_and_llm_client(store, failing_client).await;
+        let seed_result = Box::pin(handle_meerkat_run(
+            &state,
+            test_run_input("seed live resume session"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed session create should succeed");
+        let seed_payload = unwrap_payload(seed_result);
+        let session_id = meerkat::SessionId::parse(
+            seed_payload["session_id"]
+                .as_str()
+                .expect("seed response includes session id"),
+        )
+        .expect("seed session id should parse");
+        let request_executor = state.surface_request_executor(Duration::from_millis(1));
+        let request_key = "mcp-resume-post-commit-error";
+        let context = request_executor
+            .try_begin_request(
+                request_key,
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+
+        let result = Box::pin(handle_meerkat_resume(
+            &state,
+            test_resume_input(&session_id.to_string(), "fail after resume admission"),
+            None,
+            Some(context.clone()),
+        ))
+        .await;
+
+        let err = result.expect_err("failed resume turn should be returned as a tool error");
+        assert_eq!(
+            err.terminal_outcome(),
+            SurfaceRequestTerminalOutcome::CommittedFailure,
+            "post-admission resume failures must be classified from service authority; got {err:?}"
+        );
+        let data = err.data.as_ref().expect("post-commit error data");
+        assert_eq!(data.get("resumable").and_then(Value::as_bool), Some(true));
+        let session_id_string = session_id.to_string();
+        assert_eq!(
+            data.get("session_id").and_then(Value::as_str),
+            Some(session_id_string.as_str())
+        );
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("post-commit resume error must leave the session readable");
+        assert!(
+            state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live-session check should succeed"),
+            "post-commit resume error must leave the session live before terminal resolution"
+        );
+        assert!(
+            state
+                .runtime_sessions
+                .read()
+                .await
+                .contains_key(&session_id),
+            "post-commit resume error must leave runtime ingress state attached"
+        );
+        assert!(
+            state
+                .mcp_adapters
+                .lock()
+                .await
+                .contains_key(&session_id.to_string()),
+            "post-commit resume error must leave the MCP adapter registered"
+        );
+
+        let terminal_response = json!({
+            "jsonrpc": "2.0",
+            "id": 100,
+            "error": {
+                "code": err.code,
+                "message": err.message.clone(),
+                "data": data,
+            }
+        });
+        assert_eq!(
+            request_executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel after committed MCP resume failure must not replace the error payload"
+        );
+        let resolution = request_executor
+            .resolve_terminal(
+                Some(context.key()),
+                context.classify_terminal(err.terminal_outcome(), terminal_response),
+            )
+            .await;
+        assert!(matches!(resolution, RequestTerminalResolution::Emit(_)));
+        assert_eq!(request_executor.phase(context.key()), None);
+
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("resolving a resumable resume error must not run rollback cleanup");
+        assert!(
+            state
+                .runtime_sessions
+                .read()
+                .await
+                .contains_key(&session_id),
+            "resolving a resumable resume error must not clear runtime ingress state"
+        );
+        assert!(
+            state
+                .mcp_adapters
+                .lock()
+                .await
+                .contains_key(&session_id.to_string()),
+            "resolving a resumable resume error must not unregister the MCP adapter"
         );
     }
 

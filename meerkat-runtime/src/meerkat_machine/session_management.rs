@@ -131,12 +131,12 @@ impl MeerkatMachine {
         }
     }
 
-    pub(super) async fn register_session_inner(&self, session_id: SessionId) {
+    pub(super) async fn register_session_inner(&self, session_id: SessionId) -> bool {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get_mut(&session_id) {
                 existing.clear_dead_attachment();
-                return;
+                return false;
             }
         }
 
@@ -155,7 +155,7 @@ impl MeerkatMachine {
         let mut entry = self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
-            return;
+            return false;
         }
         Self::replay_recovered_runtime_phase_through_dsl_authority(
             &session_id,
@@ -194,8 +194,35 @@ impl MeerkatMachine {
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
             existing.clear_dead_attachment();
+            false
         } else {
             sessions.insert(session_id, session_entry);
+            true
+        }
+    }
+
+    pub(super) async fn unregister_session_inner_if_epoch(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+    ) {
+        let entry = {
+            let mut sessions = self.sessions.write().await;
+            let should_unregister = sessions
+                .get(session_id)
+                .is_some_and(|entry| &entry.epoch_id == epoch_id);
+            if should_unregister {
+                if let Some(entry) = sessions.get_mut(session_id) {
+                    abort_slot(&mut entry.drain_slot);
+                }
+                sessions.remove(session_id)
+            } else {
+                None
+            }
+        };
+
+        if let Some(entry) = entry {
+            self.finalize_unregistered_session(entry).await;
         }
     }
 
@@ -616,6 +643,15 @@ impl MeerkatMachine {
             .await;
     }
 
+    async fn finalize_unregistered_session(&self, entry: RuntimeSessionEntry) {
+        let mut driver = entry.driver.lock().await;
+        machine_unregister_session_projection(&mut driver);
+        drop(driver);
+
+        let mut completions = entry.completions.lock().await;
+        completions.resolve_all_terminated("runtime session unregistered");
+    }
+
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
         let entry = {
             let mut sessions = self.sessions.write().await;
@@ -630,12 +666,7 @@ impl MeerkatMachine {
         };
 
         if let Some(entry) = entry {
-            let mut driver = entry.driver.lock().await;
-            machine_unregister_session_projection(&mut driver);
-            drop(driver);
-
-            let mut completions = entry.completions.lock().await;
-            completions.resolve_all_terminated("runtime session unregistered");
+            self.finalize_unregistered_session(entry).await;
         }
     }
 

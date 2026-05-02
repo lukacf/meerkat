@@ -19,9 +19,9 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::{InterruptNoopTarget, SessionRuntime};
+use crate::session_runtime::SessionRuntime;
 use meerkat::surface::{RequestContext, request_action};
-use meerkat_runtime::{RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt};
+use meerkat_runtime::SessionServiceRuntimeExt;
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -229,40 +229,6 @@ pub async fn handle_start(
         clear_connection_ref: params.clear_connection_ref,
     };
 
-    // Lazy-register executor if not already registered.
-    // This handles cases where session/create used deferred mode or
-    // the session was created before the runtime adapter was active.
-    // Use session_has_executor (not contains_session) because sessions
-    // registered via prepare_bindings() exist in the map but have no
-    // RuntimeLoop — inputs would queue without being processed.
-    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
-        && !runtime_adapter.session_has_executor(&session_id).await
-    {
-        #[cfg(feature = "mob")]
-        {
-            if let Err(err) = runtime
-                .ensure_runtime_session_for_rotation(&session_id)
-                .await
-            {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("runtime executor registration failed: {err}"),
-                );
-            }
-        }
-        #[cfg(not(feature = "mob"))]
-        {
-            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                runtime.clone(),
-                session_id.clone(),
-            ));
-            runtime_adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
-        }
-    }
-
     let result = match runtime
         .start_turn_via_runtime(
             &session_id,
@@ -309,41 +275,8 @@ pub async fn handle_interrupt(
         Err(resp) => return resp,
     };
 
-    match runtime
-        .runtime_adapter()
-        .hard_cancel_current_run(&session_id, "RPC turn interrupt")
-        .await
-    {
+    match runtime.interrupt(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
-        Err(RuntimeDriverError::NotReady {
-            state: RuntimeState::Idle | RuntimeState::Attached,
-        }) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
-        Err(RuntimeDriverError::NotReady {
-            state: RuntimeState::Destroyed,
-        })
-        | Err(RuntimeDriverError::Destroyed) => {
-            match runtime.interrupt_noop_target(&session_id).await {
-                Ok(InterruptNoopTarget::Present) => {
-                    RpcResponse::success(id, serde_json::json!({"interrupted": true}))
-                }
-                Ok(InterruptNoopTarget::Missing) => RpcResponse::error(
-                    id,
-                    error::SESSION_NOT_FOUND,
-                    format!("Session not found: {session_id}"),
-                ),
-                Ok(InterruptNoopTarget::NotInterruptible(state)) => RpcResponse::error(
-                    id,
-                    error::INVALID_REQUEST,
-                    format!("Session is not interruptible while runtime is {state}"),
-                ),
-                Err(err) => RpcResponse::error(id, err.code, err.message),
-            }
-        }
-        Err(RuntimeDriverError::NotReady { state }) => RpcResponse::error(
-            id,
-            error::INVALID_REQUEST,
-            format!("Session is not interruptible while runtime is {state}"),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }

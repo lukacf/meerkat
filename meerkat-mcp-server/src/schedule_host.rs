@@ -47,6 +47,8 @@ struct McpScheduleContext {
     backend: String,
     mcp_adapters: runtime_ingress::SharedMcpAdapters,
     runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
+    runtime_pre_admissions: runtime_ingress::SharedMcpRuntimePreAdmissions,
+    runtime_registration_locks: runtime_ingress::SharedMcpRuntimeRegistrationLocks,
 }
 
 impl McpScheduleContext {
@@ -60,6 +62,8 @@ impl McpScheduleContext {
             backend: state.backend.clone(),
             mcp_adapters: Arc::clone(&state.mcp_adapters),
             runtime_sessions: Arc::clone(&state.runtime_sessions),
+            runtime_pre_admissions: Arc::clone(&state.runtime_pre_admissions),
+            runtime_registration_locks: Arc::clone(&state.runtime_registration_locks),
         }
     }
 
@@ -74,6 +78,8 @@ impl McpScheduleContext {
                 backend: self.backend.clone(),
                 mcp_adapters: Arc::clone(&self.mcp_adapters),
                 runtime_sessions: Arc::clone(&self.runtime_sessions),
+                runtime_pre_admissions: Arc::clone(&self.runtime_pre_admissions),
+                runtime_registration_locks: Arc::clone(&self.runtime_registration_locks),
             },
         )
     }
@@ -128,6 +134,11 @@ impl McpScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let create_admission = self
+            .service
+            .reserve_create_session_admission()
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         let prepared = prepare_surface_session(&self.runtime_adapter)
             .await
             .map_err(ScheduleDomainError::Internal)?;
@@ -137,12 +148,24 @@ impl McpScheduleContext {
 
         let output_schema = create.output_schema.clone();
 
-        let mcp_adapter = self
+        let mcp_adapter = match self
             .seed_realm_mcp_adapter(Arc::clone(runtime_bindings.external_tool_surface()))
-            .await?;
+            .await
+        {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                self.ingress_context().clear_session(&session_id).await;
+                return Err(error);
+            }
+        };
         let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-        let external_tools = compose_external_tool_dispatchers(None, Some(mcp_tools))
-            .map_err(ScheduleDomainError::Internal)?;
+        let external_tools = match compose_external_tool_dispatchers(None, Some(mcp_tools)) {
+            Ok(tools) => tools,
+            Err(error) => {
+                self.ingress_context().clear_session(&session_id).await;
+                return Err(ScheduleDomainError::Internal(error));
+            }
+        };
 
         let current_generation = self
             .config_runtime
@@ -219,7 +242,10 @@ impl McpScheduleContext {
             labels: Some(create.labels.clone()),
         };
 
-        let result = self.service.create_session(request).await;
+        let result = self
+            .service
+            .create_session_with_reserved_admission(request, create_admission)
+            .await;
         let session_exists = self.service.read(&session_id).await.is_ok();
         if session_exists {
             self.mcp_adapters

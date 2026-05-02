@@ -629,7 +629,9 @@ impl MethodRouter {
         if persisted
             .as_ref()
             .is_some_and(Self::session_metadata_marks_archived)
+            && !self.runtime.pending_session_exists(session_id).await
         {
+            self.runtime_adapter.unregister_session(session_id).await;
             return Err(RpcResponse::error(
                 None,
                 error::SESSION_NOT_FOUND,
@@ -658,6 +660,7 @@ impl MethodRouter {
             Some(SessionOwner::Mob) => {
                 Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
                     self.mob_state.session_service(),
+                    Some(self.runtime.clone()),
                     session_id.clone(),
                     self.notification_sink.clone(),
                 ))
@@ -1341,15 +1344,13 @@ impl MethodRouter {
             }
             #[cfg(not(feature = "mini-surface"))]
             "runtime/session_submit" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_submit(id, params, self.runtime_adapter.as_ref())
-                    .await
+                handlers::runtime::handle_runtime_submit(
+                    id,
+                    params,
+                    &self.runtime,
+                    &self.runtime_adapter,
+                )
+                .await
             }
             #[cfg(not(feature = "mini-surface"))]
             "runtime/session_submission" => {
@@ -2485,11 +2486,13 @@ mod tests {
     use meerkat::AgentFactory;
     use meerkat::surface::{RequestContext, SurfaceRequestExecutor, noop_request_action};
     use meerkat_client::{LlmClient, LlmError};
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
+    use meerkat_core::types::ContentInput;
     use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, Message, StopReason};
     use serde::Serialize;
 
@@ -2690,6 +2693,38 @@ mod tests {
 
     async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let (router, notif_rx) = test_router().await;
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        (router.with_runtime_adapter(runtime_adapter), notif_rx)
+    }
+
+    async fn test_router_with_v9_runtime_and_max_sessions(
+        max_sessions: usize,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        config.limits.max_sessions = Some(max_sessions);
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config.clone(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
+            NotificationSink::noop(),
+        );
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(config));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new(runtime, config_store, sink);
         let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             memory_blob_store(),
@@ -5952,6 +5987,321 @@ mod tests {
             accepted["outcome_type"].as_str(),
             Some("accepted"),
             "deferred sessions should also be routable through runtime/session_submit before their first turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_submit_capacity_full_rejects_before_input_accept() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
+        let first_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "completed session" }),
+            ))
+            .await
+            .unwrap();
+        let first_session_id = SessionId::parse(
+            result_value(&first_resp)["session_id"]
+                .as_str()
+                .expect("first session id"),
+        )
+        .expect("valid first session id");
+        let first_active = router
+            .runtime_adapter()
+            .list_active_inputs(&first_session_id)
+            .await
+            .expect("list active inputs before rejection");
+        assert!(
+            first_active.is_empty(),
+            "completed first session should have no active runtime inputs"
+        );
+
+        let filler_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "capacity filler",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            result_value(&filler_resp)["session_id"].is_string(),
+            "deferred filler should reserve active capacity"
+        );
+
+        let rejected = router
+            .dispatch(make_request(
+                "runtime/session_submit",
+                serde_json::json!({
+                    "session_id": first_session_id.to_string(),
+                    "input": {
+                        "input_type": "prompt",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": { "type": "operator" },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "text": "must not enter runtime queue"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            error_message(&rejected).contains("Max sessions"),
+            "capacity-full runtime submit should reject before runtime input accept: {}",
+            error_message(&rejected)
+        );
+
+        let first_active = router
+            .runtime_adapter()
+            .list_active_inputs(&first_session_id)
+            .await
+            .expect("list active inputs after rejection");
+        assert!(
+            first_active.is_empty(),
+            "capacity-full runtime submit must not enqueue active runtime input"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_submit_external_event_capacity_full_rejects_before_input_accept() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
+        let first_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "completed session" }),
+            ))
+            .await
+            .unwrap();
+        let first_session_id = SessionId::parse(
+            result_value(&first_resp)["session_id"]
+                .as_str()
+                .expect("first session id"),
+        )
+        .expect("valid first session id");
+
+        let filler_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "capacity filler",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            result_value(&filler_resp)["session_id"].is_string(),
+            "deferred filler should reserve active capacity"
+        );
+
+        let rejected = router
+            .dispatch(make_request(
+                "runtime/session_submit",
+                serde_json::json!({
+                    "session_id": first_session_id.to_string(),
+                    "input": {
+                        "input_type": "external_event",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": {
+                                "type": "external",
+                                "source_name": "calendar"
+                            },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "event_type": "calendar.reminder",
+                        "payload": {
+                            "body": "must not enter runtime queue"
+                        },
+                        "handling_mode": "queue"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            error_message(&rejected).contains("Max sessions"),
+            "capacity-full external event submit should reject before runtime input accept: {}",
+            error_message(&rejected)
+        );
+
+        let first_active = router
+            .runtime_adapter()
+            .list_active_inputs(&first_session_id)
+            .await
+            .expect("list active inputs after rejection");
+        assert!(
+            first_active.is_empty(),
+            "capacity-full external event submit must not enqueue active runtime input"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_capacity_full_rejects_before_executor_registration() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
+        let target_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "completed session" }),
+            ))
+            .await
+            .unwrap();
+        let target_session_id = SessionId::parse(
+            result_value(&target_resp)["session_id"]
+                .as_str()
+                .expect("target session id"),
+        )
+        .expect("valid target session id");
+        router
+            .runtime_adapter()
+            .unregister_session(&target_session_id)
+            .await;
+        assert!(
+            !router
+                .runtime_adapter()
+                .contains_session(&target_session_id)
+                .await,
+            "test setup should leave the persisted target without runtime registration"
+        );
+
+        let filler_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "capacity filler",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            result_value(&filler_resp)["session_id"].is_string(),
+            "deferred filler should reserve active capacity"
+        );
+
+        let rejected = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": target_session_id.to_string(),
+                    "prompt": "must not register executor before admission"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            error_message(&rejected).contains("Max sessions"),
+            "capacity-full turn/start should reject before runtime registration: {}",
+            error_message(&rejected)
+        );
+        assert!(
+            !router
+                .runtime_adapter()
+                .contains_session(&target_session_id)
+                .await,
+            "capacity-full turn/start must not register a runtime executor"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_submit_routes_restored_staged_transient_archive_session() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = SessionId::parse(created["session_id"].as_str().expect("session_id"))
+            .expect("valid session id");
+
+        let primitive = RunPrimitive::StagedInput(
+            meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        );
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        router
+            .runtime
+            .apply_runtime_turn(
+                &session_id,
+                meerkat_core::RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("resume-pending pre-run terminal should restore staged session");
+        let stored = router
+            .runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load transient archived session")
+            .expect("transient archived session should exist");
+        assert!(MethodRouter::session_metadata_marks_archived(&stored));
+
+        let accept_resp = router
+            .dispatch(make_request(
+                "runtime/session_submit",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "input": {
+                        "input_type": "prompt",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": { "type": "operator" },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "text": "retry restored staged session"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let accepted = result_value(&accept_resp);
+        assert_eq!(
+            accepted["outcome_type"].as_str(),
+            Some("accepted"),
+            "runtime predispatch should allow restored staged sessions despite transient archived snapshots"
         );
     }
 

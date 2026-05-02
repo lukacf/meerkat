@@ -1605,7 +1605,7 @@ async fn failed_executor_continues_processing_backlog() {
         &adapter,
         &sid,
         RuntimeState::Attached,
-        "runtime loop should publish Attached after draining the failed-run backlog",
+        "runtime should return to Attached after draining queued backlog",
     )
     .await;
     assert_eq!(runtime_state, RuntimeState::Attached);

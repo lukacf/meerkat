@@ -478,9 +478,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         || anthropic_user_id.is_some()
                         || anthropic_subscription_tier.is_some()
                     {
-                        metadata.account_id = anthropic_user_id
-                            .clone()
-                            .or_else(|| anthropic_email.clone());
+                        metadata.account_id = anthropic_user_id.or(anthropic_email);
                         metadata.plan = anthropic_subscription_tier.clone();
                         metadata.provider_metadata =
                             Some(meerkat_core::ProviderAuthMetadata::Anthropic(

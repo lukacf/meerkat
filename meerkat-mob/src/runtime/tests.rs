@@ -4477,6 +4477,37 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         .expect("create mob with persistent session service")
 }
 
+#[tokio::test]
+async fn persistent_mob_session_service_hides_archived_persisted_sessions() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let service = meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        1,
+        Arc::clone(&store),
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+
+    let mut archived = Session::new();
+    let session_id = archived.id().clone();
+    archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+    store
+        .save(&archived)
+        .await
+        .expect("save archived persisted session");
+
+    let loaded = crate::runtime::session_service::MobSessionService::load_persisted_session(
+        &service,
+        &session_id,
+    )
+    .await
+    .expect("load through persistent mob session service");
+    assert!(
+        loaded.is_none(),
+        "shared persistent mob service should hide archived persisted sessions"
+    );
+}
+
 fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<String> {
     let blocked = overlay
         .and_then(|overlay| overlay.blocked_tools.as_ref())

@@ -234,6 +234,7 @@ pub fn decode_llm_client_override_from_service(
 }
 
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
+#[derive(Clone)]
 pub struct AgentBuildConfig {
     /// Model name (e.g. "claude-sonnet-4-5").
     pub model: String,

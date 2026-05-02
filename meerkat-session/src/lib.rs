@@ -40,7 +40,10 @@ pub mod persistent;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod projector;
 
-pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot};
+pub use ephemeral::{
+    EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
+    SessionSnapshot,
+};
 
 /// Metadata key used to store session labels in the `Session.metadata` map.
 ///

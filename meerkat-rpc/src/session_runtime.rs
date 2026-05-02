@@ -1487,12 +1487,7 @@ impl SessionRuntime {
         }
     }
 
-    async fn cleanup_recovered_runtime_after_create_error(
-        &self,
-        session_id: &SessionId,
-        live_session_discarded: bool,
-        runtime_entry_existed_before_prepare: bool,
-    ) {
+    async fn cleanup_recovered_runtime_after_create_error(&self, session_id: &SessionId) {
         match self.service.export_live_session(session_id).await {
             Ok(_) => return,
             Err(SessionError::NotFound { .. }) => {}
@@ -1506,9 +1501,7 @@ impl SessionRuntime {
             }
         }
 
-        if live_session_discarded || !runtime_entry_existed_before_prepare {
-            self.runtime_adapter.unregister_session(session_id).await;
-        }
+        self.runtime_adapter.unregister_session(session_id).await;
     }
 
     async fn create_recovered_session(
@@ -1520,9 +1513,8 @@ impl SessionRuntime {
             session_id,
             runtime_entry_existed_before_prepare,
         } = recovered;
-        let live_session_discarded = match self.service.discard_live_session(&session_id).await {
-            Ok(()) => true,
-            Err(SessionError::NotFound { .. }) => false,
+        match self.service.discard_live_session(&session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => {
                 if !runtime_entry_existed_before_prepare {
                     self.runtime_adapter.unregister_session(&session_id).await;
@@ -1533,12 +1525,8 @@ impl SessionRuntime {
         match self.service.create_session(request).await {
             Ok(_) => Ok(()),
             Err(error) => {
-                self.cleanup_recovered_runtime_after_create_error(
-                    &session_id,
-                    live_session_discarded,
-                    runtime_entry_existed_before_prepare,
-                )
-                .await;
+                self.cleanup_recovered_runtime_after_create_error(&session_id)
+                    .await;
                 Err(session_error_to_rpc(error))
             }
         }
@@ -6190,6 +6178,53 @@ mod tests {
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
             "post-commit create error must preserve the committed runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_create_error_cleans_stale_preexisting_runtime_without_live_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (initial_tx, _initial_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize target for stale runtime cleanup".into(),
+                initial_tx,
+                None,
+            )
+            .await
+            .expect("materialize target session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live target session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "test precondition: stale pre-existing runtime should remain registered"
+        );
+        assert!(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_err(),
+            "test precondition: runtime exists without a live service session"
+        );
+
+        runtime
+            .cleanup_recovered_runtime_after_create_error(&session_id)
+            .await;
+
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "create errors without a live session must clear stale pre-existing runtime state"
         );
     }
 

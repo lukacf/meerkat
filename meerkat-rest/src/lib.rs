@@ -519,8 +519,6 @@ async fn cleanup_prepared_rest_runtime_if_new(
 async fn cleanup_prepared_rest_runtime_after_create_error(
     state: &AppState,
     session_id: &SessionId,
-    live_session_discarded: bool,
-    runtime_entry_existed_before_prepare: bool,
 ) {
     match state.session_service.export_live_session(session_id).await {
         Ok(_) => return,
@@ -535,16 +533,12 @@ async fn cleanup_prepared_rest_runtime_after_create_error(
         }
     }
 
-    if live_session_discarded || !runtime_entry_existed_before_prepare {
-        cleanup_prepared_rest_runtime(state, session_id).await;
-    }
+    cleanup_prepared_rest_runtime(state, session_id).await;
 }
 
 async fn cleanup_rest_runtime_context_after_create_error(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
-    live_session_discarded: bool,
-    runtime_entry_existed_before_prepare: bool,
 ) {
     match context
         .session_service
@@ -563,9 +557,7 @@ async fn cleanup_rest_runtime_context_after_create_error(
         }
     }
 
-    if live_session_discarded || !runtime_entry_existed_before_prepare {
-        context.runtime_adapter.unregister_session(session_id).await;
-    }
+    context.runtime_adapter.unregister_session(session_id).await;
 }
 
 #[cfg(feature = "comms")]
@@ -848,13 +840,7 @@ async fn apply_runtime_turn(
                     .create_session(recovered.into_deferred_create_request())
                     .await
                 {
-                    cleanup_rest_runtime_context_after_create_error(
-                        context,
-                        session_id,
-                        false,
-                        runtime_entry_existed_before_prepare,
-                    )
-                    .await;
+                    cleanup_rest_runtime_context_after_create_error(context, session_id).await;
                     return Err(error);
                 }
                 #[cfg(feature = "comms")]
@@ -1088,13 +1074,7 @@ async fn apply_runtime_turn(
                 .create_session(recovered.into_deferred_create_request())
                 .await
             {
-                cleanup_rest_runtime_context_after_create_error(
-                    context,
-                    session_id,
-                    false,
-                    runtime_entry_existed_before_prepare,
-                )
-                .await;
+                cleanup_rest_runtime_context_after_create_error(context, session_id).await;
                 return Err(error);
             }
             #[cfg(feature = "comms")]
@@ -4202,13 +4182,12 @@ async fn continue_session_inner(
             .await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
-        let live_session_discarded = match state
+        match state
             .session_service
             .discard_live_session(&session_id)
             .await
         {
-            Ok(()) => true,
-            Err(SessionError::NotFound { .. }) => false,
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
@@ -4228,13 +4207,7 @@ async fn continue_session_inner(
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                cleanup_prepared_rest_runtime_after_create_error(
-                    state,
-                    &session_id,
-                    live_session_discarded,
-                    runtime_entry_existed_before_prepare,
-                )
-                .await;
+                cleanup_prepared_rest_runtime_after_create_error(state, &session_id).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                     "Failed to rebuild session: {e}"
                 ))));
@@ -5458,6 +5431,73 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn rest_create_error_cleanup_clears_stale_preexisting_runtime_without_live_session() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let create_result = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = create_result.session_id;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test precondition: stale pre-existing runtime should remain registered"
+        );
+        assert!(
+            state
+                .session_service
+                .export_live_session(&session_id)
+                .await
+                .is_err(),
+            "test precondition: runtime exists without a live service session"
+        );
+
+        cleanup_rest_runtime_context_after_create_error(
+            &state.runtime_executor_context(),
+            &session_id,
+        )
+        .await;
+
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "create errors without a live session must clear stale pre-existing runtime state"
+        );
     }
 
     #[tokio::test]

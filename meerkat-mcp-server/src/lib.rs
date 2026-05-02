@@ -1283,8 +1283,6 @@ async fn cleanup_mcp_recovered_runtime_after_create_error(
     state: &MeerkatMcpState,
     ingress: &runtime_ingress::McpRuntimeIngressContext,
     session_id: &meerkat::SessionId,
-    live_session_discarded: bool,
-    runtime_entry_existed_before_prepare: bool,
 ) {
     match state.service.export_live_session(session_id).await {
         Ok(_) => return,
@@ -1299,9 +1297,7 @@ async fn cleanup_mcp_recovered_runtime_after_create_error(
         }
     }
 
-    if live_session_discarded || !runtime_entry_existed_before_prepare {
-        ingress.clear_session(session_id).await;
-    }
+    ingress.clear_session(session_id).await;
 }
 
 fn request_cancelled_tool_error() -> ToolCallError {
@@ -3266,9 +3262,8 @@ async fn handle_meerkat_resume(
     .await?;
 
     let result = if needs_rebuild {
-        let live_session_discarded = match state.service.discard_live_session(&session_id).await {
-            Ok(()) => true,
-            Err(SessionError::NotFound { .. }) => false,
+        match state.service.discard_live_session(&session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => {
                 if !runtime_entry_existed_before_prepare {
                     state.runtime_adapter.unregister_session(&session_id).await;
@@ -3286,14 +3281,8 @@ async fn handle_meerkat_resume(
                     .await
             }
             Err(error) => {
-                cleanup_mcp_recovered_runtime_after_create_error(
-                    state,
-                    &ingress,
-                    &session_id,
-                    live_session_discarded,
-                    runtime_entry_existed_before_prepare,
-                )
-                .await;
+                cleanup_mcp_recovered_runtime_after_create_error(state, &ingress, &session_id)
+                    .await;
                 Err(error)
             }
         }
@@ -3330,8 +3319,6 @@ async fn handle_meerkat_resume(
                             state,
                             &ingress,
                             &session_id,
-                            false,
-                            runtime_entry_existed_before_prepare,
                         )
                         .await;
                         Err(error)
@@ -5493,18 +5480,37 @@ mod tests {
             "test precondition: only a durable row should exist"
         );
 
-        cleanup_mcp_recovered_runtime_after_create_error(
-            &state,
-            &ingress,
-            &session_id,
-            false,
-            false,
-        )
-        .await;
+        cleanup_mcp_recovered_runtime_after_create_error(&state, &ingress, &session_id).await;
 
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,
             "pre-commit create errors without a live session must clear prepared runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_recovered_create_error_cleans_stale_preexisting_runtime_without_live_session() {
+        let (state, session_id) = state_with_persisted_session_metadata(false, None).await;
+        let ingress = state.runtime_ingress_context();
+        ingress.ensure_session(&session_id).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test precondition: stale pre-existing runtime should be registered"
+        );
+        assert!(
+            state
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_err(),
+            "test precondition: runtime exists without a live service session"
+        );
+
+        cleanup_mcp_recovered_runtime_after_create_error(&state, &ingress, &session_id).await;
+
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "create errors without a live session must clear stale pre-existing runtime state"
         );
     }
 

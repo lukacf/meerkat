@@ -1091,29 +1091,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
-    /// Create a persistent session service whose active admission is enforced
-    /// by an outer runtime boundary.
-    pub fn new_with_unbounded_active_capacity(
-        builder: B,
-        archived_history_capacity: usize,
-        store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
-        blob_store: Arc<dyn BlobStore>,
-    ) -> Self {
-        Self {
-            inner: EphemeralSessionService::new_unbounded_active_capacity(builder),
-            store,
-            runtime_store,
-            blob_store,
-            event_store: None,
-            projector: None,
-            archived_sessions: Mutex::new(IndexMap::new()),
-            archived_history_capacity: archived_history_capacity.max(1),
-            checkpointer_gates: Mutex::new(HashMap::new()),
-            recovery_gates: Mutex::new(HashMap::new()),
-        }
-    }
-
     /// Attach the append-only event log and derived file projector used by
     /// persistent sessions.
     ///
@@ -1201,23 +1178,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         req: CreateSessionRequest,
         admission: crate::ephemeral::RuntimeContextAdmissionGuard,
     ) -> Result<RunResult, SessionError> {
-        let session_id = req
-            .build
-            .as_ref()
-            .and_then(|build| build.resume_session.as_ref())
-            .map(|session| session.id().clone())
-            .ok_or_else(|| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "reserved create admission requires a resume_session".to_string(),
-                ))
-            })?;
-        let reserved_admission_registration = self
-            .inner
-            .insert_reserved_create_admission(session_id.clone(), admission)
-            .await?;
-        let result = self.create_session(req).await;
-        reserved_admission_registration.discard();
-        result
+        self.create_session_with_admission(req, Some(admission))
+            .await
     }
 
     pub async fn start_turn_with_reserved_admission(
@@ -2084,11 +2046,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
-#[async_trait]
-impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
-    async fn create_session(
+impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    async fn create_session_with_admission(
         &self,
         mut req: CreateSessionRequest,
+        reserved_create_admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, SessionError> {
         // Inject a checkpointer for all sessions. The keep-alive attached loop
         // calls it after each interaction; runtime-backed sessions keep it
@@ -2145,7 +2107,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         };
         let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
         let callback_session_id = resume_session_id.clone();
-        let result = match self.inner.create_session(req).await {
+        let result = match self
+            .inner
+            .create_session_with_admission(req, reserved_create_admission)
+            .await
+        {
             Ok(result) => result,
             Err(error) => {
                 if Self::callback_pending_terminal(&error).is_some()
@@ -2185,6 +2151,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .store(saved_len, std::sync::atomic::Ordering::Release);
 
         Ok(result)
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        self.create_session_with_admission(req, None).await
     }
 
     async fn start_turn(
@@ -5905,55 +5878,6 @@ mod tests {
                 .is_some_and(|err| err.to_string().contains("Max sessions")),
             "final joined release should restore the staged session capacity instead of freeing it"
         );
-    }
-
-    #[tokio::test]
-    async fn test_reserved_create_admission_registration_drop_releases_capacity() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let reserved = Session::new();
-        let reserved_id = reserved.id().clone();
-        store
-            .save(&reserved)
-            .await
-            .expect("persist reserved source");
-        let admission = service
-            .reserve_runtime_turn_admission(&reserved_id)
-            .await
-            .expect("reserve create admission");
-        let registration = service
-            .inner
-            .insert_reserved_create_admission(reserved_id, admission)
-            .await
-            .expect("register reserved create admission");
-
-        let blocker = Session::new();
-        let blocker_id = blocker.id().clone();
-        store.save(&blocker).await.expect("persist blocker");
-        let blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
-        let blocked_message = blocked
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "reservation unexpectedly succeeded".to_string());
-        assert!(
-            blocked_message.contains("Max sessions"),
-            "reserved create registration should hold active capacity: {blocked_message}"
-        );
-
-        drop(registration);
-
-        service
-            .reserve_runtime_turn_admission(&blocker_id)
-            .await
-            .expect("dropping reserved create registration should release capacity");
     }
 
     #[tokio::test]

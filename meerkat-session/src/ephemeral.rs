@@ -28,10 +28,9 @@ use meerkat_core::{
     SessionSystemContextState,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex as StdMutex, PoisonError};
 
 // Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
 #[cfg(target_arch = "wasm32")]
@@ -239,13 +238,6 @@ struct ActiveCapacityLeaseRelease {
     staged_capacity_permit: Option<Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>>,
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) struct ReservedCreateAdmissionRegistration {
-    reserved_create_admissions: Arc<StdMutex<HashMap<SessionId, RuntimeContextAdmissionGuard>>>,
-    session_id: SessionId,
-    release_on_drop: bool,
-}
-
 impl Drop for RuntimeContextAdmissionGuard {
     fn drop(&mut self) {
         if let Some(active_capacity_lease) = self.active_capacity_lease.take() {
@@ -299,28 +291,6 @@ impl RuntimeContextAdmissionGuard {
             return;
         }
         self.restore_staged_capacity_on_drop = true;
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-impl ReservedCreateAdmissionRegistration {
-    pub(crate) fn discard(mut self) {
-        self.reserved_create_admissions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.session_id);
-        self.release_on_drop = false;
-    }
-}
-
-impl Drop for ReservedCreateAdmissionRegistration {
-    fn drop(&mut self) {
-        if self.release_on_drop {
-            self.reserved_create_admissions
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&self.session_id);
-        }
     }
 }
 
@@ -733,7 +703,6 @@ fn clear_cancel_after_boundary_request(handle: &Option<Arc<AtomicBool>>) {
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
-    reserved_create_admissions: Arc<StdMutex<HashMap<SessionId, RuntimeContextAdmissionGuard>>>,
     builder: B,
     max_sessions: Option<usize>,
     active_session_capacity: Option<Arc<Semaphore>>,
@@ -872,24 +841,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Self {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
-            reserved_create_admissions: Arc::new(StdMutex::new(HashMap::new())),
             builder,
             max_sessions: Some(max_sessions),
             active_session_capacity: Some(Arc::new(Semaphore::new(max_sessions))),
-            session_registered: tokio::sync::Notify::new(),
-        }
-    }
-
-    /// Create an ephemeral service whose active-turn admission is enforced by
-    /// an outer runtime boundary.
-    pub fn new_unbounded_active_capacity(builder: B) -> Self {
-        Self {
-            sessions: RwLock::new(IndexMap::new()),
-            archived_views: RwLock::new(IndexMap::new()),
-            reserved_create_admissions: Arc::new(StdMutex::new(HashMap::new())),
-            builder,
-            max_sessions: None,
-            active_session_capacity: None,
             session_registered: tokio::sync::Notify::new(),
         }
     }
@@ -1592,7 +1546,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         )))
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(feature = "session-store")]
     pub(crate) async fn acquire_runtime_capacity_admission(
         &self,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
@@ -1605,28 +1559,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) async fn insert_reserved_create_admission(
-        &self,
-        session_id: SessionId,
-        admission: RuntimeContextAdmissionGuard,
-    ) -> Result<ReservedCreateAdmissionRegistration, SessionError> {
-        let mut reserved = self
-            .reserved_create_admissions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if reserved.contains_key(&session_id) {
-            return Err(SessionError::Busy { id: session_id });
-        }
-        reserved.insert(session_id.clone(), admission);
-        Ok(ReservedCreateAdmissionRegistration {
-            reserved_create_admissions: Arc::clone(&self.reserved_create_admissions),
-            session_id,
-            release_on_drop: true,
-        })
-    }
-
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(feature = "session-store")]
     pub(crate) async fn start_turn_with_runtime_context_admission(
         &self,
         id: &SessionId,
@@ -1638,7 +1571,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(|(error, _admission)| error)
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(feature = "session-store")]
     pub(crate) async fn start_turn_with_runtime_context_admission_recovering_not_found(
         &self,
         id: &SessionId,
@@ -2024,10 +1957,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    pub(crate) async fn create_session_with_admission(
+        &self,
+        req: CreateSessionRequest,
+        reserved_create_admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<RunResult, SessionError> {
         let prompt = req.prompt.clone();
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
@@ -2037,7 +1972,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref());
-        let resumed_session_id = resumed_session.map(|session| session.id().clone());
         let mut deferred_turn_state = resumed_session
             .and_then(meerkat_core::Session::deferred_turn_state)
             .unwrap_or_default();
@@ -2070,14 +2004,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         }
         let deferred_turn_state = Arc::new(std::sync::Mutex::new(deferred_turn_state));
 
-        let reserved_create_admission = if let Some(session_id) = resumed_session_id.as_ref() {
-            self.reserved_create_admissions
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(session_id)
-        } else {
-            None
-        };
         let create_capacity_permit = match reserved_create_admission {
             Some(admission) => admission.into_create_session_permit(),
             None => self.try_acquire_active_permit()?,
@@ -2325,6 +2251,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         };
 
         result.map_err(SessionError::Agent)
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        self.create_session_with_admission(req, None).await
     }
 
     async fn start_turn(

@@ -85,38 +85,6 @@ pub fn build_runtime_backed_service_with_capacities(
     (service, runtime_adapter)
 }
 
-#[cfg(feature = "session-store")]
-pub fn build_runtime_backed_service_with_unbounded_active_capacity(
-    mut builder: FactoryAgentBuilder,
-    archived_history_capacity: usize,
-    persistence: crate::PersistenceBundle,
-) -> (
-    PersistentSessionService<FactoryAgentBuilder>,
-    Arc<MeerkatMachine>,
-) {
-    let runtime_adapter = persistence.runtime_adapter();
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    let event_projection = persistence.event_projection();
-    let (store, runtime_store, blob_store) = persistence.into_parts();
-    builder = builder.with_image_generation_machine(runtime_adapter.clone());
-    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
-        &store,
-    ))));
-    builder.default_blob_store = Some(blob_store.clone());
-    let mut service = PersistentSessionService::new_with_unbounded_active_capacity(
-        builder,
-        archived_history_capacity,
-        store,
-        runtime_store,
-        blob_store,
-    );
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    if let Some((event_store, projector)) = event_projection {
-        service = service.with_event_projection(event_store, projector);
-    }
-    (service, runtime_adapter)
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceRuntimeMaterializeError {
     #[error(transparent)]

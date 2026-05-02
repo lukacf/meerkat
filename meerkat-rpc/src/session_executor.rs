@@ -431,15 +431,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 )
                 .await
         };
-        if let Some(admission) = pre_admission {
-            if admission.promoted_from_staged()
-                && SessionRuntime::is_pre_run_apply_runtime_turn_failure(&result)
-            {
-                admission.restore_staged_and_keep();
-            } else {
-                drop(admission);
-            }
-        }
+        drop(pre_admission);
 
         let _ = forwarder.await;
         result.map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))

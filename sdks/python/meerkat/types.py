@@ -171,6 +171,25 @@ class TurnInstruction(TypedDict):
     body: str
 
 
+RenderClass = Literal[
+    "user_prompt",
+    "peer_message",
+    "peer_request",
+    "peer_response",
+    "external_event",
+    "flow_step",
+    "continuation",
+    "system_notice",
+    "tool_scope_notice",
+    "ops_progress",
+]
+RenderSalience = Literal["background", "normal", "important", "urgent"]
+RenderMetadata = TypedDict(
+    "RenderMetadata",
+    {"class": RenderClass, "salience": NotRequired[RenderSalience]},
+)
+
+
 class TurnToolOverlay(TypedDict, total=False):
     allowed_tools: NotRequired[list[str] | None]
     blocked_tools: NotRequired[list[str] | None]
@@ -184,8 +203,10 @@ KeepAliveOverride = KeepAliveSetOverride | ClearTurnMetadataOverride
 class RuntimeTurnMetadata(TypedDict, total=False):
     """Canonical runtime metadata carrier for session creation and turn starts."""
 
+    handling_mode: Literal["queue", "steer"]
     model: str
     provider: str
+    render_metadata: RenderMetadata
     provider_params: ProviderParamsOverride
     connection_ref: ConnectionRefOverride
     keep_alive: KeepAliveOverride

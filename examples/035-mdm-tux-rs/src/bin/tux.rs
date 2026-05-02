@@ -490,32 +490,7 @@ async fn rpc_command_loop(
                             .await;
                         return;
                     };
-                    let mode_str = match handling_mode {
-                        HandlingMode::Steer => "steer",
-                        HandlingMode::Queue => "queue",
-                    };
-                    let mut params = serde_json::json!({
-                        "session_id": session_id,
-                        "prompt": prompt,
-                        "handling_mode": mode_str,
-                    });
-                    if let Some(m) = model {
-                        // Infer provider from model name prefix
-                        let provider = if m.starts_with("claude-") {
-                            "anthropic"
-                        } else if m.starts_with("gpt-")
-                            || m.starts_with("o1-")
-                            || m.starts_with("o3-")
-                        {
-                            "openai"
-                        } else if m.starts_with("gemini-") {
-                            "gemini"
-                        } else {
-                            "self_hosted"
-                        };
-                        params["model"] = Value::String(m);
-                        params["provider"] = Value::String(provider.into());
-                    }
+                    let params = build_start_turn_params(session_id, prompt, handling_mode, model);
                     match client.request("turn/start", params).await {
                         Ok(_) => {
                             // Turn started; events arrive via notifications.
@@ -2901,6 +2876,43 @@ fn find_all_flags(args: &[String], flag: &str) -> Vec<String> {
     values
 }
 
+fn build_start_turn_params(
+    session_id: String,
+    prompt: String,
+    handling_mode: HandlingMode,
+    model: Option<String>,
+) -> Value {
+    let mode_str = match handling_mode {
+        HandlingMode::Steer => "steer",
+        HandlingMode::Queue => "queue",
+    };
+    let mut turn_metadata = serde_json::json!({
+        "handling_mode": mode_str,
+    });
+    if let Some(model) = model {
+        let provider = inferred_provider_for_model(&model);
+        turn_metadata["model"] = Value::String(model);
+        turn_metadata["provider"] = Value::String(provider.into());
+    }
+    serde_json::json!({
+        "session_id": session_id,
+        "prompt": prompt,
+        "turn_metadata": turn_metadata,
+    })
+}
+
+fn inferred_provider_for_model(model: &str) -> &'static str {
+    if model.starts_with("claude-") {
+        "anthropic"
+    } else if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
+        "openai"
+    } else if model.starts_with("gemini-") {
+        "gemini"
+    } else {
+        "self_hosted"
+    }
+}
+
 fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
     sock.connect(format!("{host}:{port}"))
@@ -3017,5 +3029,21 @@ mod tests {
         assert_eq!(target.handling_mode, HandlingMode::Steer);
         target.handling_mode = HandlingMode::Queue;
         assert_eq!(target.handling_mode, HandlingMode::Queue);
+    }
+
+    #[test]
+    fn start_turn_params_use_runtime_metadata_carrier() {
+        let params = build_start_turn_params(
+            "sess-1".into(),
+            "hello".into(),
+            HandlingMode::Queue,
+            Some("gpt-5.4".into()),
+        );
+        assert!(params.get("handling_mode").is_none());
+        assert!(params.get("model").is_none());
+        assert!(params.get("provider").is_none());
+        assert_eq!(params["turn_metadata"]["handling_mode"], "queue");
+        assert_eq!(params["turn_metadata"]["model"], "gpt-5.4");
+        assert_eq!(params["turn_metadata"]["provider"], "openai");
     }
 }

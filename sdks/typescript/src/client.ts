@@ -514,6 +514,7 @@ function runtimeTurnMetadataPayload(
 ): RuntimeTurnMetadataPayload | undefined {
   if (!options) return undefined;
   const metadata: RuntimeTurnMetadataPayload = {};
+  setIfDefined(metadata, "handling_mode", options.handlingMode);
   const wireRefs = skillKeysToWire(options.skillReferences);
   if (wireRefs) {
     metadata.skill_references = wireRefs;
@@ -535,6 +536,7 @@ function runtimeTurnMetadataPayload(
   if (keepAlive) metadata.keep_alive = keepAlive;
   setIfDefined(metadata, "model", options.model);
   setIfDefined(metadata, "provider", runtimeProviderPayload(options.provider));
+  setIfDefined(metadata, "render_metadata", options.renderMetadata);
   if (options.providerParams != null) {
     metadata.provider_params =
       options.providerParams.action === "clear"

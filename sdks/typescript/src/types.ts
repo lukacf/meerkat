@@ -20,10 +20,12 @@ import type {
   WireBudgetSplitPolicy,
   WireConnectionRef,
   WireContentInput,
+  WireHandlingMode,
   WireMemberLaunchMode,
   WireMobBackendKind,
   WireMobProfile,
   WireMobRuntimeMode,
+  WireRenderMetadata,
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
@@ -261,12 +263,14 @@ export type TurnInstructionInput = string | TurnInstruction;
 
 /** Canonical runtime metadata carrier for session creation and turn starts. */
 export interface RuntimeTurnMetadata {
+  readonly handlingMode?: WireHandlingMode;
   readonly skillReferences?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: TurnInstructionInput[];
   readonly keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;
   readonly model?: string;
   readonly provider?: string;
+  readonly renderMetadata?: WireRenderMetadata;
   readonly providerParams?: TurnMetadataOverride<Record<string, unknown>>;
   readonly connectionRef?: TurnMetadataOverride<WireConnectionRef>;
 }

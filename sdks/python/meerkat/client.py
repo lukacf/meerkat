@@ -521,6 +521,9 @@ def _runtime_turn_metadata(
         return None
 
     metadata: dict[str, Any] = {}
+    if source.get("handling_mode") is not None:
+        metadata["handling_mode"] = source["handling_mode"]
+
     wire_refs = _skill_keys_to_wire(source.get("skill_references"))
     if wire_refs is not None:
         metadata["skill_references"] = wire_refs
@@ -547,6 +550,19 @@ def _runtime_turn_metadata(
     provider = source.get("provider")
     if isinstance(provider, str):
         metadata["provider"] = _runtime_provider_wire(provider)
+
+    render_metadata = source.get("render_metadata")
+    if render_metadata is not None:
+        if (
+            isinstance(render_metadata, dict)
+            and "class_" in render_metadata
+            and "class" not in render_metadata
+        ):
+            render_metadata = {
+                "class": render_metadata["class_"],
+                **{key: value for key, value in render_metadata.items() if key != "class_"},
+            }
+        metadata["render_metadata"] = render_metadata
 
     if source.get("provider_params") is not None:
         provider_params = source["provider_params"]

@@ -1006,8 +1006,10 @@ describe("Session wrappers", () => {
         skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
         additionalInstructions: ["a"],
         keepAlive: { action: "set", value: { policy: "pinned", ttlSecs: 30 } },
+        handlingMode: "steer",
         model: "m",
         provider: "openai",
+        renderMetadata: { class: "peer_request", salience: "urgent" },
         providerParams: {
           action: "set",
           value: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
@@ -1093,7 +1095,12 @@ describe("Session wrappers", () => {
       action: "set",
       value: { policy: "pinned", ttl_secs: 30 },
     });
+    assert.equal(calls[0].params.turn_metadata.handling_mode, "steer");
     assert.equal(calls[0].params.turn_metadata.provider, "openai");
+    assert.deepEqual(calls[0].params.turn_metadata.render_metadata, {
+      class: "peer_request",
+      salience: "urgent",
+    });
     assert.deepEqual(calls[0].params.turn_metadata.provider_params, {
       action: "set",
       value: {

@@ -442,6 +442,8 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     public_metadata_hints = get_type_hints(RuntimeTurnMetadata)
     assert "TurnInstruction" in str(public_metadata_hints["additional_instructions"])
     assert "TurnToolOverlay" in str(public_metadata_hints["flow_tool_overlay"])
+    assert "handling_mode" in public_metadata_hints
+    assert "RenderMetadata" in str(public_metadata_hints["render_metadata"])
 
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
@@ -1923,7 +1925,11 @@ async def test_deferred_turn_build_only_options_remain_top_level():
         max_tokens=256,
         output_schema={"type": "object"},
         structured_output_retries=3,
-        turn_metadata={"model": "gpt-5.4"},
+        turn_metadata={
+            "handling_mode": "steer",
+            "model": "gpt-5.4",
+            "render_metadata": {"class": "peer_request", "salience": "urgent"},
+        },
     )
 
     assert result.text == "ok"
@@ -1937,7 +1943,11 @@ async def test_deferred_turn_build_only_options_remain_top_level():
                 "max_tokens": 256,
                 "output_schema": {"type": "object"},
                 "structured_output_retries": 3,
-                "turn_metadata": {"model": "gpt-5.4"},
+                "turn_metadata": {
+                    "handling_mode": "steer",
+                    "model": "gpt-5.4",
+                    "render_metadata": {"class": "peer_request", "salience": "urgent"},
+                },
             },
         )
     ]

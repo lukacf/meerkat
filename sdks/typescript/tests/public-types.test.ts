@@ -51,8 +51,10 @@ import type {
 } from "../src/generated/types.js";
 
 const publicRuntimeTurnMetadata: RuntimeTurnMetadata = {
+  handlingMode: "steer",
   model: "claude-sonnet-4-6",
   provider: "anthropic",
+  renderMetadata: { class: "peer_request", salience: "urgent" },
   skillReferences: [
     { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
   ],

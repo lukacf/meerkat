@@ -121,13 +121,17 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Atomically update the runtime-owned OAuth login-flow payload snapshot.
+    ///
+    /// Stores that support OAuth snapshots must override this with a lock,
+    /// transaction, or compare-and-swap boundary. A load/compute/persist
+    /// fallback is not safe for admission, capacity, or consume claims.
     fn update_auth_oauth_flow_snapshot(
         &self,
-        update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+        _update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
     ) -> Result<(), RuntimeStoreError> {
-        let current = self.load_auth_oauth_flow_snapshot()?;
-        let next = update(current.as_deref())?;
-        self.persist_auth_oauth_flow_snapshot(&next)
+        Err(RuntimeStoreError::Unsupported(
+            "update_auth_oauth_flow_snapshot".into(),
+        ))
     }
 
     /// Atomically persist session delta + authoritative receipt + input state updates.

@@ -89,6 +89,24 @@ pub(crate) struct ReleasedOAuthFlows {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl ReleasedOAuthFlows {
+    fn empty(lease_key: LeaseKey) -> Self {
+        Self {
+            lease_key,
+            browser_flow_ids: Vec::new(),
+            device_flow_ids: Vec::new(),
+        }
+    }
+
+    fn dedup(&mut self) {
+        self.browser_flow_ids.sort();
+        self.browser_flow_ids.dedup();
+        self.device_flow_ids.sort();
+        self.device_flow_ids.dedup();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn merge_oauth_membership(
     restored: &mut auth_dsl::AuthMachineState,
     current: &auth_dsl::AuthMachineState,
@@ -146,6 +164,13 @@ fn merge_oauth_membership(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
+    fn oauth_flows_for_release(
+        &self,
+        lease_key: &LeaseKey,
+    ) -> Result<ReleasedOAuthFlows, DslTransitionError> {
+        Ok(ReleasedOAuthFlows::empty(lease_key.clone()))
+    }
+
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError>;
 }
 
@@ -225,11 +250,8 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn notify_release_observers(
-        &self,
-        released: &ReleasedOAuthFlows,
-    ) -> Result<(), DslTransitionError> {
-        let observers = {
+    fn live_release_observers(&self) -> Vec<Arc<dyn AuthLeaseReleaseObserver>> {
+        {
             let mut guard = self
                 .release_observers
                 .lock()
@@ -243,7 +265,35 @@ impl RuntimeAuthLeaseHandle {
                 None => false,
             });
             observers
-        };
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn collect_release_observer_flows(
+        &self,
+        observers: &[Arc<dyn AuthLeaseReleaseObserver>],
+        lease_key: &LeaseKey,
+    ) -> Result<ReleasedOAuthFlows, DslTransitionError> {
+        let mut released = ReleasedOAuthFlows::empty(lease_key.clone());
+        for observer in observers {
+            let mut observed = observer.oauth_flows_for_release(lease_key)?;
+            released
+                .browser_flow_ids
+                .append(&mut observed.browser_flow_ids);
+            released
+                .device_flow_ids
+                .append(&mut observed.device_flow_ids);
+        }
+        released.dedup();
+        Ok(released)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn notify_release_observers(
+        &self,
+        observers: &[Arc<dyn AuthLeaseReleaseObserver>],
+        released: &ReleasedOAuthFlows,
+    ) -> Result<(), DslTransitionError> {
         for observer in observers {
             observer.auth_lease_released(released)?;
         }
@@ -649,7 +699,9 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         // payloads, so a same-target flow admitted after this transition is
         // not removed by stale target-wide cleanup.
         #[cfg(not(target_arch = "wasm32"))]
-        let released;
+        let release_observers = self.live_release_observers();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut released = self.collect_release_observer_flows(&release_observers, lease_key)?;
         #[cfg(not(target_arch = "wasm32"))]
         let previous_state;
         #[cfg(not(target_arch = "wasm32"))]
@@ -679,11 +731,13 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 previous_state = entry.state.clone();
-                released = ReleasedOAuthFlows {
-                    lease_key: lease_key.clone(),
-                    browser_flow_ids: entry.state.oauth_browser_flow_ids.iter().cloned().collect(),
-                    device_flow_ids: entry.state.oauth_device_flow_ids.iter().cloned().collect(),
-                };
+                released
+                    .browser_flow_ids
+                    .extend(entry.state.oauth_browser_flow_ids.iter().cloned());
+                released
+                    .device_flow_ids
+                    .extend(entry.state.oauth_device_flow_ids.iter().cloned());
+                released.dedup();
             }
             let from_phase = map_phase(entry.state.lifecycle_phase);
             auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
@@ -698,7 +752,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Err(err) = self.notify_release_observers(&released) {
+        if let Err(err) = self.notify_release_observers(&release_observers, &released) {
             self.restore_released_lease_after_observer_failure(
                 lease_key,
                 previous_state,

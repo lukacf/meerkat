@@ -172,13 +172,35 @@ fn oauth_device_state_error(err: OAuthFlowError) -> (StatusCode, String) {
     }
 }
 
+fn oauth_terminal_device_consume_error(err: OAuthFlowError) -> (StatusCode, String) {
+    match err {
+        OAuthFlowError::LifecycleRejected { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("oauth device terminal consume failed: {err}"),
+        ),
+        other => oauth_device_state_error(other),
+    }
+}
+
+fn release_uncredentialed_terminal_oauth_lifecycle(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+) {
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    if !auth_lease.snapshot(&lease_key).credential_present {
+        let _ = auth_lease.release_credential_lifecycle(&lease_key);
+    }
+}
+
 fn consume_terminal_device_flow(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
     poll_lease: OAuthDevicePollLease,
 ) -> Result<(), (StatusCode, String)> {
-    poll_lease
-        .consume()
-        .map(|_| ())
-        .map_err(oauth_device_state_error)
+    poll_lease.consume().map(|_| ()).map_err(|err| {
+        release_uncredentialed_terminal_oauth_lifecycle(auth_lease, connection_ref);
+        oauth_terminal_device_consume_error(err)
+    })
 }
 
 fn finish_device_flow_poll(poll_lease: OAuthDevicePollLease) -> Result<(), (StatusCode, String)> {
@@ -194,12 +216,36 @@ fn verify_terminal_device_flow(
         .map_err(oauth_device_state_error)
 }
 
+struct PreparedTokenCommitSnapshot {
+    key: TokenKey,
+    lease_key: meerkat_core::handles::LeaseKey,
+    previous: Option<PersistedTokens>,
+}
+
 struct TokenCommitSnapshot {
     key: TokenKey,
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
+}
+
+async fn prepare_token_commit_unlocked(
+    token_store: &dyn TokenStore,
+    connection_ref: &ConnectionRef,
+) -> Result<PreparedTokenCommitSnapshot, (StatusCode, String)> {
+    let key = TokenKey::from_connection_ref(connection_ref);
+    let previous = token_store.load(&key).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("TokenStore load failed: {e}"),
+        )
+    })?;
+    Ok(PreparedTokenCommitSnapshot {
+        key,
+        lease_key: meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref),
+        previous,
+    })
 }
 
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
@@ -393,23 +439,49 @@ async fn rollback_token_commit(
     Ok(())
 }
 
-async fn rollback_token_commit_after_terminal_consume_failure(
+async fn save_prepared_tokens_after_terminal_consume_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    commit: &TokenCommitSnapshot,
-    consume_error: impl std::fmt::Display,
-) -> (StatusCode, String) {
-    let base = format!("oauth state terminal consume failed: {consume_error}");
-    match rollback_token_commit(token_store, auth_lease, commit).await {
-        Ok(()) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{base}; token commit rolled back"),
-        ),
-        Err(rollback_error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{base}; token commit rollback failed: {rollback_error}"),
-        ),
+    connection_ref: &ConnectionRef,
+    tokens: &PersistedTokens,
+    prepared: PreparedTokenCommitSnapshot,
+) -> Result<(), (StatusCode, String)> {
+    let previous_lifecycle = auth_lease.snapshot(&prepared.lease_key);
+    let transition =
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens) {
+            Ok(transition) => transition,
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("AuthMachine lifecycle acquire failed after OAuth consume: {e}"),
+                ));
+            }
+        };
+    let committed_tokens =
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
+    let commit = TokenCommitSnapshot {
+        key: prepared.key,
+        lease_key: prepared.lease_key,
+        previous: prepared.previous,
+        previous_lifecycle,
+        lifecycle_transition: transition,
+    };
+    if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
+        let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
+            Ok(()) => {
+                format!(
+                    "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
+                )
+            }
+            Err(rollback_error) => {
+                format!(
+                    "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
+                )
+            }
+        };
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
     }
+    Ok(())
 }
 
 async fn save_tokens_and_consume_device_flow_unlocked(
@@ -420,25 +492,16 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     poll_lease: OAuthDevicePollLease,
 ) -> Result<(), (StatusCode, String)> {
     verify_terminal_device_flow(&poll_lease)?;
-    let commit = save_tokens_and_publish_lifecycle_commit_unlocked(
+    let prepared = prepare_token_commit_unlocked(token_store, connection_ref).await?;
+    consume_terminal_device_flow(auth_lease, connection_ref, poll_lease)?;
+    save_prepared_tokens_after_terminal_consume_unlocked(
         token_store,
         auth_lease,
         connection_ref,
         tokens,
-        false,
+        prepared,
     )
     .await?;
-    if let Err(err) = consume_terminal_device_flow(poll_lease) {
-        return Err(rollback_token_commit_after_terminal_consume_failure(
-            token_store,
-            auth_lease,
-            &commit,
-            err.1,
-        )
-        .await);
-    }
-    mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
-        .await?;
     Ok(())
 }
 
@@ -475,28 +538,24 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     tokens: &PersistedTokens,
     flow: BrowserFlowConsume<'_>,
 ) -> Result<(), (StatusCode, String)> {
-    let commit = save_tokens_and_publish_lifecycle_commit_unlocked(
+    let prepared = prepare_token_commit_unlocked(token_store, connection_ref).await?;
+    flow.authority
+        .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .map_err(|err| {
+            release_uncredentialed_terminal_oauth_lifecycle(auth_lease, connection_ref);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("oauth state terminal consume failed: {err}"),
+            )
+        })?;
+    save_prepared_tokens_after_terminal_consume_unlocked(
         token_store,
         auth_lease,
         connection_ref,
         tokens,
-        false,
+        prepared,
     )
     .await?;
-    if let Err(err) =
-        flow.authority
-            .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
-    {
-        return Err(rollback_token_commit_after_terminal_consume_failure(
-            token_store,
-            auth_lease,
-            &commit,
-            err,
-        )
-        .await);
-    }
-    mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
-        .await?;
     Ok(())
 }
 
@@ -1439,7 +1498,11 @@ pub async fn complete_device_login(
                 (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
         },
-        DevicePollOutcome::AccessDenied => match consume_terminal_device_flow(poll_lease) {
+        DevicePollOutcome::AccessDenied => match consume_terminal_device_flow(
+            state.auth_lease.as_ref(),
+            &connection_ref,
+            poll_lease,
+        ) {
             Ok(()) => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "state": "access_denied" })),
@@ -1449,7 +1512,11 @@ pub async fn complete_device_login(
                 (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
         },
-        DevicePollOutcome::Expired => match consume_terminal_device_flow(poll_lease) {
+        DevicePollOutcome::Expired => match consume_terminal_device_flow(
+            state.auth_lease.as_ref(),
+            &connection_ref,
+            poll_lease,
+        ) {
             Ok(()) => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "state": "expired" })),
@@ -2023,87 +2090,26 @@ mod tests {
         }
     }
 
-    struct BlockingFirstSaveTokenStore {
+    struct SaveCountingTokenStore {
         inner: EphemeralTokenStore,
-        blocked_secret: &'static str,
-        blocked: std::sync::atomic::AtomicBool,
-        save_started: Arc<tokio::sync::Notify>,
-        release_save: Arc<tokio::sync::Notify>,
-    }
-
-    impl BlockingFirstSaveTokenStore {
-        fn new(blocked_secret: &'static str) -> Self {
-            Self {
-                inner: EphemeralTokenStore::new(),
-                blocked_secret,
-                blocked: std::sync::atomic::AtomicBool::new(false),
-                save_started: Arc::new(tokio::sync::Notify::new()),
-                release_save: Arc::new(tokio::sync::Notify::new()),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TokenStore for BlockingFirstSaveTokenStore {
-        async fn load(
-            &self,
-            key: &TokenKey,
-        ) -> Result<Option<PersistedTokens>, meerkat_providers::auth_store::TokenStoreError>
-        {
-            self.inner.load(key).await
-        }
-
-        async fn save(
-            &self,
-            key: &TokenKey,
-            tokens: &PersistedTokens,
-        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await?;
-            if tokens.primary_secret.as_deref() == Some(self.blocked_secret)
-                && !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
-                self.save_started.notify_waiters();
-                self.release_save.notified().await;
-            }
-            Ok(())
-        }
-
-        async fn clear(
-            &self,
-            key: &TokenKey,
-        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
-        }
-
-        async fn list(
-            &self,
-        ) -> Result<Vec<TokenKey>, meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.list().await
-        }
-
-        fn backend_name(&self) -> &'static str {
-            "blocking_first_save"
-        }
-    }
-
-    struct RollbackSaveFailingTokenStore {
-        inner: EphemeralTokenStore,
-        fail_secret: &'static str,
         save_count: std::sync::atomic::AtomicUsize,
     }
 
-    impl RollbackSaveFailingTokenStore {
-        fn new(fail_secret: &'static str) -> Self {
+    impl SaveCountingTokenStore {
+        fn new() -> Self {
             Self {
                 inner: EphemeralTokenStore::new(),
-                fail_secret,
                 save_count: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        fn save_count(&self) -> usize {
+            self.save_count.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
     #[async_trait::async_trait]
-    impl TokenStore for RollbackSaveFailingTokenStore {
+    impl TokenStore for SaveCountingTokenStore {
         async fn load(
             &self,
             key: &TokenKey,
@@ -2117,15 +2123,8 @@ mod tests {
             key: &TokenKey,
             tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            let save_count = self
-                .save_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            if save_count > 1 && tokens.primary_secret.as_deref() == Some(self.fail_secret) {
-                return Err(meerkat_providers::auth_store::TokenStoreError::Unavailable(
-                    "rollback save unavailable".into(),
-                ));
-            }
+            self.save_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.save(key, tokens).await
         }
 
@@ -2143,57 +2142,7 @@ mod tests {
         }
 
         fn backend_name(&self) -> &'static str {
-            "rollback_save_failing"
-        }
-    }
-
-    struct ClearFailingTokenStore {
-        inner: EphemeralTokenStore,
-    }
-
-    impl ClearFailingTokenStore {
-        fn new() -> Self {
-            Self {
-                inner: EphemeralTokenStore::new(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TokenStore for ClearFailingTokenStore {
-        async fn load(
-            &self,
-            key: &TokenKey,
-        ) -> Result<Option<PersistedTokens>, meerkat_providers::auth_store::TokenStoreError>
-        {
-            self.inner.load(key).await
-        }
-
-        async fn save(
-            &self,
-            key: &TokenKey,
-            tokens: &PersistedTokens,
-        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await
-        }
-
-        async fn clear(
-            &self,
-            _key: &TokenKey,
-        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            Err(meerkat_providers::auth_store::TokenStoreError::Unavailable(
-                "clear unavailable".into(),
-            ))
-        }
-
-        async fn list(
-            &self,
-        ) -> Result<Vec<TokenKey>, meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.list().await
-        }
-
-        fn backend_name(&self) -> &'static str {
-            "clear_failing"
+            "save_counting"
         }
     }
 
@@ -3113,7 +3062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_ready_device_commit_failure_keeps_flow_retryable() {
+    async fn rest_ready_device_commit_failure_does_not_save_before_consume_claim() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3162,18 +3111,30 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("AuthMachine lifecycle acquire failed"));
-        authority
-            .begin_device_code_poll(
+        assert!(
+            err.1
+                .contains("AuthMachine lifecycle acquire failed after OAuth consume")
+        );
+        assert!(
+            state
+                .token_store
+                .load(&TokenKey::from_connection_ref(&managed_connection_ref()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            authority.begin_device_code_poll(
                 "device-code",
                 &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
-            )
-            .expect("failed ready commit keeps device flow retryable");
+            ),
+            Err(meerkat_providers::oauth_flow::OAuthFlowError::Missing)
+        ));
     }
 
     #[tokio::test]
-    async fn rest_ready_device_consume_failure_rolls_back_token_commit() {
+    async fn rest_ready_device_consume_failure_does_not_commit_token() {
         let store = EphemeralTokenStore::new();
         let auth_lease = RuntimeAuthLeaseHandle::new();
         let connection_ref = managed_connection_ref();
@@ -3216,7 +3177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_browser_consume_failure_rolls_back_token_commit() {
+    async fn rest_browser_consume_failure_does_not_commit_token() {
         let temp = tempfile::tempdir().unwrap();
         let store = FileTokenStore::new(temp.path().join("tokens"));
         let auth_lease = RuntimeAuthLeaseHandle::new();
@@ -3247,6 +3208,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_browser_consume_failure_does_not_save_before_durable_claim() {
+        let store = SaveCountingTokenStore::new();
+        let auth_lease = RuntimeAuthLeaseHandle::new();
+        let connection_ref = managed_connection_ref();
+
+        let err = save_tokens_and_consume_browser_flow(
+            &store,
+            &auth_lease,
+            &connection_ref,
+            &api_key_tokens(),
+            BrowserFlowConsume {
+                authority: &RejectBrowserConsumeAuthority,
+                state: "browser-state",
+                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri: "http://127.0.0.1/callback",
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("consume_oauth_browser_flow"));
+        assert_eq!(
+            store.save_count(),
+            0,
+            "token material must not be saved before winning the durable OAuth consume claim"
+        );
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
     async fn rest_browser_consume_failure_does_not_reauthorize_stale_previous_tokens() {
         let store = EphemeralTokenStore::new();
         let auth_lease = RuntimeAuthLeaseHandle::new();
@@ -3271,7 +3264,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rolled back"));
+        assert!(err.1.contains("consume_oauth_browser_flow"));
         let stored = store.load(&key).await.unwrap().unwrap();
         assert_eq!(stored.primary_secret.as_deref(), Some("sk-stale"));
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
@@ -3283,154 +3276,6 @@ mod tests {
         );
         assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
         assert!(projection.tokens.is_none());
-    }
-
-    #[tokio::test]
-    async fn rest_stale_previous_rollback_save_failure_still_releases_lifecycle() {
-        let store = RollbackSaveFailingTokenStore::new("sk-stale");
-        let auth_lease = RuntimeAuthLeaseHandle::new();
-        let connection_ref = managed_connection_ref();
-        let key = TokenKey::from_connection_ref(&connection_ref);
-        store
-            .save(&key, &api_key_tokens_with_secret("sk-stale"))
-            .await
-            .unwrap();
-
-        let err = save_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &connection_ref,
-            &api_key_tokens_with_secret("sk-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
-                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rollback failed"));
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("sk-new"));
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-        assert_eq!(snapshot.phase, None);
-        let projection = meerkat_core::project_published_auth_status(
-            chrono::Utc::now(),
-            Some(&stored),
-            &snapshot,
-        );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
-        assert!(projection.tokens.is_none());
-    }
-
-    #[tokio::test]
-    async fn rest_active_previous_rollback_save_failure_still_releases_lifecycle() {
-        let store = RollbackSaveFailingTokenStore::new("sk-stale");
-        let auth_lease = RuntimeAuthLeaseHandle::new();
-        let connection_ref = managed_connection_ref();
-        let key = TokenKey::from_connection_ref(&connection_ref);
-        let stale = api_key_tokens_with_secret("sk-stale");
-        store.save(&key, &stale).await.unwrap();
-        meerkat_core::publish_token_lifecycle_acquired(&auth_lease, &connection_ref, &stale)
-            .unwrap();
-
-        let err = save_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &connection_ref,
-            &api_key_tokens_with_secret("sk-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
-                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rollback failed"));
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("sk-new"));
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-        assert_eq!(snapshot.phase, None);
-        let projection = meerkat_core::project_published_auth_status(
-            chrono::Utc::now(),
-            Some(&stored),
-            &snapshot,
-        );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
-        assert!(projection.tokens.is_none());
-    }
-
-    #[tokio::test]
-    async fn rest_no_previous_rollback_clear_failure_still_releases_lifecycle() {
-        let store = ClearFailingTokenStore::new();
-        let auth_lease = RuntimeAuthLeaseHandle::new();
-        let connection_ref = managed_connection_ref();
-        let key = TokenKey::from_connection_ref(&connection_ref);
-
-        let err = save_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &connection_ref,
-            &api_key_tokens_with_secret("sk-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
-                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rollback failed"));
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("sk-new"));
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-        assert_eq!(snapshot.phase, None);
-        let projection = meerkat_core::project_published_auth_status(
-            chrono::Utc::now(),
-            Some(&stored),
-            &snapshot,
-        );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
-        assert!(projection.tokens.is_none());
-    }
-
-    #[tokio::test]
-    async fn rest_oauth_rollback_clear_failure_leaves_unpublished_tokens() {
-        let store = ClearFailingTokenStore::new();
-        let auth_lease = RuntimeAuthLeaseHandle::new();
-        let connection_ref = managed_connection_ref();
-        let key = TokenKey::from_connection_ref(&connection_ref);
-
-        let err = save_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &connection_ref,
-            &chatgpt_oauth_tokens_with_secret("oauth-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
-                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rollback failed"));
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("oauth-new"));
-        assert!(!meerkat_core::tokens_lifecycle_published(&stored));
     }
 
     #[tokio::test]
@@ -3675,7 +3520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_failed_terminal_rollback_preserves_other_browser_flow() {
+    async fn rest_terminal_consume_failure_preserves_other_browser_flow() {
         let store = EphemeralTokenStore::new();
         let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
@@ -3719,7 +3564,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rolled back"));
+        assert!(err.1.contains("consume_oauth_browser_flow"));
         assert!(store.load(&key).await.unwrap().is_none());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
@@ -3734,72 +3579,6 @@ mod tests {
         assert_eq!(record.pkce_verifier, "new-verifier");
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
-    }
-
-    #[tokio::test]
-    async fn rest_login_lifecycle_guard_serializes_failed_rollback_before_new_commit() {
-        let store = Arc::new(BlockingFirstSaveTokenStore::new("sk-failed"));
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        let connection_ref = managed_connection_ref();
-        let key = TokenKey::from_connection_ref(&connection_ref);
-        let failed = api_key_tokens_with_secret("sk-failed");
-        let winner = api_key_tokens_with_secret("sk-winner");
-        let save_started = Arc::clone(&store.save_started);
-        let release_save = Arc::clone(&store.release_save);
-
-        let first_store = Arc::clone(&store);
-        let first_auth = Arc::clone(&auth_lease);
-        let first_connection_ref = connection_ref.clone();
-        let first = tokio::spawn(async move {
-            let authority = RejectBrowserConsumeAuthority;
-            save_tokens_and_consume_browser_flow(
-                first_store.as_ref(),
-                first_auth.as_ref(),
-                &first_connection_ref,
-                &failed,
-                BrowserFlowConsume {
-                    authority: &authority,
-                    state: "browser-state",
-                    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                    redirect_uri: "http://127.0.0.1/callback",
-                },
-            )
-            .await
-        });
-        save_started.notified().await;
-
-        let second_store = Arc::clone(&store);
-        let second_auth = Arc::clone(&auth_lease);
-        let second_connection_ref = connection_ref.clone();
-        let mut second = tokio::spawn(async move {
-            save_tokens_and_publish_lifecycle(
-                second_store.as_ref(),
-                second_auth.as_ref(),
-                &second_connection_ref,
-                &winner,
-            )
-            .await
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
-                .await
-                .is_err(),
-            "second commit must wait for terminal consume rollback on the same binding"
-        );
-
-        release_save.notify_waiters();
-        let err = first.await.unwrap().unwrap_err();
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(err.1.contains("token commit rolled back"));
-        second
-            .await
-            .unwrap()
-            .expect("newer commit runs after rollback");
-
-        let stored = store.load(&key).await.unwrap().unwrap();
-        assert_eq!(stored.primary_secret.as_deref(), Some("sk-winner"));
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
     }
 
     #[tokio::test]

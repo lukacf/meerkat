@@ -17,9 +17,7 @@ use meerkat_auth_core::oauth_flow::{
     PersistedOAuthBrowserFlowRemoval, PersistedOAuthDeviceFlow, PersistedOAuthDeviceFlowRemoval,
 };
 use meerkat_core::ConnectionRef;
-use meerkat_core::handles::DslTransitionError;
-#[cfg(test)]
-use meerkat_core::handles::LeaseKey;
+use meerkat_core::handles::{DslTransitionError, LeaseKey};
 
 use crate::auth_machine::dsl as auth_dsl;
 use crate::store::RuntimeStore;
@@ -47,6 +45,31 @@ fn expires_at_millis(duration: Duration) -> Result<u64, OAuthFlowError> {
         .ok_or(OAuthFlowError::DeviceExpiryOutOfRange)
 }
 
+fn load_oauth_snapshot_for_release(
+    store: &StoreSlot,
+    operation: &'static str,
+) -> Result<Option<OAuthFlowRegistrySnapshot>, DslTransitionError> {
+    let store = store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(store) = store else {
+        return Ok(None);
+    };
+    let store = store.upgrade().ok_or_else(|| {
+        DslTransitionError::new(operation, "runtime store is no longer available")
+    })?;
+    let Some(bytes) = store
+        .load_auth_oauth_flow_snapshot()
+        .map_err(|err| DslTransitionError::new(operation, err.to_string()))?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes)
+        .map(Some)
+        .map_err(|err| DslTransitionError::new(operation, err.to_string()))
+}
+
 #[derive(Debug)]
 pub struct RuntimeOAuthFlowHandle {
     registry: Arc<OAuthFlowRegistry>,
@@ -64,6 +87,66 @@ struct OAuthPayloadReleaseObserver {
 }
 
 impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
+    fn oauth_flows_for_release(
+        &self,
+        lease_key: &LeaseKey,
+    ) -> Result<ReleasedOAuthFlows, DslTransitionError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target = ConnectionRef {
+            realm: lease_key.realm.clone(),
+            binding: lease_key.binding.clone(),
+            profile: lease_key.profile.clone(),
+        };
+        let Some(snapshot) =
+            load_oauth_snapshot_for_release(&self.store, "collect_oauth_flow_payloads")?
+        else {
+            return Ok(ReleasedOAuthFlows {
+                lease_key: lease_key.clone(),
+                browser_flow_ids: Vec::new(),
+                device_flow_ids: Vec::new(),
+            });
+        };
+        let now_millis = current_time_millis();
+        let removed_browser = snapshot
+            .browser_removed
+            .iter()
+            .filter(|removal| removal.expires_at_millis > now_millis)
+            .map(persisted_browser_removal_key)
+            .collect::<BTreeSet<_>>();
+        let removed_device = snapshot
+            .device_removed
+            .iter()
+            .filter(|removal| removal.expires_at_millis > now_millis)
+            .map(persisted_device_removal_key)
+            .collect::<BTreeSet<_>>();
+        Ok(ReleasedOAuthFlows {
+            lease_key: lease_key.clone(),
+            browser_flow_ids: snapshot
+                .browser
+                .iter()
+                .filter(|flow| {
+                    flow.target == target
+                        && flow.expires_at_millis > now_millis
+                        && !removed_browser.contains(&persisted_browser_snapshot_key(flow))
+                })
+                .map(|flow| flow.state.clone())
+                .collect(),
+            device_flow_ids: snapshot
+                .device
+                .iter()
+                .filter(|flow| {
+                    flow.target == target
+                        && flow.expires_at_millis > now_millis
+                        && !removed_device.contains(&persisted_device_snapshot_key(flow))
+                })
+                .map(|flow| flow.device_code.clone())
+                .collect(),
+        })
+    }
+
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError> {
         let _payload_guard = self
             .payload_lock
@@ -86,20 +169,56 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             .collect::<BTreeSet<_>>();
         let now_millis = current_time_millis();
         let mut snapshot = self.registry.snapshot_for_persistence(now_millis);
-        let removed_browser = snapshot
+        let mut removed_browser = BTreeMap::new();
+        for removal in snapshot
             .browser
             .iter()
             .filter(|flow| flow.target == target && browser_flow_ids.contains(flow.state.as_str()))
             .map(browser_removal_from_flow)
-            .collect::<Vec<_>>();
-        let removed_device = snapshot
+        {
+            merge_browser_removal(&mut removed_browser, removal, now_millis);
+        }
+        let mut removed_device = BTreeMap::new();
+        for removal in snapshot
             .device
             .iter()
             .filter(|flow| {
                 flow.target == target && device_flow_ids.contains(flow.device_code.as_str())
             })
             .map(device_removal_from_flow)
-            .collect::<Vec<_>>();
+        {
+            merge_device_removal(&mut removed_device, removal, now_millis);
+        }
+        if let Some(durable) =
+            load_oauth_snapshot_for_release(&self.store, "release_oauth_flow_payloads")?
+        {
+            for removal in durable
+                .browser
+                .iter()
+                .filter(|flow| {
+                    flow.target == target
+                        && browser_flow_ids.contains(flow.state.as_str())
+                        && flow.expires_at_millis > now_millis
+                })
+                .map(browser_removal_from_flow)
+            {
+                merge_browser_removal(&mut removed_browser, removal, now_millis);
+            }
+            for removal in durable
+                .device
+                .iter()
+                .filter(|flow| {
+                    flow.target == target
+                        && device_flow_ids.contains(flow.device_code.as_str())
+                        && flow.expires_at_millis > now_millis
+                })
+                .map(device_removal_from_flow)
+            {
+                merge_device_removal(&mut removed_device, removal, now_millis);
+            }
+        }
+        let removed_browser = removed_browser.into_values().collect::<Vec<_>>();
+        let removed_device = removed_device.into_values().collect::<Vec<_>>();
         snapshot.browser.retain(|flow| {
             !(flow.target == target && browser_flow_ids.contains(flow.state.as_str()))
         });
@@ -2919,6 +3038,83 @@ mod tests {
         authority
             .consume(&state, &target, provider, redirect_uri)
             .expect("failed durable release leaves browser flow retryable");
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn persistent_release_prunes_durable_flows_from_stale_authority() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store_path = temp_dir.path().join("runtime.sqlite");
+        let releasing_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let admitting_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let releasing_lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let releasing_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            releasing_lifecycle.clone(),
+            &releasing_store,
+        );
+        let admitting_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &admitting_store,
+        );
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let browser_provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let browser_state = admitting_authority
+            .start(
+                target.clone(),
+                browser_provider,
+                redirect_uri.to_string(),
+                "browser-verifier".to_string(),
+            )
+            .expect("other authority admits browser flow");
+        let device_provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "released-device-code";
+        admitting_authority
+            .admit_device_code(
+                target.clone(),
+                device_provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("other authority admits device flow");
+        assert!(
+            !releasing_lifecycle.has_oauth_browser_flow_for_test(&target, &browser_state),
+            "releasing authority starts stale and does not know the browser flow locally"
+        );
+        assert!(
+            !releasing_lifecycle.has_oauth_device_flow_for_test(&target, device_code),
+            "releasing authority starts stale and does not know the device flow locally"
+        );
+
+        releasing_lifecycle
+            .release_lease(&lease_key)
+            .expect("stale release succeeds");
+
+        let restarted_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &restarted_store,
+        );
+        let browser_after_release =
+            restarted.consume(&browser_state, &target, browser_provider, redirect_uri);
+        let device_after_release =
+            restarted.verify_device_code(device_code, &target, device_provider);
+        assert!(
+            matches!(browser_after_release, Err(OAuthFlowError::Missing)),
+            "release from a stale authority must prune durable browser flow, got {browser_after_release:?}"
+        );
+        assert!(
+            matches!(device_after_release, Err(OAuthFlowError::Missing)),
+            "release from a stale authority must prune durable device flow, got {device_after_release:?}"
+        );
+        drop(releasing_authority);
     }
 
     #[test]

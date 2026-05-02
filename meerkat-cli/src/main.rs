@@ -3755,12 +3755,36 @@ fn connection_ref_from_token_key(key: &meerkat_providers::auth_store::TokenKey) 
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+struct CliPreparedTokenCommitSnapshot {
+    key: meerkat_providers::auth_store::TokenKey,
+    lease_key: meerkat_core::handles::LeaseKey,
+    previous: Option<meerkat_providers::auth_store::PersistedTokens>,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 struct CliTokenCommitSnapshot {
     key: meerkat_providers::auth_store::TokenKey,
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<meerkat_providers::auth_store::PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn prepare_cli_token_commit_unlocked(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    connection_ref: &ConnectionRef,
+) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
+    let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
+    let previous = store
+        .load(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
+    Ok(CliPreparedTokenCommitSnapshot {
+        key,
+        lease_key: meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref),
+        previous,
+    })
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3836,6 +3860,44 @@ async fn mark_cli_token_commit_lifecycle_published_unlocked(
             ),
             Err(rollback_error) => anyhow::bail!(
                 "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+    tokens: &meerkat_providers::auth_store::PersistedTokens,
+    prepared: CliPreparedTokenCommitSnapshot,
+) -> anyhow::Result<()> {
+    let previous_lifecycle = auth_lease.snapshot(&prepared.lease_key);
+    let transition =
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens) {
+            Ok(transition) => transition,
+            Err(e) => {
+                anyhow::bail!("AuthMachine lifecycle acquire failed after OAuth consume: {e}")
+            }
+        };
+    let committed_tokens =
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
+    let commit = CliTokenCommitSnapshot {
+        key: prepared.key,
+        lease_key: prepared.lease_key,
+        previous: prepared.previous,
+        previous_lifecycle,
+        lifecycle_transition: transition,
+    };
+    if let Err(e) = store.save(&commit.key, &committed_tokens).await {
+        match rollback_cli_token_commit(store, auth_lease, &commit).await {
+            Ok(()) => anyhow::bail!(
+                "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
+            ),
+            Err(rollback_error) => anyhow::bail!(
+                "TokenStore save failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
             ),
         }
     }
@@ -3954,27 +4016,18 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
         .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let commit = save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+    let prepared = prepare_cli_token_commit_unlocked(store, connection_ref).await?;
+    flow.authority
+        .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .map_err(|err| anyhow::anyhow!("oauth state terminal consume failed: {err}"))?;
+    save_prepared_cli_tokens_after_terminal_consume_unlocked(
         store,
         auth_lease,
         connection_ref,
         tokens,
-        false,
+        prepared,
     )
     .await?;
-    if let Err(err) =
-        flow.authority
-            .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
-    {
-        let base = format!("oauth state terminal consume failed: {err}");
-        match rollback_cli_token_commit(store, auth_lease, &commit).await {
-            Ok(()) => anyhow::bail!("{base}; token commit rolled back"),
-            Err(rollback_error) => {
-                anyhow::bail!("{base}; token commit rollback failed: {rollback_error}")
-            }
-        }
-    }
-    mark_cli_token_commit_lifecycle_published_unlocked(store, auth_lease, &commit, tokens).await?;
     Ok(())
 }
 
@@ -11174,13 +11227,77 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    struct SaveCountingCliTokenStore {
+        inner: meerkat_providers::auth_store::EphemeralTokenStore,
+        save_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    impl SaveCountingCliTokenStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_providers::auth_store::EphemeralTokenStore::new(),
+                save_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn save_count(&self) -> usize {
+            self.save_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[async_trait]
+    impl meerkat_providers::auth_store::TokenStore for SaveCountingCliTokenStore {
+        async fn load(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<
+            Option<meerkat_providers::auth_store::PersistedTokens>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            self.inner.load(key).await
+        }
+
+        async fn save(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            tokens: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.save_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save(key, tokens).await
+        }
+
+        async fn clear(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.inner.clear(key).await
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<
+            Vec<meerkat_providers::auth_store::TokenKey>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            self.inner.list().await
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "save_counting_cli"
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_oauth_login_consume_failure_rolls_back_token_commit() {
+    async fn test_cli_oauth_login_consume_failure_does_not_save_before_durable_claim() {
         use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
-        use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
+        use meerkat_providers::auth_store::{TokenKey, TokenStore};
 
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let store = EphemeralTokenStore::new();
+        let store = SaveCountingCliTokenStore::new();
         let connection_ref = openai_connection_ref();
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
 
@@ -11199,7 +11316,12 @@ mod tests {
         .await
         .expect_err("terminal consume failure must fail the CLI login");
 
-        assert!(err.to_string().contains("token commit rolled back"));
+        assert!(err.to_string().contains("consume_oauth_browser_flow"));
+        assert_eq!(
+            store.save_count(),
+            0,
+            "token material must not be saved before winning the durable OAuth consume claim"
+        );
         assert!(
             store
                 .load(&TokenKey::from_connection_ref(&connection_ref))

@@ -39,6 +39,7 @@ pub struct SessionRuntimeExecutor {
 /// Implements `CoreExecutor` directly against a mob-capable session service.
 pub struct MobRpcRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
+    runtime: Option<Arc<SessionRuntime>>,
     session_id: SessionId,
     notification_sink: NotificationSink,
 }
@@ -47,11 +48,13 @@ pub struct MobRpcRuntimeExecutor {
 impl MobRpcRuntimeExecutor {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
+        runtime: Option<Arc<SessionRuntime>>,
         session_id: SessionId,
         notification_sink: NotificationSink,
     ) -> Self {
         Self {
             session_service,
+            runtime,
             session_id,
             notification_sink,
         }
@@ -214,6 +217,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
+            let pre_admission = self
+                .runtime
+                .take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids);
             return self
                 .runtime
                 .apply_runtime_context_appends_via_service(
@@ -222,10 +228,17 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     pending_system_context_appends_from_primitive(&staged.context_appends),
                     primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
+                    pre_admission,
                 )
                 .await
                 .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
+
+        #[cfg(test)]
+        self.runtime
+            .wait_runtime_routed_pre_promotion_hook(&self.session_id)
+            .await;
+
         let prompt = primitive.extract_content_input();
 
         // Create an event channel and forward events to the notification sink.
@@ -243,8 +256,11 @@ impl CoreExecutor for SessionRuntimeExecutor {
         let turn_overrides = crate::session_runtime::SessionRuntime::turn_overrides_from_metadata(
             primitive.turn_metadata(),
         );
+        let pre_admission = self
+            .runtime
+            .take_runtime_pre_admission(&self.session_id, primitive.contributing_input_ids());
         let result = Box::pin(
-            self.runtime.apply_runtime_turn(
+            self.runtime.apply_runtime_turn_with_pre_admission(
                 &self.session_id,
                 run_id,
                 &primitive,
@@ -258,6 +274,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
                 None,
                 turn_overrides,
+                pre_admission,
             ),
         )
         .await;
@@ -325,6 +342,24 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
+            let pre_admission = self.runtime.as_ref().and_then(|runtime| {
+                runtime.take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids)
+            });
+            if let (Some(runtime), Some(pre_admission)) = (self.runtime.as_ref(), pre_admission) {
+                return runtime
+                    .apply_runtime_context_appends_via_service(
+                        &self.session_id,
+                        run_id,
+                        pending_system_context_appends_from_primitive(&staged.context_appends),
+                        primitive.apply_boundary(),
+                        staged.contributing_input_ids.clone(),
+                        Some(pre_admission),
+                    )
+                    .await
+                    .map_err(|err| {
+                        CoreExecutorError::apply_failed_runtime_context(err.to_string())
+                    });
+            }
             return self
                 .session_service
                 .apply_runtime_context_appends_with_boundary(
@@ -372,16 +407,39 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
-        let result = self
-            .session_service
-            .apply_runtime_turn(
-                &self.session_id,
-                run_id,
-                req,
-                primitive.apply_boundary(),
-                primitive.contributing_input_ids().to_vec(),
-            )
-            .await;
+        let pre_admission = self.runtime.as_ref().and_then(|runtime| {
+            runtime.take_runtime_pre_admission(&self.session_id, primitive.contributing_input_ids())
+        });
+        let result = if pre_admission.is_some() {
+            self.session_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &self.session_id,
+                    run_id,
+                    req,
+                    primitive.apply_boundary(),
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+        } else {
+            self.session_service
+                .apply_runtime_turn(
+                    &self.session_id,
+                    run_id,
+                    req,
+                    primitive.apply_boundary(),
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+        };
+        if let Some(admission) = pre_admission {
+            if admission.promoted_from_staged()
+                && SessionRuntime::is_pre_run_apply_runtime_turn_failure(&result)
+            {
+                admission.restore_staged_and_keep();
+            } else {
+                drop(admission);
+            }
+        }
 
         let _ = forwarder.await;
         result.map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))

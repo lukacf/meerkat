@@ -16,40 +16,42 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
 #[cfg(feature = "mcp")]
 use std::time::Duration;
 
 use futures::StreamExt;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, ScheduleService, ScheduleToolDispatcher, StagedPhase,
+    PersistentSessionService, PromotingSlot, ScheduleService, ScheduleToolDispatcher, StagedPhase,
     StagedSessionRegistry, StagedSlot, encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
-use meerkat_core::EventEnvelope;
-use meerkat_core::RunId;
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    DeferredPromptPolicy, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
-    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
+    DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
+    SessionError, SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionView,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
+use meerkat_core::{
+    AgentExecutionSnapshot, Config, ConfigStore, ContentInput, ExternalToolSurfaceSnapshot,
+    PeerIngressRuntimeSnapshot, PendingSystemContextAppend, Session, SessionLlmIdentity,
+    SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
+    SurfaceSessionRecoveryOverrides, SystemMessage, ToolScopeSnapshot, build_recovered_session,
+};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{
-    Config, ConfigStore, ContentInput, PendingSystemContextAppend, Session, SessionLlmIdentity,
-    SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, SystemMessage, build_recovered_session,
-};
+use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
     RuntimeState, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
@@ -66,6 +68,8 @@ use meerkat::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
+
+const SESSION_TRANSIENT_PENDING_ARCHIVE_KEY: &str = "session_transient_pending_archive";
 
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
@@ -98,11 +102,61 @@ fn pending_system_context_appends(
 }
 
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
+const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
+
+type ServiceStartTurnResultReceiver =
+    tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
+type ServiceApplyRuntimeTurnResultReceiver =
+    tokio::sync::oneshot::Receiver<Result<CoreApplyOutput, SessionError>>;
+type RecoverableServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot::Receiver<(
+    Result<CoreApplyOutput, SessionError>,
+    Option<ActiveSessionAdmissionGuard>,
+)>;
+
+#[derive(Debug)]
+struct RecoveredCreateRequest {
+    request: CreateSessionRequest,
+    runtime_was_registered: bool,
+}
 
 #[derive(Clone)]
 struct PendingSessionEventStreams {
     events: broadcast::Sender<EventEnvelope<AgentEvent>>,
     receiver_dropped: Arc<Notify>,
+}
+
+#[derive(Clone)]
+struct ArchiveRuntimeCleanup {
+    runtime_adapter: Arc<MeerkatMachine>,
+    pending_session_event_streams:
+        Option<Arc<Mutex<HashMap<SessionId, PendingSessionEventStreams>>>>,
+    #[cfg(feature = "mcp")]
+    mcp_sessions: Option<Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>>,
+    #[cfg(feature = "mob")]
+    mob_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
+}
+
+impl ArchiveRuntimeCleanup {
+    async fn run(&self, session_id: &SessionId) {
+        self.runtime_adapter.unregister_session(session_id).await;
+        if let Some(streams) = self.pending_session_event_streams.as_ref() {
+            streams.lock().await.remove(session_id);
+        }
+        #[cfg(feature = "mcp")]
+        if let Some(mcp_sessions) = self.mcp_sessions.as_ref()
+            && let Some(state) = mcp_sessions.write().await.remove(session_id)
+        {
+            state.adapter.shutdown().await;
+        }
+        #[cfg(feature = "mob")]
+        if let Some(mob_state) = self.mob_state.as_ref() {
+            let _ = mob_state
+                .destroy_bridge_session_mobs(&session_id.to_string())
+                .await;
+        }
+        #[cfg(feature = "comms")]
+        self.runtime_adapter.abort_comms_drain(session_id).await;
+    }
 }
 
 struct PendingSessionEventStreamDrop {
@@ -176,6 +230,1777 @@ fn realtime_projection_runtime_system_context(
 #[cfg(test)]
 fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToolVisibilityState {
     session.tool_visibility_state().unwrap_or_default()
+}
+
+#[derive(Default)]
+struct ActiveSessionAdmissions {
+    sessions: StdMutex<HashMap<SessionId, ActiveAdmissionRecord>>,
+}
+
+#[derive(Debug)]
+enum ActiveAdmissionError {
+    Busy,
+    Full { active: usize, max: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveAdmissionState {
+    Preparing,
+    Staged,
+    Running,
+    Closing,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveAdmissionRecord {
+    state: ActiveAdmissionState,
+    leases: usize,
+    restore_to_staged_on_final_release: bool,
+}
+
+impl ActiveAdmissionRecord {
+    fn new(state: ActiveAdmissionState) -> Self {
+        Self {
+            state,
+            leases: 1,
+            restore_to_staged_on_final_release: false,
+        }
+    }
+}
+
+pub(crate) struct ActiveSessionAdmissionGuard {
+    admissions: Arc<ActiveSessionAdmissions>,
+    session_id: SessionId,
+    promoted_from_staged: bool,
+    release_on_drop: bool,
+}
+
+struct ActiveSessionClosingGuard {
+    admissions: Arc<ActiveSessionAdmissions>,
+    session_id: SessionId,
+    restore_on_drop: bool,
+}
+
+struct RuntimePreAdmissionGuard {
+    admission: Option<ActiveSessionAdmissionGuard>,
+}
+
+struct RuntimePreAdmissionEntry {
+    input_id: InputId,
+    admission: ActiveSessionAdmissionGuard,
+}
+
+struct RuntimePreAdmissionRegistration {
+    runtime: Arc<SessionRuntime>,
+    session_id: SessionId,
+    input_id: InputId,
+    release_on_drop: bool,
+}
+
+struct RuntimeRegistrationLockLease {
+    locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
+    session_id: SessionId,
+    lock: Arc<Mutex<()>>,
+}
+
+struct StagedArchiveRollbackGuard {
+    staged_sessions: Arc<StagedSessionRegistry>,
+    session_id: SessionId,
+    restore_on_drop: bool,
+}
+
+#[derive(Clone, Copy)]
+enum GuardedSessionCleanupOperation {
+    Archive,
+    DiscardLive,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PendingPromotionPreTurnHook {
+    reached_flag: std::sync::atomic::AtomicBool,
+    reached: Notify,
+    release: Notify,
+}
+
+impl ActiveSessionAdmissions {
+    fn try_reserve(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        max_sessions: usize,
+        state: ActiveAdmissionState,
+    ) -> Result<ActiveSessionAdmissionGuard, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sessions.contains_key(&session_id) {
+            return Err(ActiveAdmissionError::Busy);
+        }
+        let active = sessions.len();
+        if active >= max_sessions {
+            return Err(ActiveAdmissionError::Full {
+                active,
+                max: max_sessions,
+            });
+        }
+        sessions.insert(session_id.clone(), ActiveAdmissionRecord::new(state));
+        Ok(ActiveSessionAdmissionGuard {
+            admissions: Arc::clone(self),
+            session_id,
+            promoted_from_staged: false,
+            release_on_drop: true,
+        })
+    }
+
+    fn try_promote_or_reserve_running(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        max_sessions: usize,
+    ) -> Result<ActiveSessionAdmissionGuard, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sessions.get_mut(&session_id) {
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
+                return Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id,
+                    promoted_from_staged: true,
+                    release_on_drop: true,
+                });
+            }
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                return Err(ActiveAdmissionError::Busy);
+            }
+            Some(_) => return Err(ActiveAdmissionError::Busy),
+            None => {}
+        }
+        let active = sessions.len();
+        if active >= max_sessions {
+            return Err(ActiveAdmissionError::Full {
+                active,
+                max: max_sessions,
+            });
+        }
+        sessions.insert(
+            session_id.clone(),
+            ActiveAdmissionRecord::new(ActiveAdmissionState::Running),
+        );
+        Ok(ActiveSessionAdmissionGuard {
+            admissions: Arc::clone(self),
+            session_id,
+            promoted_from_staged: false,
+            release_on_drop: true,
+        })
+    }
+
+    fn try_join_or_reserve_running(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        max_sessions: usize,
+    ) -> Result<ActiveSessionAdmissionGuard, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sessions.get_mut(&session_id) {
+            Some(record) if record.state == ActiveAdmissionState::Running => {
+                record.leases = record.leases.saturating_add(1);
+                return Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id,
+                    promoted_from_staged: false,
+                    release_on_drop: true,
+                });
+            }
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
+                return Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id,
+                    promoted_from_staged: true,
+                    release_on_drop: true,
+                });
+            }
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing | ActiveAdmissionState::Closing
+                ) =>
+            {
+                return Err(ActiveAdmissionError::Busy);
+            }
+            Some(_) => return Err(ActiveAdmissionError::Busy),
+            None => {}
+        }
+        let active = sessions.len();
+        if active >= max_sessions {
+            return Err(ActiveAdmissionError::Full {
+                active,
+                max: max_sessions,
+            });
+        }
+        sessions.insert(
+            session_id.clone(),
+            ActiveAdmissionRecord::new(ActiveAdmissionState::Running),
+        );
+        Ok(ActiveSessionAdmissionGuard {
+            admissions: Arc::clone(self),
+            session_id,
+            promoted_from_staged: false,
+            release_on_drop: true,
+        })
+    }
+
+    fn try_promote_staged_to_running(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sessions.get_mut(session_id) {
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Running;
+                record.restore_to_staged_on_final_release = false;
+                Ok(ActiveSessionAdmissionGuard {
+                    admissions: Arc::clone(self),
+                    session_id: session_id.clone(),
+                    promoted_from_staged: true,
+                    release_on_drop: true,
+                })
+            }
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                Err(ActiveAdmissionError::Busy)
+            }
+            Some(_) | None => Err(ActiveAdmissionError::Busy),
+        }
+    }
+
+    fn try_mark_staged_closing_guard(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<Option<ActiveSessionClosingGuard>, ActiveAdmissionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match sessions.get_mut(session_id) {
+            Some(record) if record.state == ActiveAdmissionState::Staged => {
+                record.state = ActiveAdmissionState::Closing;
+                Ok(Some(ActiveSessionClosingGuard {
+                    admissions: Arc::clone(self),
+                    session_id: session_id.clone(),
+                    restore_on_drop: true,
+                }))
+            }
+            Some(record)
+                if matches!(
+                    record.state,
+                    ActiveAdmissionState::Preparing
+                        | ActiveAdmissionState::Running
+                        | ActiveAdmissionState::Closing
+                ) =>
+            {
+                Err(ActiveAdmissionError::Busy)
+            }
+            Some(_) => Err(ActiveAdmissionError::Busy),
+            None => Ok(None),
+        }
+    }
+
+    fn try_mark_staged_closing(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<bool, ActiveAdmissionError> {
+        self.try_mark_staged_closing_guard(session_id)
+            .map(|guard| match guard {
+                Some(guard) => {
+                    guard.keep_closing();
+                    true
+                }
+                None => false,
+            })
+    }
+
+    fn restore_closing_to_staged(&self, session_id: &SessionId) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.state != ActiveAdmissionState::Closing {
+            return false;
+        }
+        record.state = ActiveAdmissionState::Staged;
+        true
+    }
+
+    fn restore_running_to_staged(&self, session_id: &SessionId) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.state != ActiveAdmissionState::Running || record.leases != 1 {
+            if record.state == ActiveAdmissionState::Running && record.leases > 1 {
+                record.restore_to_staged_on_final_release = true;
+                return true;
+            }
+            return false;
+        }
+        record.state = ActiveAdmissionState::Staged;
+        record.restore_to_staged_on_final_release = false;
+        true
+    }
+
+    fn release_if_state(&self, session_id: &SessionId, state: ActiveAdmissionState) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sessions.get(session_id).map(|record| record.state) == Some(state) {
+            sessions.remove(session_id);
+            return true;
+        }
+        false
+    }
+
+    fn set_state_if_present(&self, session_id: &SessionId, state: ActiveAdmissionState) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(existing) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        existing.state = state;
+        existing.restore_to_staged_on_final_release = false;
+        true
+    }
+
+    fn release(&self, session_id: &SessionId) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if record.restore_to_staged_on_final_release {
+            if record.leases > 1 {
+                record.leases -= 1;
+            }
+            if record.leases <= 1 {
+                record.leases = 1;
+                record.state = ActiveAdmissionState::Staged;
+                record.restore_to_staged_on_final_release = false;
+            }
+            return true;
+        }
+        if record.leases > 1 {
+            record.leases -= 1;
+            true
+        } else {
+            sessions.remove(session_id);
+            true
+        }
+    }
+
+    fn state(&self, session_id: &SessionId) -> Option<ActiveAdmissionState> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .map(|record| record.state)
+    }
+
+    #[cfg(test)]
+    fn lease_count(&self, session_id: &SessionId) -> Option<usize> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .map(|record| record.leases)
+    }
+
+    fn clear(&self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+impl ActiveSessionAdmissionGuard {
+    pub(crate) fn promoted_from_staged(&self) -> bool {
+        self.promoted_from_staged
+    }
+
+    pub(crate) fn restore_staged_and_keep(mut self) {
+        if self.promoted_from_staged
+            && (self.admissions.restore_running_to_staged(&self.session_id)
+                || self.admissions.state(&self.session_id) == Some(ActiveAdmissionState::Staged))
+        {
+            self.release_on_drop = false;
+        }
+    }
+
+    fn set_staged_and_keep(&mut self) -> bool {
+        if self
+            .admissions
+            .set_state_if_present(&self.session_id, ActiveAdmissionState::Staged)
+        {
+            self.release_on_drop = false;
+            return true;
+        }
+        false
+    }
+
+    fn keep(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl RuntimePreAdmissionGuard {
+    fn new(admission: ActiveSessionAdmissionGuard) -> Self {
+        Self {
+            admission: Some(admission),
+        }
+    }
+
+    fn take(&mut self) -> Option<ActiveSessionAdmissionGuard> {
+        self.admission.take()
+    }
+}
+
+impl RuntimePreAdmissionRegistration {
+    fn new(runtime: Arc<SessionRuntime>, session_id: SessionId, input_id: InputId) -> Self {
+        Self {
+            runtime,
+            session_id,
+            input_id,
+            release_on_drop: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl RuntimeRegistrationLockLease {
+    fn mutex(&self) -> &Mutex<()> {
+        &self.lock
+    }
+}
+
+impl Drop for RuntimePreAdmissionRegistration {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.runtime
+                .restore_or_release_runtime_pre_admission(&self.session_id, &self.input_id);
+        }
+    }
+}
+
+impl Drop for RuntimeRegistrationLockLease {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.lock) != 1 {
+            return;
+        }
+        let this_lock = Arc::downgrade(&self.lock);
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if locks
+            .get(&self.session_id)
+            .is_some_and(|registered| registered.ptr_eq(&this_lock))
+        {
+            locks.remove(&self.session_id);
+        }
+    }
+}
+
+impl Drop for RuntimePreAdmissionGuard {
+    fn drop(&mut self) {
+        let Some(admission) = self.admission.take() else {
+            return;
+        };
+        if admission.promoted_from_staged() {
+            admission.restore_staged_and_keep();
+        }
+    }
+}
+
+impl ActiveSessionClosingGuard {
+    fn keep_closing(mut self) {
+        self.restore_on_drop = false;
+    }
+
+    fn restore(mut self) {
+        let _ = self.admissions.restore_closing_to_staged(&self.session_id);
+        self.restore_on_drop = false;
+    }
+
+    fn release(mut self) {
+        let _ = self
+            .admissions
+            .release_if_state(&self.session_id, ActiveAdmissionState::Closing);
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for ActiveSessionClosingGuard {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = self.admissions.restore_closing_to_staged(&self.session_id);
+        }
+    }
+}
+
+impl StagedArchiveRollbackGuard {
+    fn new(staged_sessions: Arc<StagedSessionRegistry>, session_id: &SessionId) -> Self {
+        Self {
+            staged_sessions,
+            session_id: session_id.clone(),
+            restore_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for StagedArchiveRollbackGuard {
+    fn drop(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        let staged_sessions = Arc::clone(&self.staged_sessions);
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            let _ = staged_sessions.restore_archive(&session_id).await;
+        });
+    }
+}
+
+impl Drop for ActiveSessionAdmissionGuard {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.admissions.release(&self.session_id);
+        }
+    }
+}
+
+async fn await_guarded_session_cleanup(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+    closing: ActiveSessionClosingGuard,
+    operation: GuardedSessionCleanupOperation,
+    runtime_cleanup: Option<ArchiveRuntimeCleanup>,
+) -> Result<(), SessionError> {
+    let result_session_id = session_id.clone();
+    let operation_name = match operation {
+        GuardedSessionCleanupOperation::Archive => "archive",
+        GuardedSessionCleanupOperation::DiscardLive => "discard_live_session",
+    };
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = match operation {
+            GuardedSessionCleanupOperation::Archive => service.archive(&session_id).await,
+            GuardedSessionCleanupOperation::DiscardLive => {
+                service.discard_live_session(&session_id).await
+            }
+        };
+        if matches!(operation, GuardedSessionCleanupOperation::Archive)
+            && matches!(result, Ok(()) | Err(SessionError::NotFound { .. }))
+            && let Some(cleanup) = runtime_cleanup.as_ref()
+        {
+            cleanup.run(&session_id).await;
+        }
+        if result.is_ok() {
+            closing.release();
+        } else if service.has_live_session(&session_id).await.unwrap_or(true) {
+            closing.restore();
+        } else {
+            closing.release();
+        }
+        let _ = result_tx.send(result);
+    });
+    result_rx
+        .await
+        .map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "session service {operation_name} task ended before reporting a result for {result_session_id}"
+            )))
+        })?
+}
+
+async fn await_guarded_staged_archive(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    staged_sessions: Arc<StagedSessionRegistry>,
+    runtime_cleanup: ArchiveRuntimeCleanup,
+    session_id: SessionId,
+    mut staged_archive_guard: StagedArchiveRollbackGuard,
+    closing: ActiveSessionClosingGuard,
+    #[cfg(test)] after_service_hook: Option<Arc<PendingPromotionPreTurnHook>>,
+) -> Result<(), SessionError> {
+    let result_session_id = session_id.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = match service.archive(&session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {
+                runtime_cleanup.run(&session_id).await;
+                #[cfg(test)]
+                if let Some(hook) = after_service_hook {
+                    hook.reached_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    hook.reached.notify_waiters();
+                    hook.release.notified().await;
+                }
+                let _ = staged_sessions.finish_archive(&session_id).await;
+                staged_archive_guard.disarm();
+                closing.release();
+                Ok(())
+            }
+            Err(err) => {
+                let _ = staged_sessions.restore_archive(&session_id).await;
+                staged_archive_guard.disarm();
+                closing.restore();
+                Err(err)
+            }
+        };
+        let _ = result_tx.send(result);
+    });
+    result_rx
+        .await
+        .map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "session service staged archive task ended before reporting a result for {result_session_id}"
+            )))
+        })?
+}
+
+async fn await_session_archive_with_runtime_cleanup(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_cleanup: ArchiveRuntimeCleanup,
+    session_id: SessionId,
+) -> Result<(), SessionError> {
+    let result_session_id = session_id.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = service.archive(&session_id).await;
+        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            runtime_cleanup.run(&session_id).await;
+        }
+        let _ = result_tx.send(result);
+    });
+    result_rx.await.map_err(|_| {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+            "session service archive task ended before reporting a result for {result_session_id}"
+        )))
+    })?
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingPromotionCleanupMode {
+    Restore,
+    Finish,
+}
+
+struct PendingPromotionCleanup {
+    staged_sessions: Arc<StagedSessionRegistry>,
+    admissions: Arc<ActiveSessionAdmissions>,
+    session_id: SessionId,
+    build_config: Option<AgentBuildConfig>,
+    effective_llm_identity: SessionLlmIdentity,
+    labels: Option<BTreeMap<String, String>>,
+    deferred_prompt: Option<ContentInput>,
+    created_at_secs: u64,
+    updated_at_secs: u64,
+    mode: PendingPromotionCleanupMode,
+    release_active_admission: bool,
+    transient_pending_archive: bool,
+    armed: bool,
+}
+
+impl PendingPromotionCleanup {
+    fn new(
+        staged_sessions: Arc<StagedSessionRegistry>,
+        admissions: Arc<ActiveSessionAdmissions>,
+        session_id: &SessionId,
+        slot: &PromotingSlot,
+    ) -> Self {
+        Self {
+            staged_sessions,
+            admissions,
+            session_id: session_id.clone(),
+            build_config: Some((*slot.build_config).clone()),
+            effective_llm_identity: slot.effective_llm_identity.clone(),
+            labels: slot.labels.clone(),
+            deferred_prompt: slot.deferred_prompt.clone(),
+            created_at_secs: slot.created_at_secs,
+            updated_at_secs: slot.updated_at_secs,
+            mode: PendingPromotionCleanupMode::Restore,
+            release_active_admission: false,
+            transient_pending_archive: false,
+            armed: true,
+        }
+    }
+
+    fn update_build_config(&mut self, build_config: &AgentBuildConfig) {
+        if self.armed {
+            self.build_config = Some(build_config.clone());
+        }
+    }
+
+    fn update_effective_llm_identity(&mut self, effective_llm_identity: SessionLlmIdentity) {
+        if self.armed {
+            self.effective_llm_identity = effective_llm_identity;
+        }
+    }
+
+    fn mark_materialized(&mut self, release_active_admission_on_drop: bool) {
+        if self.armed {
+            self.mode = PendingPromotionCleanupMode::Finish;
+            self.release_active_admission = release_active_admission_on_drop;
+        }
+    }
+
+    fn release_active_admission_now(&mut self) {
+        if self.release_active_admission {
+            self.admissions.release(&self.session_id);
+            self.release_active_admission = false;
+        }
+    }
+
+    fn mark_transient_pending_archive(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.transient_pending_archive = true;
+        if let Some(build_config) = self.build_config.as_mut() {
+            Self::mark_build_config_transient_pending_archive(&self.session_id, build_config);
+        }
+    }
+
+    fn mark_build_config_transient_pending_archive(
+        session_id: &SessionId,
+        build_config: &mut AgentBuildConfig,
+    ) {
+        let session = build_config
+            .resume_session
+            .get_or_insert_with(|| Session::with_id(session_id.clone()));
+        session.set_metadata(
+            SESSION_TRANSIENT_PENDING_ARCHIVE_KEY,
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    async fn preserve_promoting_system_context_state(
+        staged_sessions: &StagedSessionRegistry,
+        session_id: &SessionId,
+        build_config: &mut AgentBuildConfig,
+    ) {
+        let Some((_starting_system_context_state, current_system_context_state)) = staged_sessions
+            .promoting_system_context_state(session_id)
+            .await
+        else {
+            return;
+        };
+        let session = build_config
+            .resume_session
+            .get_or_insert_with(|| Session::with_id(session_id.clone()));
+        if let Err(err) = session.set_system_context_state(current_system_context_state) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "failed to preserve promoting system-context state while restoring staged session"
+            );
+        }
+    }
+
+    async fn restore_now(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(mut build_config) = self.build_config.take() else {
+            self.armed = false;
+            return;
+        };
+        Self::preserve_promoting_system_context_state(
+            &self.staged_sessions,
+            &self.session_id,
+            &mut build_config,
+        )
+        .await;
+        if self.transient_pending_archive {
+            Self::mark_build_config_transient_pending_archive(&self.session_id, &mut build_config);
+        }
+        self.admissions
+            .set_state_if_present(&self.session_id, ActiveAdmissionState::Staged);
+        self.staged_sessions
+            .abandon_promotion(
+                self.session_id.clone(),
+                build_config,
+                self.effective_llm_identity.clone(),
+                self.labels.clone(),
+                self.deferred_prompt.clone(),
+                self.created_at_secs,
+                self.updated_at_secs,
+            )
+            .await;
+        self.armed = false;
+    }
+
+    async fn finish_now(
+        &mut self,
+    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+        if !self.armed || self.mode != PendingPromotionCleanupMode::Finish {
+            return None;
+        }
+        self.staged_sessions
+            .take_promoting_system_context_state(&self.session_id)
+            .await
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        self.build_config = None;
+        self.release_active_admission = false;
+    }
+}
+
+impl Drop for PendingPromotionCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let staged_sessions = Arc::clone(&self.staged_sessions);
+        let admissions = Arc::clone(&self.admissions);
+        let session_id = self.session_id.clone();
+        match self.mode {
+            PendingPromotionCleanupMode::Restore => {
+                let Some(mut build_config) = self.build_config.take() else {
+                    return;
+                };
+                let effective_llm_identity = self.effective_llm_identity.clone();
+                let labels = self.labels.clone();
+                let deferred_prompt = self.deferred_prompt.clone();
+                let created_at_secs = self.created_at_secs;
+                let updated_at_secs = self.updated_at_secs;
+                let transient_pending_archive = self.transient_pending_archive;
+                tokio::spawn(async move {
+                    Self::preserve_promoting_system_context_state(
+                        staged_sessions.as_ref(),
+                        &session_id,
+                        &mut build_config,
+                    )
+                    .await;
+                    if transient_pending_archive {
+                        Self::mark_build_config_transient_pending_archive(
+                            &session_id,
+                            &mut build_config,
+                        );
+                    }
+                    admissions.set_state_if_present(&session_id, ActiveAdmissionState::Staged);
+                    staged_sessions
+                        .abandon_promotion(
+                            session_id,
+                            build_config,
+                            effective_llm_identity,
+                            labels,
+                            deferred_prompt,
+                            created_at_secs,
+                            updated_at_secs,
+                        )
+                        .await;
+                });
+            }
+            PendingPromotionCleanupMode::Finish => {
+                let release_active_admission = self.release_active_admission;
+                tokio::spawn(async move {
+                    let _ = staged_sessions
+                        .take_promoting_system_context_state(&session_id)
+                        .await;
+                    if release_active_admission {
+                        admissions.release(&session_id);
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
+struct RpcMobSessionService {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    staged_sessions: Arc<StagedSessionRegistry>,
+    active_session_admissions: Arc<ActiveSessionAdmissions>,
+    max_sessions: usize,
+    config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    runtime_adapter: Arc<MeerkatMachine>,
+    #[cfg(test)]
+    direct_create_after_ack_hook: Option<Arc<PendingPromotionPreTurnHook>>,
+}
+
+#[cfg(feature = "mob")]
+impl RpcMobSessionService {
+    fn archive_runtime_cleanup(&self) -> ArchiveRuntimeCleanup {
+        ArchiveRuntimeCleanup {
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
+            pending_session_event_streams: None,
+            #[cfg(feature = "mcp")]
+            mcp_sessions: None,
+            #[cfg(feature = "mob")]
+            mob_state: None,
+        }
+    }
+
+    fn new(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: Arc<StagedSessionRegistry>,
+        active_session_admissions: Arc<ActiveSessionAdmissions>,
+        max_sessions: usize,
+        config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+        runtime_adapter: Arc<MeerkatMachine>,
+    ) -> Self {
+        Self {
+            service,
+            staged_sessions,
+            active_session_admissions,
+            max_sessions,
+            config_runtime,
+            runtime_adapter,
+            #[cfg(test)]
+            direct_create_after_ack_hook: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_direct_create_after_ack_hook(mut self, hook: Arc<PendingPromotionPreTurnHook>) -> Self {
+        self.direct_create_after_ack_hook = Some(hook);
+        self
+    }
+
+    fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
+        self.config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn active_session_capacity(&self) -> Result<usize, SessionError> {
+        let Some(runtime) = self.config_runtime() else {
+            return Ok(self.max_sessions);
+        };
+        runtime
+            .get()
+            .await
+            .map(|snapshot| snapshot.config.max_sessions())
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "Failed to load config: {err}"
+                )))
+            })
+    }
+
+    fn ensure_create_session_id(req: &mut CreateSessionRequest) -> SessionId {
+        let build = req.build.get_or_insert_with(Default::default);
+        if let Some(session) = build.resume_session.as_ref() {
+            return session.id().clone();
+        }
+        let session = Session::new();
+        let session_id = session.id().clone();
+        build.resume_session = Some(session);
+        session_id
+    }
+
+    fn admission_error_to_session_error(
+        session_id: &SessionId,
+        err: ActiveAdmissionError,
+    ) -> SessionError {
+        match err {
+            ActiveAdmissionError::Busy => SessionError::Busy {
+                id: session_id.clone(),
+            },
+            ActiveAdmissionError::Full { active, max } => {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "Max sessions reached ({active}/{max})"
+                )))
+            }
+        }
+    }
+
+    fn is_pre_run_start_turn_failure(result: &Result<RunResult, SessionError>) -> bool {
+        matches!(
+            result,
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::NoPendingBoundary
+            ))
+        )
+    }
+
+    pub(crate) fn is_pre_run_apply_runtime_turn_failure(
+        result: &Result<CoreApplyOutput, SessionError>,
+    ) -> bool {
+        matches!(
+            result,
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::NoPendingBoundary
+            ))
+        ) || matches!(
+            result,
+            Ok(output) if matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary))
+        )
+    }
+
+    fn is_archived_create_rejection(error: &SessionError) -> bool {
+        matches!(error, SessionError::NotFound { .. })
+    }
+
+    async fn pending_live_first_turn_is_still_deferred(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+    ) -> bool {
+        service
+            .live_deferred_first_turn_pending(session_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn should_restore_deferred_start_turn_admission(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+        result: &Result<RunResult, SessionError>,
+    ) -> bool {
+        Self::is_pre_run_start_turn_failure(result)
+            || (result.is_err()
+                && Self::pending_live_first_turn_is_still_deferred(service, session_id).await)
+    }
+
+    async fn should_restore_deferred_apply_runtime_turn_admission(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+        result: &Result<CoreApplyOutput, SessionError>,
+    ) -> bool {
+        Self::is_pre_run_apply_runtime_turn_failure(result)
+            || (result.is_err()
+                && Self::pending_live_first_turn_is_still_deferred(service, session_id).await)
+    }
+
+    async fn reserve_create_admission(
+        &self,
+        session_id: &SessionId,
+        initial_turn: InitialTurnPolicy,
+    ) -> Result<ActiveSessionAdmissionGuard, SessionError> {
+        let state = match initial_turn {
+            InitialTurnPolicy::RunImmediately => ActiveAdmissionState::Running,
+            InitialTurnPolicy::Defer => ActiveAdmissionState::Preparing,
+        };
+        let max_sessions = self.active_session_capacity().await?;
+        self.active_session_admissions
+            .try_reserve(session_id.clone(), max_sessions, state)
+            .map_err(|err| Self::admission_error_to_session_error(session_id, err))
+    }
+
+    async fn live_session_exists(&self, session_id: &SessionId) -> Result<bool, SessionError> {
+        match self.service.has_live_session(session_id).await {
+            Ok(live) => {
+                self.release_staged_admission_if_unowned(session_id, live)
+                    .await;
+                Ok(live)
+            }
+            Err(SessionError::NotFound { .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn reject_archived_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(());
+        };
+        if session_metadata_marks_archived(&session) {
+            if self.staged_sessions.contains(session_id).await {
+                return Ok(());
+            }
+            let _ = self.service.discard_live_session(session_id).await;
+            self.release_staged_admission_if_unowned(session_id, false)
+                .await;
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn release_staged_admission_if_unowned(&self, session_id: &SessionId, live_exists: bool) {
+        if live_exists {
+            return;
+        }
+        if self.active_session_admissions.state(session_id) != Some(ActiveAdmissionState::Staged) {
+            return;
+        }
+        if self.staged_sessions.contains(session_id).await {
+            return;
+        }
+        let _ = self.active_session_admissions.release(session_id);
+    }
+
+    async fn reserve_turn_admission(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, SessionError> {
+        if self.active_session_admissions.state(session_id) == Some(ActiveAdmissionState::Staged) {
+            let live_exists = self.live_session_exists(session_id).await?;
+            if !live_exists && self.staged_sessions.contains(session_id).await {
+                return Err(SessionError::Busy {
+                    id: session_id.clone(),
+                });
+            }
+        }
+        let max_sessions = self.active_session_capacity().await?;
+        self.active_session_admissions
+            .try_promote_or_reserve_running(session_id.clone(), max_sessions)
+            .map_err(|err| Self::admission_error_to_session_error(session_id, err))
+    }
+
+    async fn await_guarded_start_turn(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: SessionId,
+        req: StartTurnRequest,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> Result<RunResult, SessionError> {
+        let result_session_id = session_id.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service.start_turn(&session_id, req).await;
+            if admission.promoted_from_staged()
+                && Self::should_restore_deferred_start_turn_admission(
+                    &service,
+                    &session_id,
+                    &result,
+                )
+                .await
+            {
+                admission.restore_staged_and_keep();
+            } else {
+                drop(admission);
+            }
+            let _ = result_tx.send(result);
+        });
+        result_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session service start_turn task ended before reporting a result for {result_session_id}"
+                )))
+            })?
+    }
+
+    async fn await_guarded_apply_runtime_turn(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        let result_session_id = session_id.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service
+                .apply_runtime_turn(&session_id, run_id, req, boundary, contributing_input_ids)
+                .await;
+            if admission.promoted_from_staged()
+                && Self::should_restore_deferred_apply_runtime_turn_admission(
+                    &service,
+                    &session_id,
+                    &result,
+                )
+                .await
+            {
+                admission.restore_staged_and_keep();
+            } else {
+                drop(admission);
+            }
+            let _ = result_tx.send(result);
+        });
+        result_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session service apply_runtime_turn task ended before reporting a result for {result_session_id}"
+                )))
+            })?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn await_guarded_apply_runtime_context_appends(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: Option<Arc<StagedSessionRegistry>>,
+        session_id: SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        let result_session_id = session_id.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service
+                .apply_runtime_context_appends_with_boundary(
+                    &session_id,
+                    run_id,
+                    appends,
+                    boundary,
+                    contributing_input_ids,
+                )
+                .await;
+            let restore_staged = if admission.promoted_from_staged() {
+                Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
+                    || match staged_sessions.as_ref() {
+                        Some(staged_sessions) => staged_sessions.contains(&session_id).await,
+                        None => false,
+                    }
+            } else {
+                false
+            };
+            if restore_staged {
+                admission.restore_staged_and_keep();
+            } else {
+                drop(admission);
+            }
+            let _ = result_tx.send(result);
+        });
+        result_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session service apply_runtime_context_appends task ended before reporting a result for {result_session_id}"
+                )))
+            })?
+    }
+
+    async fn finish_guarded_apply_runtime_context_appends_admission(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: &Arc<StagedSessionRegistry>,
+        session_id: &SessionId,
+        admission: ActiveSessionAdmissionGuard,
+    ) {
+        let restore_staged = admission.promoted_from_staged()
+            && (Self::pending_live_first_turn_is_still_deferred(service, session_id).await
+                || staged_sessions.contains(session_id).await);
+        if restore_staged {
+            admission.restore_staged_and_keep();
+        } else {
+            drop(admission);
+        }
+    }
+
+    async fn await_guarded_create_session(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: SessionId,
+        initial_turn: InitialTurnPolicy,
+        req: CreateSessionRequest,
+        admission: ActiveSessionAdmissionGuard,
+        #[cfg(test)] after_ack_hook: Option<Arc<PendingPromotionPreTurnHook>>,
+    ) -> Result<RunResult, SessionError> {
+        let result_session_id = session_id.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (deferred_ack_tx, deferred_ack_rx) = tokio::sync::oneshot::channel();
+        let (deferred_ready_tx, deferred_ready_rx) = tokio::sync::oneshot::channel();
+        let (deferred_commit_tx, deferred_commit_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service.create_session(req).await;
+            match initial_turn {
+                InitialTurnPolicy::Defer => match result {
+                    Ok(result) => {
+                        if result_tx.send(Ok(result)).is_ok() && deferred_ack_rx.await.is_ok() {
+                            #[cfg(test)]
+                            if let Some(hook) = after_ack_hook {
+                                hook.reached_flag
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                hook.reached.notify_waiters();
+                                hook.release.notified().await;
+                            }
+                            if admission
+                                .admissions
+                                .set_state_if_present(&session_id, ActiveAdmissionState::Staged)
+                            {
+                                if deferred_ready_tx.send(Ok(())).is_ok()
+                                    && deferred_commit_rx.await.is_ok()
+                                {
+                                    admission.keep();
+                                } else {
+                                    let _ = service.discard_live_session(&session_id).await;
+                                }
+                            } else {
+                                let _ = service.discard_live_session(&session_id).await;
+                                let _ = deferred_ready_tx.send(Err(SessionError::Agent(
+                                    meerkat_core::error::AgentError::InternalError(format!(
+                                        "direct deferred session {session_id} lost active admission before create completed"
+                                    )),
+                                )));
+                            }
+                        } else {
+                            let _ = service.discard_live_session(&session_id).await;
+                        }
+                    }
+                    Err(err) => {
+                        if service.has_live_session(&session_id).await.unwrap_or(false) {
+                            let _ = service.discard_live_session(&session_id).await;
+                        }
+                        let _ = result_tx.send(Err(err));
+                    }
+                },
+                InitialTurnPolicy::RunImmediately => {
+                    let _ = result_tx.send(result);
+                }
+            }
+        });
+        let result = result_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "session service create_session task ended before reporting a result for {result_session_id}"
+            )))
+        })?;
+        if initial_turn == InitialTurnPolicy::Defer && result.is_ok() {
+            let _ = deferred_ack_tx.send(());
+            deferred_ready_rx
+                .await
+                .map_err(|_| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "session service create_session task ended before finalizing deferred admission for {result_session_id}"
+                    )))
+                })??;
+            let _ = deferred_commit_tx.send(());
+        }
+        result
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl SessionService for RpcMobSessionService {
+    async fn create_session(
+        &self,
+        mut req: CreateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        let initial_turn = req.initial_turn;
+        let session_id = Self::ensure_create_session_id(&mut req);
+        if req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .is_some_and(session_metadata_marks_archived)
+        {
+            return Err(SessionError::NotFound { id: session_id });
+        }
+        self.reject_archived_persisted_session(&session_id).await?;
+        let admission = self
+            .reserve_create_admission(&session_id, initial_turn)
+            .await?;
+        Self::await_guarded_create_session(
+            Arc::clone(&self.service),
+            session_id,
+            initial_turn,
+            req,
+            admission,
+            #[cfg(test)]
+            self.direct_create_after_ack_hook.clone(),
+        )
+        .await
+    }
+
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        self.reject_archived_persisted_session(id).await?;
+        let admission = self.reserve_turn_admission(id).await?;
+        Self::await_guarded_start_turn(Arc::clone(&self.service), id.clone(), req, admission).await
+    }
+
+    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.service.interrupt(id).await
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.service.cancel_after_boundary(id).await
+    }
+
+    async fn set_session_client(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), SessionError> {
+        self.service.set_session_client(id, client).await
+    }
+
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), SessionError> {
+        self.service
+            .hot_swap_session_llm_identity(id, client, identity, request_policy)
+            .await
+    }
+
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.service
+            .set_session_tool_visibility_state(id, state)
+            .await
+    }
+
+    async fn update_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        self.service.update_session_keep_alive(id, keep_alive).await
+    }
+
+    async fn update_session_mob_authority_context(
+        &self,
+        id: &SessionId,
+        authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), SessionError> {
+        self.service
+            .update_session_mob_authority_context(id, authority_context)
+            .await
+    }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        let live = self.live_session_exists(id).await?;
+        Ok(live)
+    }
+
+    async fn set_session_tool_filter(
+        &self,
+        id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), SessionError> {
+        self.service.set_session_tool_filter(id, filter).await
+    }
+
+    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        self.service.read(id).await
+    }
+
+    async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+        self.service.list(query).await
+    }
+
+    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        if self.staged_sessions.contains(id).await {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        match self
+            .active_session_admissions
+            .try_mark_staged_closing_guard(id)
+        {
+            Ok(Some(closing)) => {
+                return await_guarded_session_cleanup(
+                    Arc::clone(&self.service),
+                    id.clone(),
+                    closing,
+                    GuardedSessionCleanupOperation::Archive,
+                    Some(self.archive_runtime_cleanup()),
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(ActiveAdmissionError::Busy) => return Err(SessionError::Busy { id: id.clone() }),
+            Err(ActiveAdmissionError::Full { .. }) => unreachable!("closing does not reserve"),
+        }
+        let result = self.service.archive(id).await;
+        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            self.archive_runtime_cleanup().run(id).await;
+        }
+        result
+    }
+
+    async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
+        self.service.subscribe_session_events(id).await
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl meerkat_core::service::SessionServiceCommsExt for RpcMobSessionService {
+    async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.service.comms_runtime(session_id).await
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        self.service.event_injector(session_id).await
+    }
+
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.service.interaction_event_injector(session_id).await
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl SessionServiceControlExt for RpcMobSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        self.service.append_system_context(id, req).await
+    }
+
+    async fn stage_tool_results(
+        &self,
+        id: &SessionId,
+        req: StageToolResultsRequest,
+    ) -> Result<StageToolResultsResult, SessionError> {
+        self.service.stage_tool_results(id, req).await
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl SessionServiceHistoryExt for RpcMobSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError> {
+        self.service.read_history(id, query).await
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    fn supports_persistent_sessions(&self) -> bool {
+        true
+    }
+
+    fn runtime_adapter(&self) -> Option<Arc<MeerkatMachine>> {
+        Some(Arc::clone(&self.runtime_adapter))
+    }
+
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        let session = self.service.load_authoritative_session(session_id).await?;
+        Ok(session.filter(|session| !session_metadata_marks_archived(session)))
+    }
+
+    async fn execution_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<AgentExecutionSnapshot>, SessionError> {
+        self.service.execution_snapshot(session_id).await
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ToolScopeSnapshot>, SessionError> {
+        self.service.tool_scope_snapshot(session_id).await
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ExternalToolSurfaceSnapshot>, SessionError> {
+        self.service
+            .external_tool_surface_snapshot(session_id)
+            .await
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<PeerIngressRuntimeSnapshot>, SessionError> {
+        let Some(runtime) = self.service.comms_runtime(session_id).await else {
+            return Ok(None);
+        };
+        match runtime.peer_ingress_runtime_snapshot().await {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(meerkat_core::CommsCapabilityError::Unsupported(_)) => Ok(None),
+        }
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        match self
+            .active_session_admissions
+            .try_mark_staged_closing_guard(session_id)
+        {
+            Ok(Some(closing)) => {
+                return await_guarded_session_cleanup(
+                    Arc::clone(&self.service),
+                    session_id.clone(),
+                    closing,
+                    GuardedSessionCleanupOperation::DiscardLive,
+                    None,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(ActiveAdmissionError::Busy) => {
+                return Err(SessionError::Busy {
+                    id: session_id.clone(),
+                });
+            }
+            Err(ActiveAdmissionError::Full { .. }) => unreachable!("closing does not reserve"),
+        }
+        self.service.discard_live_session(session_id).await
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.reject_archived_persisted_session(session_id).await?;
+        let admission = self.reserve_turn_admission(session_id).await?;
+        Self::await_guarded_apply_runtime_turn(
+            Arc::clone(&self.service),
+            session_id.clone(),
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+            admission,
+        )
+        .await
+    }
+
+    async fn apply_runtime_turn_with_reserved_admission(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.reject_archived_persisted_session(session_id).await?;
+        self.service
+            .apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
+            .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_context_appends_with_boundary(
+            session_id,
+            run_id,
+            appends,
+            RunApplyBoundary::Immediate,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.reject_archived_persisted_session(session_id).await?;
+        let admission = self.reserve_turn_admission(session_id).await?;
+        Self::await_guarded_apply_runtime_context_appends(
+            Arc::clone(&self.service),
+            Some(Arc::clone(&self.staged_sessions)),
+            session_id.clone(),
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+            admission,
+        )
+        .await
+    }
+
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        self.service
+            .apply_runtime_system_context_for_turn(session_id, appends)
+            .await
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        self.service.cancel_all_checkpointers().await;
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        self.service.rearm_all_checkpointers().await;
+    }
 }
 
 fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
@@ -701,6 +2526,23 @@ pub struct SessionRuntime {
     /// first materializing turn fans out events here, then bridges the stream
     /// to the live session service after promotion.
     pending_session_event_streams: Arc<Mutex<HashMap<SessionId, PendingSessionEventStreams>>>,
+    /// Active-work admission reservations. Staged sessions, promoting
+    /// sessions, and currently running turns are counted here; persisted
+    /// history and idle live handles are not.
+    active_session_admissions: Arc<ActiveSessionAdmissions>,
+    runtime_pre_admissions: Arc<StdMutex<HashMap<SessionId, Vec<RuntimePreAdmissionEntry>>>>,
+    runtime_registration_locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
+    #[cfg(test)]
+    pending_promotion_pre_turn_hook: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    #[cfg(test)]
+    runtime_routed_pre_promotion_hook: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    #[cfg(test)]
+    staged_archive_after_service_hook: Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    #[cfg(test)]
+    create_session_after_prepare_bindings_error: Arc<StdMutex<Option<String>>>,
+    #[cfg(test)]
+    create_session_after_prepare_bindings_session_id: Arc<StdMutex<Option<SessionId>>>,
+    /// Startup fallback capacity used when no live config runtime is attached.
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
@@ -719,7 +2561,7 @@ pub struct SessionRuntime {
     #[cfg(feature = "mob")]
     mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
     #[cfg(feature = "mcp")]
-    mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
+    mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Channel for sending callback tool requests to the RPC server loop.
     /// Wrapped in `RwLock` so it can be set after Arc wrapping (server construction).
     #[allow(clippy::type_complexity)]
@@ -795,6 +2637,17 @@ fn approval_service_from_persistence(
 }
 
 impl SessionRuntime {
+    fn take_runtime_pre_admission_guard(
+        pre_admission: &mut RuntimePreAdmissionGuard,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        pre_admission.take().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("runtime pre-admission guard already consumed for {session_id}"),
+            data: None,
+        })
+    }
+
     fn turn_keep_alive_policy(
         requested: Option<bool>,
     ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
@@ -948,10 +2801,53 @@ impl SessionRuntime {
         let Some(stored) = self.load_persisted_session(session_id).await? else {
             return Ok(false);
         };
-        Ok(stored.updated_at() > live.updated_at()
-            || (stored.updated_at() == live.updated_at()
-                && stored.messages().len() > live.messages().len())
-            || stored_has_unapplied_system_context(&stored, &live))
+        Ok(session_metadata_marks_archived(&stored)
+            || stored.messages().len() > live.messages().len())
+    }
+
+    async fn archived_persisted_session_without_live(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RpcError> {
+        let Some(stored) = self.load_persisted_session(session_id).await? else {
+            return Ok(false);
+        };
+        if !session_metadata_marks_archived(&stored) {
+            return Ok(false);
+        }
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(false);
+        }
+        let _ = self.service.discard_live_session(session_id).await;
+        if matches!(
+            self.active_session_admissions.state(session_id),
+            Some(ActiveAdmissionState::Staged | ActiveAdmissionState::Preparing)
+        ) {
+            let _ = self.active_session_admissions.release(session_id);
+        }
+        self.archive_runtime_cleanup().run(session_id).await;
+        Ok(true)
+    }
+
+    pub async fn reject_archived_persisted_session_without_live(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
+        }
+        Ok(())
+    }
+
+    fn session_not_found_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: format!("session not found: {session_id}"),
+            data: None,
+        }
     }
 
     /// Create a new session runtime.
@@ -978,7 +2874,11 @@ impl SessionRuntime {
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
-            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+            meerkat::surface::build_runtime_backed_service_with_unbounded_active_capacity(
+                builder,
+                DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY,
+                persistence,
+            );
         let service = Arc::new(service);
         let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
@@ -999,6 +2899,19 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            active_session_admissions: Arc::new(ActiveSessionAdmissions::default()),
+            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(test)]
+            pending_promotion_pre_turn_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            runtime_routed_pre_promotion_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            staged_archive_after_service_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            create_session_after_prepare_bindings_error: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            create_session_after_prepare_bindings_session_id: Arc::new(StdMutex::new(None)),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -1016,7 +2929,7 @@ impl SessionRuntime {
             #[cfg(feature = "mob")]
             mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
-            mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             callback_request_tx: StdRwLock::new(None),
             callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
@@ -1054,7 +2967,11 @@ impl SessionRuntime {
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
-            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+            meerkat::surface::build_runtime_backed_service_with_unbounded_active_capacity(
+                builder,
+                DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY,
+                persistence,
+            );
         let service = Arc::new(service);
         let reconfigure_auth_lease = runtime_adapter.auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
@@ -1075,6 +2992,19 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            active_session_admissions: Arc::new(ActiveSessionAdmissions::default()),
+            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(test)]
+            pending_promotion_pre_turn_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            runtime_routed_pre_promotion_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            staged_archive_after_service_hook: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            create_session_after_prepare_bindings_error: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            create_session_after_prepare_bindings_session_id: Arc::new(StdMutex::new(None)),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -1092,7 +3022,7 @@ impl SessionRuntime {
             #[cfg(feature = "mob")]
             mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
-            mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             callback_request_tx: StdRwLock::new(None),
             callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
@@ -1176,6 +3106,1031 @@ impl SessionRuntime {
             .clone()
     }
 
+    async fn active_session_capacity(&self) -> Result<usize, RpcError> {
+        let Some(runtime) = self.config_runtime() else {
+            return Ok(self.max_sessions);
+        };
+        runtime
+            .get()
+            .await
+            .map(|snapshot| snapshot.config.max_sessions())
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("Failed to load config: {err}"),
+                data: None,
+            })
+    }
+
+    async fn reserve_active_admission(
+        &self,
+        session_id: SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        self.reserve_active_admission_with_state(session_id, ActiveAdmissionState::Staged)
+            .await
+    }
+
+    async fn reserve_active_admission_with_state(
+        &self,
+        session_id: SessionId,
+        state: ActiveAdmissionState,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        let max_sessions = self.active_session_capacity().await?;
+        self.active_session_admissions
+            .try_reserve(session_id.clone(), max_sessions, state)
+            .map_err(|err| match err {
+                ActiveAdmissionError::Busy => RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} already has active work"),
+                    data: None,
+                },
+                ActiveAdmissionError::Full { active, max } => RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Max sessions reached ({active}/{max})"),
+                    data: None,
+                },
+            })
+    }
+
+    async fn pending_live_first_turn_is_still_deferred(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+    ) -> bool {
+        service
+            .live_deferred_first_turn_pending(session_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn should_restore_pending_after_start_turn(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+        result: &Result<RunResult, SessionError>,
+    ) -> bool {
+        Self::is_pre_run_start_turn_failure(result)
+            || (result.is_err()
+                && Self::pending_live_first_turn_is_still_deferred(service, session_id).await)
+    }
+
+    async fn should_restore_pending_after_apply_runtime_turn(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+        result: &Result<CoreApplyOutput, SessionError>,
+    ) -> bool {
+        Self::is_pre_run_apply_runtime_turn_failure(result)
+            || (result.is_err()
+                && Self::pending_live_first_turn_is_still_deferred(service, session_id).await)
+    }
+
+    async fn finish_guarded_apply_runtime_context_appends_admission(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: &Arc<StagedSessionRegistry>,
+        session_id: &SessionId,
+        admission: ActiveSessionAdmissionGuard,
+    ) {
+        let restore_staged = admission.promoted_from_staged()
+            && (Self::pending_live_first_turn_is_still_deferred(service, session_id).await
+                || staged_sessions.contains(session_id).await);
+        if restore_staged {
+            admission.restore_staged_and_keep();
+        } else {
+            drop(admission);
+        }
+    }
+
+    async fn reserve_active_turn_for_service(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, SessionError> {
+        let max_sessions = self.active_session_capacity().await.map_err(|err| {
+            SessionError::Agent(meerkat_core::AgentError::InternalError(err.message))
+        })?;
+        self.active_session_admissions
+            .try_promote_or_reserve_running(session_id.clone(), max_sessions)
+            .map_err(|err| match err {
+                ActiveAdmissionError::Busy => SessionError::Busy {
+                    id: session_id.clone(),
+                },
+                ActiveAdmissionError::Full { active, max } => {
+                    SessionError::Agent(meerkat_core::AgentError::InternalError(format!(
+                        "Max sessions reached ({active}/{max})"
+                    )))
+                }
+            })
+    }
+
+    async fn reserve_or_join_active_turn_for_service(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, SessionError> {
+        let max_sessions = self.active_session_capacity().await.map_err(|err| {
+            SessionError::Agent(meerkat_core::AgentError::InternalError(err.message))
+        })?;
+        self.active_session_admissions
+            .try_join_or_reserve_running(session_id.clone(), max_sessions)
+            .map_err(|err| match err {
+                ActiveAdmissionError::Busy => SessionError::Busy {
+                    id: session_id.clone(),
+                },
+                ActiveAdmissionError::Full { active, max } => {
+                    SessionError::Agent(meerkat_core::AgentError::InternalError(format!(
+                        "Max sessions reached ({active}/{max})"
+                    )))
+                }
+            })
+    }
+
+    async fn reserve_active_turn(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        self.reserve_active_turn_for_service(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    async fn reserve_or_join_active_turn(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        self.reserve_or_join_active_turn_for_service(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    pub(crate) fn take_runtime_pre_admission(
+        &self,
+        session_id: &SessionId,
+        input_ids: &[InputId],
+    ) -> Option<ActiveSessionAdmissionGuard> {
+        if input_ids.is_empty() {
+            return None;
+        }
+        let mut pre_admissions = self
+            .runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = pre_admissions.get_mut(session_id)?;
+        let index = entries
+            .iter()
+            .position(|entry| input_ids.contains(&entry.input_id))?;
+        let entry = entries.remove(index);
+        if entries.is_empty() {
+            pre_admissions.remove(session_id);
+        }
+        Some(entry.admission)
+    }
+
+    fn insert_runtime_pre_admission(
+        &self,
+        session_id: SessionId,
+        input_id: InputId,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> Result<(), RpcError> {
+        let mut pre_admissions = self
+            .runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = pre_admissions.entry(session_id.clone()).or_default();
+        if entries.iter().any(|entry| entry.input_id == input_id) {
+            drop(pre_admissions);
+            if admission.promoted_from_staged() {
+                admission.restore_staged_and_keep();
+            }
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!("session {session_id} already has queued runtime work"),
+                data: None,
+            });
+        }
+        entries.push(RuntimePreAdmissionEntry {
+            input_id,
+            admission,
+        });
+        Ok(())
+    }
+
+    fn restore_or_release_runtime_pre_admission(&self, session_id: &SessionId, input_id: &InputId) {
+        let Some(admission) =
+            self.take_runtime_pre_admission(session_id, std::slice::from_ref(input_id))
+        else {
+            return;
+        };
+        if admission.promoted_from_staged() {
+            admission.restore_staged_and_keep();
+        }
+    }
+
+    fn register_runtime_pre_admission(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        input_id: InputId,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> Result<RuntimePreAdmissionRegistration, RpcError> {
+        self.insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)?;
+        Ok(RuntimePreAdmissionRegistration::new(
+            Arc::clone(self),
+            session_id,
+            input_id,
+        ))
+    }
+
+    fn runtime_registration_lock(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> RuntimeRegistrationLockLease {
+        let lock = {
+            let mut locks = self
+                .runtime_registration_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(session_id.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        RuntimeRegistrationLockLease {
+            locks: Arc::clone(&self.runtime_registration_locks),
+            session_id: session_id.clone(),
+            lock,
+        }
+    }
+
+    async fn unregister_new_runtime_registration_if_idle(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        runtime_was_registered: bool,
+        staged_session_existed: bool,
+        protect_active_admission: bool,
+    ) {
+        if runtime_was_registered || staged_session_existed {
+            return;
+        }
+        if self.staged_sessions.contains(session_id).await {
+            return;
+        }
+        if protect_active_admission && self.active_session_admissions.state(session_id).is_some() {
+            return;
+        }
+        if adapter
+            .list_active_inputs(session_id)
+            .await
+            .is_ok_and(|inputs| !inputs.is_empty())
+        {
+            return;
+        }
+        if self
+            .service
+            .has_live_session(session_id)
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+        adapter.unregister_session(session_id).await;
+    }
+
+    fn runtime_input_requires_active_pre_admission(input: &meerkat_runtime::Input) -> bool {
+        let idle_policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
+        matches!(
+            idle_policy.wake_mode,
+            meerkat_runtime::policy::WakeMode::WakeIfIdle
+        ) && matches!(
+            idle_policy.apply_mode,
+            meerkat_runtime::policy::ApplyMode::StageRunStart
+                | meerkat_runtime::policy::ApplyMode::StageRunBoundary
+                | meerkat_runtime::policy::ApplyMode::InjectNow
+        )
+    }
+
+    fn completion_outcome_requires_runtime_cleanup(
+        outcome: &meerkat_runtime::CompletionOutcome,
+    ) -> bool {
+        match outcome {
+            meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
+                reason.contains("runtime boundary commit failed")
+                    || reason.contains("runtime loop commit failed")
+            }
+            meerkat_runtime::CompletionOutcome::Completed(_)
+            | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
+            | meerkat_runtime::CompletionOutcome::CallbackPending { .. } => false,
+        }
+    }
+
+    fn completion_outcome_is_apply_failure(outcome: &meerkat_runtime::CompletionOutcome) -> bool {
+        match outcome {
+            meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
+                reason.starts_with("apply failed:")
+            }
+            meerkat_runtime::CompletionOutcome::Completed(_)
+            | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
+            | meerkat_runtime::CompletionOutcome::CallbackPending { .. } => false,
+        }
+    }
+
+    async fn cleanup_runtime_after_completion_outcome(
+        &self,
+        session_id: &SessionId,
+        outcome: &meerkat_runtime::CompletionOutcome,
+    ) {
+        let archived_now = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            .is_some_and(session_metadata_marks_archived);
+        if archived_now {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.archive_runtime_cleanup().run(session_id).await;
+            return;
+        }
+
+        let live_present = self
+            .service
+            .has_live_session(session_id)
+            .await
+            .unwrap_or(false);
+        if Self::completion_outcome_requires_runtime_cleanup(outcome)
+            || (!live_present && Self::completion_outcome_is_apply_failure(outcome))
+        {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.archive_runtime_cleanup().run(session_id).await;
+        }
+    }
+
+    fn spawn_runtime_pre_admission_cleanup(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        input_id: InputId,
+        handle: meerkat_runtime::CompletionHandle,
+    ) {
+        drop(self.spawn_runtime_pre_admission_cleanup_with_outcome(session_id, input_id, handle));
+    }
+
+    fn spawn_runtime_pre_admission_cleanup_with_outcome(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        input_id: InputId,
+        handle: meerkat_runtime::CompletionHandle,
+    ) -> tokio::sync::oneshot::Receiver<meerkat_runtime::CompletionOutcome> {
+        let runtime = Arc::clone(self);
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = handle.wait().await;
+            runtime.restore_or_release_runtime_pre_admission(&session_id, &input_id);
+            runtime
+                .cleanup_runtime_after_completion_outcome(&session_id, &outcome)
+                .await;
+            let _ = outcome_tx.send(outcome);
+        });
+        outcome_rx
+    }
+
+    fn spawn_runtime_pre_admission_idle_cleanup(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        input_id: InputId,
+    ) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let runtime_running = runtime
+                    .runtime_adapter
+                    .runtime_state(&session_id)
+                    .await
+                    .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
+                let input_still_active = runtime
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .is_ok_and(|inputs| inputs.contains(&input_id));
+                if !runtime_running || !input_still_active {
+                    runtime.restore_or_release_runtime_pre_admission(&session_id, &input_id);
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        });
+    }
+
+    fn promote_pending_active_turn(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ActiveSessionAdmissionGuard, RpcError> {
+        self.active_session_admissions
+            .try_promote_staged_to_running(session_id)
+            .map_err(|err| match err {
+                ActiveAdmissionError::Busy => RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} already has active work"),
+                    data: None,
+                },
+                ActiveAdmissionError::Full { active, max } => RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Max sessions reached ({active}/{max})"),
+                    data: None,
+                },
+            })
+    }
+
+    fn is_pre_run_start_turn_failure(result: &Result<RunResult, SessionError>) -> bool {
+        matches!(
+            result,
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::NoPendingBoundary
+            ))
+        )
+    }
+
+    pub(crate) fn is_pre_run_apply_runtime_turn_failure(
+        result: &Result<CoreApplyOutput, SessionError>,
+    ) -> bool {
+        matches!(
+            result,
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::NoPendingBoundary
+            ))
+        ) || matches!(
+            result,
+            Ok(output) if matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary))
+        )
+    }
+
+    fn is_archived_create_rejection(error: &SessionError) -> bool {
+        matches!(error, SessionError::NotFound { .. })
+    }
+
+    fn spawn_service_start_turn_with_admission_guard(
+        &self,
+        session_id: SessionId,
+        req: StartTurnRequest,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> ServiceStartTurnResultReceiver {
+        let service = Arc::clone(&self.service);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service.start_turn(&session_id, req).await;
+            if admission.promoted_from_staged()
+                && Self::should_restore_pending_after_start_turn(&service, &session_id, &result)
+                    .await
+            {
+                admission.restore_staged_and_keep();
+            } else {
+                drop(admission);
+            }
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    #[cfg(test)]
+    async fn wait_pending_promotion_pre_turn_hook(
+        hook_slot: &Arc<StdMutex<Option<Arc<PendingPromotionPreTurnHook>>>>,
+    ) {
+        let hook = hook_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(hook) = hook else {
+            return;
+        };
+        hook.reached_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        hook.reached.notify_waiters();
+        hook.release.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_runtime_routed_pre_promotion_hook(&self, session_id: &SessionId) {
+        if !self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .is_some_and(|info| !info.is_promoting)
+        {
+            return;
+        }
+        if self.active_session_admissions.state(session_id) != Some(ActiveAdmissionState::Running) {
+            return;
+        }
+        Self::wait_pending_promotion_pre_turn_hook(&self.runtime_routed_pre_promotion_hook).await;
+    }
+
+    fn spawn_pending_create_and_start_turn_with_admission_guard(
+        &self,
+        session_id: SessionId,
+        create_req: CreateSessionRequest,
+        start_req: StartTurnRequest,
+        mut promotion_cleanup: PendingPromotionCleanup,
+        mut admission: ActiveSessionAdmissionGuard,
+    ) -> ServiceStartTurnResultReceiver {
+        let service = Arc::clone(&self.service);
+        let staged_sessions = Arc::clone(&self.staged_sessions);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
+        #[cfg(test)]
+        let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            match service.create_session(create_req).await {
+                Ok(_) => {
+                    promotion_cleanup.mark_materialized(false);
+                }
+                Err(err) => {
+                    if Self::is_archived_create_rejection(&err) {
+                        let _ = service.discard_live_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                        promotion_cleanup.mark_materialized(false);
+                        let _ = promotion_cleanup.finish_now().await;
+                        promotion_cleanup.disarm();
+                        drop(admission);
+                        let _ = result_tx.send(Err(err));
+                        return;
+                    }
+                    if Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
+                    {
+                        admission.set_staged_and_keep();
+                        promotion_cleanup.mark_materialized(false);
+                        Self::finish_pending_promotion_after_service_turn(
+                            Arc::clone(&service),
+                            staged_sessions,
+                            &session_id,
+                            "create_session",
+                        )
+                        .await;
+                    } else {
+                        let materialized_after_error =
+                            service.has_live_session(&session_id).await.unwrap_or(false);
+                        if materialized_after_error {
+                            promotion_cleanup.mark_materialized(false);
+                            Self::finish_pending_promotion_after_service_turn(
+                                Arc::clone(&service),
+                                staged_sessions,
+                                &session_id,
+                                "create_session",
+                            )
+                            .await;
+                        } else {
+                            admission.keep();
+                            promotion_cleanup.restore_now().await;
+                        }
+                    }
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+            }
+
+            #[cfg(test)]
+            Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
+
+            let result = service.start_turn(&session_id, start_req).await;
+            if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
+                if let Err(error) = service.archive(&session_id).await {
+                    let _ = service.discard_live_session(&session_id).await;
+                    admission.keep();
+                    promotion_cleanup.restore_now().await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+                if let Err(error) = service.mark_transient_pending_archive(&session_id).await {
+                    admission.keep();
+                    promotion_cleanup.restore_now().await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+                admission.keep();
+                promotion_cleanup.mark_transient_pending_archive();
+                promotion_cleanup.restore_now().await;
+                promotion_cleanup.disarm();
+                let _ = result_tx.send(result);
+                return;
+            }
+
+            Self::finish_pending_promotion_after_service_turn(
+                Arc::clone(&service),
+                staged_sessions,
+                &session_id,
+                "start_turn",
+            )
+            .await;
+            drop(admission);
+            promotion_cleanup.disarm();
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    async fn await_service_start_turn(
+        session_id: &SessionId,
+        result_rx: ServiceStartTurnResultReceiver,
+    ) -> Result<RunResult, RpcError> {
+        result_rx
+            .await
+            .map_err(|_| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session service start_turn task ended before reporting a result for {session_id}"
+                ),
+                data: None,
+            })?
+            .map_err(session_error_to_rpc)
+    }
+
+    fn spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
+        &self,
+        session_id: SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> RecoverableServiceApplyRuntimeTurnResultReceiver {
+        let service = Arc::clone(&self.service);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = service
+                .apply_runtime_turn(&session_id, run_id, req, boundary, contributing_input_ids)
+                .await;
+            let admission = if admission.promoted_from_staged()
+                && Self::should_restore_pending_after_apply_runtime_turn(
+                    &service,
+                    &session_id,
+                    &result,
+                )
+                .await
+            {
+                admission.restore_staged_and_keep();
+                None
+            } else if !matches!(result, Err(SessionError::NotFound { .. })) {
+                drop(admission);
+                None
+            } else {
+                // Preserve the accepted-input admission for stored-session
+                // recovery. Dropping it here creates a capacity gap before the
+                // fallback materialization path can run.
+                Some(admission)
+            };
+            let _ = result_tx.send((result, admission));
+        });
+        result_rx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
+        &self,
+        session_id: SessionId,
+        create_req: CreateSessionRequest,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+        mut promotion_cleanup: PendingPromotionCleanup,
+        mut admission: ActiveSessionAdmissionGuard,
+        keep_alive: bool,
+    ) -> ServiceApplyRuntimeTurnResultReceiver {
+        let service = Arc::clone(&self.service);
+        let staged_sessions = Arc::clone(&self.staged_sessions);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
+        #[cfg(test)]
+        let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            match service.create_session(create_req).await {
+                Ok(_) => {
+                    promotion_cleanup.mark_materialized(false);
+                }
+                Err(err) => {
+                    if Self::is_archived_create_rejection(&err) {
+                        let _ = service.discard_live_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                        promotion_cleanup.mark_materialized(false);
+                        let _ = promotion_cleanup.finish_now().await;
+                        promotion_cleanup.disarm();
+                        drop(admission);
+                        let _ = result_tx.send(Err(err));
+                        return;
+                    }
+                    if Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
+                    {
+                        admission.set_staged_and_keep();
+                        promotion_cleanup.mark_materialized(false);
+                        Self::finish_pending_promotion_after_service_turn(
+                            Arc::clone(&service),
+                            staged_sessions,
+                            &session_id,
+                            "create_session",
+                        )
+                        .await;
+                    } else {
+                        let materialized_after_error =
+                            service.has_live_session(&session_id).await.unwrap_or(false);
+                        if materialized_after_error {
+                            promotion_cleanup.mark_materialized(false);
+                            Self::finish_pending_promotion_after_service_turn(
+                                Arc::clone(&service),
+                                staged_sessions,
+                                &session_id,
+                                "create_session",
+                            )
+                            .await;
+                        } else {
+                            admission.keep();
+                            promotion_cleanup.restore_now().await;
+                        }
+                    }
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+            }
+
+            #[cfg(test)]
+            Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
+
+            let (turn_result_tx, turn_result_rx) = tokio::sync::oneshot::channel();
+            let service_for_turn = Arc::clone(&service);
+            let session_for_turn = session_id.clone();
+            tokio::spawn(async move {
+                let result = service_for_turn
+                    .apply_runtime_turn(
+                        &session_for_turn,
+                        run_id,
+                        req,
+                        boundary,
+                        contributing_input_ids,
+                    )
+                    .await;
+                let _ = turn_result_tx.send(result);
+            });
+
+            #[cfg(feature = "comms")]
+            {
+                // W2-G: never reconfigure a mob-owned drain during runtime
+                // materialization. See `start_turn_via_runtime`.
+                let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
+                if !owner.is_mob_owned() {
+                    let comms_rt = service.comms_runtime(&session_id).await;
+                    let peer_ingress_enabled =
+                        keep_alive || runtime_adapter.session_has_comms(&session_id).await;
+                    runtime_adapter
+                        .update_peer_ingress_context(&session_id, peer_ingress_enabled, comms_rt)
+                        .await;
+                }
+            }
+
+            let result = turn_result_rx.await.unwrap_or_else(|_| {
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+                    )),
+                ))
+            });
+            if Self::should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
+                .await
+            {
+                if let Err(error) = service.archive(&session_id).await {
+                    let _ = service.discard_live_session(&session_id).await;
+                    admission.keep();
+                    promotion_cleanup.restore_now().await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+                if let Err(error) = service.mark_transient_pending_archive(&session_id).await {
+                    admission.keep();
+                    promotion_cleanup.restore_now().await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+                admission.keep();
+                promotion_cleanup.mark_transient_pending_archive();
+                promotion_cleanup.restore_now().await;
+                promotion_cleanup.disarm();
+                let _ = result_tx.send(result);
+                return;
+            }
+
+            Self::finish_pending_promotion_after_service_turn(
+                Arc::clone(&service),
+                staged_sessions,
+                &session_id,
+                "apply_runtime_turn",
+            )
+            .await;
+            drop(admission);
+            promotion_cleanup.disarm();
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
+        &self,
+        session_id: SessionId,
+        create_req: CreateSessionRequest,
+        runtime_was_registered: bool,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+        mut admission: ActiveSessionAdmissionGuard,
+        keep_alive: bool,
+    ) -> ServiceApplyRuntimeTurnResultReceiver {
+        #[cfg(not(feature = "comms"))]
+        let _ = keep_alive;
+        let service = Arc::clone(&self.service);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = match service.create_session(create_req).await {
+                Ok(_) => {
+                    let (turn_result_tx, turn_result_rx) = tokio::sync::oneshot::channel();
+                    let service_for_turn = Arc::clone(&service);
+                    let session_for_turn = session_id.clone();
+                    tokio::spawn(async move {
+                        let result = service_for_turn
+                            .apply_runtime_turn(
+                                &session_for_turn,
+                                run_id,
+                                req,
+                                boundary,
+                                contributing_input_ids,
+                            )
+                            .await;
+                        let _ = turn_result_tx.send(result);
+                    });
+
+                    #[cfg(feature = "comms")]
+                    {
+                        // W2-G: never reconfigure a mob-owned drain during recovery
+                        // materialization. See `start_turn_via_runtime`.
+                        let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
+                        if !owner.is_mob_owned() {
+                            let comms_rt = service.comms_runtime(&session_id).await;
+                            let peer_ingress_enabled =
+                                keep_alive || runtime_adapter.session_has_comms(&session_id).await;
+                            runtime_adapter
+                                .update_peer_ingress_context(
+                                    &session_id,
+                                    peer_ingress_enabled,
+                                    comms_rt,
+                                )
+                                .await;
+                        }
+                    }
+
+                    let result = turn_result_rx.await.unwrap_or_else(|_| {
+                        Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+                            )),
+                        ))
+                    });
+                    if Self::should_restore_pending_after_apply_runtime_turn(
+                        &service,
+                        &session_id,
+                        &result,
+                    )
+                    .await
+                    {
+                        let _ = service.discard_live_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                    }
+                    result
+                }
+                Err(err) => {
+                    if !runtime_was_registered {
+                        runtime_adapter.unregister_session(&session_id).await;
+                    }
+                    if Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
+                    {
+                        admission.set_staged_and_keep();
+                    }
+                    Err(err)
+                }
+            };
+            drop(admission);
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_recovered_create_and_apply_runtime_context_appends_with_admission_guard(
+        &self,
+        session_id: SessionId,
+        create_req: CreateSessionRequest,
+        runtime_was_registered: bool,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+        admission: ActiveSessionAdmissionGuard,
+    ) -> ServiceApplyRuntimeTurnResultReceiver {
+        let service = Arc::clone(&self.service);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = match service.create_session(create_req).await {
+                Ok(_) => {
+                    service
+                        .apply_runtime_context_appends_with_boundary(
+                            &session_id,
+                            run_id,
+                            appends,
+                            boundary,
+                            contributing_input_ids,
+                        )
+                        .await
+                }
+                Err(err) => {
+                    if !runtime_was_registered {
+                        runtime_adapter.unregister_session(&session_id).await;
+                    }
+                    Err(err)
+                }
+            };
+            drop(admission);
+            let _ = result_tx.send(result);
+        });
+        result_rx
+    }
+
+    async fn await_service_apply_runtime_turn(
+        session_id: &SessionId,
+        result_rx: ServiceApplyRuntimeTurnResultReceiver,
+    ) -> Result<CoreApplyOutput, RpcError> {
+        result_rx
+            .await
+            .map_err(|_| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+                ),
+                data: None,
+            })?
+            .map_err(session_error_to_rpc)
+    }
+
+    async fn await_service_apply_runtime_turn_with_recoverable_admission(
+        session_id: &SessionId,
+        result_rx: RecoverableServiceApplyRuntimeTurnResultReceiver,
+    ) -> Result<
+        (
+            Result<CoreApplyOutput, SessionError>,
+            Option<ActiveSessionAdmissionGuard>,
+        ),
+        RpcError,
+    > {
+        result_rx.await.map_err(|_| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!(
+                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+            ),
+            data: None,
+        })
+    }
+
+    async fn finish_pending_promotion_after_service_turn(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: Arc<StagedSessionRegistry>,
+        session_id: &SessionId,
+        operation: &'static str,
+    ) {
+        let Some((starting_system_context_state, current_system_context_state)) = staged_sessions
+            .take_promoting_system_context_state(session_id)
+            .await
+        else {
+            return;
+        };
+        if let Err(err) = Self::replay_promoted_system_context_on_service(
+            service,
+            session_id,
+            &starting_system_context_state,
+            &current_system_context_state,
+        )
+        .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err.message,
+                operation,
+                "failed to replay promoted system-context state after service turn"
+            );
+        }
+    }
+
     /// Persistent TokenStore used by OAuth-backed bindings (shared with
     /// the AgentFactory so login writes + resolve reads see the same
     /// credentials).
@@ -1208,6 +4163,27 @@ impl SessionRuntime {
 
     pub(crate) fn core_session_service(&self) -> Arc<dyn SessionService> {
         self.service.clone()
+    }
+
+    fn archive_runtime_cleanup(&self) -> ArchiveRuntimeCleanup {
+        ArchiveRuntimeCleanup {
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
+            pending_session_event_streams: Some(Arc::clone(&self.pending_session_event_streams)),
+            #[cfg(feature = "mcp")]
+            mcp_sessions: Some(Arc::clone(&self.mcp_sessions)),
+            #[cfg(feature = "mob")]
+            mob_state: self.mob_state(),
+        }
+    }
+
+    async fn cleanup_recovered_runtime_if_new(
+        &self,
+        session_id: &SessionId,
+        runtime_was_registered: bool,
+    ) {
+        if !runtime_was_registered {
+            self.archive_runtime_cleanup().run(session_id).await;
+        }
     }
 
     pub fn approval_service(&self) -> meerkat_core::ApprovalService {
@@ -1300,11 +4276,12 @@ impl SessionRuntime {
         session_id: &SessionId,
         session: Session,
         overrides: SurfaceSessionRecoveryOverrides,
-    ) -> Result<CreateSessionRequest, RpcError> {
+    ) -> Result<RecoveredCreateRequest, RpcError> {
         let current_generation = match self.config_runtime() {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
+        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let bindings = self
             .runtime_adapter
             .prepare_bindings(session_id.clone())
@@ -1316,7 +4293,7 @@ impl SessionRuntime {
                 ),
                 data: None,
             })?;
-        let recovered = build_recovered_session(
+        let recovered = match build_recovered_session(
             session,
             &overrides,
             SurfaceSessionRecoveryContext {
@@ -1332,9 +4309,19 @@ impl SessionRuntime {
                 backend: self.backend.clone(),
                 config_generation: current_generation,
             },
-        )
-        .map_err(Self::recovery_error_to_rpc)?;
-        Ok(recovered.into_deferred_create_request())
+        ) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                if !runtime_was_registered {
+                    self.runtime_adapter.unregister_session(session_id).await;
+                }
+                return Err(Self::recovery_error_to_rpc(error));
+            }
+        };
+        Ok(RecoveredCreateRequest {
+            request: recovered.into_deferred_create_request(),
+            runtime_was_registered,
+        })
     }
 
     pub fn schedule_service(&self) -> ScheduleService {
@@ -1823,7 +4810,33 @@ impl SessionRuntime {
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        self.service.discard_live_session(session_id).await
+        let result = self.service.discard_live_session(session_id).await;
+        if result.is_ok()
+            && matches!(
+                self.active_session_admissions.state(session_id),
+                Some(ActiveAdmissionState::Preparing | ActiveAdmissionState::Staged)
+            )
+            && !self.staged_sessions.contains(session_id).await
+        {
+            self.active_session_admissions.release(session_id);
+        }
+        result
+    }
+
+    async fn release_unowned_staged_admission(&self, session_id: &SessionId) {
+        if self.active_session_admissions.state(session_id) != Some(ActiveAdmissionState::Staged) {
+            return;
+        }
+        if self.staged_sessions.contains(session_id).await {
+            return;
+        }
+        let _ = self.active_session_admissions.release(session_id);
+    }
+
+    async fn discard_stale_live_session(&self, session_id: &SessionId) {
+        let _ = self.discard_live_session(session_id).await;
+        self.runtime_adapter.unregister_session(session_id).await;
+        self.release_unowned_staged_admission(session_id).await;
     }
 
     pub async fn dispatch_external_tool_call(
@@ -1860,7 +4873,14 @@ impl SessionRuntime {
 
     #[cfg(feature = "mob")]
     pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
-        self.service.clone()
+        Arc::new(RpcMobSessionService::new(
+            Arc::clone(&self.service),
+            Arc::clone(&self.staged_sessions),
+            Arc::clone(&self.active_session_admissions),
+            self.max_sessions,
+            Arc::clone(&self.config_runtime),
+            Arc::clone(&self.runtime_adapter),
+        ))
     }
 
     /// Apply runtime-owned system context appends to the canonical session
@@ -1875,19 +4895,117 @@ impl SessionRuntime {
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+        pre_admission: Option<ActiveSessionAdmissionGuard>,
     ) -> Result<
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::service::SessionError,
     > {
-        self.service
+        self.apply_runtime_context_appends_with_recovery(
+            session_id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+            None,
+            pre_admission,
+        )
+        .await
+        .map_err(|err| rpc_error_to_session_error(err, session_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_runtime_context_appends_with_recovery(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        pre_admission: Option<ActiveSessionAdmissionGuard>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, crate::protocol::RpcError>
+    {
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
+        }
+        if self.live_session_is_stale(session_id).await? {
+            self.discard_stale_live_session(session_id).await;
+        }
+        let admission = match pre_admission {
+            Some(admission) => admission,
+            None => self.reserve_active_turn(session_id).await?,
+        };
+        let result = self
+            .service
             .apply_runtime_context_appends_with_boundary(
                 session_id,
+                run_id.clone(),
+                appends.clone(),
+                boundary,
+                contributing_input_ids.clone(),
+            )
+            .await;
+        match result {
+            Ok(output) => {
+                Self::finish_guarded_apply_runtime_context_appends_admission(
+                    &self.service,
+                    &self.staged_sessions,
+                    session_id,
+                    admission,
+                )
+                .await;
+                return Ok(output);
+            }
+            Err(SessionError::NotFound { .. })
+                if !self.staged_sessions.contains(session_id).await =>
+            {
+                // Preserve the accepted-input admission for recovery. Dropping
+                // it here would make recovery re-admit against global capacity
+                // even though this input has already been accepted.
+            }
+            Err(error) => {
+                Self::finish_guarded_apply_runtime_context_appends_admission(
+                    &self.service,
+                    &self.staged_sessions,
+                    session_id,
+                    admission,
+                )
+                .await;
+                return Err(session_error_to_rpc(error));
+            }
+        }
+
+        let stored_session = self
+            .load_persisted_session(session_id)
+            .await?
+            .ok_or_else(|| Self::session_not_found_rpc(session_id))?;
+        if session_metadata_marks_archived(&stored_session) {
+            self.discard_stale_live_session(session_id).await;
+            return Err(Self::session_not_found_rpc(session_id));
+        }
+        let keep_alive = stored_session
+            .session_metadata()
+            .map(|metadata| metadata.keep_alive)
+            .unwrap_or(false);
+        let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
+        let recovered_create = self
+            .recovered_create_request(session_id, stored_session, recovery_overrides)
+            .await?;
+        let result_rx = self
+            .spawn_recovered_create_and_apply_runtime_context_appends_with_admission_guard(
+                session_id.clone(),
+                recovered_create.request,
+                recovered_create.runtime_was_registered,
                 run_id,
                 appends,
                 boundary,
                 contributing_input_ids,
-            )
-            .await
+                admission,
+            );
+        Self::await_service_apply_runtime_turn(session_id, result_rx).await
     }
 
     /// Pre-initialize the callback channel and return the receiver half.
@@ -2068,19 +5186,38 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), RpcError> {
+        self.ensure_runtime_executor_on_adapter(&self.runtime_adapter, session_id)
+            .await
+    }
+
+    async fn ensure_runtime_executor_on_adapter(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
+        }
         // Check for a live executor (not just registration). Sessions
         // registered via `prepare_bindings()` exist in the adapter map but
         // have no RuntimeLoop — inputs would queue without being processed.
-        if !self.runtime_adapter.session_has_executor(session_id).await {
-            let session_exists = self.runtime_adapter.contains_session(session_id).await
+        if !adapter.session_has_executor(session_id).await {
+            let persisted_session = self.load_persisted_session(session_id).await?;
+            let persisted_session_is_archived = persisted_session
+                .as_ref()
+                .is_some_and(session_metadata_marks_archived);
+            let persisted_session_exists = persisted_session
+                .as_ref()
+                .is_some_and(|session| !session_metadata_marks_archived(session));
+            let adapter_registration_exists =
+                adapter.contains_session(session_id).await && !persisted_session_is_archived;
+            let session_exists = adapter_registration_exists
                 || self.staged_sessions.contains(session_id).await
                 || self.service.read(session_id).await.is_ok()
-                || self
-                    .load_persisted_session(session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
+                || persisted_session_exists;
             if !session_exists {
                 return Err(RpcError {
                     code: error::SESSION_NOT_FOUND,
@@ -2103,6 +5240,7 @@ impl SessionRuntime {
                             .unwrap_or_else(crate::router::NotificationSink::noop);
                         Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
                             mob_state.session_service(),
+                            Some(Arc::clone(self)),
                             session_id.clone(),
                             sink,
                         ))
@@ -2118,7 +5256,7 @@ impl SessionRuntime {
                     Arc::clone(self),
                     session_id.clone(),
                 ));
-            self.runtime_adapter
+            adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
                 .await;
         }
@@ -2143,6 +5281,11 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
+        self.reject_archived_persisted_session_without_live(session_id)
+            .await
+            .map_err(|_| meerkat_core::service::SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
         if self.runtime_adapter.session_has_executor(session_id).await {
             return Ok(());
         }
@@ -2160,6 +5303,7 @@ impl SessionRuntime {
                     .unwrap_or_else(crate::router::NotificationSink::noop);
                 Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
                     mob_state.session_service(),
+                    Some(Arc::clone(self)),
                     session_id.clone(),
                     sink,
                 ))
@@ -2200,6 +5344,8 @@ impl SessionRuntime {
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
+        self.reject_archived_persisted_session_without_live(session_id)
+            .await?;
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;
@@ -2207,9 +5353,15 @@ impl SessionRuntime {
             .await?;
 
         if self.live_session_is_stale(session_id).await? {
-            let _ = self.service.discard_live_session(session_id).await;
-            self.runtime_adapter.unregister_session(session_id).await;
+            self.discard_stale_live_session(session_id).await;
         }
+
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
+        let staged_session_existed = self.staged_sessions.contains(session_id).await;
+        let mut pre_admission =
+            RuntimePreAdmissionGuard::new(self.reserve_active_turn(session_id).await?);
 
         // Apply MCP boundary before building the input — staged MCP ops
         // (from mcp/add, mcp/remove, mcp/reload) must be connected and made
@@ -2264,6 +5416,7 @@ impl SessionRuntime {
         );
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
+        let input_id = input.id().clone();
 
         self.ensure_runtime_executor(session_id).await?;
 
@@ -2273,18 +5426,44 @@ impl SessionRuntime {
             let keep_alive_override = overrides.as_ref().and_then(|ov| ov.keep_alive);
             let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
             {
-                self.apply_pending_keep_alive_override(session_id, keep_alive)
-                    .await?
+                match self
+                    .apply_pending_keep_alive_override(session_id, keep_alive)
+                    .await
+                {
+                    Ok(applied) => applied,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                }
             } else {
                 false
             };
             let keep_alive = match keep_alive_override {
                 Some(val) => val,
-                None => self
-                    .load_persisted_session(session_id)
-                    .await?
-                    .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
-                    .unwrap_or(false),
+                None => match self.load_persisted_session(session_id).await {
+                    Ok(session) => session
+                        .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
+                        .unwrap_or(false),
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                },
             };
             if !pending_keep_alive_override_applied {
                 let comms_rt = self.service.comms_runtime(session_id).await;
@@ -2295,6 +5474,14 @@ impl SessionRuntime {
                     let adapter_has_comms =
                         self.runtime_adapter.session_has_comms(session_id).await;
                     if !adapter_has_comms {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                        )
+                        .await;
                         return Err(RpcError {
                             code: error::INVALID_PARAMS,
                             message: "keep_alive requires a session created with comms_name"
@@ -2304,11 +5491,21 @@ impl SessionRuntime {
                     }
                 }
                 // Persist explicit override so subsequent inheriting calls observe it.
-                if keep_alive_override.is_some() {
-                    self.service
+                if keep_alive_override.is_some()
+                    && let Err(err) = self
+                        .service
                         .apply_runtime_session_keep_alive(session_id, keep_alive)
                         .await
-                        .map_err(session_error_to_rpc)?;
+                {
+                    self.unregister_new_runtime_registration_if_idle(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        false,
+                    )
+                    .await;
+                    return Err(session_error_to_rpc(err));
                 }
                 // W2-G: never reconfigure a mob-owned drain from the session-runtime
                 // turn-start path. The mob provisioner owns peer-ingress for its
@@ -2344,20 +5541,74 @@ impl SessionRuntime {
             }
         }
 
-        let (outcome, handle) = self
+        let pre_admission_guard =
+            match Self::take_runtime_pre_admission_guard(&mut pre_admission, session_id) {
+                Ok(admission) => admission,
+                Err(err) => {
+                    self.unregister_new_runtime_registration_if_idle(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        false,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+        let pre_admission_registration = match self.register_runtime_pre_admission(
+            session_id.clone(),
+            input_id.clone(),
+            pre_admission_guard,
+        ) {
+            Ok(registration) => registration,
+            Err(err) => {
+                self.unregister_new_runtime_registration_if_idle(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    false,
+                )
+                .await;
+                return Err(err);
+            }
+        };
+        let (outcome, handle) = match self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })?;
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.unregister_new_runtime_registration_if_idle(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    false,
+                )
+                .await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("runtime accept failed: {e}"),
+                    data: None,
+                });
+            }
+        };
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
 
         let Some(handle) = handle else {
+            self.unregister_new_runtime_registration_if_idle(
+                &self.runtime_adapter,
+                session_id,
+                runtime_was_registered,
+                staged_session_existed,
+                false,
+            )
+            .await;
             // Input already terminal (dedup of completed input)
             let existing_id = match outcome {
                 AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
@@ -2370,7 +5621,20 @@ impl SessionRuntime {
             });
         };
 
-        completion_outcome_to_rpc_result(handle.wait().await, session_id)
+        let completion_rx = self.spawn_runtime_pre_admission_cleanup_with_outcome(
+            session_id.clone(),
+            input_id,
+            handle,
+        );
+        pre_admission_registration.disarm();
+        drop(runtime_registration_guard);
+        drop(runtime_registration_lock);
+        let outcome = completion_rx.await.unwrap_or_else(|_| {
+            meerkat_runtime::CompletionOutcome::RuntimeTerminated(
+                "runtime pre-admission cleanup task ended before reporting completion".to_string(),
+            )
+        });
+        completion_outcome_to_rpc_result(outcome, session_id)
     }
 
     /// Admit a canonical external event through the runtime-backed path.
@@ -2385,12 +5649,8 @@ impl SessionRuntime {
             ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
 
-        if self.live_session_is_stale(session_id).await? {
-            let _ = self.service.discard_live_session(session_id).await;
-            self.runtime_adapter.unregister_session(session_id).await;
-        }
-
-        self.ensure_runtime_executor(session_id).await?;
+        self.reject_archived_persisted_session_without_live(session_id)
+            .await?;
 
         if event_type.trim().is_empty() {
             return Err(RpcError {
@@ -2421,15 +5681,225 @@ impl SessionRuntime {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         });
+        let input_id = input.id().clone();
 
-        self.runtime_adapter
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
+        let staged_session_existed = self.staged_sessions.contains(session_id).await;
+        let runtime_is_already_running = self
+            .runtime_adapter
+            .runtime_state(session_id)
+            .await
+            .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
+        let mut pre_admission = if runtime_is_already_running {
+            Some(RuntimePreAdmissionGuard::new(
+                self.reserve_or_join_active_turn(session_id).await?,
+            ))
+        } else {
+            None
+        };
+        let cleanup_protects_active_admission = pre_admission.is_none();
+
+        if self.live_session_is_stale(session_id).await? {
+            self.discard_stale_live_session(session_id).await;
+        }
+        self.ensure_runtime_executor(session_id).await?;
+
+        let mut pre_admission_registration = None;
+        if let Some(admission) = pre_admission.as_mut() {
+            let admission_guard =
+                match Self::take_runtime_pre_admission_guard(admission, session_id) {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                };
+            pre_admission_registration = Some(
+                match self.register_runtime_pre_admission(
+                    session_id.clone(),
+                    input_id.clone(),
+                    admission_guard,
+                ) {
+                    Ok(registration) => registration,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                },
+            );
+        }
+
+        let result = self
+            .runtime_adapter
             .accept_input_without_wake(session_id, input)
             .await
             .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,
                 message: format!("runtime accept failed: {e}"),
                 data: None,
-            })
+            });
+        if result.is_err() {
+            self.unregister_new_runtime_registration_if_idle(
+                &self.runtime_adapter,
+                session_id,
+                runtime_was_registered,
+                staged_session_existed,
+                cleanup_protects_active_admission,
+            )
+            .await;
+        }
+        if let Some(registration) = pre_admission_registration {
+            let keep_admission_for_active_input =
+                matches!(result, Ok(meerkat_runtime::AcceptOutcome::Accepted { .. }))
+                    && self
+                        .runtime_adapter
+                        .list_active_inputs(session_id)
+                        .await
+                        .is_ok_and(|inputs| inputs.contains(&input_id));
+            if keep_admission_for_active_input {
+                self.spawn_runtime_pre_admission_idle_cleanup(session_id.clone(), input_id.clone());
+                registration.disarm();
+            }
+        }
+        drop(runtime_registration_guard);
+        drop(runtime_registration_lock);
+        result
+    }
+
+    pub(crate) async fn accept_runtime_input_with_active_admission(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        input: meerkat_runtime::Input,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        self.reject_archived_persisted_session_without_live(session_id)
+            .await?;
+        let input_id = input.id().clone();
+        let should_pre_admit = Self::runtime_input_requires_active_pre_admission(&input);
+        let cleanup_protects_active_admission = !should_pre_admit;
+        let mut pre_admission = if should_pre_admit {
+            Some(RuntimePreAdmissionGuard::new(
+                self.reserve_or_join_active_turn(session_id).await?,
+            ))
+        } else {
+            None
+        };
+
+        if self.live_session_is_stale(session_id).await? {
+            self.discard_stale_live_session(session_id).await;
+        }
+
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let mut pre_admission_registration = None;
+
+        let runtime_was_registered = adapter.contains_session(session_id).await;
+        let staged_session_existed = self.staged_sessions.contains(session_id).await;
+        self.ensure_runtime_executor_on_adapter(adapter, session_id)
+            .await?;
+
+        if let Some(admission) = pre_admission.as_mut() {
+            let admission_guard =
+                match Self::take_runtime_pre_admission_guard(admission, session_id) {
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                };
+            pre_admission_registration = Some(
+                match self.register_runtime_pre_admission(
+                    session_id.clone(),
+                    input_id.clone(),
+                    admission_guard,
+                ) {
+                    Ok(registration) => registration,
+                    Err(err) => {
+                        self.unregister_new_runtime_registration_if_idle(
+                            adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                        )
+                        .await;
+                        return Err(err);
+                    }
+                },
+            );
+        }
+
+        let accepted = match adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+        {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.unregister_new_runtime_registration_if_idle(
+                    adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    cleanup_protects_active_admission,
+                )
+                .await;
+                return Err(runtime_driver_error_to_rpc(error));
+            }
+        };
+
+        let (outcome, handle) = accepted;
+        let accepted_with_completion =
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }) && handle.is_some();
+        if matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. })
+            && let Some(registration) = pre_admission_registration.take()
+        {
+            if let Some(handle) = handle {
+                self.spawn_runtime_pre_admission_cleanup(
+                    session_id.clone(),
+                    input_id.clone(),
+                    handle,
+                );
+                registration.disarm();
+            } else {
+                drop(registration);
+            }
+        }
+        if !accepted_with_completion {
+            self.unregister_new_runtime_registration_if_idle(
+                adapter,
+                session_id,
+                runtime_was_registered,
+                staged_session_existed,
+                cleanup_protects_active_admission,
+            )
+            .await;
+        }
+        drop(runtime_registration_guard);
+        drop(runtime_registration_lock);
+        Ok(outcome)
     }
 
     /// Admit a typed correlated terminal peer response through the
@@ -2443,13 +5913,6 @@ impl SessionRuntime {
         status: meerkat_contracts::PeerResponseTerminalStatusWire,
         result: serde_json::Value,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        if self.live_session_is_stale(session_id).await? {
-            let _ = self.service.discard_live_session(session_id).await;
-            self.runtime_adapter.unregister_session(session_id).await;
-        }
-
-        self.ensure_runtime_executor(session_id).await?;
-
         let input = meerkat_runtime::peer_response_terminal_input(
             peer_id,
             display_name,
@@ -2458,14 +5921,9 @@ impl SessionRuntime {
             result,
         );
 
-        self.runtime_adapter
-            .accept_input(session_id, input)
+        let adapter = Arc::clone(&self.runtime_adapter);
+        self.accept_runtime_input_with_active_admission(&adapter, session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2481,12 +5939,49 @@ impl SessionRuntime {
         _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
+        self.apply_runtime_turn_with_pre_admission(
+            session_id,
+            run_id,
+            primitive,
+            prompt,
+            event_tx,
+            skill_references,
+            flow_tool_overlay,
+            _additional_instructions,
+            overrides,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_runtime_turn_with_pre_admission(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        primitive: &RunPrimitive,
+        prompt: ContentInput,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        _additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        pre_admission: Option<ActiveSessionAdmissionGuard>,
+    ) -> Result<CoreApplyOutput, RpcError> {
+        let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: reason.to_string(),
                 data: None,
             });
+        }
+
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
         }
 
         // Context-only staged primitives may land directly as runtime
@@ -2496,17 +5991,30 @@ impl SessionRuntime {
             let RunPrimitive::StagedInput(staged) = primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
+            let context_pre_admission = match pre_admission.as_mut() {
+                Some(admission) => Some(Self::take_runtime_pre_admission_guard(
+                    admission, session_id,
+                )?),
+                None => None,
+            };
             return self
-                .service
-                .apply_runtime_context_appends_with_boundary(
+                .apply_runtime_context_appends_with_recovery(
                     session_id,
                     run_id,
                     pending_system_context_appends(&staged.context_appends),
                     primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
+                    overrides.as_ref(),
+                    context_pre_admission,
                 )
-                .await
-                .map_err(session_error_to_rpc);
+                .await;
+        }
+
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
         }
 
         let pre_turn_context_appends = match primitive {
@@ -2525,15 +6033,7 @@ impl SessionRuntime {
             .await?;
 
         let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
-            Ok(slot) => slot.map(|s| {
-                (
-                    *s.build_config,
-                    s.labels,
-                    s.deferred_prompt,
-                    s.created_at_secs,
-                    s.updated_at_secs,
-                )
-            }),
+            Ok(slot) => slot,
             Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
                 return Err(RpcError {
                     code: error::SESSION_BUSY,
@@ -2563,12 +6063,16 @@ impl SessionRuntime {
             .or_else(|| {
                 pending_session
                     .as_ref()
-                    .map(|(build_config, _, _, _, _)| build_config.keep_alive)
+                    .map(|slot| slot.build_config.keep_alive)
             })
             .or(persisted_keep_alive)
             .unwrap_or(false);
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
+            let active_turn = match pre_admission.as_mut() {
+                Some(admission) => Self::take_runtime_pre_admission_guard(admission, session_id)?,
+                None => self.reserve_active_turn(session_id).await?,
+            };
             // Hot-swap LLM client if model/provider overrides are present.
             if let Some(ref ov) = overrides
                 && (ov.model.is_some()
@@ -2594,59 +6098,83 @@ impl SessionRuntime {
                 turn_metadata: primitive.turn_metadata().cloned(),
             };
 
-            match self
-                .service
-                .apply_runtime_turn(
-                    session_id,
-                    run_id.clone(),
-                    req,
-                    match primitive {
-                        RunPrimitive::StagedInput(staged) => staged.boundary,
-                        _ => RunApplyBoundary::Immediate,
-                    },
-                    primitive.contributing_input_ids().to_vec(),
+            let result_rx = self.spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
+                session_id.clone(),
+                run_id.clone(),
+                req,
+                match primitive {
+                    RunPrimitive::StagedInput(staged) => staged.boundary,
+                    _ => RunApplyBoundary::Immediate,
+                },
+                primitive.contributing_input_ids().to_vec(),
+                active_turn,
+            );
+            let (result, recovered_admission) =
+                Self::await_service_apply_runtime_turn_with_recoverable_admission(
+                    session_id, result_rx,
                 )
-                .await
-            {
+                .await?;
+            match result {
                 Ok(output) => return Ok(output),
-                Err(SessionError::NotFound { .. }) => {}
-                Err(err) => return Err(session_error_to_rpc(err)),
+                Err(SessionError::NotFound { .. }) => {
+                    if let Some(admission) = recovered_admission {
+                        pre_admission = Some(RuntimePreAdmissionGuard::new(admission));
+                    }
+                }
+                Err(err) => {
+                    drop(recovered_admission);
+                    return Err(session_error_to_rpc(err));
+                }
             }
         }
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
-        {
+        if let Some(slot) = pending_session {
+            let mut promotion_cleanup = PendingPromotionCleanup::new(
+                Arc::clone(&self.staged_sessions),
+                Arc::clone(&self.active_session_admissions),
+                session_id,
+                &slot,
+            );
+            let PromotingSlot {
+                build_config,
+                labels,
+                deferred_prompt,
+                ..
+            } = slot;
+            let mut build_config = *build_config;
             let mut runtime_prompt: ContentInput = prompt.clone();
-            let saved_deferred_prompt = deferred_prompt.clone();
             if let Some(deferred) = deferred_prompt {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
 
+            let mut resolved_override_identity = None;
             if let Some(ref ov) = overrides {
                 if ov.provider.is_some() && ov.model.is_none() {
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        created_at_secs,
-                        updated_at_secs,
-                    )
-                    .await;
+                    promotion_cleanup.restore_now().await;
                     return Err(RpcError {
                         code: error::INVALID_PARAMS,
                         message: "provider override requires model on a session turn".to_string(),
                         data: None,
                     });
                 }
-                let resolved_identity = self
-                    .resolve_target_llm_identity(
-                        &self.llm_identity_from_pending_build(&build_config).await?,
-                        ov,
-                    )
-                    .await?;
+                let base_identity = match self.llm_identity_from_pending_build(&build_config).await
+                {
+                    Ok(identity) => identity,
+                    Err(err) => {
+                        promotion_cleanup.restore_now().await;
+                        return Err(err);
+                    }
+                };
+                let resolved_identity =
+                    match self.resolve_target_llm_identity(&base_identity, ov).await {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            promotion_cleanup.restore_now().await;
+                            return Err(err);
+                        }
+                    };
                 Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
+                resolved_override_identity = Some(resolved_identity);
                 if let Some(max_tokens) = ov.max_tokens {
                     build_config.max_tokens = Some(max_tokens);
                 }
@@ -2657,15 +6185,7 @@ impl SessionRuntime {
                     match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
                         Ok(os) => build_config.output_schema = Some(os),
                         Err(e) => {
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                created_at_secs,
-                                updated_at_secs,
-                            )
-                            .await;
+                            promotion_cleanup.restore_now().await;
                             return Err(RpcError {
                                 code: error::INVALID_PARAMS,
                                 message: format!("Invalid output_schema override: {e}"),
@@ -2683,21 +6203,20 @@ impl SessionRuntime {
             }
 
             if let Err(err) = Self::validate_keep_alive_has_comms_name(&build_config) {
-                self.restore_pending_from_promoting(
-                    session_id,
-                    build_config,
-                    labels,
-                    saved_deferred_prompt,
-                    created_at_secs,
-                    updated_at_secs,
-                )
-                .await;
+                promotion_cleanup.restore_now().await;
                 return Err(err);
+            }
+            if let Some(identity) = resolved_override_identity {
+                promotion_cleanup.update_effective_llm_identity(identity);
+            }
+            if overrides.is_some() {
+                promotion_cleanup.update_build_config(&build_config);
             }
             if build_config.llm_client_override.is_none()
                 && let Some(client) = self.default_llm_client()
             {
                 build_config.llm_client_override = Some(client);
+                promotion_cleanup.update_build_config(&build_config);
             }
             let runtime_generation = if build_config.config_generation.is_none() {
                 if let Some(runtime) = self.config_runtime() {
@@ -2716,122 +6235,55 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
-
-            match self
-                .service
-                .create_session(CreateSessionRequest {
-                    model: build_config.model.clone(),
-                    prompt: runtime_prompt.clone(),
-                    render_metadata: None,
-                    system_prompt: build_config.system_prompt.clone(),
-                    max_tokens: build_config.max_tokens,
-                    event_tx: None,
-
-                    skill_references: skill_references.clone(),
-                    initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                    build: Some(build),
-                    labels: labels.clone(),
-                })
-                .await
-            {
-                Ok(_) => {
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                        && let Err(err) = self
-                            .replay_promoted_system_context(
-                                session_id,
-                                &starting_system_context_state,
-                                &current_system_context_state,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err.message,
-                            "failed to replay promoted system-context state after runtime materialization"
-                        );
-                    }
-                    #[cfg(feature = "comms")]
-                    {
-                        // W2-G: never reconfigure a mob-owned drain during
-                        // runtime materialization. See `start_turn_via_runtime`.
-                        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
-                        if !owner.is_mob_owned() {
-                            let comms_rt = self.service.comms_runtime(session_id).await;
-                            let peer_ingress_enabled = self
-                                .preserve_existing_peer_ingress(session_id, build_config.keep_alive)
-                                .await;
-                            self.runtime_adapter
-                                .update_peer_ingress_context(
-                                    session_id,
-                                    peer_ingress_enabled,
-                                    comms_rt,
-                                )
-                                .await;
-                        }
-                    }
-                }
-                Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                    }
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        created_at_secs,
-                        updated_at_secs,
-                    )
-                    .await;
-                    return Err(session_error_to_rpc(err));
-                }
-            }
-
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
                 .await;
-            let output = self
-                .service
-                .apply_runtime_turn(
-                    session_id,
-                    run_id,
-                    StartTurnRequest {
-                        prompt: runtime_prompt,
-                        system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: meerkat_core::types::HandlingMode::Queue,
-                        event_tx: Some(event_tx),
+            let create_req = CreateSessionRequest {
+                model: build_config.model.clone(),
+                prompt: runtime_prompt.clone(),
+                render_metadata: None,
+                system_prompt: build_config.system_prompt.clone(),
+                max_tokens: build_config.max_tokens,
+                event_tx: None,
 
-                        skill_references,
-                        flow_tool_overlay,
-                        pre_turn_context_appends: pre_turn_context_appends.clone(),
-                        turn_metadata: primitive.turn_metadata().cloned(),
-                    },
-                    match primitive {
-                        RunPrimitive::StagedInput(staged) => staged.boundary,
-                        _ => RunApplyBoundary::Immediate,
-                    },
-                    primitive.contributing_input_ids().to_vec(),
-                )
-                .await;
+                skill_references: skill_references.clone(),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(build),
+                labels: labels.clone(),
+            };
+            let active_turn = match pre_admission.as_mut() {
+                Some(admission) => Self::take_runtime_pre_admission_guard(admission, session_id)?,
+                None => self.promote_pending_active_turn(session_id)?,
+            };
+            let output_rx = self.spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
+                session_id.clone(),
+                create_req,
+                run_id,
+                StartTurnRequest {
+                    prompt: runtime_prompt,
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: Some(event_tx),
+
+                    skill_references,
+                    flow_tool_overlay,
+                    pre_turn_context_appends: pre_turn_context_appends.clone(),
+                    turn_metadata: primitive.turn_metadata().cloned(),
+                },
+                match primitive {
+                    RunPrimitive::StagedInput(staged) => staged.boundary,
+                    _ => RunApplyBoundary::Immediate,
+                },
+                primitive.contributing_input_ids().to_vec(),
+                promotion_cleanup,
+                active_turn,
+                build_config.keep_alive,
+            );
+            let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await;
             self.bridge_pending_session_event_streams(session_id).await;
-            let output = output.map_err(session_error_to_rpc)?;
-            return Ok(output);
+            return output;
         }
 
         let stored_session = self
@@ -2842,55 +6294,49 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
+        if session_metadata_marks_archived(&stored_session) {
+            self.discard_stale_live_session(session_id).await;
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("session not found: {session_id}"),
+                data: None,
+            });
+        }
         let recovery_overrides =
             self.recovery_overrides_from_turn(overrides.as_ref(), keep_alive)?;
-        let create_request = self
+        let active_turn = match pre_admission.as_mut() {
+            Some(admission) => Self::take_runtime_pre_admission_guard(admission, session_id)?,
+            None => self.reserve_active_turn(session_id).await?,
+        };
+        let recovered_create = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
-        self.service
-            .create_session(create_request)
-            .await
-            .map_err(session_error_to_rpc)?;
-        #[cfg(feature = "comms")]
-        {
-            // W2-G: never reconfigure a mob-owned drain during recovery
-            // materialization. See `start_turn_via_runtime`.
-            let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
-            if !owner.is_mob_owned() {
-                let comms_rt = self.service.comms_runtime(session_id).await;
-                let peer_ingress_enabled = self
-                    .preserve_existing_peer_ingress(session_id, keep_alive)
-                    .await;
-                self.runtime_adapter
-                    .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                    .await;
-            }
-        }
-        let output = self
-            .service
-            .apply_runtime_turn(
-                session_id,
-                run_id,
-                StartTurnRequest {
-                    prompt,
-                    system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
-                    event_tx: Some(event_tx),
+        let output_rx = self.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
+            session_id.clone(),
+            recovered_create.request,
+            recovered_create.runtime_was_registered,
+            run_id,
+            StartTurnRequest {
+                prompt,
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                event_tx: Some(event_tx),
 
-                    skill_references,
-                    flow_tool_overlay,
-                    pre_turn_context_appends,
-                    turn_metadata: primitive.turn_metadata().cloned(),
-                },
-                match primitive {
-                    RunPrimitive::StagedInput(staged) => staged.boundary,
-                    _ => RunApplyBoundary::Immediate,
-                },
-                primitive.contributing_input_ids().to_vec(),
-            )
-            .await
-            .map_err(session_error_to_rpc)?;
+                skill_references,
+                flow_tool_overlay,
+                pre_turn_context_appends,
+                turn_metadata: primitive.turn_metadata().cloned(),
+            },
+            match primitive {
+                RunPrimitive::StagedInput(staged) => staged.boundary,
+                _ => RunApplyBoundary::Immediate,
+            },
+            primitive.contributing_input_ids().to_vec(),
+            active_turn,
+            keep_alive,
+        );
+        let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await?;
         Ok(output)
     }
 
@@ -2936,28 +6382,10 @@ impl SessionRuntime {
                 .await?;
         }
 
-        // Check combined capacity (pending + active).
-        {
-            let staged = self.staged_sessions.len().await;
-            let active = self
-                .service
-                .list(Default::default())
-                .await
-                .map_err(session_error_to_rpc)?
-                .len();
-            let total = staged + active;
-            if total >= self.max_sessions {
-                return Err(RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!("Max sessions reached ({}/{})", total, self.max_sessions),
-                    data: None,
-                });
-            }
-        }
-
         // Pre-create a session to claim a stable SessionId.
         let session = Session::new();
         let session_id = session.id().clone();
+        let admission = self.reserve_active_admission(session_id.clone()).await?;
 
         // Inject the pre-created session so the agent builder will reuse this ID.
         let bindings = self
@@ -2978,13 +6406,42 @@ impl SessionRuntime {
             ..build_config
         };
 
+        #[cfg(test)]
+        let create_session_after_prepare_bindings_error = {
+            self.create_session_after_prepare_bindings_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        #[cfg(test)]
+        if let Some(message) = create_session_after_prepare_bindings_error {
+            *self
+                .create_session_after_prepare_bindings_session_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.clone());
+            self.archive_runtime_cleanup().run(&session_id).await;
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message,
+                data: None,
+            });
+        }
+
         #[cfg(feature = "mcp")]
-        let build_config = self
+        let build_config = match self
             .attach_mcp_adapter_for_pending_session(session_id.clone(), build_config)
-            .await?;
+            .await
+        {
+            Ok(build_config) => build_config,
+            Err(err) => {
+                self.archive_runtime_cleanup().run(&session_id).await;
+                return Err(err);
+            }
+        };
 
         let now = now_unix_secs();
-        self.staged_sessions
+        if let Err(err) = self
+            .staged_sessions
             .stage(
                 session_id.clone(),
                 StagedSlot {
@@ -2999,11 +6456,15 @@ impl SessionRuntime {
                 },
             )
             .await
-            .map_err(|e| RpcError {
+        {
+            self.archive_runtime_cleanup().run(&session_id).await;
+            return Err(RpcError {
                 code: error::INTERNAL_ERROR,
-                message: format!("failed to stage session {session_id}: {e}"),
+                message: format!("failed to stage session {session_id}: {err}"),
                 data: None,
-            })?;
+            });
+        }
+        admission.keep();
 
         Ok(session_id)
     }
@@ -3030,32 +6491,10 @@ impl SessionRuntime {
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
-        #[cfg(feature = "mcp")]
-        {
-            let mut mcp_text = String::new();
-            self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
-                .await?;
-            if !mcp_text.is_empty() {
-                let mut blocks = turn_prompt.into_blocks();
-                blocks.insert(
-                    0,
-                    meerkat_core::types::ContentBlock::Text { text: mcp_text },
-                );
-                turn_prompt = ContentInput::Blocks(blocks);
-            }
-        }
 
         // Check if this is a pending (not-yet-materialized) session.
         let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
-            Ok(slot) => slot.map(|s| {
-                (
-                    *s.build_config,
-                    s.labels,
-                    s.deferred_prompt,
-                    s.created_at_secs,
-                    s.updated_at_secs,
-                )
-            }),
+            Ok(slot) => slot,
             Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
                 return Err(RpcError {
                     code: error::SESSION_BUSY,
@@ -3072,42 +6511,62 @@ impl SessionRuntime {
             }
         };
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
-        {
+        if let Some(slot) = pending_session {
+            let mut promotion_cleanup = PendingPromotionCleanup::new(
+                Arc::clone(&self.staged_sessions),
+                Arc::clone(&self.active_session_admissions),
+                session_id,
+                &slot,
+            );
+            let PromotingSlot {
+                build_config,
+                labels,
+                deferred_prompt,
+                ..
+            } = slot;
+            let mut build_config = *build_config;
+            #[cfg(feature = "mcp")]
+            if let Err(err) = self
+                .apply_mcp_boundary_to_turn_prompt(session_id, &event_tx, &mut turn_prompt)
+                .await
+            {
+                promotion_cleanup.restore_now().await;
+                return Err(err);
+            }
             // Prepend the deferred create-time prompt to the turn prompt.
             // Keep copies for rollback paths that re-stage the pending session.
-            let saved_deferred_prompt = deferred_prompt.clone();
-            let saved_created_at_secs = created_at_secs;
-            let saved_updated_at_secs = updated_at_secs;
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = merge_content_inputs(deferred, turn_prompt);
             }
             // Apply per-turn overrides to the pending build config.
+            let mut resolved_override_identity = None;
             if let Some(ref ov) = overrides {
                 if ov.provider.is_some() && ov.model.is_none() {
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        saved_created_at_secs,
-                        saved_updated_at_secs,
-                    )
-                    .await;
+                    promotion_cleanup.restore_now().await;
                     return Err(RpcError {
                         code: error::INVALID_PARAMS,
                         message: "provider override requires model on a session turn".to_string(),
                         data: None,
                     });
                 }
-                let resolved_identity = self
-                    .resolve_target_llm_identity(
-                        &self.llm_identity_from_pending_build(&build_config).await?,
-                        ov,
-                    )
-                    .await?;
+                let base_identity = match self.llm_identity_from_pending_build(&build_config).await
+                {
+                    Ok(identity) => identity,
+                    Err(err) => {
+                        promotion_cleanup.restore_now().await;
+                        return Err(err);
+                    }
+                };
+                let resolved_identity =
+                    match self.resolve_target_llm_identity(&base_identity, ov).await {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            promotion_cleanup.restore_now().await;
+                            return Err(err);
+                        }
+                    };
                 Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
+                resolved_override_identity = Some(resolved_identity);
                 if let Some(max_tokens) = ov.max_tokens {
                     build_config.max_tokens = Some(max_tokens);
                 }
@@ -3119,15 +6578,7 @@ impl SessionRuntime {
                         Ok(os) => build_config.output_schema = Some(os),
                         Err(e) => {
                             // Restore pending state before returning error.
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                saved_created_at_secs,
-                                saved_updated_at_secs,
-                            )
-                            .await;
+                            promotion_cleanup.restore_now().await;
                             return Err(RpcError {
                                 code: error::INVALID_PARAMS,
                                 message: format!("Invalid output_schema override: {e}"),
@@ -3144,22 +6595,21 @@ impl SessionRuntime {
                 }
             }
             if let Err(err) = Self::validate_keep_alive_has_comms_name(&build_config) {
-                self.restore_pending_from_promoting(
-                    session_id,
-                    build_config,
-                    labels,
-                    saved_deferred_prompt,
-                    saved_created_at_secs,
-                    saved_updated_at_secs,
-                )
-                .await;
+                promotion_cleanup.restore_now().await;
                 return Err(err);
+            }
+            if let Some(identity) = resolved_override_identity {
+                promotion_cleanup.update_effective_llm_identity(identity);
+            }
+            if overrides.is_some() {
+                promotion_cleanup.update_build_config(&build_config);
             }
             // Inject default LLM client if the caller didn't provide one.
             if build_config.llm_client_override.is_none()
                 && let Some(client) = self.default_llm_client()
             {
                 build_config.llm_client_override = Some(client);
+                promotion_cleanup.update_build_config(&build_config);
             }
             let runtime_generation = if build_config.config_generation.is_none() {
                 if let Some(runtime) = self.config_runtime() {
@@ -3190,79 +6640,47 @@ impl SessionRuntime {
                     overrides.as_ref(),
                     initial_turn_provider_hint,
                 ));
-
+            let turn_metadata = build.initial_turn_metadata.clone();
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
                 .await;
-            let req = CreateSessionRequest {
+
+            let create_req = CreateSessionRequest {
                 model: build_config.model.clone(),
-                prompt: turn_prompt,
+                prompt: ContentInput::Text(String::new()),
                 render_metadata: None,
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
-                event_tx: Some(event_tx),
+                event_tx: None,
 
                 skill_references: skill_references.clone(),
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: labels.clone(),
             };
 
-            match self.service.create_session(req).await {
-                Ok(result) => {
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                        && let Err(err) = self
-                            .replay_promoted_system_context(
-                                session_id,
-                                &starting_system_context_state,
-                                &current_system_context_state,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err.message,
-                            "failed to replay promoted system-context state after create_session; preserving completed turn result"
-                        );
-                    }
-                    self.bridge_pending_session_event_streams(session_id).await;
-                    return Ok(result);
-                }
-                Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                        let effective_llm_identity =
-                            self.llm_identity_from_pending_build(&build_config).await?;
-                        self.staged_sessions
-                            .abandon_promotion(
-                                session_id.clone(),
-                                build_config,
-                                effective_llm_identity,
-                                labels,
-                                saved_deferred_prompt.clone(),
-                                saved_created_at_secs,
-                                saved_updated_at_secs,
-                            )
-                            .await;
-                    }
-                    return Err(session_error_to_rpc(err));
-                }
-            }
+            let active_turn = self.promote_pending_active_turn(session_id)?;
+            let result_rx = self.spawn_pending_create_and_start_turn_with_admission_guard(
+                session_id.clone(),
+                create_req,
+                StartTurnRequest {
+                    prompt: turn_prompt,
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: Some(event_tx),
+                    skill_references,
+                    flow_tool_overlay,
+                    pre_turn_context_appends: Vec::new(),
+                    turn_metadata,
+                },
+                promotion_cleanup,
+                active_turn,
+            );
+            let result = Self::await_service_start_turn(session_id, result_rx).await;
+            self.bridge_pending_session_event_streams(session_id).await;
+            return result;
         }
 
         // Normal turn on an existing (materialized) session.
@@ -3304,18 +6722,6 @@ impl SessionRuntime {
             overrides.as_ref().and_then(|ov| ov.provider.as_deref()),
         ));
 
-        let req = StartTurnRequest {
-            prompt: turn_prompt.clone(),
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: Some(event_tx.clone()),
-            skill_references: skill_references.clone(),
-            flow_tool_overlay: flow_tool_overlay.clone(),
-            pre_turn_context_appends: Vec::new(),
-            turn_metadata,
-        };
-
         if self.live_session_is_stale(session_id).await? {
             return Box::pin(self.try_recover_persisted_session(
                 session_id,
@@ -3329,6 +6735,8 @@ impl SessionRuntime {
             ))
             .await;
         }
+
+        let active_turn = self.reserve_active_turn(session_id).await?;
 
         // Persist explicit keep_alive override so subsequent inheriting calls
         // (REST/MCP resume with None) observe the updated intent.
@@ -3374,9 +6782,31 @@ impl SessionRuntime {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
 
-        match self.service.start_turn(session_id, req).await {
+        #[cfg(feature = "mcp")]
+        self.apply_mcp_boundary_to_turn_prompt(session_id, &event_tx, &mut turn_prompt)
+            .await?;
+
+        let req = StartTurnRequest {
+            prompt: turn_prompt.clone(),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: Some(event_tx.clone()),
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: flow_tool_overlay.clone(),
+            pre_turn_context_appends: Vec::new(),
+            turn_metadata,
+        };
+
+        let result_rx = self.spawn_service_start_turn_with_admission_guard(
+            session_id.clone(),
+            req,
+            active_turn,
+        );
+        let result = Self::await_service_start_turn(session_id, result_rx).await;
+        match result {
             Ok(result) => Ok(result),
-            Err(SessionError::NotFound { .. }) => {
+            Err(err) if err.code == error::SESSION_NOT_FOUND => {
                 // Attempt persisted session recovery: the session may exist in the
                 // store from a previous runtime lifetime.
                 Box::pin(self.try_recover_persisted_session(
@@ -3391,38 +6821,8 @@ impl SessionRuntime {
                 ))
                 .await
             }
-            Err(err) => Err(session_error_to_rpc(err)),
+            Err(err) => Err(err),
         }
-    }
-
-    /// Restore a pending session from `Promoting` state back to `Staged` after
-    /// an override validation failure. Prevents the session from being stuck in
-    /// the promoting state when the turn is aborted before `create_session`.
-    async fn restore_pending_from_promoting(
-        &self,
-        session_id: &SessionId,
-        mut build_config: AgentBuildConfig,
-        labels: Option<BTreeMap<String, String>>,
-        deferred_prompt: Option<ContentInput>,
-        created_at_secs: u64,
-        updated_at_secs: u64,
-    ) {
-        let Ok(effective_llm_identity) = self.llm_identity_from_pending_build(&build_config).await
-        else {
-            return;
-        };
-        build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
-        self.staged_sessions
-            .abandon_promotion(
-                session_id.clone(),
-                build_config,
-                effective_llm_identity,
-                labels,
-                deferred_prompt,
-                created_at_secs,
-                updated_at_secs,
-            )
-            .await;
     }
 
     /// Attempt to recover a persisted session that is no longer live.
@@ -3454,6 +6854,7 @@ impl SessionRuntime {
             });
         };
         if session_metadata_marks_archived(&session) {
+            self.discard_stale_live_session(session_id).await;
             return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("Session not found: {session_id}"),
@@ -3462,16 +6863,37 @@ impl SessionRuntime {
         }
 
         let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
-        let create_request = self
+        let admission = self
+            .reserve_active_admission_with_state(
+                session_id.clone(),
+                ActiveAdmissionState::Preparing,
+            )
+            .await?;
+        if self
+            .archived_persisted_session_without_live(session_id)
+            .await?
+        {
+            return Err(Self::session_not_found_rpc(session_id));
+        }
+        let recovered_create = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
-        let build = create_request.build.clone().ok_or_else(|| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!(
-                "recovered create request for session {session_id} is missing build options"
-            ),
-            data: None,
-        })?;
+        let runtime_was_registered = recovered_create.runtime_was_registered;
+        let create_request = recovered_create.request;
+        let build = match create_request.build.clone() {
+            Some(build) => build,
+            None => {
+                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                    .await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "recovered create request for session {session_id} is missing build options"
+                    ),
+                    data: None,
+                });
+            }
+        };
         let model = create_request.model.clone();
         let mut build_config = AgentBuildConfig::new(model);
         build_config.apply_session_build_options(&build);
@@ -3486,9 +6908,17 @@ impl SessionRuntime {
 
         {
             let effective_llm_identity =
-                self.llm_identity_from_pending_build(&build_config).await?;
+                match self.llm_identity_from_pending_build(&build_config).await {
+                    Ok(identity) => identity,
+                    Err(err) => {
+                        self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                            .await;
+                        return Err(err);
+                    }
+                };
             let now = now_unix_secs();
-            self.staged_sessions
+            if let Err(err) = self
+                .staged_sessions
                 .stage(
                     session_id.clone(),
                     StagedSlot {
@@ -3503,12 +6933,32 @@ impl SessionRuntime {
                     },
                 )
                 .await
-                .map_err(|e| RpcError {
+            {
+                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                    .await;
+                return Err(RpcError {
                     code: error::INTERNAL_ERROR,
-                    message: format!("failed to stage recovered session {session_id}: {e}"),
+                    message: format!("failed to stage recovered session {session_id}: {err}"),
                     data: None,
-                })?;
+                });
+            }
         }
+        if !self
+            .active_session_admissions
+            .set_state_if_present(session_id, ActiveAdmissionState::Staged)
+        {
+            let _ = self.staged_sessions.abandon(session_id).await;
+            self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                .await;
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "recovered session {session_id} lost active admission before staging completed"
+                ),
+                data: None,
+            });
+        }
+        admission.keep();
 
         // Recursively call start_turn which will now find the pending session.
         // Use Box::pin to avoid infinite recursion concerns in async.
@@ -3524,12 +6974,12 @@ impl SessionRuntime {
         .await
     }
 
-    async fn take_promoting_system_context_state(
+    async fn promoting_system_context_state(
         &self,
         session_id: &SessionId,
     ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
         self.staged_sessions
-            .take_promoting_system_context_state(session_id)
+            .promoting_system_context_state(session_id)
             .await
     }
 
@@ -3539,11 +6989,26 @@ impl SessionRuntime {
         starting_state: &SessionSystemContextState,
         current_state: &SessionSystemContextState,
     ) -> Result<(), RpcError> {
+        Self::replay_promoted_system_context_on_service(
+            Arc::clone(&self.service),
+            session_id,
+            starting_state,
+            current_state,
+        )
+        .await
+    }
+
+    async fn replay_promoted_system_context_on_service(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: &SessionId,
+        starting_state: &SessionSystemContextState,
+        current_state: &SessionSystemContextState,
+    ) -> Result<(), RpcError> {
         for pending in &current_state.pending {
             if starting_state.pending.contains(pending) {
                 continue;
             }
-            self.service
+            service
                 .append_system_context(
                     session_id,
                     AppendSystemContextRequest {
@@ -3562,9 +7027,27 @@ impl SessionRuntime {
     ///
     /// If the session is idle, this is a no-op.
     pub async fn interrupt(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        // Pending sessions have no running turn.
-        if self.staged_sessions.contains(session_id).await {
-            return Ok(());
+        let staged_info = self.staged_sessions.info(session_id).await;
+        let staged_is_promoting = match staged_info {
+            Some(info) if info.is_promoting => true,
+            Some(_)
+                if self.active_session_admissions.state(session_id)
+                    == Some(ActiveAdmissionState::Running) =>
+            {
+                true
+            }
+            Some(_) => return Ok(()),
+            None => false,
+        };
+
+        if staged_is_promoting {
+            return match self.service.interrupt(session_id).await {
+                Ok(()) => Ok(()),
+                Err(SessionError::NotRunning { .. } | SessionError::NotFound { .. }) => {
+                    Err(Self::promoting_session_busy_rpc(session_id))
+                }
+                Err(err) => Err(session_error_to_rpc(err)),
+            };
         }
 
         match self
@@ -3574,12 +7057,27 @@ impl SessionRuntime {
         {
             Ok(()) => Ok(()),
             Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Running,
+            }) if staged_is_promoting => match self.service.interrupt(session_id).await {
+                Ok(()) => Ok(()),
+                Err(SessionError::NotRunning { .. }) => {
+                    Err(Self::promoting_session_busy_rpc(session_id))
+                }
+                Err(err) => Err(session_error_to_rpc(err)),
+            },
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle | RuntimeState::Attached,
+            }) if staged_is_promoting => Err(Self::promoting_session_busy_rpc(session_id)),
+            Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Idle | RuntimeState::Attached,
             }) => Ok(()),
             Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })
             | Err(RuntimeDriverError::Destroyed) => {
+                if staged_is_promoting {
+                    return Err(Self::promoting_session_busy_rpc(session_id));
+                }
                 match self.interrupt_noop_target(session_id).await? {
                     InterruptNoopTarget::Present => return Ok(()),
                     InterruptNoopTarget::Missing => {}
@@ -3609,6 +7107,16 @@ impl SessionRuntime {
                 message: format!("Failed to interrupt session: {e}"),
                 data: None,
             }),
+        }
+    }
+
+    fn promoting_session_busy_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: error::SESSION_BUSY,
+            message: format!(
+                "session {session_id} is still being materialized and cannot be interrupted yet"
+            ),
+            data: None,
         }
     }
 
@@ -3690,13 +7198,31 @@ impl SessionRuntime {
     /// by runtime peer ingress so queued work can proceed after a wait/yield
     /// boundary without aborting the in-flight turn.
     pub async fn interrupt_yielding(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        // Pending sessions have no running turn.
-        if self.staged_sessions.contains(session_id).await {
+        let staged_info = self.staged_sessions.info(session_id).await;
+        let staged_is_materializing = match staged_info.as_ref() {
+            Some(info) if info.is_promoting => true,
+            Some(_)
+                if self.active_session_admissions.state(session_id)
+                    == Some(ActiveAdmissionState::Running) =>
+            {
+                true
+            }
+            Some(_) => false,
+            None => false,
+        };
+        if staged_info.is_some() && !staged_is_materializing {
             return Ok(());
         }
 
         match self.service.cancel_after_boundary(session_id).await {
-            Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(()),
+            Ok(()) => Ok(()),
+            Err(SessionError::NotRunning { .. } | SessionError::NotFound { .. })
+                if staged_is_materializing =>
+            {
+                Err(Self::promoting_session_busy_rpc(session_id))
+            }
+            Err(SessionError::NotRunning { .. }) => Ok(()),
+            Err(SessionError::Unsupported(_)) => Ok(()),
             Err(e) => Err(session_error_to_rpc(e)),
         }
     }
@@ -3836,36 +7362,137 @@ impl SessionRuntime {
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         // Check pending sessions first.
-        if self.staged_sessions.abandon(session_id).await {
-            self.pending_session_event_streams
-                .lock()
+        match self.staged_sessions.begin_archive(session_id).await {
+            Ok(true) => {
+                let mut staged_archive_guard =
+                    StagedArchiveRollbackGuard::new(Arc::clone(&self.staged_sessions), session_id);
+                #[cfg(test)]
+                let staged_archive_after_service_hook = {
+                    let guard = self
+                        .staged_archive_after_service_hook
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.clone()
+                };
+                let closing = match self
+                    .active_session_admissions
+                    .try_mark_staged_closing_guard(session_id)
+                {
+                    Ok(Some(closing)) => closing,
+                    Ok(None) => {
+                        self.staged_sessions.restore_archive(session_id).await;
+                        staged_archive_guard.disarm();
+                        return Err(RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: format!(
+                                "staged session {session_id} was missing active admission"
+                            ),
+                            data: None,
+                        });
+                    }
+                    Err(ActiveAdmissionError::Busy) => {
+                        self.staged_sessions.restore_archive(session_id).await;
+                        staged_archive_guard.disarm();
+                        return Err(RpcError {
+                            code: error::SESSION_BUSY,
+                            message: format!("session {session_id} has active work"),
+                            data: None,
+                        });
+                    }
+                    Err(ActiveAdmissionError::Full { .. }) => {
+                        unreachable!("closing does not reserve")
+                    }
+                };
+
+                await_guarded_staged_archive(
+                    Arc::clone(&self.service),
+                    Arc::clone(&self.staged_sessions),
+                    self.archive_runtime_cleanup(),
+                    session_id.clone(),
+                    staged_archive_guard,
+                    closing,
+                    #[cfg(test)]
+                    staged_archive_after_service_hook,
+                )
                 .await
-                .remove(session_id);
+                .map_err(session_error_to_rpc)?;
+                self.pending_session_event_streams
+                    .lock()
+                    .await
+                    .remove(session_id);
+                #[cfg(feature = "mcp")]
+                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
+                    state.adapter.shutdown().await;
+                }
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                return Err(RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} is already being materialized"),
+                    data: None,
+                });
+            }
+            Err(err) => {
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("staged session lifecycle error: {err}"),
+                    data: None,
+                });
+            }
+        }
+
+        let closing = match self
+            .active_session_admissions
+            .try_mark_staged_closing_guard(session_id)
+        {
+            Ok(closing) => closing,
+            Err(ActiveAdmissionError::Busy) => {
+                return Err(RpcError {
+                    code: error::SESSION_BUSY,
+                    message: format!("session {session_id} has active work"),
+                    data: None,
+                });
+            }
+            Err(ActiveAdmissionError::Full { .. }) => unreachable!("closing does not reserve"),
+        };
+        let result = if let Some(closing) = closing {
+            await_guarded_session_cleanup(
+                Arc::clone(&self.service),
+                session_id.clone(),
+                closing,
+                GuardedSessionCleanupOperation::Archive,
+                Some(self.archive_runtime_cleanup()),
+            )
+            .await
+            .map_err(session_error_to_rpc)
+        } else {
+            await_session_archive_with_runtime_cleanup(
+                Arc::clone(&self.service),
+                self.archive_runtime_cleanup(),
+                session_id.clone(),
+            )
+            .await
+            .map_err(session_error_to_rpc)
+        };
+
+        if result.is_ok() {
+            self.runtime_adapter.unregister_session(session_id).await;
+
             #[cfg(feature = "mcp")]
             if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
                 state.adapter.shutdown().await;
             }
-            return Ok(());
+
+            self.pending_session_event_streams
+                .lock()
+                .await
+                .remove(session_id);
+
+            #[cfg(feature = "comms")]
+            self.runtime_adapter.abort_comms_drain(session_id).await;
         }
-
-        let result = self
-            .service
-            .archive(session_id)
-            .await
-            .map_err(session_error_to_rpc);
-
-        #[cfg(feature = "mcp")]
-        if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-            state.adapter.shutdown().await;
-        }
-
-        self.pending_session_event_streams
-            .lock()
-            .await
-            .remove(session_id);
-
-        #[cfg(feature = "comms")]
-        self.runtime_adapter.abort_comms_drain(session_id).await;
 
         result
     }
@@ -4304,6 +7931,11 @@ impl SessionRuntime {
     pub async fn shutdown(&self) {
         // Clear pending sessions.
         self.staged_sessions.clear().await;
+        self.runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.active_session_admissions.clear();
         self.pending_session_event_streams.lock().await.clear();
 
         self.shutdown_schedule_host().await;
@@ -4649,6 +8281,28 @@ impl SessionRuntime {
     }
 
     #[cfg(feature = "mcp")]
+    async fn apply_mcp_boundary_to_turn_prompt(
+        &self,
+        session_id: &SessionId,
+        event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
+        turn_prompt: &mut ContentInput,
+    ) -> Result<(), RpcError> {
+        let mut mcp_text = String::new();
+        self.apply_mcp_boundary(session_id, event_tx, &mut mcp_text)
+            .await?;
+        if !mcp_text.is_empty() {
+            let prompt = std::mem::replace(turn_prompt, ContentInput::Text(String::new()));
+            let mut blocks = prompt.into_blocks();
+            blocks.insert(
+                0,
+                meerkat_core::types::ContentBlock::Text { text: mcp_text },
+            );
+            *turn_prompt = ContentInput::Blocks(blocks);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
     fn spawn_mcp_drain_task_if_needed(
         adapter: Arc<McpRouterAdapter>,
         task_running: Arc<AtomicBool>,
@@ -4729,15 +8383,6 @@ fn decode_wire_content_blocks(
         })
 }
 
-fn stored_has_unapplied_system_context(stored: &Session, live: &Session) -> bool {
-    let stored_state = stored.system_context_state().unwrap_or_default();
-    let live_state = live.system_context_state().unwrap_or_default();
-    stored_state
-        .pending
-        .iter()
-        .any(|pending| !live_state.pending.contains(pending))
-}
-
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
@@ -4765,6 +8410,18 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         code,
         message: err.to_string(),
         data: None,
+    }
+}
+
+fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionError {
+    match err.code {
+        error::SESSION_NOT_FOUND => SessionError::NotFound {
+            id: session_id.clone(),
+        },
+        error::SESSION_BUSY => SessionError::Busy {
+            id: session_id.clone(),
+        },
+        _ => SessionError::Agent(meerkat_core::error::AgentError::InternalError(err.message)),
     }
 }
 
@@ -4853,6 +8510,7 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
     #[cfg(feature = "comms")]
     fn install_ephemeral_peer_request_response_authority(
@@ -4951,6 +8609,152 @@ mod tests {
         );
     }
 
+    #[test]
+    fn active_admission_closing_blocks_staged_promotion() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Staged)
+            .expect("reserve staged admission")
+            .keep();
+
+        assert!(matches!(
+            admissions.try_mark_staged_closing(&session_id),
+            Ok(true)
+        ));
+        assert!(matches!(
+            admissions.try_promote_staged_to_running(&session_id),
+            Err(ActiveAdmissionError::Busy)
+        ));
+        assert!(admissions.release_if_state(&session_id, ActiveAdmissionState::Closing));
+        assert_eq!(admissions.state(&session_id), None);
+
+        admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Staged)
+            .expect("reserve staged admission again")
+            .keep();
+        let running = admissions
+            .try_promote_staged_to_running(&session_id)
+            .expect("promote staged admission");
+        assert!(matches!(
+            admissions.try_mark_staged_closing(&session_id),
+            Err(ActiveAdmissionError::Busy)
+        ));
+        drop(running);
+        assert_eq!(admissions.state(&session_id), None);
+    }
+
+    #[test]
+    fn active_admission_preparing_blocks_close_until_staged() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Preparing)
+            .expect("reserve preparing admission")
+            .keep();
+
+        assert!(matches!(
+            admissions.try_mark_staged_closing(&session_id),
+            Err(ActiveAdmissionError::Busy)
+        ));
+        assert!(matches!(
+            admissions.try_promote_staged_to_running(&session_id),
+            Err(ActiveAdmissionError::Busy)
+        ));
+        assert!(admissions.set_state_if_present(&session_id, ActiveAdmissionState::Staged));
+
+        let closing = admissions
+            .try_mark_staged_closing_guard(&session_id)
+            .expect("closing staged admission")
+            .expect("staged admission should close");
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Closing)
+        );
+        drop(closing);
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Staged)
+        );
+
+        admissions
+            .try_mark_staged_closing_guard(&session_id)
+            .expect("closing staged admission again")
+            .expect("staged admission should close")
+            .release();
+        assert_eq!(admissions.state(&session_id), None);
+    }
+
+    #[test]
+    fn active_admission_running_join_keeps_capacity_until_all_leases_drop() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        let first = admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Running)
+            .expect("reserve running admission");
+        let joined = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("join existing running session admission");
+
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        drop(first);
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running),
+            "joined admission must keep the session active after the first lease drops"
+        );
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        drop(joined);
+        assert_eq!(admissions.state(&session_id), None);
+    }
+
+    #[test]
+    fn active_admission_restore_staged_waits_for_joined_running_leases() {
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let session_id = SessionId::new();
+        admissions
+            .try_reserve(session_id.clone(), 1, ActiveAdmissionState::Staged)
+            .expect("reserve staged admission")
+            .keep();
+        let promoted = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("promote staged admission");
+        let joined = admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("join promoted running admission");
+
+        assert_eq!(admissions.lease_count(&session_id), Some(2));
+        promoted.restore_staged_and_keep();
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running)
+        );
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+
+        drop(joined);
+        assert_eq!(
+            admissions.state(&session_id),
+            Some(ActiveAdmissionState::Staged)
+        );
+        assert_eq!(admissions.lease_count(&session_id), Some(1));
+        assert!(matches!(
+            admissions.try_join_or_reserve_running(SessionId::new(), 1),
+            Err(ActiveAdmissionError::Full { .. })
+        ));
+        admissions
+            .try_join_or_reserve_running(session_id.clone(), 1)
+            .expect("restored staged admission should promote again");
+    }
+
     // -----------------------------------------------------------------------
     // Mock LLM client
     // -----------------------------------------------------------------------
@@ -5031,6 +8835,94 @@ mod tests {
         }
     }
 
+    struct BlockingMockLlmClient {
+        calls: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockingMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let calls = Arc::clone(&self.calls);
+            let release = Arc::clone(&self.release);
+            Box::pin(async_stream::stream! {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                release.notified().await;
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Blocked response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                });
+            })
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct FailAfterFirstMockLlmClient {
+        calls: AtomicUsize,
+    }
+
+    impl FailAfterFirstMockLlmClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for FailAfterFirstMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if call == 0 {
+                Box::pin(stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: "first turn succeeds".to_string(),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    }),
+                ]))
+            } else {
+                Box::pin(stream::iter(vec![Err(LlmError::InvalidRequest {
+                    message: "synthetic turn failure".to_string(),
+                })]))
+            }
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -5098,6 +8990,283 @@ mod tests {
         }
     }
 
+    fn blocking_build_config() -> (AgentBuildConfig, Arc<AtomicUsize>, Arc<Notify>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let client = BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        };
+        (
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(client)),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            calls,
+            release,
+        )
+    }
+
+    fn fail_after_first_build_config() -> AgentBuildConfig {
+        AgentBuildConfig {
+            llm_client_override: Some(Arc::new(FailAfterFirstMockLlmClient::new())),
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        }
+    }
+
+    async fn wait_hook_reached(hook: &PendingPromotionPreTurnHook) {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if hook.reached_flag.load(AtomicOrdering::SeqCst) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "test hook was not reached before deadline"
+            );
+            tokio::select! {
+                _ = hook.reached.notified() => {}
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {}
+            }
+        }
+    }
+
+    fn service_create_request(
+        build_config: AgentBuildConfig,
+        initial_turn: InitialTurnPolicy,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: build_config.model.clone(),
+            prompt: ContentInput::Text("service-created session".to_string()),
+            render_metadata: None,
+            system_prompt: build_config.system_prompt.clone(),
+            max_tokens: build_config.max_tokens,
+            event_tx: None,
+            skill_references: None,
+            initial_turn,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(build_config.to_session_build_options()),
+            labels: None,
+        }
+    }
+
+    fn service_start_turn_request(prompt: &str) -> StartTurnRequest {
+        StartTurnRequest {
+            prompt: ContentInput::Text(prompt.to_string()),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: None,
+            skill_references: None,
+            flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
+            turn_metadata: Some(
+                SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+                    None, None, None, None, None,
+                ),
+            ),
+        }
+    }
+
+    fn service_resume_pending_request() -> StartTurnRequest {
+        StartTurnRequest {
+            prompt: ContentInput::Text(String::new()),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: None,
+            skill_references: None,
+            flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
+            turn_metadata: Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    fn runtime_content_turn_primitive() -> RunPrimitive {
+        RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: Vec::new(),
+            context_appends: Vec::new(),
+            contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+            turn_metadata: Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        })
+    }
+
+    fn runtime_resume_pending_primitive() -> RunPrimitive {
+        RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: Vec::new(),
+            context_appends: Vec::new(),
+            contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+            turn_metadata: Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        })
+    }
+
+    async fn wait_for_llm_calls(calls: &AtomicUsize, expected: usize, description: &str) {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if calls.load(AtomicOrdering::SeqCst) >= expected {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{description} did not enter the LLM stream before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_active_leases(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        expected: usize,
+        description: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime
+                .active_session_admissions
+                .lease_count(session_id)
+                .is_some_and(|leases| leases >= expected)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{description} did not reach {expected} active admission leases before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_runtime_unregistered(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        description: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if !runtime.runtime_adapter.contains_session(session_id).await {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{description} runtime registration was not cleaned up before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn start_blocking_capacity_turn(
+        runtime: &Arc<SessionRuntime>,
+    ) -> (
+        SessionId,
+        tokio::task::JoinHandle<Result<RunResult, RpcError>>,
+        Arc<Notify>,
+    ) {
+        let (build_config, calls, release) = blocking_build_config();
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create blocking session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(runtime);
+        let session_for_turn = session_id.clone();
+        let turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "block active capacity".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if calls.load(AtomicOrdering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "blocking turn did not enter the LLM stream before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        (session_id, turn, release)
+    }
+
+    async fn start_runtime_prompt_without_registration_lock(
+        runtime: &Arc<SessionRuntime>,
+        session_id: &SessionId,
+        prompt: &str,
+    ) -> tokio::task::JoinHandle<meerkat_runtime::CompletionOutcome> {
+        let runtime = Arc::clone(runtime);
+        let session_id = session_id.clone();
+        let prompt = prompt.to_string();
+        tokio::spawn(async move {
+            let input = meerkat_runtime::Input::Prompt(
+                meerkat_runtime::PromptInput::from_content_input(ContentInput::Text(prompt), None),
+            );
+            let input_id = input.id().clone();
+            let admission = runtime
+                .reserve_active_turn(&session_id)
+                .await
+                .expect("reserve active runtime prompt");
+            runtime
+                .ensure_runtime_executor(&session_id)
+                .await
+                .expect("ensure runtime executor");
+            let registration = runtime
+                .register_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+                .expect("register active runtime prompt pre-admission");
+            let (outcome, handle) = runtime
+                .runtime_adapter
+                .accept_input_with_completion(&session_id, input)
+                .await
+                .expect("accept active runtime prompt");
+            assert!(
+                matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+                "active runtime prompt should be accepted: {outcome:?}"
+            );
+            let Some(handle) = handle else {
+                return meerkat_runtime::CompletionOutcome::CompletedWithoutResult;
+            };
+            let cleanup = runtime
+                .spawn_runtime_pre_admission_cleanup_with_outcome(session_id, input_id, handle);
+            registration.disarm();
+            cleanup
+                .await
+                .expect("active runtime prompt cleanup should report completion")
+        })
+    }
+
     #[tokio::test]
     async fn context_only_runtime_apply_preserves_run_checkpoint_boundary() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5161,6 +9330,552 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_executor_consumes_runtime_pre_admission() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize runtime session".into(),
+                initial_event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve runtime pre-admission");
+        runtime
+            .insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+            .expect("insert runtime pre-admission");
+
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-pre-admitted-context-only".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "pre-admitted context-only runtime apply".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let mut executor =
+            crate::session_executor::SessionRuntimeExecutor::new(Arc::clone(&runtime), session_id);
+        let output = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("context-only executor should consume pre-admission");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed context-only apply should release pre-admission");
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_recovers_persisted_live_missing_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable context-only session".into(),
+                initial_event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "test must remove live runtime bindings before context-only recovery"
+        );
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-recovered-live-missing".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "recovered live-missing runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("context-only apply should recover persisted session");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "context-only recovery should recreate runtime bindings"
+        );
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+        let projected = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected.iter().any(|text| {
+                text.contains("ctx-rpc-recovered-live-missing")
+                    && text.contains("recovered live-missing runtime context")
+            }),
+            "recovered live session should include context-only append: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_respects_active_admission_capacity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create candidate session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize candidate".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize candidate session");
+
+        let (_blocker, blocking_turn, release) = start_blocking_capacity_turn(&runtime).await;
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-capacity-boundary".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "capacity-bounded context-only runtime apply".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let blocked = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "context-only runtime apply should respect active admission capacity: {blocked:?}"
+        );
+
+        release.notify_waiters();
+        blocking_turn
+            .await
+            .expect("blocking turn task")
+            .expect("blocking turn should finish");
+    }
+
+    #[tokio::test]
+    async fn failed_context_only_runtime_apply_restores_staged_admission() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(
+                mock_build_config(),
+                None,
+                Some(ContentInput::Text("deferred prompt".to_string())),
+            )
+            .await
+            .expect("create staged session");
+
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-staged-restore".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only staged restore".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "context-only apply against staged live-missing session should fail not-found: {rejected:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed context-only apply must restore staged admission capacity: {blocked:?}"
+        );
+
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive staged session");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archive should release restored staged admission");
+    }
+
+    #[tokio::test]
+    async fn archived_live_context_only_runtime_apply_rejects_before_capacity_admission() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create candidate session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize candidate".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize candidate session");
+
+        let mut archived = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted candidate")
+            .expect("candidate should be persisted");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived authoritative snapshot");
+
+        let (_blocker, blocking_turn, release) = start_blocking_capacity_turn(&runtime).await;
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::Immediate,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-archived-before-capacity".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "archived context-only apply".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived live context-only apply should reject before capacity admission: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived context-only rejection should unregister stale runtime bindings"
+        );
+
+        release.notify_waiters();
+        blocking_turn
+            .await
+            .expect("blocking turn task")
+            .expect("blocking turn should finish");
+    }
+
+    #[tokio::test]
+    async fn archived_live_external_runtime_inputs_reject_and_unregister_before_recreate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create candidate session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize candidate".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize candidate session");
+
+        let mut archived = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted candidate")
+            .expect("candidate should be persisted");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived authoritative snapshot");
+
+        let rejected = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                "external_archived_input".to_string(),
+                serde_json::json!({"archived": true}),
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived external runtime input should reject as not found: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived external runtime input must unregister stale runtime state"
+        );
+
+        let peer_rejected = runtime
+            .accept_peer_response_terminal_via_runtime(
+                &session_id,
+                meerkat_core::comms::PeerId::new(),
+                None,
+                meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+                meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+                serde_json::json!({"archived": true}),
+            )
+            .await;
+        assert!(
+            peer_rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived peer terminal runtime input should reject as not found: {peer_rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived peer terminal runtime input must not recreate runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_failure_after_prepare_bindings_unregisters_runtime_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        *runtime
+            .create_session_after_prepare_bindings_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some("synthetic post-prepare create failure".to_string());
+
+        let failed = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("synthetic post-prepare")),
+            "create should fail at the test hook after prepare_bindings: {failed:?}"
+        );
+        let leaked_session_id = runtime
+            .create_session_after_prepare_bindings_session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("test hook should capture prepared session id");
+        assert!(
+            !runtime
+                .runtime_adapter
+                .contains_session(&leaked_session_id)
+                .await,
+            "failed create must unregister prepared runtime bindings"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("failed create should release admission capacity");
     }
 
     #[tokio::test]
@@ -6299,6 +11014,22 @@ mod tests {
         )
     }
 
+    fn make_runtime_with_session_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+        store: Arc<dyn meerkat::SessionStore>,
+    ) -> SessionRuntime {
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        )
+    }
+
     fn make_runtime_with_runtime_store(
         factory: AgentFactory,
         max_sessions: usize,
@@ -6353,6 +11084,90 @@ mod tests {
             .expect("surface construction must preserve PersistenceBundle OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "rpc-persistent-verifier");
+    }
+
+    struct ToggleFailSaveStore {
+        inner: meerkat::MemoryStore,
+        fail_save: AtomicBool,
+        fail_after_saves: AtomicUsize,
+    }
+
+    impl ToggleFailSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+                fail_save: AtomicBool::new(false),
+                fail_after_saves: AtomicUsize::new(usize::MAX),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, AtomicOrdering::Release);
+        }
+
+        fn fail_after_successful_saves(&self, saves: usize) {
+            self.fail_save.store(false, AtomicOrdering::Release);
+            self.fail_after_saves.store(saves, AtomicOrdering::Release);
+        }
+
+        fn clear_failures(&self) {
+            self.fail_save.store(false, AtomicOrdering::Release);
+            self.fail_after_saves
+                .store(usize::MAX, AtomicOrdering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for ToggleFailSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            if self.fail_save.load(AtomicOrdering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            loop {
+                let remaining = self.fail_after_saves.load(AtomicOrdering::Acquire);
+                if remaining == usize::MAX {
+                    break;
+                }
+                if remaining == 0 {
+                    return Err(meerkat_store::SessionStoreError::Internal(
+                        "forced save failure".to_string(),
+                    ));
+                }
+                if self
+                    .fail_after_saves
+                    .compare_exchange(
+                        remaining,
+                        remaining - 1,
+                        AtomicOrdering::AcqRel,
+                        AtomicOrdering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
+        }
     }
 
     fn approval_request() -> meerkat_core::ApprovalRequest {
@@ -7119,9 +11934,10 @@ mod tests {
     async fn append_system_context_survives_pending_session_promotion() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None, None)
+            .create_session(build_config, None, None)
             .await
             .unwrap();
 
@@ -7136,18 +11952,12 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            let is_promoting = runtime
-                .staged_sessions
-                .info(&session_id)
-                .await
-                .map(|info| info.is_promoting)
-                .unwrap_or(false);
-            if is_promoting {
+            if calls.load(AtomicOrdering::SeqCst) > 0 {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "session did not enter the promoting state before deadline"
+                "session did not start the service-side turn before deadline"
             );
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
@@ -7166,8 +11976,9 @@ mod tests {
             meerkat_core::AppendSystemContextStatus::Staged
         );
 
+        release.notify_waiters();
         let result = turn_handle.await.unwrap().unwrap();
-        assert!(result.text.contains("Slow response"));
+        assert!(result.text.contains("Blocked response"));
 
         let duplicate = runtime
             .append_system_context(&session_id, append_req)
@@ -7176,6 +11987,87 @@ mod tests {
         assert_eq!(
             duplicate.status,
             meerkat_core::AppendSystemContextStatus::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_restore_preserves_system_context_appends() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let staged_sessions = Arc::new(StagedSessionRegistry::new());
+        let admissions = Arc::new(ActiveSessionAdmissions::default());
+        let mut build_config = mock_build_config();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        build_config.resume_session = Some(session);
+        let effective_llm_identity = runtime
+            .llm_identity_from_pending_build(&build_config)
+            .await
+            .expect("effective identity");
+        let now = now_unix_secs();
+        staged_sessions
+            .stage(
+                session_id.clone(),
+                StagedSlot {
+                    effective_llm_identity,
+                    phase: StagedPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
+                    labels: None,
+                    deferred_prompt: None,
+                    created_at_secs: now,
+                    updated_at_secs: now,
+                },
+            )
+            .await
+            .expect("stage session");
+
+        let slot = staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin promotion")
+            .expect("promoting slot");
+        let mut cleanup = PendingPromotionCleanup::new(
+            Arc::clone(&staged_sessions),
+            admissions,
+            &session_id,
+            &slot,
+        );
+        let append = AppendSystemContextRequest {
+            text: "Preserve this append across rollback.".to_string(),
+            source: Some("test".to_string()),
+            idempotency_key: Some("rollback-preserve".to_string()),
+        };
+        staged_sessions
+            .append_system_context(
+                &session_id,
+                &append,
+                meerkat_core::time_compat::SystemTime::now(),
+                now_unix_secs(),
+            )
+            .await
+            .expect("promoting slot should exist")
+            .expect("append should stage");
+
+        cleanup.restore_now().await;
+
+        let restored = staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin restored promotion")
+            .expect("restored slot should exist");
+        let state = restored
+            .build_config
+            .resume_session
+            .as_ref()
+            .and_then(|session| session.system_context_state())
+            .expect("restored system context state");
+        assert!(
+            state
+                .pending
+                .iter()
+                .any(|pending| pending.text == append.text),
+            "rollback must preserve appends made while promotion was in progress: {state:?}"
         );
     }
 
@@ -7240,9 +12132,10 @@ mod tests {
     async fn start_turn_on_busy_session_fails() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None, None)
+            .create_session(build_config, None, None)
             .await
             .unwrap();
 
@@ -7250,7 +12143,7 @@ mod tests {
         let (event_tx1, _rx1) = mpsc::channel(100);
         let runtime_clone = runtime.clone();
         let sid_clone = session_id.clone();
-        let _turn_handle = tokio::spawn(async move {
+        let turn_handle = tokio::spawn(async move {
             runtime_clone
                 .start_turn(
                     &sid_clone,
@@ -7267,14 +12160,12 @@ mod tests {
         // Wait until the first turn is definitely running.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            if runtime.session_state(&session_id).await.map(|i| i.state)
-                == Some(SessionState::Running)
-            {
+            if calls.load(AtomicOrdering::SeqCst) > 0 {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "session did not enter running state before deadline"
+                "session did not start the service-side turn before deadline"
             );
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
@@ -7301,6 +12192,12 @@ mod tests {
             "Error code should be SESSION_BUSY, got: {}",
             err.code
         );
+
+        release.notify_waiters();
+        turn_handle
+            .await
+            .unwrap()
+            .expect("first turn should finish after release");
     }
 
     /// 5. Agent events are forwarded through the per-turn event channel.
@@ -7560,6 +12457,4892 @@ mod tests {
             "Error message should mention max sessions, got: {}",
             err.message
         );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_filters_archived_persisted_session_without_admission_leak() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+
+        let mut archived = Session::new();
+        let session_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived session");
+
+        assert!(
+            service
+                .load_persisted_session(&session_id)
+                .await
+                .expect("load archived session through mob service")
+                .is_none(),
+            "mob service should hide archived persisted sessions"
+        );
+
+        let mut req = service_create_request(mock_build_config(), InitialTurnPolicy::Defer);
+        req.build = Some(meerkat_core::service::SessionBuildOptions {
+            resume_session: Some(archived),
+            ..Default::default()
+        });
+        let rejected = service.create_session(req).await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "archived resume through mob service should be rejected before admission: {rejected:?}"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("rejected archived mob resume should not leak admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_archived_start_turn_rejects_before_capacity_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let _active = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("fill active admission capacity");
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let rejected = service
+            .start_turn(
+                &archived_id,
+                service_start_turn_request("archived mob bridge"),
+            )
+            .await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "archived mob start_turn should return not-found before capacity: {rejected:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_archived_runtime_apply_rejects_before_capacity_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let _active = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("fill active admission capacity");
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let rejected = service
+            .apply_runtime_turn(
+                &archived_id,
+                RunId::new(),
+                service_start_turn_request("archived mob bridge"),
+                RunApplyBoundary::Immediate,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "archived mob runtime apply should return not-found before capacity: {rejected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_store_only_start_turn_rejects_before_capacity_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let _active = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("fill active admission capacity");
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn(
+                &archived_id,
+                "archived store-only session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived store-only start_turn should return not-found before capacity: {rejected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_store_only_runtime_apply_rejects_before_capacity_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let _active = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("fill active admission capacity");
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .apply_runtime_turn(
+                &archived_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("archived store-only session".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived store-only runtime apply should return not-found before capacity: {rejected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_store_only_runtime_routed_turn_rejects_before_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn_via_runtime(
+                &archived_id,
+                "archived runtime-routed session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "runtime-routed turn should return not-found before runtime registration: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&archived_id).await,
+            "archived runtime-routed turn must not register runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_external_event_rejects_before_runtime_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        meerkat::SessionStore::save(store.as_ref(), &session)
+            .await
+            .expect("save persisted session");
+
+        let rejected = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                " ".to_string(),
+                serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::INVALID_PARAMS),
+            "invalid event type should reject before runtime registration: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "invalid external event must not register runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_external_event_preserves_existing_runtime_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "create_session should prepare runtime bindings"
+        );
+
+        let rejected = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                String::new(),
+                serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::INVALID_PARAMS),
+            "invalid event type should reject: {rejected:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "invalid external event must not unregister existing runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_event_accept_preserves_new_runtime_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        meerkat::SessionStore::save(store.as_ref(), &session)
+            .await
+            .expect("save persisted session");
+
+        let accepted = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                "review.event".to_string(),
+                serde_json::json!({"status": "queued"}),
+                None,
+            )
+            .await
+            .expect("external event should queue");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "external event should be accepted: {accepted:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "external event should install runtime state"
+        );
+
+        runtime
+            .unregister_new_runtime_registration_if_idle(
+                &runtime.runtime_adapter,
+                &session_id,
+                false,
+                false,
+                true,
+            )
+            .await;
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "queued external event must protect the new runtime registration from stale cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_routed_turn_capacity_full_rejects_before_input_accept() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before capacity check".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session and release active admission");
+
+        let active_before = runtime
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("list active inputs before rejected turn");
+        assert!(
+            active_before.is_empty(),
+            "materialized idle session should have no active runtime inputs before rejection"
+        );
+
+        let _capacity_filler = runtime
+            .reserve_active_admission_with_state(SessionId::new(), ActiveAdmissionState::Running)
+            .await
+            .expect("fill active admission capacity");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "must not enter runtime queue".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity-full runtime-routed turn should reject before runtime input accept: {rejected:?}"
+        );
+
+        let active_after = runtime
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("list active inputs after rejected turn");
+        assert!(
+            active_after.is_empty(),
+            "capacity rejection must not enqueue runtime input: {active_after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_submit_queued_same_session_input_extends_active_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let (build_config, calls, release) = blocking_build_config();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create staged blocking session");
+        let first_turn = start_runtime_prompt_without_registration_lock(
+            &runtime,
+            &session_id,
+            "first runtime turn blocks",
+        )
+        .await;
+        wait_for_llm_calls(&calls, 1, "first runtime-routed turn").await;
+
+        let queued_input = meerkat_runtime::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"token": "queued runtime submit should keep capacity"}),
+        );
+        let queued_runtime = Arc::clone(&runtime);
+        let queued_session_id = session_id.clone();
+        let queued_accept = tokio::spawn(async move {
+            queued_runtime
+                .accept_runtime_input_with_active_admission(
+                    &queued_runtime.runtime_adapter,
+                    &queued_session_id,
+                    queued_input,
+                )
+                .await
+        });
+        wait_for_active_leases(
+            &runtime,
+            &session_id,
+            2,
+            "queued same-session runtime submit",
+        )
+        .await;
+
+        release.notify_one();
+
+        let blocked = runtime.reserve_active_turn(&SessionId::new()).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "queued same-session runtime input must keep active capacity after the first turn releases"
+        );
+        first_turn
+            .await
+            .expect("first runtime prompt task should not panic");
+        let accepted = queued_accept
+            .await
+            .expect("queued runtime submit task should not panic")
+            .expect("runtime submit should join running session admission");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "runtime submit should accept queued same-session input: {accepted:?}"
+        );
+
+        release.notify_one();
+        wait_for_llm_calls(&calls, 2, "queued runtime submit turn").await;
+        let replacement_id = SessionId::new();
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                match runtime.reserve_active_turn(&replacement_id).await {
+                    Ok(guard) => break guard,
+                    Err(err) if err.message.contains("Max sessions") => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                    Err(err) => panic!("unexpected replacement admission error: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("queued runtime submit should eventually release active capacity");
+    }
+
+    #[tokio::test]
+    async fn external_event_queued_while_running_extends_active_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let (build_config, calls, release) = blocking_build_config();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create staged blocking session");
+        let first_turn = start_runtime_prompt_without_registration_lock(
+            &runtime,
+            &session_id,
+            "first runtime turn blocks before external event",
+        )
+        .await;
+        wait_for_llm_calls(&calls, 1, "first runtime-routed turn").await;
+
+        let event_runtime = Arc::clone(&runtime);
+        let event_session_id = session_id.clone();
+        let event_accept = tokio::spawn(async move {
+            event_runtime
+                .accept_external_event_via_runtime(
+                    &event_session_id,
+                    "review.event".to_string(),
+                    serde_json::json!({"status": "queued"}),
+                    None,
+                )
+                .await
+        });
+        wait_for_active_leases(&runtime, &session_id, 2, "queued external event").await;
+
+        release.notify_one();
+
+        let blocked = runtime.reserve_active_turn(&SessionId::new()).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "queued external event must keep active capacity after the first turn releases"
+        );
+        first_turn
+            .await
+            .expect("first runtime prompt task should not panic");
+        let accepted = event_accept
+            .await
+            .expect("queued external event task should not panic")
+            .expect("external event should queue behind running runtime");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "external event should be accepted: {accepted:?}"
+        );
+        let replacement_id = SessionId::new();
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                match runtime.reserve_active_turn(&replacement_id).await {
+                    Ok(guard) => break guard,
+                    Err(err) if err.message.contains("Max sessions") => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    }
+                    Err(err) => panic!("unexpected replacement admission error: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("queued external event should eventually release active capacity");
+    }
+
+    #[tokio::test]
+    async fn runtime_routed_turn_waits_for_registration_lock_before_active_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before lock ordering check".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session and release active admission");
+
+        let registration_lock = runtime.runtime_registration_lock(&session_id);
+        let registration_guard = registration_lock.mutex().lock().await;
+        let turn_runtime = Arc::clone(&runtime);
+        let turn_session_id = session_id.clone();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let mut turn_task = tokio::spawn(async move {
+            turn_runtime
+                .start_turn_via_runtime(
+                    &turn_session_id,
+                    "wait for registration lock before reserving".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        tokio::select! {
+            result = &mut turn_task => {
+                panic!("runtime-routed turn completed before registration lock release: {result:?}");
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+        }
+
+        let _capacity_filler = runtime
+            .reserve_active_admission_with_state(SessionId::new(), ActiveAdmissionState::Running)
+            .await
+            .expect("blocked runtime-routed turn must not reserve active capacity before lock");
+
+        drop(registration_guard);
+        drop(registration_lock);
+        let rejected = tokio::time::timeout(tokio::time::Duration::from_secs(5), turn_task)
+            .await
+            .expect("runtime-routed turn should finish after lock release")
+            .expect("runtime-routed turn task should not panic");
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity filler should make the blocked runtime turn reject after lock release: {rejected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_response_terminal_capacity_full_rejects_before_input_accept() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before peer terminal capacity check".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session and release active admission");
+
+        let active_before = runtime
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("list active inputs before rejected peer terminal");
+        assert!(
+            active_before.is_empty(),
+            "materialized idle session should have no active runtime inputs before rejection"
+        );
+
+        let _capacity_filler = runtime
+            .reserve_active_admission_with_state(SessionId::new(), ActiveAdmissionState::Running)
+            .await
+            .expect("fill active admission capacity");
+        let rejected = runtime
+            .accept_peer_response_terminal_via_runtime(
+                &session_id,
+                meerkat_core::comms::PeerId::new(),
+                None,
+                meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+                meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+                serde_json::json!({"token": "amber"}),
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity-full peer terminal should reject before runtime input accept: {rejected:?}"
+        );
+
+        let active_after = runtime
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("list active inputs after rejected peer terminal");
+        assert!(
+            active_after.is_empty(),
+            "capacity rejection must not enqueue peer terminal input: {active_after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_accept_validation_failure_unregisters_new_executor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        meerkat::SessionStore::save(store.as_ref(), &session)
+            .await
+            .expect("save store-only session");
+
+        let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::Peer {
+                    peer_id: meerkat_core::comms::PeerId::new().to_string(),
+                    display_identity: Some("progress-peer".to_string()),
+                    runtime_id: None,
+                },
+                durability: meerkat_runtime::InputDurability::Durable,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(meerkat_runtime::PeerConvention::ResponseProgress {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                phase: meerkat_runtime::ResponseProgressPhase::InProgress,
+            }),
+            body: "working".to_string(),
+            payload: Some(serde_json::json!({"progress": "working"})),
+            blocks: None,
+            handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+        });
+
+        let rejected = runtime
+            .accept_runtime_input_with_active_admission(
+                &runtime.runtime_adapter,
+                &session_id,
+                input,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::INVALID_PARAMS),
+            "invalid runtime input should reject after executor installation: {rejected:?}"
+        );
+        wait_for_runtime_unregistered(&runtime, &session_id, "validation-failed runtime accept")
+            .await;
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("accept validation failure should release active capacity");
+    }
+
+    #[tokio::test]
+    async fn runtime_accept_terminal_no_handle_unregisters_new_executor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        meerkat::SessionStore::save(store.as_ref(), &session)
+            .await
+            .expect("save store-only session");
+
+        let operation_id = meerkat_core::OperationId::new();
+        let input = meerkat_runtime::Input::Operation(meerkat_runtime::OperationInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::System,
+                durability: meerkat_runtime::InputDurability::Derived,
+                visibility: meerkat_runtime::InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            operation_id: operation_id.clone(),
+            event: meerkat_core::OpEvent::Cancelled { id: operation_id },
+        });
+
+        let outcome = runtime
+            .accept_runtime_input_with_active_admission(
+                &runtime.runtime_adapter,
+                &session_id,
+                input,
+            )
+            .await
+            .expect("terminal operation input should be accepted without a completion handle");
+        assert!(
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "terminal operation input should be accepted: {outcome:?}"
+        );
+        wait_for_runtime_unregistered(&runtime, &session_id, "terminal no-handle runtime accept")
+            .await;
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("terminal no-handle accept should leave active capacity available");
+    }
+
+    #[tokio::test]
+    async fn new_runtime_cleanup_preserves_active_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let mut runtime = make_runtime(temp_factory(&temp), 2);
+        runtime.set_default_llm_client(Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        })));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "initial materialization".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("initial turn should complete");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure runtime executor");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let active_runtime = Arc::clone(&runtime);
+        let active_session_id = session_id.clone();
+        let active_turn = tokio::spawn(async move {
+            active_runtime
+                .start_turn_via_runtime(
+                    &active_session_id,
+                    "active input survives stale cleanup".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+        wait_for_llm_calls(&calls, 1, "active runtime input").await;
+        let active_inputs = runtime
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("list active inputs");
+        assert!(
+            !active_inputs.is_empty(),
+            "test requires an active runtime input before cleanup"
+        );
+
+        runtime
+            .unregister_new_runtime_registration_if_idle(
+                &runtime.runtime_adapter,
+                &session_id,
+                false,
+                false,
+                true,
+            )
+            .await;
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "new-runtime cleanup must not unregister a session with active runtime input"
+        );
+
+        release.notify_waiters();
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), active_turn)
+            .await
+            .expect("active input should complete after release");
+        result
+            .expect("active turn task should not panic")
+            .expect("active turn should not be terminated by cleanup");
+    }
+
+    #[tokio::test]
+    async fn new_runtime_cleanup_preserves_foreign_active_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "initial materialization".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("initial turn should complete");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        let _foreign_admission = runtime
+            .reserve_active_admission_with_state(
+                session_id.clone(),
+                ActiveAdmissionState::Preparing,
+            )
+            .await
+            .expect("reserve foreign preparing admission");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure runtime executor");
+
+        assert!(
+            runtime
+                .runtime_adapter
+                .list_active_inputs(&session_id)
+                .await
+                .expect("list active inputs")
+                .is_empty(),
+            "test covers the pre-input admission window"
+        );
+
+        runtime
+            .unregister_new_runtime_registration_if_idle(
+                &runtime.runtime_adapter,
+                &session_id,
+                false,
+                false,
+                true,
+            )
+            .await;
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "new-runtime cleanup must not unregister a session protected by another active admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_pre_admission_cleanup_releases_if_executor_never_takes_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let session_id = SessionId::new();
+        let input_id = InputId::new();
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve active turn");
+        runtime
+            .insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+            .expect("insert pre-admission");
+
+        let handle = meerkat_runtime::CompletionHandle::already_resolved(
+            meerkat_runtime::CompletionOutcome::Abandoned(
+                "executor never took pre-admission".to_string(),
+            ),
+        );
+        runtime.spawn_runtime_pre_admission_cleanup(session_id, input_id, handle);
+
+        let replacement_id = SessionId::new();
+        let _replacement = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match runtime
+                    .reserve_active_admission_with_state(
+                        replacement_id.clone(),
+                        ActiveAdmissionState::Running,
+                    )
+                    .await
+                {
+                    Ok(guard) => break guard,
+                    Err(err) if err.message.contains("Max sessions") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(err) => panic!("unexpected reserve error: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("completion cleanup should release leaked pre-admission");
+    }
+
+    #[tokio::test]
+    async fn runtime_pre_admission_cleanup_unregisters_after_boundary_commit_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let session_id = SessionId::new();
+        runtime
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare runtime bindings");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "test requires a runtime adapter entry before cleanup"
+        );
+
+        let input_id = InputId::new();
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve active turn");
+        runtime
+            .insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+            .expect("insert pre-admission");
+
+        let handle = meerkat_runtime::CompletionHandle::already_resolved(
+            meerkat_runtime::CompletionOutcome::Abandoned(
+                "apply failed: runtime boundary commit failed: injected failure".to_string(),
+            ),
+        );
+        let outcome = runtime
+            .spawn_runtime_pre_admission_cleanup_with_outcome(session_id.clone(), input_id, handle)
+            .await
+            .expect("cleanup task should report completion");
+        assert!(
+            matches!(outcome, meerkat_runtime::CompletionOutcome::Abandoned(_)),
+            "test completion should be an apply failure: {outcome:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "boundary commit failure cleanup must unregister stale runtime state"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("failed runtime input cleanup should release active admission");
+    }
+
+    #[tokio::test]
+    async fn runtime_pre_admission_registration_drop_releases_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let session_id = SessionId::new();
+        let input_id = InputId::new();
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve active turn");
+        let registration = runtime
+            .register_runtime_pre_admission(session_id, input_id, admission)
+            .expect("register pre-admission");
+
+        drop(registration);
+
+        let replacement_id = SessionId::new();
+        let _replacement = runtime
+            .reserve_active_admission_with_state(replacement_id, ActiveAdmissionState::Running)
+            .await
+            .expect("dropping pre-admission registration should release active capacity");
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_pre_admission_cleanup_does_not_remove_newer_input_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let session_id = SessionId::new();
+        let first_input_id = InputId::new();
+        let first_admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve first active turn");
+        runtime
+            .insert_runtime_pre_admission(
+                session_id.clone(),
+                first_input_id.clone(),
+                first_admission,
+            )
+            .expect("insert first pre-admission");
+
+        let consumed = runtime
+            .take_runtime_pre_admission(&session_id, std::slice::from_ref(&first_input_id))
+            .expect("executor consumes first pre-admission");
+        drop(consumed);
+
+        let second_input_id = InputId::new();
+        let second_admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve second active turn");
+        runtime
+            .insert_runtime_pre_admission(
+                session_id.clone(),
+                second_input_id.clone(),
+                second_admission,
+            )
+            .expect("insert second pre-admission");
+
+        let stale_handle = meerkat_runtime::CompletionHandle::already_resolved(
+            meerkat_runtime::CompletionOutcome::Abandoned(
+                "stale cleanup for first input".to_string(),
+            ),
+        );
+        runtime.spawn_runtime_pre_admission_cleanup(
+            session_id.clone(),
+            first_input_id,
+            stale_handle,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let preserved =
+            runtime.take_runtime_pre_admission(&session_id, std::slice::from_ref(&second_input_id));
+        assert!(
+            preserved.is_some(),
+            "stale cleanup for a consumed input must not remove a newer input's guard"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn archived_store_only_rotation_registration_rejects_before_executor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = Arc::new(make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        ));
+
+        let mut archived = Session::new();
+        let archived_id = archived.id().clone();
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived store-only session");
+
+        let rejected = runtime
+            .ensure_runtime_session_for_rotation(&archived_id)
+            .await;
+        assert!(
+            matches!(rejected, Err(SessionError::NotFound { .. })),
+            "rotation registration should reject archived store-only session: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&archived_id).await,
+            "archived rotation registration must not install runtime state"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_create_shares_rpc_staged_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let _rpc_staged = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("rpc staged session should reserve capacity");
+
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await;
+        assert!(
+            direct
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Max sessions")),
+            "mob/direct service create must observe RPC staged capacity: {direct:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_staged_create_blocks_and_releases_rpc_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let service = runtime.session_service();
+
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("mob/direct deferred create should reserve capacity");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "rpc create should be blocked by mob/direct staged capacity: {blocked:?}"
+        );
+
+        service
+            .archive(&direct.session_id)
+            .await
+            .expect("archiving direct staged session should release capacity");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("rpc create should succeed after direct staged archive");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_cancelled_deferred_create_after_ack_discards_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        let service = Arc::new(
+            RpcMobSessionService::new(
+                Arc::clone(&runtime.service),
+                Arc::clone(&runtime.staged_sessions),
+                Arc::clone(&runtime.active_session_admissions),
+                runtime.max_sessions,
+                Arc::clone(&runtime.config_runtime),
+                Arc::clone(&runtime.runtime_adapter),
+            )
+            .with_direct_create_after_ack_hook(Arc::clone(&hook)),
+        );
+        let task_service = Arc::clone(&service);
+        let create_task = tokio::spawn(async move {
+            task_service
+                .create_session(service_create_request(
+                    mock_build_config(),
+                    InitialTurnPolicy::Defer,
+                ))
+                .await
+        });
+
+        wait_hook_reached(&hook).await;
+        create_task.abort();
+        hook.release.notify_waiters();
+        let _ = create_task.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runtime
+                    .create_session(mock_build_config(), None, None)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled direct deferred create should release admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_archive_rejects_rpc_staged_session_without_releasing_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("rpc staged session should reserve capacity");
+        let service = runtime.session_service();
+
+        let archived = service.archive(&session_id).await;
+        assert!(
+            matches!(archived, Err(SessionError::Busy { .. })),
+            "direct mob service must not archive an RPC-staged session: {archived:?}"
+        );
+        let discarded = service.discard_live_session(&session_id).await;
+        assert!(
+            matches!(discarded, Err(SessionError::Busy { .. })),
+            "direct mob service must not discard an RPC-staged session: {discarded:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed direct archive/discard must not release RPC staged capacity: {blocked:?}"
+        );
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("RPC archive should still own RPC-staged cleanup");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("RPC archive should release staged capacity");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn rpc_archive_direct_deferred_failure_keeps_admission_until_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+        store.set_fail_save(true);
+
+        let archived = runtime.archive_session(&direct.session_id).await;
+        assert!(
+            archived
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "RPC archive of direct deferred session should surface durable failure: {archived:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed archive should keep direct deferred admission reserved: {blocked:?}"
+        );
+
+        store.clear_failures();
+        runtime
+            .archive_session(&direct.session_id)
+            .await
+            .expect("archive should succeed after durable store recovers");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("successful retry archive should release admission");
+    }
+
+    #[tokio::test]
+    async fn failed_non_staged_archive_preserves_runtime_cleanup_state_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let mut runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            2,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before failed archive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+        let _stream = runtime
+            .subscribe_pending_session_events(&session_id)
+            .await
+            .expect("seed runtime cleanup state");
+        assert!(
+            runtime
+                .pending_session_event_streams
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "test should seed runtime cleanup state before archive"
+        );
+
+        store.set_fail_save(true);
+        let archived = runtime.archive_session(&session_id).await;
+        assert!(
+            archived
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "failed archive should surface durable error: {archived:?}"
+        );
+        assert!(
+            runtime
+                .pending_session_event_streams
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "failed archive must preserve runtime cleanup state for retry"
+        );
+
+        store.clear_failures();
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("retry archive should succeed after store recovers");
+        assert!(
+            !runtime
+                .pending_session_event_streams
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "successful archive should remove runtime cleanup state"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn rpc_discard_direct_deferred_session_releases_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "direct deferred session should consume RPC admission: {blocked:?}"
+        );
+
+        runtime
+            .discard_live_session(&direct.session_id)
+            .await
+            .expect("runtime discard should remove direct deferred live session");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("discarding direct deferred live session should release RPC admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_stale_live_cleanup_releases_rpc_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "direct deferred session should consume RPC admission: {blocked:?}"
+        );
+
+        let mut archived = runtime
+            .service
+            .export_live_session(&direct.session_id)
+            .await
+            .expect("export live direct deferred session");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save stale archived durable snapshot");
+
+        let failed = service
+            .start_turn(
+                &direct.session_id,
+                service_start_turn_request("stale direct deferred turn"),
+            )
+            .await;
+        assert!(
+            matches!(failed, Err(SessionError::NotFound { .. })),
+            "stale archived direct deferred turn should surface not found after cleanup: {failed:?}"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("stale live cleanup should release direct deferred RPC admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_runtime_start_turn_stale_archive_releases_rpc_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+
+        let mut archived = runtime
+            .service
+            .export_live_session(&direct.session_id)
+            .await
+            .expect("export live direct deferred session");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save stale archived durable snapshot");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .start_turn(
+                &direct.session_id,
+                "must not recover archived direct session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "runtime start_turn should reject stale archived direct session: {failed:?}"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("stale archived runtime start_turn should release direct deferred admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_runtime_apply_stale_archive_releases_rpc_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+
+        let mut archived = runtime
+            .service
+            .export_live_session(&direct.session_id)
+            .await
+            .expect("export live direct deferred session");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save stale archived durable snapshot");
+
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .apply_runtime_turn(
+                &direct.session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("must not recover archived direct session".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "runtime apply should reject stale archived direct session: {failed:?}"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("stale archived runtime apply should release direct deferred admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_has_live_stale_cleanup_releases_rpc_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "direct deferred session should consume RPC admission: {blocked:?}"
+        );
+
+        let mut archived = runtime
+            .service
+            .export_live_session(&direct.session_id)
+            .await
+            .expect("export live direct deferred session");
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save stale archived durable snapshot");
+
+        let live = service
+            .has_live_session(&direct.session_id)
+            .await
+            .expect("probe stale live session");
+        assert!(
+            !live,
+            "stale archived direct deferred liveness probe should report no live session"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("stale live liveness probe should release direct deferred RPC admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_timestamp_only_projection_is_not_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("direct deferred create should reserve capacity");
+
+        let mut projected = runtime
+            .service
+            .export_live_session(&direct.session_id)
+            .await
+            .expect("export live direct deferred session");
+        projected.set_metadata("projection_only", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &projected)
+            .await
+            .expect("save timestamp-only durable projection");
+
+        assert!(
+            !runtime
+                .live_session_is_stale(&direct.session_id)
+                .await
+                .expect("query timestamp-only stale predicate"),
+            "timestamp-only durable projection must not evict live runtime mechanics"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "timestamp-only projection must not release direct deferred admission: {blocked:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn direct_deferred_create_preparing_admission_blocks_archive_race() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let service = RpcMobSessionService::new(
+            Arc::clone(&runtime.service),
+            Arc::clone(&runtime.staged_sessions),
+            Arc::clone(&runtime.active_session_admissions),
+            runtime.max_sessions,
+            Arc::clone(&runtime.config_runtime),
+            Arc::clone(&runtime.runtime_adapter),
+        );
+        let session_id = SessionId::new();
+        let admission = service
+            .reserve_create_admission(&session_id, InitialTurnPolicy::Defer)
+            .await
+            .expect("reserve direct deferred create admission");
+        assert_eq!(
+            service.active_session_admissions.state(&session_id),
+            Some(ActiveAdmissionState::Preparing)
+        );
+
+        let archived = service.archive(&session_id).await;
+        assert!(
+            matches!(archived, Err(SessionError::Busy { .. })),
+            "archive must not release preparing direct deferred create admission: {archived:?}"
+        );
+        let discarded =
+            meerkat_mob::MobSessionService::discard_live_session(&service, &session_id).await;
+        assert!(
+            matches!(discarded, Err(SessionError::Busy { .. })),
+            "discard must not release preparing direct deferred create admission: {discarded:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "pre-live direct deferred create admission should still consume capacity: {blocked:?}"
+        );
+
+        drop(admission);
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("dropping preparing admission should release capacity");
+    }
+
+    #[tokio::test]
+    async fn cancelled_staged_archive_finishes_background_cleanup_after_service_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .staged_archive_after_service_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let runtime_for_archive = Arc::clone(&runtime);
+        let session_for_archive = session_id.clone();
+        let archive_task = tokio::spawn(async move {
+            runtime_for_archive
+                .archive_session(&session_for_archive)
+                .await
+        });
+        wait_hook_reached(&hook).await;
+        archive_task.abort();
+        let _ = archive_task.await;
+        hook.release.notify_waiters();
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            match runtime
+                .create_session(mock_build_config(), None, None)
+                .await
+            {
+                Ok(_) => break,
+                Err(err) if err.message.contains("Max sessions") => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "background staged archive cleanup did not release admission before deadline"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("unexpected create error after cancelled archive: {err:?}"),
+            }
+        }
+        assert!(
+            runtime.session_state(&session_id).await.is_none(),
+            "background staged archive cleanup should remove the archived staged slot"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "background staged archive cleanup should unregister prepared runtime bindings"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_pre_run_apply_restores_staged_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let service = runtime.session_service();
+
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("mob/direct deferred create should reserve capacity");
+        let output = service
+            .apply_runtime_turn(
+                &direct.session_id,
+                RunId::new(),
+                service_resume_pending_request(),
+                RunApplyBoundary::Immediate,
+                vec![InputId::new()],
+            )
+            .await
+            .expect("resume-pending without a boundary should return a typed terminal");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "direct service resume-pending should surface the typed no-pending terminal: {output:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "pre-run direct apply should restore staged admission instead of releasing capacity: {blocked:?}"
+        );
+
+        service
+            .archive(&direct.session_id)
+            .await
+            .expect("restored direct staged session should be archivable");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archiving restored direct staged session should release capacity");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_pre_run_apply_error_restores_staged_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let service = runtime.session_service();
+
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("mob/direct deferred create should reserve capacity");
+        let mut request = service_start_turn_request("missing runtime stamp");
+        request.turn_metadata = None;
+        let result = service
+            .apply_runtime_turn(
+                &direct.session_id,
+                RunId::new(),
+                request,
+                RunApplyBoundary::Immediate,
+                vec![InputId::new()],
+            )
+            .await;
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("runtime_execution_kind not set")),
+            "direct service apply should reject missing runtime metadata before the run: {result:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "pre-run direct apply error should restore staged admission instead of releasing capacity: {blocked:?}"
+        );
+
+        service
+            .archive(&direct.session_id)
+            .await
+            .expect("restored direct staged session should remain archivable");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archiving restored direct staged session should release capacity");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_runtime_executor_consumes_runtime_pre_admission_without_double_reserve() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before mob runtime executor apply".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+
+        let primitive = runtime_content_turn_primitive();
+        let input_id = primitive
+            .contributing_input_ids()
+            .first()
+            .cloned()
+            .expect("runtime primitive should carry input id");
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve runtime pre-admission");
+        runtime
+            .insert_runtime_pre_admission(session_id.clone(), input_id, admission)
+            .expect("insert runtime pre-admission");
+
+        let mut executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+            runtime.session_service(),
+            Some(Arc::clone(&runtime)),
+            session_id.clone(),
+            crate::router::NotificationSink::noop(),
+        );
+        executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("mob runtime executor should use existing pre-admission");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed mob runtime executor apply should release active admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_runtime_executor_no_pending_restores_promoted_staged_pre_admission() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let service = runtime.session_service();
+
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("mob/direct deferred create should reserve capacity");
+        let primitive = runtime_resume_pending_primitive();
+        let input_id = primitive
+            .contributing_input_ids()
+            .first()
+            .cloned()
+            .expect("runtime primitive should carry input id");
+        let admission = runtime
+            .reserve_active_turn(&direct.session_id)
+            .await
+            .expect("reserve promoted runtime pre-admission");
+        runtime
+            .insert_runtime_pre_admission(direct.session_id.clone(), input_id, admission)
+            .expect("insert runtime pre-admission");
+
+        let mut executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+            runtime.session_service(),
+            Some(Arc::clone(&runtime)),
+            direct.session_id.clone(),
+            crate::router::NotificationSink::noop(),
+        );
+        let output = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("mob runtime executor should return typed no-pending output");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "resume-pending without a boundary should surface the typed no-pending terminal: {output:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "mob executor no-pending apply should restore staged admission instead of releasing capacity: {blocked:?}"
+        );
+
+        service
+            .archive(&direct.session_id)
+            .await
+            .expect("restored direct staged session should remain archivable");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archiving restored direct staged session should release capacity");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_running_turn_blocks_rpc_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let (build_config, calls, release) = blocking_build_config();
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_initial = Arc::clone(&runtime);
+        let session_for_initial = session_id.clone();
+        let initial_turn = tokio::spawn(async move {
+            runtime_for_initial
+                .start_turn(
+                    &session_for_initial,
+                    "materialize".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if calls.load(AtomicOrdering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "initial turn did not enter the LLM stream before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        release.notify_waiters();
+        initial_turn
+            .await
+            .expect("initial turn task")
+            .expect("materialize session");
+
+        let service = runtime.session_service();
+        let session_for_turn = session_id.clone();
+        let direct_turn = tokio::spawn(async move {
+            service
+                .start_turn(
+                    &session_for_turn,
+                    service_start_turn_request("direct service turn"),
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if calls.load(AtomicOrdering::SeqCst) >= 2 {
+                break;
+            }
+            if direct_turn.is_finished() {
+                let result = direct_turn.await.expect("direct turn task");
+                panic!("direct service turn finished before reaching LLM stream: {result:?}");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "direct service turn did not enter the LLM stream before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "rpc create should be blocked by mob/direct running turn: {blocked:?}"
+        );
+
+        release.notify_waiters();
+        direct_turn
+            .await
+            .expect("direct turn task")
+            .expect("direct service turn should finish");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_cannot_release_rpc_pending_first_turn_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let (build_config, calls, release) = blocking_build_config();
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create pending RPC session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let pending_first_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "materialize via RPC".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        wait_for_llm_calls(&calls, 1, "RPC pending first turn").await;
+
+        let service = runtime.session_service();
+        let direct_turn = service
+            .start_turn(
+                &session_id,
+                service_start_turn_request("direct service race"),
+            )
+            .await;
+        assert!(
+            matches!(direct_turn, Err(SessionError::Busy { .. })),
+            "mob/direct start_turn must see RPC pending first turn as running: {direct_turn:?}"
+        );
+
+        let archive = service.archive(&session_id).await;
+        assert!(
+            matches!(archive, Err(SessionError::Busy { .. })),
+            "mob/direct archive must not release an active RPC pending first turn: {archive:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "RPC create should remain blocked while first turn is running: {blocked:?}"
+        );
+
+        release.notify_waiters();
+        pending_first_turn
+            .await
+            .expect("pending first turn task")
+            .expect("pending first turn should finish");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("capacity should release after pending first turn stops");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_cancelled_eager_create_holds_admission_until_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let service = runtime.session_service();
+        let (build_config, calls, release) = blocking_build_config();
+        let create = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .create_session(service_create_request(
+                        build_config,
+                        InitialTurnPolicy::RunImmediately,
+                    ))
+                    .await
+            }
+        });
+
+        wait_for_llm_calls(&calls, 1, "mob/direct eager create").await;
+        create.abort();
+        assert!(
+            create
+                .await
+                .expect_err("outer create task should abort")
+                .is_cancelled(),
+            "outer create task should be cancelled"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "cancelled mob/direct create awaiter must not release running create capacity: {blocked:?}"
+        );
+
+        release.notify_waiters();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            match runtime
+                .create_session(mock_build_config(), None, None)
+                .await
+            {
+                Ok(_) => break,
+                Err(err) if err.message.contains("Max sessions") => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "capacity did not release after service create finished"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("unexpected create_session error after cancellation: {err:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_persisted_sessions_do_not_consume_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 2);
+
+        for index in 0..4 {
+            let session_id = runtime
+                .create_session(mock_build_config(), None, None)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("create_session {index} should ignore completed history: {err:?}")
+                });
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            runtime
+                .start_turn(
+                    &session_id,
+                    format!("complete session {index}").into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("start_turn {index} should complete and release capacity: {err:?}")
+                });
+        }
+
+        let listed = runtime.list_sessions(SessionQuery::default()).await;
+        assert_eq!(
+            listed.len(),
+            4,
+            "completed sessions should remain queryable as persisted history"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_sessions_still_consume_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
+
+        let first = runtime
+            .create_session(slow_build_config(250), None, None)
+            .await
+            .expect("create first session");
+        let second = runtime
+            .create_session(slow_build_config(250), None, None)
+            .await
+            .expect("create second session");
+
+        let (event_tx1, _event_rx1) = mpsc::channel(100);
+        let runtime_first = Arc::clone(&runtime);
+        let first_for_task = first.clone();
+        let first_turn = tokio::spawn(async move {
+            runtime_first
+                .start_turn(
+                    &first_for_task,
+                    "first".into(),
+                    event_tx1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let runtime_second = Arc::clone(&runtime);
+        let second_for_task = second.clone();
+        let second_turn = tokio::spawn(async move {
+            runtime_second
+                .start_turn(
+                    &second_for_task,
+                    "second".into(),
+                    event_tx2,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            let first_running = runtime.session_state(&first).await.map(|info| info.state)
+                == Some(SessionState::Running);
+            let second_running = runtime.session_state(&second).await.map(|info| info.state)
+                == Some(SessionState::Running);
+            if first_running && second_running {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "sessions did not both enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let result = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(result.is_err(), "third session should fail while two run");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Max sessions"),
+            "Error message should mention max sessions, got: {}",
+            err.message
+        );
+
+        first_turn.await.unwrap().expect("first turn should finish");
+        second_turn
+            .await
+            .unwrap()
+            .expect("second turn should finish");
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_session_admission_is_atomically_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
+
+        let results = futures::future::join_all((0..8).map(|_| {
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .create_session(mock_build_config(), None, None)
+                    .await
+            }
+        }))
+        .await;
+
+        let successes = results.iter().filter(|result| result.is_ok()).count();
+        let max_errors = results
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|err| err.message.contains("Max sessions"))
+            })
+            .count();
+        assert_eq!(successes, 2, "only two creates should reserve capacity");
+        assert_eq!(
+            max_errors, 6,
+            "remaining concurrent creates should be rejected by admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_staged_session_releases_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let staged = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked.is_err(),
+            "capacity should be consumed while the session is staged"
+        );
+
+        runtime
+            .archive_session(&staged)
+            .await
+            .expect("archive staged session");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("new session should be admitted after staged archive");
+    }
+
+    #[tokio::test]
+    async fn archive_promoting_session_does_not_release_active_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(slow_build_config(250), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "first turn".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime
+                .session_state(&session_id)
+                .await
+                .map(|info| info.state)
+                == Some(SessionState::Running)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running promotion before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let archive = runtime.archive_session(&session_id).await;
+        assert!(
+            archive
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_BUSY),
+            "archive during promotion should be rejected as busy: {archive:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "promoting first turn should keep active capacity reserved: {blocked:?}"
+        );
+
+        running_turn
+            .await
+            .unwrap()
+            .expect("promoting turn should finish");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("capacity should release after promotion completes");
+    }
+
+    #[tokio::test]
+    async fn interrupt_reaches_promoting_pending_first_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let (build_config, calls, _release) = blocking_build_config();
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "interrupt me".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        wait_for_llm_calls(&calls, 1, "promoting pending first turn").await;
+        assert!(
+            runtime
+                .staged_sessions
+                .info(&session_id)
+                .await
+                .is_some_and(|info| info.is_promoting),
+            "session should remain in promoting state while the service-side first turn runs"
+        );
+
+        runtime
+            .interrupt(&session_id)
+            .await
+            .expect("interrupt should reach promoting live turn");
+        let interrupted = tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("promoting first turn should finish after interrupt")
+            .expect("turn task should not panic")
+            .expect_err("interrupted turn should return an RPC error");
+        assert!(
+            interrupted.message.contains("cancelled"),
+            "interrupt should cancel the live first turn, got: {interrupted:?}"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("interrupted first turn should release admission");
+    }
+
+    #[tokio::test]
+    async fn public_interrupt_during_pending_promotion_start_window_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .pending_promotion_pre_turn_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "interrupt in promotion window".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        while !hook.reached_flag.load(AtomicOrdering::SeqCst) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pending promotion did not reach the pre-turn interrupt window"
+            );
+            hook.reached.notified().await;
+        }
+
+        let err = runtime
+            .interrupt(&session_id)
+            .await
+            .expect_err("pre-running promotion should report busy instead of acknowledging cancel");
+        assert_eq!(err.code, error::SESSION_BUSY);
+        hook.release.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("pending first turn should finish")
+            .expect("turn task should not panic")
+            .expect("busy pre-run interrupt must not cancel or corrupt the first turn");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed first turn should release active admission");
+    }
+
+    #[tokio::test]
+    async fn turn_interrupt_handler_during_pending_promotion_start_window_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .pending_promotion_pre_turn_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "interrupt through RPC handler in promotion window".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        wait_hook_reached(&hook).await;
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "session_id": session_id.to_string(),
+        }))
+        .expect("serialize interrupt params");
+
+        #[cfg(feature = "mob")]
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        #[cfg(feature = "mob")]
+        let response = crate::handlers::turn::handle_interrupt(
+            Some(crate::protocol::RpcId::Num(294)),
+            Some(params.as_ref()),
+            runtime.as_ref(),
+            mob_state.as_ref(),
+        )
+        .await;
+        #[cfg(not(feature = "mob"))]
+        let response = crate::handlers::turn::handle_interrupt(
+            Some(crate::protocol::RpcId::Num(294)),
+            Some(params.as_ref()),
+            runtime.as_ref(),
+        )
+        .await;
+
+        let err = response
+            .error
+            .expect("pre-running handler interrupt should return an error");
+        assert_eq!(err.code, error::SESSION_BUSY);
+        hook.release.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("pending first turn should finish")
+            .expect("turn task should not panic")
+            .expect("busy handler interrupt must not cancel or corrupt the first turn");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed first turn should release active admission");
+    }
+
+    #[tokio::test]
+    async fn turn_interrupt_handler_during_runtime_routed_pre_promotion_window_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .runtime_routed_pre_promotion_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn_via_runtime(
+                    &session_for_turn,
+                    "interrupt accepted runtime-routed first turn".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        wait_hook_reached(&hook).await;
+        assert!(
+            runtime
+                .staged_sessions
+                .info(&session_id)
+                .await
+                .is_some_and(|info| !info.is_promoting),
+            "test must pause after runtime input accept but before staged promotion"
+        );
+        assert_eq!(
+            runtime.active_session_admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running),
+            "runtime-routed accepted input must hold active admission while waiting to promote"
+        );
+
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "session_id": session_id.to_string(),
+        }))
+        .expect("serialize interrupt params");
+
+        #[cfg(feature = "mob")]
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        #[cfg(feature = "mob")]
+        let response = crate::handlers::turn::handle_interrupt(
+            Some(crate::protocol::RpcId::Num(295)),
+            Some(params.as_ref()),
+            runtime.as_ref(),
+            mob_state.as_ref(),
+        )
+        .await;
+        #[cfg(not(feature = "mob"))]
+        let response = crate::handlers::turn::handle_interrupt(
+            Some(crate::protocol::RpcId::Num(295)),
+            Some(params.as_ref()),
+            runtime.as_ref(),
+        )
+        .await;
+
+        let err = response
+            .error
+            .expect("pre-promotion runtime-routed interrupt should return an error");
+        assert_eq!(err.code, error::SESSION_BUSY);
+        hook.release.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("runtime-routed first turn should finish")
+            .expect("turn task should not panic")
+            .expect("busy pre-promotion interrupt must not cancel or corrupt the first turn");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed runtime-routed first turn should release active admission");
+    }
+
+    #[tokio::test]
+    async fn yielding_interrupt_during_runtime_routed_pre_promotion_window_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .runtime_routed_pre_promotion_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn_via_runtime(
+                    &session_for_turn,
+                    "yielding interrupt runtime-routed first turn".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        wait_hook_reached(&hook).await;
+        assert!(
+            runtime
+                .staged_sessions
+                .info(&session_id)
+                .await
+                .is_some_and(|info| !info.is_promoting),
+            "test must pause after runtime input accept but before staged promotion"
+        );
+        assert_eq!(
+            runtime.active_session_admissions.state(&session_id),
+            Some(ActiveAdmissionState::Running),
+            "runtime-routed accepted input must hold active admission while waiting to promote"
+        );
+
+        let err = runtime
+            .interrupt_yielding(&session_id)
+            .await
+            .expect_err("pre-promotion yielding interrupt should report busy");
+        assert_eq!(err.code, error::SESSION_BUSY);
+        hook.release.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("runtime-routed first turn should finish")
+            .expect("turn task should not panic")
+            .expect("busy yielding interrupt must not cancel or corrupt the first turn");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed runtime-routed first turn should release active admission");
+    }
+
+    #[tokio::test]
+    async fn public_interrupt_during_pending_promotion_apply_window_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let hook = Arc::new(PendingPromotionPreTurnHook::default());
+        *runtime
+            .pending_promotion_pre_turn_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .apply_runtime_turn(
+                    &session_for_turn,
+                    RunId::new(),
+                    &primitive,
+                    ContentInput::Text("interrupt in apply window".to_string()),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        while !hook.reached_flag.load(AtomicOrdering::SeqCst) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pending apply did not reach the pre-turn interrupt window"
+            );
+            hook.reached.notified().await;
+        }
+
+        let err = runtime.interrupt(&session_id).await.expect_err(
+            "pre-running runtime apply should report busy instead of acknowledging cancel",
+        );
+        assert_eq!(err.code, error::SESSION_BUSY);
+        hook.release.notify_waiters();
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+            .await
+            .expect("pending apply should finish")
+            .expect("apply task should not panic")
+            .expect("busy pre-run interrupt must not cancel or corrupt runtime apply");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed runtime apply should release active admission");
+    }
+
+    #[tokio::test]
+    async fn invalid_pending_turn_override_restores_staged_session_for_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let err = runtime
+            .start_turn(
+                &session_id,
+                "invalid override".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(crate::handlers::turn::TurnOverrides {
+                    provider: Some("openai".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("provider-only override should fail before materialization");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("failed pending promotion should be restored and archivable");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archive after failed promotion should release active admission");
+    }
+
+    #[tokio::test]
+    async fn invalid_pending_start_keep_alive_override_does_not_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let err = runtime
+            .start_turn(
+                &session_id,
+                "invalid keep_alive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(crate::handlers::turn::TurnOverrides {
+                    keep_alive: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("keep_alive=true without comms_name should fail");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed runtime keep_alive override should keep staged admission reserved: {blocked:?}"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry without override".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("failed keep_alive override must not poison the staged build config");
+    }
+
+    #[tokio::test]
+    async fn invalid_pending_apply_keep_alive_override_does_not_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let err = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                "invalid keep_alive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(crate::handlers::turn::TurnOverrides {
+                    keep_alive: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("keep_alive=true without comms_name should fail");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry without override".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("failed runtime keep_alive override must not poison staged build config");
+    }
+
+    #[tokio::test]
+    async fn pending_runtime_apply_pre_run_terminal_restores_staged_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let primitive = runtime_resume_pending_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("no-pending boundary should be returned as a runtime terminal");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "resume-pending without a boundary should return the typed no-pending terminal: {output:?}"
+        );
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load transient no-pending snapshot")
+            .expect("no-pending runtime apply should leave a durable terminal snapshot");
+        assert!(
+            session_metadata_marks_archived(&stored),
+            "transient no-pending snapshot should be archived while the staged slot is restored"
+        );
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let recovery = runtime
+            .try_recover_persisted_session(
+                &session_id,
+                "should not recover restored staged no-pending snapshot".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            recovery
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "restored staged no-pending snapshot must not be recoverable before archive: {recovery:?}"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "pre-run no-pending terminal should restore staged admission instead of releasing it: {blocked:?}"
+        );
+
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("restored staged session should remain archivable");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let recovered = runtime
+            .try_recover_persisted_session(
+                &session_id,
+                "should not recover archived pending no-op".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            recovered
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived restored staged session must not leave a recoverable no-pending snapshot: {recovered:?}"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("archiving the restored staged session should release admission");
+    }
+
+    #[tokio::test]
+    async fn pending_runtime_apply_pre_run_terminal_restored_session_can_still_materialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let primitive = runtime_resume_pending_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("no-pending boundary should be returned as a runtime terminal");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "resume-pending without a boundary should return the typed no-pending terminal: {output:?}"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry after no-pending boundary".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("restored staged session should remain materializable");
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load retried session")
+            .expect("retry should persist the materialized session");
+        assert!(
+            !session_metadata_marks_archived(&stored),
+            "retry should overwrite the transient archived no-pending snapshot"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed retry should release admission");
+    }
+
+    async fn drive_pending_start_resume_pending(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+    ) -> Result<RunResult, RpcError> {
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .ok_or_else(|| RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            })?;
+        let promotion_cleanup = PendingPromotionCleanup::new(
+            Arc::clone(&runtime.staged_sessions),
+            Arc::clone(&runtime.active_session_admissions),
+            session_id,
+            &slot,
+        );
+        let PromotingSlot {
+            build_config,
+            labels,
+            ..
+        } = slot;
+        let build_config = *build_config;
+        let create_req = CreateSessionRequest {
+            model: build_config.model.clone(),
+            prompt: ContentInput::Text(String::new()),
+            render_metadata: None,
+            system_prompt: build_config.system_prompt.clone(),
+            max_tokens: build_config.max_tokens,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(build_config.to_session_build_options()),
+            labels,
+        };
+        let active_turn = runtime.promote_pending_active_turn(session_id)?;
+        let result_rx = runtime.spawn_pending_create_and_start_turn_with_admission_guard(
+            session_id.clone(),
+            create_req,
+            service_resume_pending_request(),
+            promotion_cleanup,
+            active_turn,
+        );
+        SessionRuntime::await_service_start_turn(session_id, result_rx).await
+    }
+
+    #[tokio::test]
+    async fn pending_start_pre_run_failure_archives_transient_snapshot_and_allows_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let no_pending = drive_pending_start_resume_pending(&runtime, &session_id)
+            .await
+            .expect_err("resume-pending start without a boundary should fail before run");
+        assert!(
+            no_pending.message.contains("no pending boundary"),
+            "unexpected no-pending start error: {no_pending:?}"
+        );
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load transient no-pending start snapshot")
+            .expect("pending start should leave a durable transient snapshot");
+        assert!(
+            session_metadata_marks_archived(&stored),
+            "transient start no-pending snapshot should be archived while staged slot is restored"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "restored staged no-pending start should keep admission reserved: {blocked:?}"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry start after no-pending".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("restored staged session should retry after no-pending start");
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load retried start session")
+            .expect("retry should persist session");
+        assert!(
+            !session_metadata_marks_archived(&stored),
+            "retry should overwrite archived start no-pending snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_start_archived_authoritative_row_abandons_staged_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(meerkat::MemoryStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let mut archived = Session::with_id(session_id.clone());
+        archived.set_metadata("session_archived", serde_json::Value::Bool(true));
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save archived authoritative snapshot");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn(
+                &session_id,
+                "materialize archived staged session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "archived authoritative row should terminally reject pending materialization: {rejected:?}"
+        );
+        assert!(
+            !runtime.staged_sessions.contains(&session_id).await,
+            "terminal archived create rejection must not restore the staged slot"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "terminal archived create rejection must unregister runtime bindings"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("terminal archived rejection should release admission capacity");
+    }
+
+    #[tokio::test]
+    async fn recovered_create_archived_recheck_unregisters_prepared_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize recoverable session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live recoverable session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session should exist");
+        let recovery_overrides = runtime
+            .recovery_overrides_from_turn(None, false)
+            .expect("recovery overrides");
+        let recovered_create = runtime
+            .recovered_create_request(&session_id, stored, recovery_overrides)
+            .await
+            .expect("prepare recovered create request");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "recovered_create_request should prepare runtime bindings before create"
+        );
+
+        runtime
+            .service
+            .archive(&session_id)
+            .await
+            .expect("archive should win before recovered create");
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve recovery admission");
+        let result_rx = runtime.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
+            session_id.clone(),
+            recovered_create.request,
+            recovered_create.runtime_was_registered,
+            RunId::new(),
+            service_start_turn_request("recover after archive"),
+            RunApplyBoundary::Immediate,
+            vec![meerkat_core::lifecycle::InputId::new()],
+            admission,
+            false,
+        );
+        let rejected =
+            SessionRuntime::await_service_apply_runtime_turn(&session_id, result_rx).await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "recovered create should observe current archived row: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived recovered-create rejection must unregister prepared bindings"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_create_request_failure_unregisters_new_runtime_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize recoverable session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live recoverable session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "test starts without runtime registration"
+        );
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session should exist");
+        let rejected = runtime
+            .recovered_create_request(
+                &session_id,
+                stored,
+                SurfaceSessionRecoveryOverrides {
+                    provider: Some(meerkat_core::Provider::OpenAI),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::INVALID_PARAMS),
+            "invalid recovery override should reject after prepare_bindings: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed recovery should unregister only the new runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_create_request_failure_preserves_existing_runtime_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize recoverable session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live recoverable session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "test requires a pre-existing runtime registration"
+        );
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session should exist");
+        let rejected = runtime
+            .recovered_create_request(
+                &session_id,
+                stored,
+                SurfaceSessionRecoveryOverrides {
+                    provider: Some(meerkat_core::Provider::OpenAI),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::INVALID_PARAMS),
+            "invalid recovery override should reject after prepare_bindings: {rejected:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed recovery must preserve a pre-existing runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_staging_failure_unregisters_prepared_runtime_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize recoverable session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live recoverable session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let overrides = crate::handlers::turn::TurnOverrides {
+            keep_alive: None,
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("anthropic".to_string()),
+            max_tokens: None,
+            system_prompt: None,
+            output_schema: None,
+            structured_output_retries: None,
+            provider_params: None,
+            clear_provider_params: false,
+            connection_ref: None,
+            clear_connection_ref: false,
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .try_recover_persisted_session(
+                &session_id,
+                ContentInput::Text("recover".to_string()),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                Some(&overrides),
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("provider")),
+            "invalid recovered staging override should fail validation: {rejected:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed recovered staging should unregister prepared runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_archive_unregisters_prepared_runtime_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "staged create should prepare runtime bindings"
+        );
+
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive staged session");
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "staged archive must unregister prepared runtime bindings"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("staged archive should release active admission capacity");
+    }
+
+    #[tokio::test]
+    async fn archive_retry_cleans_stale_runtime_registration_for_already_archived_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before service-only archive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "materialized session should have runtime bindings"
+        );
+        runtime
+            .service
+            .archive(&session_id)
+            .await
+            .expect("service archive should leave only runtime registration stale");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "test should simulate stale runtime registration after durable archive"
+        );
+
+        let retry = runtime.archive_session(&session_id).await;
+        assert!(
+            retry
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "retrying an already archived session should still report not found: {retry:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archive retry should unregister stale runtime bindings even on not-found"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_archive_unregisters_runtime_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before archive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "materialized session should have runtime bindings"
+        );
+
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive materialized session");
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "materialized archive must unregister runtime bindings"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("materialized archive should release active admission capacity");
+    }
+
+    #[tokio::test]
+    async fn pending_start_pre_run_archive_failure_restores_staged_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        store.fail_after_successful_saves(1);
+        let failed = drive_pending_start_resume_pending(&runtime, &session_id).await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "archive failure should be surfaced for no-pending start cleanup: {failed:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed no-pending start cleanup must restore staged admission: {blocked:?}"
+        );
+
+        store.clear_failures();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry after failed no-pending cleanup".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("staged session should remain retryable after cleanup failure");
+    }
+
+    #[tokio::test]
+    async fn pending_start_create_persist_failure_restores_staged_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        store.set_fail_save(true);
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .start_turn(
+                &session_id,
+                "first materialization should fail durable save".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "create persist failure should be surfaced for pending start: {failed:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "restored staged session must keep admission reserved after create failure: {blocked:?}"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live session after create failure"),
+            "failed pending create should discard the unpersisted live deferred session"
+        );
+
+        store.clear_failures();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry after create persist failure".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("staged session should retry after durable store recovers");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed retry should release active admission");
+    }
+
+    #[tokio::test]
+    async fn pending_runtime_apply_pre_run_archive_failure_restores_staged_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        store.fail_after_successful_saves(2);
+        let primitive = runtime_resume_pending_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "archive failure should be surfaced for no-pending apply cleanup: {failed:?}"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed no-pending apply cleanup must restore staged admission: {blocked:?}"
+        );
+
+        store.clear_failures();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "retry after failed apply cleanup".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("staged session should remain retryable after apply cleanup failure");
+    }
+
+    #[tokio::test]
+    async fn archive_staged_session_restores_slot_and_admission_when_durable_archive_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create staged session");
+        let transient = Session::with_id(session_id.clone());
+        meerkat::SessionStore::save(store.as_ref(), &transient)
+            .await
+            .expect("seed transient durable snapshot");
+        store.set_fail_save(true);
+
+        let archived = runtime.archive_session(&session_id).await;
+        assert!(
+            archived
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "archive should surface durable snapshot failure: {archived:?}"
+        );
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "failed archive must restore the staged slot"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "failed archive must keep staged admission reserved: {blocked:?}"
+        );
+
+        store.set_fail_save(false);
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive should succeed after durable store recovers");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("successful archive should release staged admission");
+    }
+
+    #[tokio::test]
+    async fn failed_materialized_turn_releases_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+
+        let session_id = runtime
+            .create_session(fail_after_first_build_config(), None, None)
+            .await
+            .expect("create session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "first turn".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first turn should succeed");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .start_turn(
+                &session_id,
+                "second turn fails".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(failed.is_err(), "second turn should fail");
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("failed turn should release admission capacity");
+    }
+
+    #[tokio::test]
+    async fn cancelled_materialized_turn_keeps_admission_until_service_turn_stops() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(slow_build_config(250), None, None)
+            .await
+            .expect("create session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first turn should materialize session");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_for_turn = session_id.clone();
+        let running_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &session_for_turn,
+                    "slow materialized turn".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime
+                .session_state(&session_id)
+                .await
+                .map(|info| info.state)
+                == Some(SessionState::Running)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        running_turn.abort();
+        assert!(
+            running_turn.await.unwrap_err().is_cancelled(),
+            "outer RPC future should be cancelled"
+        );
+
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "cancelled caller must not release capacity while service turn is still running: {blocked:?}"
+        );
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            match runtime
+                .create_session(mock_build_config(), None, None)
+                .await
+            {
+                Ok(_) => break,
+                Err(err) if err.message.contains("Max sessions") => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "capacity did not release after service turn stopped"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("unexpected create_session error after cancellation: {err:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn materialized_turn_rejected_by_capacity_does_not_hot_swap_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create materialized candidate");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize candidate".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize candidate");
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load stored candidate")
+            .expect("stored candidate exists");
+        let original_meta = stored
+            .session_metadata()
+            .expect("stored candidate metadata before rejected turns");
+        assert_eq!(original_meta.model, "claude-sonnet-4-5");
+        assert_eq!(original_meta.provider, meerkat_core::Provider::Anthropic);
+
+        let (_blocker, blocking_turn, release) = start_blocking_capacity_turn(&runtime).await;
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn(
+                &session_id,
+                "rejected start".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity-full materialized start should be rejected before hot-swap: {rejected:?}"
+        );
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load stored candidate after rejected start")
+            .expect("stored candidate exists after rejected start");
+        let meta = stored
+            .session_metadata()
+            .expect("stored candidate metadata after rejected start");
+        assert_eq!(meta.model, "claude-sonnet-4-5");
+        assert_eq!(meta.provider, meerkat_core::Provider::Anthropic);
+        release.notify_waiters();
+        blocking_turn
+            .await
+            .expect("blocking turn task")
+            .expect("blocking turn should finish");
+
+        let (_blocker, blocking_turn, release) = start_blocking_capacity_turn(&runtime).await;
+        let primitive = runtime_content_turn_primitive();
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("rejected runtime apply".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity-full runtime apply should be rejected before hot-swap: {rejected:?}"
+        );
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load stored candidate after rejected apply")
+            .expect("stored candidate exists after rejected apply");
+        let meta = stored
+            .session_metadata()
+            .expect("stored candidate metadata after rejected apply");
+        assert_eq!(meta.model, "claude-sonnet-4-5");
+        assert_eq!(meta.provider, meerkat_core::Provider::Anthropic);
+        release.notify_waiters();
+        blocking_turn
+            .await
+            .expect("blocking turn task")
+            .expect("blocking turn should finish");
+    }
+
+    #[tokio::test]
+    async fn persisted_recovery_respects_active_admission_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let recoverable = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &recoverable,
+                "persist me".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("complete recoverable session");
+        runtime
+            .service
+            .discard_live_session(&recoverable)
+            .await
+            .expect("discard live recoverable session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&recoverable)
+            .await;
+
+        let blocker = runtime
+            .create_session(slow_build_config(250), None, None)
+            .await
+            .expect("create blocker");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_for_turn = Arc::clone(&runtime);
+        let blocker_for_task = blocker.clone();
+        let blocking_turn = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn(
+                    &blocker_for_task,
+                    "block capacity".into(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            if runtime.session_state(&blocker).await.map(|info| info.state)
+                == Some(SessionState::Running)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "blocking session did not enter running state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let blocked_recovery = runtime
+            .try_recover_persisted_session(
+                &recoverable,
+                "recover while full".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            blocked_recovery
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "recovery should be rejected while active capacity is full: {blocked_recovery:?}"
+        );
+
+        blocking_turn
+            .await
+            .unwrap()
+            .expect("blocking turn should finish");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .try_recover_persisted_session(
+                &recoverable,
+                "recover after release".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("recovery should succeed after active capacity releases");
+    }
+
+    #[tokio::test]
+    async fn runtime_apply_live_not_found_preserves_pre_admission_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable runtime turn".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("complete recoverable session");
+
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("accepted runtime input should reserve active admission");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before service apply");
+        let result_rx = runtime.spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
+            session_id.clone(),
+            RunId::new(),
+            service_start_turn_request("live missing after pre-admission"),
+            RunApplyBoundary::Immediate,
+            vec![InputId::new()],
+            admission,
+        );
+        let (result, recovered_admission) =
+            SessionRuntime::await_service_apply_runtime_turn_with_recoverable_admission(
+                &session_id,
+                result_rx,
+            )
+            .await
+            .expect("service apply task should report");
+        assert!(
+            matches!(result, Err(SessionError::NotFound { .. })),
+            "discarded live service apply should return NotFound: {result:?}"
+        );
+        let recovered_admission =
+            recovered_admission.expect("NotFound must preserve pre-admission for recovery");
+
+        let blocked = runtime.reserve_active_turn(&SessionId::new()).await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "preserved pre-admission should keep active capacity reserved"
+        );
+        drop(recovered_admission);
+
+        runtime
+            .reserve_active_turn(&SessionId::new())
+            .await
+            .expect("dropping recovered pre-admission should release active capacity");
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn start_turn_capacity_full_rejects_before_mcp_boundary_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create target session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "complete target".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("complete target session");
+
+        {
+            let mut mcp_sessions = runtime.mcp_sessions.write().await;
+            let mcp_state = mcp_sessions
+                .get_mut(&session_id)
+                .expect("target session should have MCP adapter state");
+            mcp_state.turn_counter = 0;
+        }
+
+        let _capacity_filler = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create capacity filler");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let rejected = runtime
+            .start_turn(
+                &session_id,
+                "must not apply MCP boundary".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "capacity-full start_turn should reject: {rejected:?}"
+        );
+
+        let mcp_sessions = runtime.mcp_sessions.read().await;
+        let mcp_state = mcp_sessions
+            .get(&session_id)
+            .expect("target MCP state should remain registered");
+        assert_eq!(
+            mcp_state.turn_counter, 0,
+            "capacity-rejected start_turn must not apply the MCP boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_runtime_apply_pre_run_terminal_discards_live_deferred_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create recoverable session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist me".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("complete recoverable session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live recoverable session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "discarding the live session should leave a stale runtime registration for recovery cleanup"
+        );
+
+        let primitive = runtime_resume_pending_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("recovered no-pending boundary should be returned as a typed terminal");
+        assert!(
+            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
+            "recovered resume-pending without a boundary should return no-pending terminal: {output:?}"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live recovered session"),
+            "recovered pre-run terminal must not leave an untracked live deferred session"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "recovered pre-run terminal must unregister stale runtime registration"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("recovered pre-run terminal should release active admission");
+    }
+
+    #[tokio::test]
+    async fn archived_runtime_apply_recovery_rejects_without_admission_leak() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create session to archive");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist before archive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("complete session before archive");
+        runtime
+            .archive_session(&session_id)
+            .await
+            .expect("archive persisted session");
+
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let recovered = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("must not recover archived session".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            recovered
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
+            "runtime apply must reject archived persisted recovery: {recovered:?}"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("rejected archived recovery must not leak active admission");
+    }
+
+    #[tokio::test]
+    async fn recovered_runtime_apply_create_persist_failure_discards_live_deferred_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let mut runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = SessionId::new();
+        let mut persisted = Session::with_id(session_id.clone());
+        persisted
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("session metadata");
+        let mut deferred = meerkat_core::SessionDeferredTurnState::default();
+        deferred.mark_initial_turn_pending();
+        persisted
+            .set_deferred_turn_state(deferred)
+            .expect("deferred turn state");
+        meerkat::SessionStore::save(store.as_ref(), &persisted)
+            .await
+            .expect("seed persisted deferred session");
+
+        store.set_fail_save(true);
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let failed = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("first recovery should fail durable save".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("forced save failure")),
+            "recovered create persist failure should be surfaced: {failed:?}"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live recovered session after create failure"),
+            "failed recovered create should discard the unpersisted live deferred session"
+        );
+
+        store.clear_failures();
+        let admitted = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("discarded recovered create failure should release admission");
+        runtime
+            .archive_session(&admitted)
+            .await
+            .expect("archive admitted control session before retrying recovery");
+
+        let primitive = runtime_content_turn_primitive();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text("retry recovery after durable store recovers".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("recovered session should retry after durable store recovers");
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed recovery retry should release active admission");
+    }
+
+    #[tokio::test]
+    async fn create_session_admission_uses_live_runtime_config_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.limits.max_sessions = Some(1);
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(config.clone()));
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        ));
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_config_runtime(config_runtime.clone());
+
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("first session should use config capacity");
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.message.contains("Max sessions")),
+            "second session should be blocked by live config capacity: {blocked:?}"
+        );
+
+        config.limits.max_sessions = Some(2);
+        config_runtime
+            .set(config, None)
+            .await
+            .expect("raise max_sessions");
+        let second = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("raised config capacity should admit a second session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &second,
+                "second after config raise".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("raised config capacity should allow materialization");
     }
 
     /// 9. session_state returns None for an unknown session ID.
@@ -9532,6 +19315,75 @@ mod tests {
             )
             .await
             .expect("staged session should remain promotable after rejected override");
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn runtime_turn_keep_alive_override_on_persisted_only_unregisters_new_executor() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist before invalid keep_alive override".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize and persist session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "test requires a persisted-only session with no runtime registration"
+        );
+
+        let (tx, _rx) = mpsc::channel(100);
+        let err = runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "invalid keep_alive on persisted-only".into(),
+                tx,
+                None,
+                None,
+                None,
+                Some(TurnOverrides {
+                    keep_alive: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("keep_alive=true must require comms_name on persisted-only sessions");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert_eq!(
+            err.message,
+            "keep_alive requires a session created with comms_name"
+        );
+        wait_for_runtime_unregistered(&runtime, &session_id, "persisted-only keep_alive rejection")
+            .await;
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("invalid keep_alive override should release active capacity");
     }
 
     /// W2-G regression: once a mob has claimed peer-ingress ownership on a

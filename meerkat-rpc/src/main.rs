@@ -215,6 +215,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap_or_else(|_| Config::default());
     config.apply_env_overrides()?;
+    config
+        .validate()
+        .map_err(|err| std::io::Error::other(format!("invalid runtime config: {err}")))?;
     let cli_user_root = cli.user_config_root.clone();
     let default_user_root = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let identity_registry =
@@ -276,9 +279,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
         factory,
-        config,
+        config.clone(),
         Arc::clone(&config_store),
-        64,
+        config.max_sessions(),
         persistence,
         meerkat_rpc::router::NotificationSink::noop(),
     );

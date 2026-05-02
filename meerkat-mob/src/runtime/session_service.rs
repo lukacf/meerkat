@@ -51,6 +51,14 @@ fn session_control_error_to_session_error(err: SessionControlError) -> SessionEr
     }
 }
 
+fn session_metadata_marks_archived(session: &Session) -> bool {
+    session
+        .metadata()
+        .get("session_archived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
@@ -185,6 +193,18 @@ pub trait MobSessionService:
                 "runtime-backed apply is unavailable for this session service".into(),
             ),
         ))
+    }
+
+    async fn apply_runtime_turn_with_reserved_admission(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
+            .await
     }
 
     async fn apply_runtime_context_appends(
@@ -445,7 +465,8 @@ where
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        self.load_authoritative_session(session_id).await
+        let session = self.load_authoritative_session(session_id).await?;
+        Ok(session.filter(|session| !session_metadata_marks_archived(session)))
     }
 
     async fn execution_snapshot(

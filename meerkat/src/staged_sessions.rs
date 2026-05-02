@@ -42,6 +42,10 @@ use crate::AgentBuildConfig;
 pub enum StagedPhase {
     /// Session ID claimed, build config staged, first turn has not started.
     Staged { build_config: Box<AgentBuildConfig> },
+    /// Archive/discard has begun. The slot remains present while durable
+    /// cleanup runs so competing materialization/direct-service paths cannot
+    /// observe a missing staged slot before active admission is closed.
+    Closing { build_config: Box<AgentBuildConfig> },
     /// `start_turn` is running; the build config has been consumed and the
     /// session is being materialized in the service. Concurrent `start_turn`
     /// calls on the same ID are rejected with `AlreadyPromoting`.
@@ -78,6 +82,7 @@ pub struct StagedSessionInfo {
 /// promotion path or restore the slot via `abandon_promotion`.
 pub struct PromotingSlot {
     pub build_config: Box<AgentBuildConfig>,
+    pub effective_llm_identity: SessionLlmIdentity,
     pub labels: Option<BTreeMap<String, String>>,
     pub deferred_prompt: Option<ContentInput>,
     pub created_at_secs: u64,
@@ -163,7 +168,7 @@ impl StagedSessionRegistry {
                 slot.updated_at_secs = updated_at_secs;
                 Ok(true)
             }
-            StagedPhase::Promoting { .. } => {
+            StagedPhase::Promoting { .. } | StagedPhase::Closing { .. } => {
                 Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
             }
         }
@@ -209,7 +214,7 @@ impl StagedSessionRegistry {
                 .as_ref()
                 .and_then(Session::system_context_state)
                 .unwrap_or_default(),
-            StagedPhase::Promoting { .. } => {
+            StagedPhase::Promoting { .. } | StagedPhase::Closing { .. } => {
                 return Err(StagedLifecycleError::AlreadyPromoting(id.clone()));
             }
         };
@@ -225,6 +230,7 @@ impl StagedSessionRegistry {
         };
         Ok(Some(PromotingSlot {
             build_config,
+            effective_llm_identity: slot.effective_llm_identity.clone(),
             labels: slot.labels.clone(),
             deferred_prompt: slot.deferred_prompt.clone(),
             created_at_secs: slot.created_at_secs,
@@ -262,6 +268,41 @@ impl StagedSessionRegistry {
                 );
                 None
             }
+            StagedPhase::Closing { build_config } => {
+                slots.insert(
+                    id.clone(),
+                    StagedSlot {
+                        phase: StagedPhase::Closing { build_config },
+                        effective_llm_identity: slot.effective_llm_identity,
+                        labels: slot.labels,
+                        deferred_prompt: slot.deferred_prompt,
+                        created_at_secs: slot.created_at_secs,
+                        updated_at_secs: slot.updated_at_secs,
+                    },
+                );
+                None
+            }
+        }
+    }
+
+    /// Clone the system-context states for a slot that is currently
+    /// `Promoting` without removing the slot. Rollback paths use this before
+    /// restoring the slot to `Staged`.
+    pub async fn promoting_system_context_state(
+        &self,
+        id: &SessionId,
+    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+        let slots = self.slots.read().await;
+        let slot = slots.get(id)?;
+        match &slot.phase {
+            StagedPhase::Promoting {
+                starting_system_context_state,
+                current_system_context_state,
+            } => Some((
+                starting_system_context_state.clone(),
+                current_system_context_state.clone(),
+            )),
+            StagedPhase::Staged { .. } | StagedPhase::Closing { .. } => None,
         }
     }
 
@@ -279,8 +320,15 @@ impl StagedSessionRegistry {
         deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
-    ) {
+    ) -> bool {
         let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get(&id) else {
+            return false;
+        };
+        if !matches!(slot.phase, StagedPhase::Promoting { .. }) {
+            return false;
+        }
+        let updated_at_secs = updated_at_secs.max(slot.updated_at_secs);
         slots.insert(
             id,
             StagedSlot {
@@ -294,11 +342,145 @@ impl StagedSessionRegistry {
                 updated_at_secs,
             },
         );
+        true
+    }
+
+    /// Mark a staged slot as closing without removing it. This makes archive
+    /// admission observable to competing surface paths while durable cleanup
+    /// is still fallible.
+    pub async fn begin_archive(&self, id: &SessionId) -> Result<bool, StagedLifecycleError> {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get_mut(id) else {
+            return Ok(false);
+        };
+        let phase = std::mem::replace(
+            &mut slot.phase,
+            StagedPhase::Promoting {
+                starting_system_context_state: SessionSystemContextState::default(),
+                current_system_context_state: SessionSystemContextState::default(),
+            },
+        );
+        match phase {
+            StagedPhase::Staged { build_config } => {
+                slot.phase = StagedPhase::Closing { build_config };
+                Ok(true)
+            }
+            StagedPhase::Promoting {
+                starting_system_context_state,
+                current_system_context_state,
+            } => {
+                slot.phase = StagedPhase::Promoting {
+                    starting_system_context_state,
+                    current_system_context_state,
+                };
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+            StagedPhase::Closing { build_config } => {
+                slot.phase = StagedPhase::Closing { build_config };
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+        }
+    }
+
+    /// Restore a slot marked by `begin_archive` back to ordinary staged state.
+    pub async fn restore_archive(&self, id: &SessionId) -> bool {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get_mut(id) else {
+            return false;
+        };
+        let phase = std::mem::replace(
+            &mut slot.phase,
+            StagedPhase::Promoting {
+                starting_system_context_state: SessionSystemContextState::default(),
+                current_system_context_state: SessionSystemContextState::default(),
+            },
+        );
+        match phase {
+            StagedPhase::Closing { build_config } => {
+                slot.phase = StagedPhase::Staged { build_config };
+                true
+            }
+            StagedPhase::Staged { build_config } => {
+                slot.phase = StagedPhase::Staged { build_config };
+                false
+            }
+            StagedPhase::Promoting {
+                starting_system_context_state,
+                current_system_context_state,
+            } => {
+                slot.phase = StagedPhase::Promoting {
+                    starting_system_context_state,
+                    current_system_context_state,
+                };
+                false
+            }
+        }
+    }
+
+    /// Remove a slot that is currently closing after durable archive succeeds.
+    pub async fn finish_archive(&self, id: &SessionId) -> bool {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get(id) else {
+            return false;
+        };
+        if !matches!(slot.phase, StagedPhase::Closing { .. }) {
+            return false;
+        }
+        slots.remove(id);
+        true
     }
 
     /// Drop a slot entirely (archive path).
     pub async fn abandon(&self, id: &SessionId) -> bool {
         self.slots.write().await.remove(id).is_some()
+    }
+
+    /// Take a slot only if it has not begun promotion. Archive callers use
+    /// this when they must perform a fallible durable cleanup before deciding
+    /// whether the staged slot should be permanently removed.
+    pub async fn take_staged(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<StagedSlot>, StagedLifecycleError> {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get(id) else {
+            return Ok(None);
+        };
+        match &slot.phase {
+            StagedPhase::Staged { .. } => Ok(slots.remove(id)),
+            StagedPhase::Promoting { .. } | StagedPhase::Closing { .. } => {
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+        }
+    }
+
+    /// Restore a slot previously removed by `take_staged`.
+    pub async fn restore_taken_staged(&self, id: SessionId, slot: StagedSlot) -> bool {
+        let mut slots = self.slots.write().await;
+        if slots.contains_key(&id) {
+            return false;
+        }
+        slots.insert(id, slot);
+        true
+    }
+
+    /// Drop a slot only if it has not begun promotion. Archive callers use
+    /// this to avoid releasing active capacity while the first turn is already
+    /// materializing.
+    pub async fn abandon_staged(&self, id: &SessionId) -> Result<bool, StagedLifecycleError> {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get(id) else {
+            return Ok(false);
+        };
+        match &slot.phase {
+            StagedPhase::Staged { .. } => {
+                slots.remove(id);
+                Ok(true)
+            }
+            StagedPhase::Promoting { .. } | StagedPhase::Closing { .. } => {
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+        }
     }
 
     /// Drop all slots (shutdown path).
@@ -348,6 +530,11 @@ impl StagedSessionRegistry {
                 current_system_context_state,
                 ..
             } => current_system_context_state.stage_append(req, now_system_time),
+            StagedPhase::Closing { .. } => {
+                Err(meerkat_core::SystemContextStageError::InvalidRequest(
+                    "session is being archived".to_string(),
+                ))
+            }
         };
         if result.is_ok() {
             slot.updated_at_secs = now_secs;
@@ -361,7 +548,10 @@ impl StagedSessionRegistry {
             effective_llm_identity: slot.effective_llm_identity.clone(),
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
-            is_promoting: matches!(slot.phase, StagedPhase::Promoting { .. }),
+            is_promoting: matches!(
+                slot.phase,
+                StagedPhase::Promoting { .. } | StagedPhase::Closing { .. }
+            ),
         }
     }
 
@@ -493,6 +683,73 @@ mod tests {
             .flatten()
             .expect("re-promotion after abandon");
         assert_eq!(promoted_again.created_at_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn abandon_promotion_does_not_resurrect_finished_slot() {
+        let reg = StagedSessionRegistry::new();
+        let id = SessionId::new();
+        reg.stage(id.clone(), slot()).await.unwrap();
+        let promoted = reg
+            .begin_promotion(&id)
+            .await
+            .ok()
+            .flatten()
+            .expect("initial promotion");
+        assert!(reg.take_promoting_system_context_state(&id).await.is_some());
+        let restored = reg
+            .abandon_promotion(
+                id.clone(),
+                *promoted.build_config,
+                identity("test-model"),
+                promoted.labels,
+                promoted.deferred_prompt,
+                promoted.created_at_secs,
+                promoted.updated_at_secs,
+            )
+            .await;
+        assert!(!restored, "finished promotion must not be restored");
+        assert!(!reg.contains(&id).await);
+    }
+
+    #[tokio::test]
+    async fn begin_archive_blocks_promotion_until_restored_or_finished() {
+        let reg = StagedSessionRegistry::new();
+        let id = SessionId::new();
+        reg.stage(id.clone(), slot()).await.unwrap();
+
+        assert!(reg.begin_archive(&id).await.unwrap());
+        assert!(reg.info(&id).await.unwrap().is_promoting);
+        let promoting = reg.begin_promotion(&id).await;
+        assert!(matches!(
+            promoting,
+            Err(StagedLifecycleError::AlreadyPromoting(_))
+        ));
+
+        assert!(reg.restore_archive(&id).await);
+        assert!(!reg.info(&id).await.unwrap().is_promoting);
+        let promoted = reg
+            .begin_promotion(&id)
+            .await
+            .ok()
+            .flatten()
+            .expect("promotion should succeed after archive restore");
+        assert!(
+            reg.abandon_promotion(
+                id.clone(),
+                *promoted.build_config,
+                identity("test-model"),
+                promoted.labels,
+                promoted.deferred_prompt,
+                promoted.created_at_secs,
+                promoted.updated_at_secs,
+            )
+            .await
+        );
+
+        assert!(reg.begin_archive(&id).await.unwrap());
+        assert!(reg.finish_archive(&id).await);
+        assert!(!reg.contains(&id).await);
     }
 
     #[tokio::test]

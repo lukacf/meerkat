@@ -24,9 +24,15 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
-use ::tokio::sync::RwLock;
+use ::tokio::{
+    self,
+    sync::{RwLock, oneshot},
+};
 #[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias::sync::RwLock;
+use tokio_with_wasm::alias::{
+    self as tokio,
+    sync::{RwLock, oneshot},
+};
 
 use crate::MobMcpState;
 use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute};
@@ -1871,20 +1877,32 @@ struct ProfileDeleteArgs {
 
 /// Archive a session and clean up any mobs it owns (best-effort).
 ///
-/// Single-function cleanup path used by CLI delete_session. Other surfaces
-/// (REST, MCP, RPC) call `destroy_bridge_session_mobs` inline after their own
-/// archive calls because their session service types are concrete and
-/// can't be wrapped with a decorator.
-pub async fn archive_session_with_mob_cleanup(
-    service: &dyn SessionService,
-    mob_state: &MobMcpState,
+/// Single-function cleanup path used by CLI delete_session.
+pub async fn archive_session_with_mob_cleanup<S>(
+    service: Arc<S>,
+    mob_state: Arc<MobMcpState>,
     session_id: &SessionId,
-) -> Result<(), SessionError> {
-    service.archive(session_id).await?;
-    let _ = mob_state
-        .destroy_bridge_session_mobs(&session_id.to_string())
-        .await;
-    Ok(())
+) -> Result<(), SessionError>
+where
+    S: SessionService + ?Sized + 'static,
+{
+    let session_id = session_id.clone();
+    let result_session_id = session_id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = service.archive(&session_id).await;
+        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            let _ = mob_state
+                .destroy_bridge_session_mobs(&session_id.to_string())
+                .await;
+        }
+        let _ = result_tx.send(result);
+    });
+    result_rx.await.map_err(|_| {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+            "mob archive task ended before reporting a result for {result_session_id}"
+        )))
+    })?
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────

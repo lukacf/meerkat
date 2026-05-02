@@ -84,13 +84,11 @@ impl MeerkatMachine {
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
-        if matches!(
-            self.existing_session_runtime_state(&session_id).await,
-            Some(RuntimeState::Destroyed)
-        ) {
+        let existing_state = self.existing_session_runtime_state(&session_id).await;
+        if matches!(existing_state, Some(RuntimeState::Destroyed)) {
             return Err(RuntimeDriverError::Destroyed);
         }
-        self.register_session_inner(session_id.clone()).await;
+        let inserted_by_call = self.register_session_inner(session_id.clone()).await;
         let (
             driver_handle,
             epoch_id,
@@ -127,16 +125,29 @@ impl MeerkatMachine {
                 generation: crate::meerkat_machine::dsl::Generation::from(0),
                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
             };
-            let staged = self
+            let staged = match self
                 .stage_session_dsl_transition(&session_id, dsl_input, "PrepareBindings")
                 .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            {
+                Ok(staged) => staged,
+                Err(reason) => {
+                    if inserted_by_call {
+                        self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                            .await;
+                    }
+                    return Err(RuntimeDriverError::ValidationFailed { reason });
+                }
+            };
             {
                 let mut driver = driver_handle.lock().await;
                 if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
                     drop(driver);
                     self.restore_session_dsl_state(&session_id, staged.previous_state)
                         .await;
+                    if inserted_by_call {
+                        self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                            .await;
+                    }
                     return Err(err);
                 }
             }
@@ -148,6 +159,10 @@ impl MeerkatMachine {
                     .lock()
                     .await
                     .sync_control_projection_from_dsl_authority();
+                if inserted_by_call {
+                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                        .await;
+                }
                 return Err(RuntimeDriverError::Internal(reason));
             }
         }

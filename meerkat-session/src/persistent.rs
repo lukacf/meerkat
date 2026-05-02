@@ -1571,8 +1571,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let build = req.build.get_or_insert_with(Default::default);
         build.checkpointer = Some(checkpointer.clone());
         build.blob_store_override = Some(Arc::clone(&self.blob_store));
+        if build.resume_session.is_none() {
+            build.resume_session = Some(Session::new());
+        }
         let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
-        let callback_session_id = req
+        let create_session_id = req
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
@@ -1582,7 +1585,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             Err(error) => {
                 let committed_session_id = match &error {
                     SessionError::PostAdmissionFailure { id, .. } => Some(id.clone()),
-                    _ if Self::callback_pending_terminal(&error).is_some() => callback_session_id,
+                    _ if Self::callback_pending_terminal(&error).is_some() => create_session_id,
                     _ => None,
                 };
                 if let Some(session_id) = committed_session_id {
@@ -6910,6 +6913,84 @@ mod tests {
             )
             .await
             .expect("callback-pending session should retain live projection machinery");
+
+        event_store.wait_for_seq(&session_id, 2).await;
+        let events_path = dir
+            .path()
+            .join(".rkat")
+            .join("sessions")
+            .join(session_id.to_string())
+            .join("events.jsonl");
+        let projected = read_projected_events_after(&events_path, "run_completed").await;
+        assert!(projected.contains("run_started"));
+        assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_callback_pending_fresh_create_installs_projection_and_checkpointer() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            EventfulCallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let error = service
+            .create_session(create_request(
+                "fresh callback session",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect_err("callback-pending first turn should surface as a resumable create error");
+        assert!(
+            matches!(
+                error,
+                SessionError::Agent(AgentError::CallbackPending { .. })
+            ),
+            "expected callback-pending create error, got {error:?}"
+        );
+        let sessions = service
+            .list(SessionQuery::default())
+            .await
+            .expect("callback-pending create should leave a live session");
+        let session_id = sessions
+            .first()
+            .expect("fresh callback-pending create should list its live session")
+            .session_id
+            .clone();
+
+        assert!(
+            service
+                .checkpointer_gates
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "fresh callback-pending creates must install the same checkpointer gate as successful creates"
+        );
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "project future fresh callback-pending event".to_string(),
+                    source: Some("test".to_string()),
+                    idempotency_key: Some("fresh-callback-pending-create-projection".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("fresh callback-pending session should retain live projection machinery");
 
         event_store.wait_for_seq(&session_id, 2).await;
         let events_path = dir

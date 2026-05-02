@@ -85,7 +85,7 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:workspace_runfiles",
         ":package_runfiles",

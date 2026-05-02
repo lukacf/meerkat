@@ -9,7 +9,7 @@ use std::convert::TryFrom;
 use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params};
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcId, RpcResponse, RpcTerminalResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
@@ -1814,20 +1814,44 @@ pub async fn handle_mob_turn_start(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
+    handle_mob_turn_start_terminal(
+        id,
+        params,
+        state,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+    .into_response()
+}
+
+pub(crate) async fn handle_mob_turn_start_terminal(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &crate::router::NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcTerminalResponse {
     let mob_params: MobTurnStartParams = match parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
+        Err(resp) => return RpcTerminalResponse::failure(resp.with_id(id)),
     };
     let mob_id = match parse_mob_id(id.clone(), &mob_params.mob_id) {
         Ok(m) => m,
-        Err(resp) => return resp,
+        Err(resp) => return RpcTerminalResponse::failure(resp),
     };
     let identity = AgentIdentity::from(mob_params.agent_identity.as_str());
 
     // Resolve identity → bridge session ID.
     let handle = match state.handle_for(&mob_id).await {
         Ok(h) => h,
-        Err(err) => return invalid_params(id, err.to_string()),
+        Err(err) => {
+            return RpcTerminalResponse::failure(invalid_params(id, err.to_string()));
+        }
     };
     let runtime_mode = handle
         .list_members()
@@ -1836,21 +1860,21 @@ pub async fn handle_mob_turn_start(
         .find(|entry| entry.agent_identity == identity)
         .map(|entry| entry.runtime_mode);
     if matches!(runtime_mode, Some(MobRuntimeMode::AutonomousHost)) {
-        return invalid_params(
+        return RpcTerminalResponse::failure(invalid_params(
             id,
             format!(
                 "mob/turn_start is only valid for turn_driven members; \
                  autonomous member '{identity}' is driven by mob kickoff and mob/member_send"
             ),
-        );
+        ));
     }
     let session_id = match handle.resolve_bridge_session_id(&identity).await {
         Some(sid) => sid,
         None => {
-            return invalid_params(
+            return RpcTerminalResponse::failure(invalid_params(
                 id,
                 format!("member '{identity}' has no active bridge session in mob '{mob_id}'"),
-            );
+            ));
         }
     };
 
@@ -1911,7 +1935,7 @@ pub async fn handle_mob_turn_start(
     let raw_json = serde_json::to_string(&turn_params).unwrap_or_default();
     let raw_value = RawValue::from_string(raw_json).ok();
 
-    super::turn::handle_start(
+    super::turn::handle_start_terminal(
         id,
         raw_value.as_deref(),
         runtime,

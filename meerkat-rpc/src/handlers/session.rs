@@ -19,11 +19,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::skills::reject_retired_skill_references;
 use super::{
-    RpcResponseExt, parse_params, parse_session_id_for_runtime, rpc_response_from_turn_start_error,
+    RpcResponseExt, parse_params, parse_session_id_for_runtime,
+    rpc_terminal_response_from_turn_start_error,
 };
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
-use crate::protocol::{RpcError, RpcId, RpcResponse};
+use crate::protocol::{RpcError, RpcId, RpcResponse, RpcTerminalResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::{
     RuntimePreAdmissionCancelCheck, RuntimeTurnStartError, SessionRuntime,
@@ -242,18 +243,38 @@ pub async fn handle_create(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
+    handle_create_terminal(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+    .into_response()
+}
+
+pub(crate) async fn handle_create_terminal(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcTerminalResponse {
     let params: CreateSessionParams = match parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
+        Err(resp) => return RpcTerminalResponse::failure(resp.with_id(id)),
     };
     if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
-        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+        return RpcTerminalResponse::failure(RpcResponse::error(id, error::INVALID_PARAMS, err));
     }
     if let Err(err) = meerkat::surface::validate_public_surface_metadata(
         params.labels.as_ref(),
         params.app_context.as_ref(),
     ) {
-        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+        return RpcTerminalResponse::failure(RpcResponse::error(id, error::INVALID_PARAMS, err));
     }
 
     let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
@@ -281,11 +302,11 @@ pub async fn handle_create(
         Some(schema) => match OutputSchema::from_json_value(schema) {
             Ok(os) => Some(os),
             Err(e) => {
-                return RpcResponse::error(
+                return RpcTerminalResponse::failure(RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
                     format!("Invalid output_schema: {e}"),
-                );
+                ));
             }
         },
         None => None,
@@ -353,11 +374,11 @@ pub async fn handle_create(
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs) {
         Ok(r) => r,
         Err(e) => {
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
                 format!("Invalid skill_refs: {e}"),
-            );
+            ));
         }
     };
 
@@ -373,7 +394,11 @@ pub async fn handle_create(
     {
         Ok(sid) => sid,
         Err(rpc_err) => {
-            return RpcResponse::error(id, rpc_err.code, rpc_err.message);
+            return RpcTerminalResponse::failure(RpcResponse::error(
+                id,
+                rpc_err.code,
+                rpc_err.message,
+            ));
         }
     };
 
@@ -393,11 +418,11 @@ pub async fn handle_create(
         if context.cancel_already_requested() {
             let _ = runtime.archive_session(&session_id).await;
             runtime_adapter.unregister_session(&session_id).await;
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,
                 "request cancelled before start",
-            );
+            ));
         }
         if let Err(err) = context
             .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
@@ -405,11 +430,11 @@ pub async fn handle_create(
         {
             let _ = runtime.archive_session(&session_id).await;
             runtime_adapter.unregister_session(&session_id).await;
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
                 format!("request lifecycle rejected session binding: {err}"),
-            );
+            ));
         }
         let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
         let session_id_for_cancel = session_id.clone();
@@ -428,11 +453,11 @@ pub async fn handle_create(
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             let _ = runtime.archive_session(&session_id).await;
             runtime_adapter.unregister_session(&session_id).await;
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,
                 "request cancelled before start",
-            );
+            ));
         }
     }
 
@@ -456,7 +481,7 @@ pub async fn handle_create(
         id.clone(),
         request_context.as_ref(),
     ) {
-        return response;
+        return RpcTerminalResponse::failure(response);
     }
 
     // Deferred mode: return session ID without running a turn.
@@ -467,7 +492,7 @@ pub async fn handle_create(
                 .realm_id()
                 .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
         };
-        return RpcResponse::success(id, result);
+        return RpcTerminalResponse::success(RpcResponse::success(id, result));
     }
 
     // Set up MCP lifecycle event forwarding. Agent execution events flow
@@ -563,7 +588,7 @@ pub async fn handle_create(
             },
         };
         if let Some(rpc_err) = pre_admission_error {
-            return rpc_response_from_turn_start_error(id, rpc_err);
+            return rpc_terminal_response_from_turn_start_error(id, rpc_err);
         }
 
         if !await_comms_runtime_ready(&runtime, &session_id).await {
@@ -611,7 +636,7 @@ pub async fn handle_create(
                     request_context.as_ref(),
                     &rpc_err,
                 );
-                return rpc_response_from_turn_start_error(id, rpc_err);
+                return rpc_terminal_response_from_turn_start_error(id, rpc_err);
             }
         }
     };
@@ -624,7 +649,7 @@ pub async fn handle_create(
     response.session_ref = runtime
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
-    RpcResponse::success(id, response)
+    RpcTerminalResponse::success(RpcResponse::success(id, response))
 }
 
 fn disarm_unpublished_cleanup_after_admitted_turn_error(

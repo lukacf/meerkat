@@ -251,6 +251,14 @@ pub struct ToolVisibilityWitness {
 }
 
 impl ToolVisibilityWitness {
+    fn contains(&self, field: &str) -> bool {
+        match field {
+            "stable_owner_key" => self.stable_owner_key.is_some(),
+            "last_seen_provenance" => self.last_seen_provenance.is_some(),
+            _ => false,
+        }
+    }
+
     fn len(&self) -> u64 {
         u64::from(self.last_seen_provenance.is_some())
     }
@@ -2748,7 +2756,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // =====================================================================
 
         helper deferred_authority_has_identity(witness: ToolVisibilityWitness) -> bool {
-            witness.len() > 0
+            witness.contains("stable_owner_key") || witness.contains("last_seen_provenance")
         }
 
         helper deferred_authorities_have_identity(

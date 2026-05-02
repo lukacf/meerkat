@@ -29,7 +29,7 @@ use serde_json::json;
 use crate::error;
 use crate::handlers;
 use crate::handlers::RpcResponseExt;
-use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
+use crate::protocol::{RpcNotification, RpcRequest, RpcResponse, RpcTerminalResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
@@ -1523,6 +1523,66 @@ impl MethodRouter {
                 error::METHOD_NOT_FOUND,
                 format!("Method not found: {}", request.method),
             ),
+        };
+
+        Some(response)
+    }
+
+    pub(crate) async fn dispatch_tracked_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: RequestContext,
+    ) -> Option<RpcTerminalResponse> {
+        if request.is_notification() {
+            return None;
+        }
+
+        let id = request.id.clone();
+        let params = request.params.as_deref();
+        let response = match request.method.as_str() {
+            "session/create" => {
+                handlers::session::handle_create_terminal(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                    Some(request_context),
+                )
+                .await
+            }
+            "turn/start" => {
+                handlers::turn::handle_start_terminal(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                    Some(request_context),
+                )
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/turn_start" => {
+                handlers::mob::handle_mob_turn_start_terminal(
+                    id,
+                    params,
+                    &self.mob_state,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                    Some(request_context),
+                )
+                .await
+            }
+            _ => RpcTerminalResponse::failure(RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "tracked RPC method '{}' has no terminal authority adapter",
+                    request.method
+                ),
+            )),
         };
 
         Some(response)

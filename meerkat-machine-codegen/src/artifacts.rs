@@ -514,10 +514,17 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(
-                ty,
-                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
-            ) {
+            if domain_is_model_defined(&ty) {
+                continue;
+            }
+            if !domain_is_tlc_config_assignable(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    config_domain_operator_name(&name, deep)
+                )
+                .expect("write to string");
                 continue;
             }
             writeln!(
@@ -598,10 +605,7 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(
-                ty,
-                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
-            ) {
+            if domain_is_model_defined(&ty) {
                 continue;
             }
             let cardinality = if deep {
@@ -613,6 +617,16 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
             } else {
                 default_sample_cardinality(false)
             };
+            if !domain_is_tlc_config_assignable(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    config_domain_operator_name(&name, deep)
+                )
+                .expect("write to string");
+                continue;
+            }
             writeln!(
                 &mut out,
                 "  {} = {}",
@@ -714,10 +728,17 @@ pub fn render_composition_witness_cfg(
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(
-                ty,
-                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
-            ) {
+            if domain_is_model_defined(&ty) {
+                continue;
+            }
+            if !domain_is_tlc_config_assignable(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    config_domain_operator_name(&name, true)
+                )
+                .expect("write to string");
                 continue;
             }
             writeln!(
@@ -2869,15 +2890,23 @@ fn type_path_enum_variant_samples(
     structural_variants: &[TypePathEnumStructuralVariant],
     sample_cardinality: usize,
 ) -> Vec<String> {
+    if structural_variants.is_empty() {
+        return unit_variants
+            .iter()
+            .map(|variant| tla_string(variant.as_str()))
+            .collect();
+    }
+
+    let structural_defaults = type_path_enum_structural_field_defaults(structural_variants);
     let mut samples = unit_variants
         .iter()
-        .map(|variant| tla_string(variant.as_str()))
+        .map(|variant| {
+            render_type_path_enum_record(variant.as_str(), Vec::new(), &structural_defaults)
+        })
         .collect::<Vec<_>>();
-    samples.extend(
-        structural_variants.iter().flat_map(|variant| {
-            render_type_path_enum_structural_samples(variant, sample_cardinality)
-        }),
-    );
+    samples.extend(structural_variants.iter().flat_map(|variant| {
+        render_type_path_enum_structural_samples(variant, sample_cardinality, &structural_defaults)
+    }));
     samples
 }
 
@@ -2961,11 +2990,9 @@ fn type_path_struct_field_samples(
 fn render_type_path_enum_structural_samples(
     variant: &TypePathEnumStructuralVariant,
     sample_cardinality: usize,
+    structural_defaults: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    let mut samples = vec![vec![format!(
-        "tag |-> {}",
-        tla_string(variant.variant.as_str())
-    )]];
+    let mut samples: Vec<Vec<(String, String)>> = vec![Vec::new()];
     for field in &variant.fields {
         let values = match field.atom {
             TypePathEnumPayloadAtom::StringSet => string_set_payload_samples(sample_cardinality),
@@ -2974,7 +3001,7 @@ fn render_type_path_enum_structural_samples(
         for sample in &samples {
             for value in &values {
                 let mut next = sample.clone();
-                next.push(format!("{} |-> {value}", field.name));
+                next.push((field.name.as_str().to_owned(), value.clone()));
                 next_samples.push(next);
             }
         }
@@ -2982,8 +3009,43 @@ fn render_type_path_enum_structural_samples(
     }
     samples
         .into_iter()
-        .map(|fields| format!("[{}]", fields.join(", ")))
+        .map(|fields| {
+            render_type_path_enum_record(variant.variant.as_str(), fields, structural_defaults)
+        })
         .collect()
+}
+
+fn type_path_enum_structural_field_defaults(
+    structural_variants: &[TypePathEnumStructuralVariant],
+) -> BTreeMap<String, String> {
+    let mut defaults = BTreeMap::new();
+    for variant in structural_variants {
+        for field in &variant.fields {
+            let value = match field.atom {
+                TypePathEnumPayloadAtom::StringSet => "{}",
+            };
+            defaults.insert(field.name.as_str().to_owned(), value.to_owned());
+        }
+    }
+    defaults
+}
+
+fn render_type_path_enum_record(
+    variant: &str,
+    fields: Vec<(String, String)>,
+    structural_defaults: &BTreeMap<String, String>,
+) -> String {
+    let mut values = structural_defaults.clone();
+    for (field, value) in fields {
+        values.insert(field, value);
+    }
+    let mut rendered = vec![format!("tag |-> {}", tla_string(variant))];
+    rendered.extend(
+        values
+            .into_iter()
+            .map(|(field, value)| format!("{field} |-> {value}")),
+    );
+    format!("[{}]", rendered.join(", "))
 }
 
 fn string_set_payload_samples(sample_cardinality: usize) -> Vec<String> {
@@ -3014,6 +3076,24 @@ fn string_enum_wire_label(name: &str, variant: &str) -> String {
     }
 
     variant.to_owned()
+}
+
+fn render_named_variant_value(
+    enum_name: &str,
+    variant: &str,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    if let Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+        structural_variants,
+        ..
+    }) = named_bindings.get(enum_name)
+        && !structural_variants.is_empty()
+    {
+        let structural_defaults = type_path_enum_structural_field_defaults(structural_variants);
+        return render_type_path_enum_record(variant, Vec::new(), &structural_defaults);
+    }
+
+    tla_string(string_enum_wire_label(enum_name, variant))
 }
 
 /// Consult the schema's named-type binding table to decide whether a
@@ -3159,6 +3239,31 @@ mod tests {
             "path-only TypePath twins should not block composition-domain binding merge"
         );
     }
+
+    #[test]
+    fn structural_enum_domains_use_tlc_operator_override_in_cfg() {
+        let meerkat = meerkat_machine();
+
+        let cfg = render_machine_ci_cfg(&meerkat, false);
+
+        assert!(cfg.contains("ToolFilterValues <- ToolFilterValuesCiDomain"));
+        assert!(
+            !cfg.contains("ToolFilterValues = {\"All\", [tag |->"),
+            "record-shaped ToolFilter values must not be emitted directly in TLC config"
+        );
+    }
+
+    #[test]
+    fn structural_enum_domain_operators_keep_typed_records_in_model() {
+        let meerkat = meerkat_machine();
+
+        let model = render_machine_semantic_model(&meerkat);
+
+        assert!(model.contains("CONSTANTS "));
+        assert!(model.contains("ToolFilterValues"));
+        assert!(model.contains("ToolFilterValuesCiDomain == {[tag |-> \"All\", names |-> {}]"));
+        assert!(model.contains("ToolFilterValuesDeepDomain == {[tag |-> \"All\", names |-> {}]"));
+    }
 }
 
 fn render_sequence_domain_definition(inner: &TypeRef) -> String {
@@ -3180,6 +3285,99 @@ fn render_map_domain_definition(key: &TypeRef, value: &TypeRef) -> String {
     format!(
         "{{{empty_map}}} \\cup {{ [x \\in {{k}} |-> v] : k \\in {key_domain}, v \\in {value_domain} }}"
     )
+}
+
+fn domain_is_model_defined(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+    )
+}
+
+fn domain_is_tlc_config_assignable(
+    ty: &TypeRef,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> bool {
+    match ty {
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => true,
+        TypeRef::Named(name) => {
+            named_domain_is_tlc_config_assignable(named_bindings, name.as_str())
+        }
+        TypeRef::Enum(name) => named_domain_is_tlc_config_assignable(named_bindings, name.as_str()),
+        TypeRef::Set(inner) => domain_is_tlc_config_assignable(inner, named_bindings),
+        TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _) => false,
+    }
+}
+
+fn named_domain_is_tlc_config_assignable(
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> bool {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match require_named_binding(named_bindings, name) {
+        RustTypeAtom::U64
+        | RustTypeAtom::U32
+        | RustTypeAtom::U16
+        | RustTypeAtom::U8
+        | RustTypeAtom::Bool
+        | RustTypeAtom::String
+        | RustTypeAtom::StringEnum { .. }
+        | RustTypeAtom::TypePath(_)
+        | RustTypeAtom::TypePathFieldPresenceSet { .. } => true,
+        RustTypeAtom::TypePathEnum {
+            structural_variants,
+            ..
+        } => structural_variants.is_empty(),
+        RustTypeAtom::TypePathStruct { .. } => false,
+    }
+}
+
+fn config_domain_operator_name(name: &str, deep: bool) -> String {
+    format!(
+        "{}{}Domain",
+        tla_ident(name),
+        if deep { "Deep" } else { "Ci" }
+    )
+}
+
+fn render_config_domain_operator_definitions(
+    out: &mut String,
+    constants: &BTreeMap<String, TypeRef>,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    ci_cardinality: impl Fn(&str) -> usize,
+    deep_cardinality: impl Fn(&str) -> usize,
+    include_string_samples: bool,
+) {
+    let mut rendered_any = false;
+    for (name, ty) in constants {
+        if domain_is_model_defined(ty) || domain_is_tlc_config_assignable(ty, named_bindings) {
+            continue;
+        }
+        for (deep, cardinality) in [
+            (false, ci_cardinality(name.as_str())),
+            (true, deep_cardinality(name.as_str())),
+        ] {
+            writeln!(
+                out,
+                "{} == {}",
+                config_domain_operator_name(name, deep),
+                render_default_domain_assignment(
+                    ty,
+                    cardinality,
+                    named_samples,
+                    named_bindings,
+                    include_string_samples,
+                )
+            )
+            .expect("write to string");
+            rendered_any = true;
+        }
+    }
+    if rendered_any {
+        pushln!(out);
+    }
 }
 
 fn ordered_composite_domain_definitions(
@@ -3328,6 +3526,10 @@ impl<'a> CompositionTlaCompiler<'a> {
     fn render(&self) -> std::result::Result<String, String> {
         let mut out = String::new();
         let constants = self.collect_binding_domains();
+        let named_samples =
+            collect_composition_named_type_samples(self.schema, &self.machine_by_instance);
+        let named_bindings =
+            collect_composition_named_bindings(self.machine_by_instance.values().copied());
         let machine_vars = self.machine_vars();
         let obligation_vars = self.obligation_vars();
         let mut machine_invariant_names = Vec::new();
@@ -3364,6 +3566,21 @@ impl<'a> CompositionTlaCompiler<'a> {
             .expect("write to string");
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
         pushln!(&mut out);
+        render_config_domain_operator_definitions(
+            &mut out,
+            &constants,
+            &named_samples,
+            &named_bindings,
+            |_| default_sample_cardinality(false),
+            |name| {
+                self.schema
+                    .deep_domain_overrides
+                    .get(name)
+                    .copied()
+                    .unwrap_or(self.schema.deep_domain_cardinality)
+            },
+            false,
+        );
         for (name, ty) in ordered_composite_domain_definitions(&constants) {
             let definition = match ty {
                 TypeRef::Seq(inner) => render_sequence_domain_definition(inner),
@@ -5055,7 +5272,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
             Expr::NamedVariant { enum_name, variant } => {
-                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
+                let named_bindings =
+                    collect_composition_named_bindings(self.machine_by_instance.values().copied());
+                render_named_variant_value(enum_name.as_str(), variant.as_str(), &named_bindings)
             }
             Expr::None => "None".into(),
             Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
@@ -5692,6 +5911,8 @@ impl<'a> MachineTlaCompiler<'a> {
     fn render(&mut self) -> String {
         let mut out = String::new();
         let constants = collect_binding_domains(self.schema);
+        let named_samples = collect_machine_named_type_samples(self.schema);
+        let named_bindings = collect_machine_named_bindings(self.schema);
 
         pushln!(&mut out, "---- MODULE model ----");
         pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
@@ -5724,6 +5945,20 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
         pushln!(&mut out);
+        let ci_sample_cardinality = if self.schema.ci_step_limit == Some(1) {
+            0
+        } else {
+            default_sample_cardinality(false)
+        };
+        render_config_domain_operator_definitions(
+            &mut out,
+            &constants,
+            &named_samples,
+            &named_bindings,
+            |_| ci_sample_cardinality,
+            |_| default_sample_cardinality(true),
+            false,
+        );
         for (name, ty) in ordered_composite_domain_definitions(&constants) {
             let definition = match ty {
                 TypeRef::Seq(inner) => render_sequence_domain_definition(inner),
@@ -6896,7 +7131,8 @@ impl<'a> MachineTlaCompiler<'a> {
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
             Expr::NamedVariant { enum_name, variant } => {
-                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
+                let named_bindings = collect_machine_named_bindings(self.schema);
+                render_named_variant_value(enum_name.as_str(), variant.as_str(), &named_bindings)
             }
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "[x \\in {} |-> None]".into(),

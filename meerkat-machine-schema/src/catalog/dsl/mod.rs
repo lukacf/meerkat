@@ -711,6 +711,7 @@ runtime_internal_inputs!(
         ClassifyRealtimeTurnTerminated,
         ClearLocalEndpoint,
         ClearRealtimeReconnectProgress,
+        CompleteSurfaceRequestCommitted,
         CoalesceInput,
         CommitDeferredNames,
         CommitVisibilityFilter,

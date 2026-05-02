@@ -488,6 +488,7 @@ fn mcp_tool_terminal_from_result(
             }
         }
         Err(err) => {
+            let terminal_outcome = err.terminal_outcome();
             let mut error = json!({
                 "code": err.code,
                 "message": err.message
@@ -501,7 +502,7 @@ fn mcp_tool_terminal_from_result(
                 "error": error
             });
             match terminal_context {
-                Some(context) => context.classify_failure_terminal(response),
+                Some(context) => context.classify_terminal(terminal_outcome, response),
                 None => RequestTerminal::inline(response),
             }
         }
@@ -942,11 +943,11 @@ mod tests {
             |tool_name, context| async move {
                 assert_eq!(tool_name, "meerkat_run");
                 assert!(context.is_some());
-                Err(meerkat_mcp_server::ToolCallError {
-                    code: -32602,
-                    message: "Invalid arguments: missing prompt".to_string(),
-                    data: None,
-                })
+                Err(meerkat_mcp_server::ToolCallError::new(
+                    -32602,
+                    "Invalid arguments: missing prompt",
+                    None,
+                ))
             },
         );
 
@@ -1003,6 +1004,28 @@ mod tests {
             context
                 .classify_failure_terminal(())
                 .is_respond_without_publish()
+        );
+    }
+
+    #[test]
+    fn mcp_tool_error_terminal_uses_error_terminal_outcome() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("fn mcp_tool_terminal_from_result")
+            .expect("MCP terminal builder should exist");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("fn duplicate_request_response")
+                    .expect("terminal builder should end before duplicate response helper")];
+
+        assert!(
+            body.contains("err.terminal_outcome()"),
+            "MCP tool errors must carry explicit terminal outcome authority from handlers"
+        );
+        assert!(
+            !body.contains("context.classify_failure_terminal(response)"),
+            "MCP tool error terminals must not always downgrade through ordinary failure classification"
         );
     }
 

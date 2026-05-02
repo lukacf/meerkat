@@ -21,7 +21,9 @@ use meerkat_core::ConfigStore;
 
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::handlers::RpcResponseExt;
-use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
+use crate::protocol::{
+    RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcTerminalResponse,
+};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{BlockingWriter, JsonlTransport, TransportError, TransportWriter};
@@ -358,7 +360,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     fn spawn_tracked_request(&self, request: &RpcRequest) -> Option<SpawnedTrackedRequest> {
         let router = self.router.clone();
         self.spawn_tracked_request_with_dispatch(request, move |request, context| async move {
-            Box::pin(router.dispatch_with_request_context(request, Some(context))).await
+            Box::pin(router.dispatch_tracked_with_request_context(request, context)).await
         })
     }
 
@@ -369,7 +371,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ) -> Option<SpawnedTrackedRequest>
     where
         F: FnOnce(RpcRequest, meerkat::surface::RequestContext) -> Fut + Send + 'static,
-        Fut: Future<Output = Option<RpcResponse>> + Send + 'static,
+        Fut: Future<Output = Option<RpcTerminalResponse>> + Send + 'static,
     {
         let kind = self.tracked_rpc_request_kind(request)?;
         let id = request.id.clone()?;
@@ -399,8 +401,9 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let request_key_for_task = request_key.clone();
         let handle = tokio::spawn(async move {
             if let Some(response) = dispatch(request, context).await {
-                let outcome = response.surface_terminal_outcome();
-                let terminal = terminal_context.classify_terminal(outcome, response);
+                let outcome = response.terminal_outcome();
+                let terminal =
+                    terminal_context.classify_terminal(outcome, response.into_response());
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
@@ -678,10 +681,10 @@ mod tests {
         let spawned = server
             .spawn_tracked_request_with_dispatch(&request, |request, _context| async move {
                 assert_eq!(request.method, "turn/start");
-                Some(RpcResponse::success(
+                Some(RpcTerminalResponse::success(RpcResponse::success(
                     request.id.clone(),
                     serde_json::json!({"ok": true}),
-                ))
+                )))
             })
             .expect("id-bearing request should be admitted through RPC tracking");
         let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
@@ -717,11 +720,11 @@ mod tests {
 
         let spawned = server
             .spawn_tracked_request_with_dispatch(&request, |request, _context| async move {
-                Some(RpcResponse::error(
+                Some(RpcTerminalResponse::failure(RpcResponse::error(
                     request.id.clone(),
                     crate::error::INVALID_PARAMS,
                     "missing session_id",
-                ))
+                )))
             })
             .expect("tracked RPC method should be admitted");
         let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
@@ -1421,8 +1424,10 @@ mod tests {
             "tracked RPC terminal classification must consume explicit terminal outcome metadata"
         );
         assert!(
-            source.contains("surface_terminal_outcome"),
-            "tracked RPC terminal classification should use the explicit terminal outcome carried by handlers"
+            source.contains("RpcTerminalResponse")
+                && source.contains("terminal_outcome()")
+                && source.contains("into_response()"),
+            "tracked RPC terminal classification should use the private terminal sidecar carried by handlers"
         );
     }
 
@@ -1564,11 +1569,11 @@ mod tests {
                 let err =
                     result.expect_err("runtime admission boundary should reject cancellation");
                 let err = err.into_rpc_error();
-                Some(RpcResponse::error(
+                Some(RpcTerminalResponse::failure(RpcResponse::error(
                     request.id.clone(),
                     err.code,
                     err.message,
-                ))
+                )))
             })
             .expect("turn/start should be tracked");
         let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {

@@ -15,11 +15,12 @@ use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::skills::reject_retired_skill_references;
 use super::{
-    RpcResponseExt, parse_params, parse_session_id_for_runtime, rpc_response_from_turn_start_error,
+    RpcResponseExt, parse_params, parse_session_id_for_runtime,
+    rpc_terminal_response_from_turn_start_error,
 };
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcId, RpcResponse, RpcTerminalResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::{InterruptNoopTarget, RuntimePreAdmissionCancelCheck, SessionRuntime};
 use meerkat::surface::{RequestContext, request_action};
@@ -161,14 +162,34 @@ pub async fn handle_start(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
+    handle_start_terminal(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+    .into_response()
+}
+
+pub(crate) async fn handle_start_terminal(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcTerminalResponse {
     let params: StartTurnParams = match parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
+        Err(resp) => return RpcTerminalResponse::failure(resp.with_id(id)),
     };
 
     let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, &runtime) {
         Ok(sid) => sid,
-        Err(resp) => return resp,
+        Err(resp) => return RpcTerminalResponse::failure(resp),
     };
 
     // Set up MCP lifecycle event forwarding. Agent execution events flow
@@ -186,11 +207,11 @@ pub async fn handle_start(
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs) {
         Ok(r) => r,
         Err(e) => {
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 crate::error::INVALID_PARAMS,
                 format!("Invalid skill_refs: {e}"),
-            );
+            ));
         }
     };
 
@@ -223,11 +244,11 @@ pub async fn handle_start(
                 .ensure_runtime_session_for_rotation(&session_id)
                 .await
             {
-                return RpcResponse::error(
+                return RpcTerminalResponse::failure(RpcResponse::error(
                     id,
                     error::INTERNAL_ERROR,
                     format!("runtime executor registration failed: {err}"),
-                );
+                ));
             }
         }
         #[cfg(not(feature = "mob"))]
@@ -247,11 +268,11 @@ pub async fn handle_start(
             .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
             .await
         {
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
                 format!("request lifecycle rejected session binding: {err}"),
-            );
+            ));
         }
         let runtime_adapter = Arc::clone(runtime_adapter);
         let session_id = session_id.clone();
@@ -267,18 +288,18 @@ pub async fn handle_start(
             }))
             .await;
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            return RpcResponse::error(
+            return RpcTerminalResponse::failure(RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,
                 "request cancelled before start",
-            );
+            ));
         }
     }
 
     if let Some(response) =
         reject_if_cancelled_before_runtime_admission(id.clone(), request_context.as_ref())
     {
-        return response;
+        return RpcTerminalResponse::failure(response);
     }
 
     let pre_admission_cancel_check = request_context.clone().map(|context| {
@@ -304,7 +325,7 @@ pub async fn handle_start(
     {
         Ok(r) => r,
         Err(rpc_err) => {
-            return rpc_response_from_turn_start_error(id, rpc_err);
+            return rpc_terminal_response_from_turn_start_error(id, rpc_err);
         }
     };
 
@@ -312,7 +333,7 @@ pub async fn handle_start(
     response.session_ref = runtime
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
-    RpcResponse::success(id, response)
+    RpcTerminalResponse::success(RpcResponse::success(id, response))
 }
 
 pub(crate) fn reject_if_cancelled_before_runtime_admission(

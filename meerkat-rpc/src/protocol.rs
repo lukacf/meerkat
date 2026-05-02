@@ -6,9 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-fn default_surface_terminal_outcome() -> meerkat_core::handles::SurfaceRequestTerminalOutcome {
-    meerkat_core::handles::SurfaceRequestTerminalOutcome::Failed
-}
+use meerkat_core::handles::SurfaceRequestTerminalOutcome;
 
 /// JSON-RPC request or notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,8 +36,12 @@ pub struct RpcResponse {
     pub result: Option<Box<RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
-    #[serde(skip, default = "default_surface_terminal_outcome")]
-    pub(crate) surface_terminal_outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RpcTerminalResponse {
+    response: RpcResponse,
+    terminal_outcome: SurfaceRequestTerminalOutcome,
 }
 
 /// JSON-RPC error object.
@@ -99,8 +101,6 @@ impl RpcResponse {
             id,
             result: Some(raw),
             error: None,
-            surface_terminal_outcome:
-                meerkat_core::handles::SurfaceRequestTerminalOutcome::Succeeded,
         }
     }
 
@@ -115,7 +115,6 @@ impl RpcResponse {
                 message: message.into(),
                 data: None,
             }),
-            surface_terminal_outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome::Failed,
         }
     }
 
@@ -135,22 +134,38 @@ impl RpcResponse {
                 message: message.into(),
                 data: Some(data),
             }),
-            surface_terminal_outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome::Failed,
+        }
+    }
+}
+
+impl RpcTerminalResponse {
+    pub(crate) fn success(response: RpcResponse) -> Self {
+        Self {
+            response,
+            terminal_outcome: SurfaceRequestTerminalOutcome::Succeeded,
         }
     }
 
-    pub(crate) fn with_surface_terminal_outcome(
-        mut self,
-        outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome,
-    ) -> Self {
-        self.surface_terminal_outcome = outcome;
-        self
+    pub(crate) fn failure(response: RpcResponse) -> Self {
+        Self {
+            response,
+            terminal_outcome: SurfaceRequestTerminalOutcome::Failed,
+        }
     }
 
-    pub(crate) fn surface_terminal_outcome(
-        &self,
-    ) -> meerkat_core::handles::SurfaceRequestTerminalOutcome {
-        self.surface_terminal_outcome
+    pub(crate) fn committed_failure(response: RpcResponse) -> Self {
+        Self {
+            response,
+            terminal_outcome: SurfaceRequestTerminalOutcome::CommittedFailure,
+        }
+    }
+
+    pub(crate) fn terminal_outcome(&self) -> SurfaceRequestTerminalOutcome {
+        self.terminal_outcome
+    }
+
+    pub(crate) fn into_response(self) -> RpcResponse {
+        self.response
     }
 }
 
@@ -274,6 +289,24 @@ mod tests {
         let serialized = serde_json::to_string(&resp).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed["error"]["data"]["detail"], "missing field");
+    }
+
+    #[test]
+    fn rpc_response_wire_struct_does_not_carry_lifecycle_authority() {
+        let source = include_str!("protocol.rs");
+        let start = source
+            .find("pub struct RpcResponse {")
+            .expect("RpcResponse wire struct should exist");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("}\n\n/// JSON-RPC error object.")
+                    .expect("RpcResponse body should end before RpcError")];
+
+        assert!(
+            !body.contains("surface_terminal_outcome"),
+            "RpcResponse is the exported JSON-RPC wire shape; lifecycle authority must live in a private dispatch sidecar"
+        );
     }
 
     #[test]

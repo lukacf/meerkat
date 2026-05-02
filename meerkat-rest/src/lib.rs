@@ -4232,10 +4232,16 @@ async fn continue_session_inner(
                 );
             }
             Err(err) => {
-                if err.is_post_admission_failure()
-                    && let Some(ctx) = req_ctx.as_ref()
-                {
-                    ctx.disarm_unpublished_cleanup();
+                if err.is_post_admission_failure() {
+                    if let Some(ctx) = req_ctx.as_ref() {
+                        ctx.disarm_unpublished_cleanup();
+                    }
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return committed_terminal(
+                        req_ctx.as_ref(),
+                        Err(ApiError::Internal(err.to_string())),
+                    );
                 }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
@@ -4346,6 +4352,14 @@ async fn continue_session_inner(
                 );
             }
             Err(err) => {
+                if err.is_post_admission_failure() {
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return committed_terminal(
+                        req_ctx.as_ref(),
+                        Err(ApiError::Internal(err.to_string())),
+                    );
+                }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
@@ -6900,7 +6914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rebuild_continue_disarms_cleanup_after_post_admission_accept_error() {
+    fn test_rebuild_continue_uses_committed_terminal_after_post_admission_accept_error() {
         let source = include_str!("lib.rs");
         let start = source
             .find("let final_result = if requires_rebuild")
@@ -6928,13 +6942,45 @@ mod tests {
         let disarm = branch
             .find("ctx.disarm_unpublished_cleanup()")
             .expect("post-admission accept failure should disarm cleanup");
-        let fail = branch
-            .find("return failed_terminal")
-            .expect("accept failure should return a failed terminal");
+        let commit = branch
+            .find("return committed_terminal")
+            .expect("post-admission accept failure should return a committed terminal");
 
         assert!(
-            classify < disarm && disarm < fail,
-            "rebuild continue must preserve admitted sessions before returning accept errors"
+            classify < disarm && disarm < commit,
+            "rebuild continue must preserve admitted sessions through committed failure terminals"
+        );
+    }
+
+    #[test]
+    fn test_live_continue_uses_committed_terminal_after_post_admission_accept_error() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("    } else {\n        #[cfg(feature = \"comms\")]")
+            .expect("continue_session_inner should have a live continue path");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("        #[cfg(feature = \"comms\")]\n        let keep_alive_side_effect_result")
+                    .expect("live continue accept block should precede keep_alive side effects")];
+        let submit = body
+            .find(".accept_input_with_completion_and_admission_controls(")
+            .expect("live continue should submit input through runtime admission controls");
+        let accept_block = &body[submit..];
+        let err_branch_start = accept_block
+            .find("Err(err) =>")
+            .expect("accept block should have a non-cancellation error branch");
+        let branch = &accept_block[err_branch_start..];
+        let classify = branch
+            .find("err.is_post_admission_failure()")
+            .expect("post-admission accept failures should be machine-classified");
+        let commit = branch
+            .find("return committed_terminal")
+            .expect("post-admission accept failure should return a committed terminal");
+
+        assert!(
+            classify < commit,
+            "live continue must preserve admitted sessions through committed failure terminals"
         );
     }
 

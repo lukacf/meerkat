@@ -42,6 +42,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -91,6 +92,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -151,6 +153,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -200,6 +203,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -255,6 +259,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -330,6 +335,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -410,6 +416,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -490,6 +497,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -566,6 +574,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -642,6 +651,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -718,6 +728,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -794,6 +805,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ] + [
@@ -858,6 +870,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -901,6 +914,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -950,6 +964,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -1002,6 +1017,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -1048,6 +1064,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -1100,6 +1117,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -1151,6 +1169,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],
@@ -1196,6 +1215,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol.rs",
         "src/realtime_ws.rs",
         "src/server.rs",
     ],

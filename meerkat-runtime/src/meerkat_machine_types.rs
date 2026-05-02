@@ -893,6 +893,7 @@ meerkat_machine_runtime_internal_inputs!(
         BeginSurfaceRequest,
         CancelSurfaceRequest,
         ClassifySurfaceRequestTerminal,
+        CompleteSurfaceRequestCommitted,
         DecideSurfaceRequestCancelActionInstall,
         FinishSurfaceRequestUnpublished,
         PublishSurfaceRequest,

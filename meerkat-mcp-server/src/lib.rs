@@ -20,6 +20,7 @@ use meerkat::{
 };
 use meerkat_contracts::{RealtimeOpenRequest, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
+use meerkat_core::handles::SurfaceRequestTerminalOutcome;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
     SessionBuildOptions, SessionError, SessionService, SessionServiceHistoryExt, StartTurnRequest,
@@ -263,15 +264,35 @@ pub struct ToolCallError {
     pub code: i32,
     pub message: String,
     pub data: Option<Value>,
+    terminal_outcome: SurfaceRequestTerminalOutcome,
 }
 
 impl ToolCallError {
-    fn new(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
+    pub fn new(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
         Self {
             code,
             message: message.into(),
             data,
+            terminal_outcome: SurfaceRequestTerminalOutcome::Failed,
         }
+    }
+
+    fn new_with_terminal_outcome(
+        code: i32,
+        message: impl Into<String>,
+        data: Option<Value>,
+        terminal_outcome: SurfaceRequestTerminalOutcome,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+            terminal_outcome,
+        }
+    }
+
+    pub fn terminal_outcome(&self) -> SurfaceRequestTerminalOutcome {
+        self.terminal_outcome
     }
 
     fn invalid_params(message: impl Into<String>) -> Self {
@@ -288,6 +309,15 @@ impl ToolCallError {
 
     fn internal_with_data(message: impl Into<String>, data: Value) -> Self {
         Self::new(-32603, message, Some(data))
+    }
+
+    fn committed_internal_with_data(message: impl Into<String>, data: Value) -> Self {
+        Self::new_with_terminal_outcome(
+            -32603,
+            message,
+            Some(data),
+            SurfaceRequestTerminalOutcome::CommittedFailure,
+        )
     }
 }
 
@@ -1235,7 +1265,7 @@ fn post_commit_session_created_error(
     session_id: &meerkat::SessionId,
     err: &SessionError,
 ) -> ToolCallError {
-    ToolCallError::internal_with_data(
+    ToolCallError::committed_internal_with_data(
         format!("Agent error: {err}"),
         json!({
             "session_id": session_id.to_string(),
@@ -1480,11 +1510,7 @@ pub async fn handle_tools_call_with_notifier(
         let payload =
             meerkat_mob_mcp::handle_public_tools_call(&state.mob_state, tool_name, arguments)
                 .await
-                .map_err(|err| ToolCallError {
-                    code: err.code,
-                    message: err.message,
-                    data: err.data,
-                })?;
+                .map_err(|err| ToolCallError::new(err.code, err.message, err.data))?;
         return Ok(wrap_tool_payload(payload));
     }
 
@@ -4759,19 +4785,25 @@ mod tests {
             "post-commit error must leave the MCP adapter registered before terminal resolution"
         );
 
+        let terminal_outcome = err.terminal_outcome();
         let terminal_response = json!({
             "jsonrpc": "2.0",
             "id": 99,
             "error": {
                 "code": err.code,
-                "message": err.message,
+                "message": err.message.clone(),
                 "data": data,
             }
         });
+        assert_eq!(
+            request_executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel after committed MCP failure must not replace the error payload"
+        );
         let resolution = request_executor
             .resolve_terminal(
                 Some(context.key()),
-                context.classify_failure_terminal(terminal_response),
+                context.classify_terminal(terminal_outcome, terminal_response),
             )
             .await;
         assert!(matches!(resolution, RequestTerminalResolution::Emit(_)));

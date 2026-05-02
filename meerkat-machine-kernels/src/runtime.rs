@@ -269,6 +269,30 @@ fn tool_visibility_witness_identity_len(
     Some(len)
 }
 
+fn tool_visibility_witness_contains_field(
+    schema: &MachineSchema,
+    value: &KernelValue,
+    field: &KernelValue,
+) -> Option<bool> {
+    let KernelValue::Map(fields) = value else {
+        return None;
+    };
+    let KernelValue::String(field) = field else {
+        return Some(false);
+    };
+    match field.as_str() {
+        "stable_owner_key" => Some(matches!(
+            fields.get(&string_key("stable_owner_key")),
+            Some(KernelValue::String(_))
+        )),
+        "last_seen_provenance" => Some(matches!(
+            fields.get(&string_key("last_seen_provenance")),
+            Some(provenance) if tool_provenance_matches(schema, provenance)
+        )),
+        _ => Some(false),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelState {
     pub phase: PhaseId,
@@ -1032,6 +1056,19 @@ impl GeneratedMachineKernel {
                         KernelValue::String(needle) => items.contains(&needle),
                         _ => false,
                     },
+                    KernelValue::Named {
+                        type_name,
+                        value: inner,
+                    } if named_value_type_is(&type_name, TOOL_VISIBILITY_WITNESS_TYPE) => {
+                        tool_visibility_witness_contains_field(&self.schema, inner.as_ref(), &value)
+                            .ok_or_else(|| {
+                                self.eval_error(
+                                    transition_name,
+                                    "contains expects structural ToolVisibilityWitness authority"
+                                        .to_string(),
+                                )
+                            })?
+                    }
                     KernelValue::NamedVariant { .. }
                     | KernelValue::Named { .. }
                     | KernelValue::Bool(_)

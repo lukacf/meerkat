@@ -1046,6 +1046,9 @@ impl SessionService for RpcMobSessionService {
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         self.reject_archived_persisted_session(id).await?;
+        if self.staged_sessions.contains(id).await {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
         let admission = self.reserve_turn_admission(id).await?;
         Self::await_guarded_start_turn(Arc::clone(&self.service), id.clone(), req, admission).await
     }
@@ -4277,6 +4280,16 @@ impl SessionRuntime {
                 // even though this input has already been accepted.
                 admission
             }
+            Err((error @ SessionError::NotFound { .. }, Some(admission)))
+                if self.staged_sessions.contains(session_id).await =>
+            {
+                restore_staged_capacity_admission(
+                    &self.staged_capacity_admissions,
+                    session_id.clone(),
+                    admission,
+                );
+                return Err(session_error_to_rpc(error));
+            }
             Err((error, admission)) => {
                 drop(admission);
                 return Err(session_error_to_rpc(error));
@@ -4661,6 +4674,31 @@ impl SessionRuntime {
             self.discard_stale_live_session(session_id).await;
         }
 
+        // Reject build-only overrides that cannot be applied via runtime turn
+        // metadata before taking active capacity. Silently dropping them would
+        // violate the surface contract, and invalid params are not active work.
+        if let Some(ref ov) = overrides {
+            let rejected = [
+                ov.max_tokens.map(|_| "max_tokens"),
+                ov.system_prompt.as_ref().map(|_| "system_prompt"),
+                ov.output_schema.as_ref().map(|_| "output_schema"),
+                ov.structured_output_retries
+                    .map(|_| "structured_output_retries"),
+            ];
+            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
+            if !rejected.is_empty() {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "Cannot override {} on a runtime-routed turn; \
+                         set these at session/create time or use a deferred session",
+                        rejected.join(", ")
+                    ),
+                    data: None,
+                });
+            }
+        }
+
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
@@ -4683,32 +4721,6 @@ impl SessionRuntime {
                     meerkat_core::types::ContentBlock::Text { text: mcp_text },
                 );
                 prompt = ContentInput::Blocks(blocks);
-            }
-        }
-
-        // Reject build-only overrides that cannot be applied via runtime turn
-        // metadata. These fields only apply during pending→materialized
-        // promotion (handled by the legacy start_turn path). Silently
-        // dropping them would violate surface contract.
-        if let Some(ref ov) = overrides {
-            let rejected = [
-                ov.max_tokens.map(|_| "max_tokens"),
-                ov.system_prompt.as_ref().map(|_| "system_prompt"),
-                ov.output_schema.as_ref().map(|_| "output_schema"),
-                ov.structured_output_retries
-                    .map(|_| "structured_output_retries"),
-            ];
-            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
-            if !rejected.is_empty() {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a runtime-routed turn; \
-                         set these at session/create time or use a deferred session",
-                        rejected.join(", ")
-                    ),
-                    data: None,
-                });
             }
         }
 
@@ -14834,15 +14846,15 @@ mod tests {
             "recovered_create_request should prepare runtime bindings before create"
         );
 
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve recovery admission");
         runtime
             .service
             .archive(&session_id)
             .await
             .expect("archive should win before recovered create");
-        let admission = runtime
-            .reserve_active_turn(&session_id)
-            .await
-            .expect("reserve recovery admission");
         let result_rx = runtime.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             session_id.clone(),
             recovered_create.request,

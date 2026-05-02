@@ -646,6 +646,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         keep_alive: bool,
         keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
     ) -> Result<(), SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
         let previous = self
             .export_session_with_labels(id)
             .await

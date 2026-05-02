@@ -186,7 +186,7 @@ where
     {
         Ok(result) => result,
         Err(error) => {
-            adapter.unregister_session(session_id).await;
+            cleanup_rematerialized_runtime_after_create_error(service, adapter, session_id).await;
             return Err(error.into());
         }
     };
@@ -203,6 +203,26 @@ where
         .await;
 
     Ok((result, keep_alive))
+}
+
+async fn cleanup_rematerialized_runtime_after_create_error(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) {
+    match service.export_live_session(session_id).await {
+        Ok(_) => {}
+        Err(SessionError::NotFound { .. }) => {
+            adapter.unregister_session(session_id).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "preserving runtime registration after create error because live session state is unknown"
+            );
+        }
+    }
 }
 
 pub async fn install_prepared_runtime_interrupt_handle(
@@ -758,6 +778,77 @@ mod tests {
         ))
     }
 
+    struct FailingSaveSessionStore {
+        inner: tokio::sync::RwLock<std::collections::HashMap<SessionId, Session>>,
+        fail_save: AtomicBool,
+    }
+
+    impl FailingSaveSessionStore {
+        fn new() -> Self {
+            Self {
+                inner: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+                fail_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailingSaveSessionStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            let mut sessions = self.inner.write().await;
+            let previous = sessions.get(session.id());
+            meerkat_core::session_store::append_only_save_guard(session, previous)?;
+            sessions.insert(session.id().clone(), session.clone());
+            Ok(())
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            Ok(self.inner.read().await.get(id).cloned())
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            let sessions = self.inner.read().await;
+            let mut metas: Vec<meerkat_core::SessionMeta> = sessions
+                .values()
+                .filter(|session| {
+                    if let Some(created_after) = filter.created_after
+                        && session.created_at() < created_after
+                    {
+                        return false;
+                    }
+                    if let Some(updated_after) = filter.updated_after
+                        && session.updated_at() < updated_after
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .map(meerkat_core::SessionMeta::from)
+                .collect();
+            metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let offset = filter.offset.unwrap_or(0);
+            let limit = filter.limit.unwrap_or(usize::MAX);
+            Ok(metas.into_iter().skip(offset).take(limit).collect())
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.write().await.remove(id);
+            Ok(())
+        }
+    }
+
     async fn build_test_service(
         temp: &TempDir,
     ) -> (
@@ -1004,6 +1095,74 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn rematerialize_post_commit_create_error_preserves_live_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fail_store = Arc::new(FailingSaveSessionStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&fail_store) as Arc<dyn SessionStore>,
+            None,
+            Arc::new(MemoryBlobStore::new()),
+        );
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        fail_store.set_fail_save(true);
+        let error = Box::pin(rematerialize_session_for_runtime_turn(
+            &service,
+            &adapter,
+            &result.session_id,
+            SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.4-mini")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("forced post-commit save failure should surface");
+
+        assert!(
+            error.to_string().contains("forced save failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            service
+                .export_live_session(&result.session_id)
+                .await
+                .is_ok(),
+            "post-commit create error should leave the committed live session"
+        );
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "post-commit create error must preserve runtime registration"
+        );
     }
 
     #[tokio::test]

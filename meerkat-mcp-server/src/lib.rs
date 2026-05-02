@@ -1286,8 +1286,17 @@ async fn cleanup_mcp_recovered_runtime_after_create_error(
     live_session_discarded: bool,
     runtime_entry_existed_before_prepare: bool,
 ) {
-    if state.service.read(session_id).await.is_ok() {
-        return;
+    match state.service.export_live_session(session_id).await {
+        Ok(_) => return,
+        Err(SessionError::NotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "preserving MCP runtime registration after create error because live session state is unknown"
+            );
+            return;
+        }
     }
 
     if live_session_discarded || !runtime_entry_existed_before_prepare {
@@ -3332,8 +3341,19 @@ async fn handle_meerkat_resume(
             Err(other) => Err(other),
         }
     };
-    let session_exists = state.service.read(&session_id).await.is_ok();
-    if result.is_err() && !session_exists {
+    let live_session_exists = match state.service.export_live_session(&session_id).await {
+        Ok(_) => true,
+        Err(SessionError::NotFound { .. }) => false,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "preserving MCP runtime registration after resume because live session state is unknown"
+            );
+            true
+        }
+    };
+    if result.is_err() && !live_session_exists {
         ingress.clear_session(&session_id).await;
         if !runtime_entry_existed_before_prepare {
             state.runtime_adapter.unregister_session(&session_id).await;
@@ -3347,7 +3367,7 @@ async fn handle_meerkat_resume(
         tracing::warn!("event task panicked: {e}");
     }
 
-    if session_exists {
+    if live_session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         if input.tools.is_empty() {
             ingress.ensure_session(&session_id).await;
@@ -3361,7 +3381,7 @@ async fn handle_meerkat_resume(
     // Manage comms drain lifecycle for rebuilt sessions after the session
     // commit boundary. keep_alive may commit independently of turn success.
     #[cfg(feature = "comms")]
-    if session_exists && (needs_rebuild || session_rematerialized) {
+    if live_session_exists && (needs_rebuild || session_rematerialized) {
         let comms_rt = state.service.comms_runtime(&session_id).await;
         state
             .runtime_adapter
@@ -5001,6 +5021,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_resume_keep_alive_override_does_not_overwrite_durable_pending_context() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store.clone()).await;
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(1024),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+
+        let mut persisted = store
+            .load(&created.session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session");
+        let mut state_context = persisted.system_context_state().unwrap_or_default();
+        state_context
+            .stage_append(
+                &meerkat_core::service::AppendSystemContextRequest {
+                    text: "mcp keep-alive stale live pending context".to_string(),
+                    source: Some("mcp-keep-alive-stale-test".to_string()),
+                    idempotency_key: Some("mcp-keep-alive-stale-test".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("stage persisted-only context");
+        persisted
+            .set_system_context_state(state_context)
+            .expect("persist system-context state");
+        store.save(&persisted).await.expect("save stale snapshot");
+        assert!(
+            state
+                .service
+                .export_live_session(&created.session_id)
+                .await
+                .expect("live session")
+                .system_context_state()
+                .unwrap_or_default()
+                .pending
+                .is_empty(),
+            "test precondition: live session must not carry the durable-only pending context"
+        );
+
+        let input: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": created.session_id.to_string(),
+            "prompt": "resume with keep-alive override",
+            "turn_metadata": {
+                "keep_alive": {
+                    "action": "clear"
+                }
+            }
+        }))
+        .expect("valid resume input");
+        let result = Box::pin(handle_meerkat_resume(&state, input, None, None)).await;
+        assert!(
+            result.is_ok(),
+            "MCP resume should succeed after replacing stale live state: {result:?}"
+        );
+
+        let persisted_state = store
+            .load(&created.session_id)
+            .await
+            .expect("reload persisted session")
+            .expect("persisted session after resume")
+            .system_context_state()
+            .unwrap_or_default();
+        assert!(
+            persisted_state
+                .pending
+                .iter()
+                .any(|pending| { pending.text == "mcp keep-alive stale live pending context" })
+                || persisted_state
+                    .applied
+                    .iter()
+                    .any(|applied| { applied.text == "mcp keep-alive stale live pending context" }),
+            "MCP keep_alive override must not overwrite durable-only system context"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_keep_alive_pre_start_mutation_does_not_overwrite_durable_pending_context() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store.clone()).await;
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let created = state
+            .service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(1024),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+
+        let mut persisted = store
+            .load(&created.session_id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session");
+        let mut state_context = persisted.system_context_state().unwrap_or_default();
+        state_context
+            .stage_append(
+                &meerkat_core::service::AppendSystemContextRequest {
+                    text: "mcp direct keep-alive stale live pending context".to_string(),
+                    source: Some("mcp-direct-keep-alive-stale-test".to_string()),
+                    idempotency_key: Some("mcp-direct-keep-alive-stale-test".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("stage persisted-only context");
+        persisted
+            .set_system_context_state(state_context)
+            .expect("persist system-context state");
+        store.save(&persisted).await.expect("save stale snapshot");
+
+        let ingress = state.runtime_ingress_context();
+        apply_mcp_resume_keep_alive_override(&state, &ingress, &created.session_id, false, None)
+            .await
+            .expect("keep-alive clear should persist without erasing durable context");
+
+        let persisted_state = store
+            .load(&created.session_id)
+            .await
+            .expect("reload persisted session")
+            .expect("persisted session after keep_alive")
+            .system_context_state()
+            .unwrap_or_default();
+        assert!(
+            persisted_state.pending.iter().any(|pending| {
+                pending.text == "mcp direct keep-alive stale live pending context"
+            }),
+            "pre-start keep_alive persistence must not overwrite durable-only system context"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_resume_keep_alive_enable_uses_persisted_comms_name_without_live_runtime() {
         let (state, session_id) =
             state_with_persisted_session_metadata(false, Some("persisted-agent".to_string())).await;
@@ -5282,6 +5472,39 @@ mod tests {
                 .contains_session(&created.session_id)
                 .await,
             "post-commit MCP rebuild error must preserve runtime registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_recovered_create_error_cleans_prepared_runtime_without_live_session() {
+        let (state, session_id) = state_with_persisted_session_metadata(false, None).await;
+        let ingress = state.runtime_ingress_context();
+        ingress.ensure_session(&session_id).await;
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "test precondition: prepared runtime should be registered"
+        );
+        assert!(
+            state
+                .service
+                .export_live_session(&session_id)
+                .await
+                .is_err(),
+            "test precondition: only a durable row should exist"
+        );
+
+        cleanup_mcp_recovered_runtime_after_create_error(
+            &state,
+            &ingress,
+            &session_id,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "pre-commit create errors without a live session must clear prepared runtime state"
         );
     }
 

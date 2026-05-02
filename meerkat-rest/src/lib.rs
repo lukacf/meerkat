@@ -516,6 +516,58 @@ async fn cleanup_prepared_rest_runtime_if_new(
     }
 }
 
+async fn cleanup_prepared_rest_runtime_after_create_error(
+    state: &AppState,
+    session_id: &SessionId,
+    live_session_discarded: bool,
+    runtime_entry_existed_before_prepare: bool,
+) {
+    match state.session_service.export_live_session(session_id).await {
+        Ok(_) => return,
+        Err(SessionError::NotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "preserving REST runtime registration after create error because live session state is unknown"
+            );
+            return;
+        }
+    }
+
+    if live_session_discarded || !runtime_entry_existed_before_prepare {
+        cleanup_prepared_rest_runtime(state, session_id).await;
+    }
+}
+
+async fn cleanup_rest_runtime_context_after_create_error(
+    context: &RestRuntimeExecutorContext,
+    session_id: &SessionId,
+    live_session_discarded: bool,
+    runtime_entry_existed_before_prepare: bool,
+) {
+    match context
+        .session_service
+        .export_live_session(session_id)
+        .await
+    {
+        Ok(_) => return,
+        Err(SessionError::NotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "preserving REST runtime registration after create error because live session state is unknown"
+            );
+            return;
+        }
+    }
+
+    if live_session_discarded || !runtime_entry_existed_before_prepare {
+        context.runtime_adapter.unregister_session(session_id).await;
+    }
+}
+
 #[cfg(feature = "comms")]
 fn comms_runtime_for_peer_ingress(
     keep_alive: bool,
@@ -796,9 +848,13 @@ async fn apply_runtime_turn(
                     .create_session(recovered.into_deferred_create_request())
                     .await
                 {
-                    if !runtime_entry_existed_before_prepare {
-                        context.runtime_adapter.unregister_session(session_id).await;
-                    }
+                    cleanup_rest_runtime_context_after_create_error(
+                        context,
+                        session_id,
+                        false,
+                        runtime_entry_existed_before_prepare,
+                    )
+                    .await;
                     return Err(error);
                 }
                 #[cfg(feature = "comms")]
@@ -1032,9 +1088,13 @@ async fn apply_runtime_turn(
                 .create_session(recovered.into_deferred_create_request())
                 .await
             {
-                if !runtime_entry_existed_before_prepare {
-                    context.runtime_adapter.unregister_session(session_id).await;
-                }
+                cleanup_rest_runtime_context_after_create_error(
+                    context,
+                    session_id,
+                    false,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 return Err(error);
             }
             #[cfg(feature = "comms")]
@@ -4142,12 +4202,13 @@ async fn continue_session_inner(
             .await;
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
-        match state
+        let live_session_discarded = match state
             .session_service
             .discard_live_session(&session_id)
             .await
         {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Ok(()) => true,
+            Err(SessionError::NotFound { .. }) => false,
             Err(error) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
@@ -4161,13 +4222,19 @@ async fn continue_session_inner(
                     "Failed to replace live session: {error}"
                 ))));
             }
-        }
+        };
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                cleanup_prepared_rest_runtime(state, &session_id).await;
+                cleanup_prepared_rest_runtime_after_create_error(
+                    state,
+                    &session_id,
+                    live_session_discarded,
+                    runtime_entry_existed_before_prepare,
+                )
+                .await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
                     "Failed to rebuild session: {e}"
                 ))));

@@ -220,6 +220,24 @@ async fn read_response(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde
     }
 }
 
+async fn wait_for_seen_tool_calls(
+    client: &RecordingToolClient,
+    expected: usize,
+) -> Vec<Vec<String>> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    loop {
+        let seen = client.seen_tools();
+        if seen.len() >= expected {
+            return seen;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} LLM call(s), saw {seen:?}"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -279,6 +297,70 @@ async fn initialize_roundtrip() {
     }
 
     // Close to trigger EOF
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn immediate_session_create_keep_alive_policy_runs_first_turn_once() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/create",
+            "params": {
+                "prompt": "Run the keep-alive create turn.",
+                "comms_name": "rpc-create-keepalive-policy",
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false,
+                "turn_metadata": {
+                    "keep_alive": {
+                        "action": "set",
+                        "value": {
+                            "ttl_secs": 75,
+                            "policy": "policy_driven"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create with non-default keep_alive policy failed: {create_resp}"
+    );
+
+    let seen = wait_for_seen_tool_calls(&client, 1).await;
+    assert_eq!(
+        seen.len(),
+        1,
+        "immediate keep_alive create must run the first turn exactly once"
+    );
+
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }

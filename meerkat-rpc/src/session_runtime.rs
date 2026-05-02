@@ -9853,6 +9853,56 @@ mod tests {
     }
 
     #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn pending_initial_keep_alive_policy_attaches_peer_ingress_without_turn_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+        let keep_alive_policy = KeepAlivePolicy {
+            ttl: std::time::Duration::from_secs(75),
+            policy: KeepAliveMode::PolicyDriven,
+        };
+        let mut build = mock_build_config();
+        build.comms_name = Some("scheduled-initial-keepalive-agent".to_string());
+        build.initial_turn_metadata = Some(RuntimeTurnMetadata {
+            keep_alive: Some(TurnMetadataOverride::Set(keep_alive_policy)),
+            ..Default::default()
+        });
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create staged keep_alive session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(&session_id, "materialize".into(), tx, None, None)
+            .await
+            .expect("first runtime turn should materialize with initial keep_alive metadata");
+
+        let owner_after = runtime
+            .runtime_adapter
+            .peer_ingress_owner(&session_id)
+            .await;
+        assert!(
+            matches!(
+                owner_after,
+                meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+            ),
+            "initial_turn_metadata.keep_alive must attach peer ingress after runtime materialization: {owner_after:?}"
+        );
+        let persisted = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session should be persisted");
+        let metadata = persisted
+            .session_metadata()
+            .expect("session metadata should be present");
+        assert_eq!(metadata.keep_alive_policy, Some(keep_alive_policy));
+    }
+
+    #[cfg(feature = "comms")]
     fn runtime_keep_alive_set_primitive() -> RunPrimitive {
         use meerkat_core::lifecycle::run_primitive::{
             KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, StagedRunInput,

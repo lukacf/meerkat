@@ -807,7 +807,6 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
         // exercises.
         provider_params: Some(json!({ "reasoning_effort": "low" })),
         keep_alive: false,
-        keep_alive_policy: None,
         comms_name: Some("explicit-name".to_string()),
         peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "explicit")),
         ..AgentBuildConfig::new("gpt-5.4")
@@ -1144,7 +1143,6 @@ async fn build_agent_keep_alive_without_comms_name_fails() {
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         keep_alive: true,
-        keep_alive_policy: None,
         comms_name: None,
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };

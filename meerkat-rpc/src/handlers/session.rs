@@ -316,9 +316,10 @@ pub async fn handle_create(
         create_turn_provider_params_for_build(initial_turn_metadata.as_ref());
     build_config.connection_ref =
         create_turn_connection_ref_for_build(initial_turn_metadata.as_ref());
-    build_config.initial_turn_metadata = defer_initial_turn
-        .then(|| initial_turn_metadata.clone())
-        .flatten();
+    // Stage canonical create-time metadata for both deferred and immediate
+    // creates. Immediate first-turn dispatch below passes `None` so pending
+    // promotion merges this carrier with only the runtime-owned execution stamp.
+    build_config.initial_turn_metadata = initial_turn_metadata.clone();
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
 
@@ -449,14 +450,13 @@ pub async fn handle_create(
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
         let prompt_for_turn = params.prompt.clone();
-        let turn_metadata_for_turn = initial_turn_metadata.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
                 .start_turn_via_runtime(
                     &sid_for_turn,
                     prompt_for_turn,
                     event_tx_for_turn,
-                    turn_metadata_for_turn,
+                    None,
                     None,
                 )
                 .await
@@ -489,13 +489,7 @@ pub async fn handle_create(
         }
     } else {
         match runtime
-            .start_turn_via_runtime(
-                &session_id,
-                params.prompt,
-                mcp_event_tx,
-                initial_turn_metadata,
-                None,
-            )
+            .start_turn_via_runtime(&session_id, params.prompt, mcp_event_tx, None, None)
             .await
         {
             Ok(r) => r,

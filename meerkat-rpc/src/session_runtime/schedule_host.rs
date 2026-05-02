@@ -238,21 +238,14 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(default_llm_client);
         }
 
-        let keep_alive = create.requests_keep_alive();
         let session_id = self
             .create_session(build_config, Some(create.labels.clone()), None)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.message))?;
-        #[cfg(feature = "comms")]
-        {
-            let comms_rt = self.service.comms_runtime(&session_id).await;
-            let comms_rt = Self::comms_runtime_for_peer_ingress(keep_alive, comms_rt);
-            self.runtime_adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
-        }
-        #[cfg(not(feature = "comms"))]
-        let _ = keep_alive;
+        // `create_session` stages only. The first scheduled prompt is admitted
+        // through the runtime loop, where pending materialization merges this
+        // initial metadata and attaches peer ingress after the service session
+        // and its comms runtime exist.
         Ok(session_id)
     }
 
@@ -426,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_scheduled_materialization_derives_keep_alive_from_turn_metadata() {
+    fn rpc_scheduled_materialization_stages_initial_turn_metadata_without_pre_ingress_attach() {
         let source = include_str!("schedule_host.rs");
         let start = source
             .find("pub(super) async fn materialize_scheduled_session")
@@ -437,12 +430,12 @@ mod tests {
         let body = &source[start..end];
 
         assert!(
-            body.contains("let keep_alive = create.requests_keep_alive()"),
-            "RPC scheduled materialization must derive keep_alive from canonical initial_turn_metadata"
+            body.contains("build_config.initial_turn_metadata = create.initial_turn_metadata()"),
+            "RPC scheduled materialization must stage canonical initial_turn_metadata"
         );
         assert!(
-            body.contains("update_peer_ingress_context"),
-            "RPC scheduled materialization must update peer ingress when canonical metadata requests keep_alive"
+            !body.contains("update_peer_ingress_context"),
+            "RPC scheduled materialization must not try to attach peer ingress before the service session exists"
         );
     }
 }

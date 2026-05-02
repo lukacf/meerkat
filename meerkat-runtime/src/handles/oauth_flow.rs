@@ -113,6 +113,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             &removed_browser,
             &removed_device,
             now_millis,
+            SnapshotRemovalMode::Merge,
         )
         .map_err(|err| {
             DslTransitionError::new(
@@ -429,6 +430,21 @@ impl RuntimeOAuthFlowHandle {
         )
     }
 
+    fn persist_registry_payloads_claiming_removal(
+        &self,
+        operation: &'static str,
+        removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+        removed_device: &[PersistedOAuthDeviceFlowRemoval],
+    ) -> Result<(), OAuthFlowError> {
+        persist_registry_payloads_claiming_removal(
+            &self.registry,
+            &self.store,
+            operation,
+            removed_browser,
+            removed_device,
+        )
+    }
+
     fn browser_record_expires_at_millis(
         &self,
         record: &OAuthFlowRecord,
@@ -730,7 +746,34 @@ fn persist_registry_payloads(
         removed_browser,
         removed_device,
         now_millis,
+        SnapshotRemovalMode::Merge,
     )
+}
+
+fn persist_registry_payloads_claiming_removal(
+    registry: &OAuthFlowRegistry,
+    store: &StoreSlot,
+    operation: &'static str,
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
+) -> Result<(), OAuthFlowError> {
+    let now_millis = current_time_millis();
+    let snapshot = registry.snapshot_for_persistence(now_millis);
+    persist_registry_snapshot(
+        &snapshot,
+        store,
+        operation,
+        removed_browser,
+        removed_device,
+        now_millis,
+        SnapshotRemovalMode::Claim,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotRemovalMode {
+    Merge,
+    Claim,
 }
 
 fn persist_registry_snapshot(
@@ -740,6 +783,7 @@ fn persist_registry_snapshot(
     removed_browser: &[PersistedOAuthBrowserFlowRemoval],
     removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
+    removal_mode: SnapshotRemovalMode,
 ) -> Result<(), OAuthFlowError> {
     let store = store
         .lock()
@@ -761,16 +805,23 @@ fn persist_registry_snapshot(
             removed_browser,
             removed_device,
             now_millis,
+            removal_mode,
         )?;
         serde_json::to_vec(&merged)
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))
     };
-    store
-        .update_auth_oauth_flow_snapshot(&mut update)
-        .map_err(|err| OAuthFlowError::PersistenceFailed {
+    match store.update_auth_oauth_flow_snapshot(&mut update) {
+        Ok(()) => Ok(()),
+        Err(crate::store::RuntimeStoreError::NotFound(_))
+            if removal_mode == SnapshotRemovalMode::Claim =>
+        {
+            Err(OAuthFlowError::Missing)
+        }
+        Err(err) => Err(OAuthFlowError::PersistenceFailed {
             operation,
             detail: err.to_string(),
-        })
+        }),
+    }
 }
 
 type BrowserSnapshotKey = (String, String, Option<String>, String);
@@ -862,12 +913,59 @@ fn merge_device_removal(
     }
 }
 
+fn ensure_removed_flows_are_active(
+    current: &OAuthFlowRegistrySnapshot,
+    browser_removed: &BTreeMap<BrowserSnapshotKey, PersistedOAuthBrowserFlowRemoval>,
+    device_removed: &BTreeMap<DeviceSnapshotKey, PersistedOAuthDeviceFlowRemoval>,
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
+    now_millis: u64,
+) -> Result<(), crate::store::RuntimeStoreError> {
+    let active_browser = current
+        .browser
+        .iter()
+        .filter(|flow| flow.expires_at_millis > now_millis)
+        .map(persisted_browser_snapshot_key)
+        .collect::<BTreeSet<_>>();
+    for removal in removed_browser {
+        let key = persisted_browser_removal_key(removal);
+        if removal.expires_at_millis <= now_millis
+            || browser_removed.contains_key(&key)
+            || !active_browser.contains(&key)
+        {
+            return Err(crate::store::RuntimeStoreError::NotFound(
+                "oauth browser flow was already consumed".to_string(),
+            ));
+        }
+    }
+
+    let active_device = current
+        .device
+        .iter()
+        .filter(|flow| flow.expires_at_millis > now_millis)
+        .map(persisted_device_snapshot_key)
+        .collect::<BTreeSet<_>>();
+    for removal in removed_device {
+        let key = persisted_device_removal_key(removal);
+        if removal.expires_at_millis <= now_millis
+            || device_removed.contains_key(&key)
+            || !active_device.contains(&key)
+        {
+            return Err(crate::store::RuntimeStoreError::NotFound(
+                "oauth device flow was already consumed".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn merge_oauth_registry_snapshot(
     current: Option<&[u8]>,
     local: &OAuthFlowRegistrySnapshot,
     removed_browser: &[PersistedOAuthBrowserFlowRemoval],
     removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
+    removal_mode: SnapshotRemovalMode,
 ) -> Result<OAuthFlowRegistrySnapshot, crate::store::RuntimeStoreError> {
     let mut merged = match current {
         Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(bytes)
@@ -878,12 +976,22 @@ fn merge_oauth_registry_snapshot(
     for removal in merged.browser_removed.iter().cloned() {
         merge_browser_removal(&mut browser_removed, removal, now_millis);
     }
-    for removal in removed_browser.iter().cloned() {
-        merge_browser_removal(&mut browser_removed, removal, now_millis);
-    }
     let mut device_removed = BTreeMap::new();
     for removal in merged.device_removed.iter().cloned() {
         merge_device_removal(&mut device_removed, removal, now_millis);
+    }
+    if removal_mode == SnapshotRemovalMode::Claim {
+        ensure_removed_flows_are_active(
+            &merged,
+            &browser_removed,
+            &device_removed,
+            removed_browser,
+            removed_device,
+            now_millis,
+        )?;
+    }
+    for removal in removed_browser.iter().cloned() {
+        merge_browser_removal(&mut browser_removed, removal, now_millis);
     }
     for removal in removed_device.iter().cloned() {
         merge_device_removal(&mut device_removed, removal, now_millis);
@@ -1115,7 +1223,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
             device_code: record.device_code.clone(),
             expires_at_millis: expires_at_millis(remaining)?,
         }];
-        persist_registry_payloads(
+        persist_registry_payloads_claiming_removal(
             &self.registry,
             &self.store,
             "persist_oauth_device_flow_payloads",
@@ -1264,11 +1372,14 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             state: state.to_string(),
             expires_at_millis: self.browser_record_expires_at_millis(&record)?,
         }];
-        if let Err(err) = self.persist_registry_payloads_removing(
+        if let Err(err) = self.persist_registry_payloads_claiming_removal(
             "consume_oauth_browser_flow",
             &removed_browser,
             &[],
         ) {
+            if matches!(err, OAuthFlowError::Missing) {
+                return Err(err);
+            }
             let _ = self.restore_browser_flow(state, &record);
             return Err(err);
         }
@@ -1594,6 +1705,25 @@ mod tests {
                 .lock()
                 .map(|snapshot| snapshot.clone())
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        }
+
+        fn update_auth_oauth_flow_snapshot(
+            &self,
+            update: &mut crate::store::AuthOAuthFlowSnapshotUpdate<'_>,
+        ) -> Result<(), RuntimeStoreError> {
+            self.wait_if_oauth_persist_blocked();
+            if self.fail_oauth_persist.load(Ordering::SeqCst) {
+                return Err(RuntimeStoreError::WriteFailed(
+                    "injected oauth snapshot failure".to_string(),
+                ));
+            }
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            let next = update(snapshot.as_deref())?;
+            *snapshot = Some(next);
+            Ok(())
         }
 
         async fn commit_session_boundary(
@@ -2282,6 +2412,113 @@ mod tests {
         stale_authority
             .verify_device_code(replacement_device_code, &replacement_target, provider)
             .expect("replacement device flow remains usable");
+    }
+
+    #[test]
+    fn concurrent_persistent_browser_consumes_require_fresh_durable_claim() {
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = creator
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+        let first = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                Duration::from_secs(60),
+                Arc::new(RuntimeAuthLeaseHandle::new()),
+                &store_dyn,
+            ),
+        );
+        let second = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+
+        store.block_next_oauth_persist();
+        let first_consume = std::thread::spawn({
+            let first = Arc::clone(&first);
+            let state = state.clone();
+            let target = target.clone();
+            move || first.consume(&state, &target, provider, redirect_uri)
+        });
+        store.wait_for_blocked_oauth_persist();
+
+        second
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("second authority wins durable consume race");
+        store.release_blocked_oauth_persist();
+        assert!(matches!(
+            first_consume
+                .join()
+                .expect("first consume thread should not panic"),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn concurrent_persistent_device_consumes_require_fresh_durable_claim() {
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+        let target = target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "race-device-code";
+        creator
+            .admit_device_code(
+                target.clone(),
+                provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+        let first = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+        let second = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &store_dyn,
+        );
+        let first_poll = first
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("first authority begins poll");
+        let second_poll = second
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("second authority begins poll");
+
+        store.block_next_oauth_persist();
+        let first_consume = std::thread::spawn(move || first_poll.consume());
+        store.wait_for_blocked_oauth_persist();
+
+        second_poll
+            .consume()
+            .expect("second authority wins durable device consume race");
+        store.release_blocked_oauth_persist();
+        assert!(matches!(
+            first_consume
+                .join()
+                .expect("first device consume thread should not panic"),
+            Err(OAuthFlowError::Missing)
+        ));
     }
 
     #[test]

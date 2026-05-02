@@ -675,6 +675,9 @@ impl OAuthDevicePollLease {
                 if let Some(lifecycle) = &self.lifecycle
                     && let Err(err) = lifecycle.device_flow_payload_removed(&record)
                 {
+                    if matches!(err, OAuthFlowError::Missing) {
+                        return Err(err);
+                    }
                     let _ = lifecycle.restore_device_flow(&verified);
                     let mut flows = self.device_flows.lock();
                     flows.insert(

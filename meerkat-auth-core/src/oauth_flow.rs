@@ -383,10 +383,6 @@ pub struct OAuthFlowRegistrySnapshot {
     pub browser: Vec<PersistedOAuthBrowserFlow>,
     #[serde(default)]
     pub device: Vec<PersistedOAuthDeviceFlow>,
-    #[serde(default)]
-    pub browser_removed: Vec<PersistedOAuthBrowserFlowRemoval>,
-    #[serde(default)]
-    pub device_removed: Vec<PersistedOAuthDeviceFlowRemoval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,20 +402,6 @@ pub struct PersistedOAuthDeviceFlow {
     pub provider: String,
     pub device_code: String,
     pub created_at_millis: u64,
-    pub expires_at_millis: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistedOAuthBrowserFlowRemoval {
-    pub target: ConnectionRef,
-    pub state: String,
-    pub expires_at_millis: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistedOAuthDeviceFlowRemoval {
-    pub target: ConnectionRef,
-    pub device_code: String,
     pub expires_at_millis: u64,
 }
 
@@ -984,12 +966,7 @@ impl OAuthFlowRegistry {
             })
             .collect();
 
-        OAuthFlowRegistrySnapshot {
-            browser,
-            device,
-            browser_removed: Vec::new(),
-            device_removed: Vec::new(),
-        }
+        OAuthFlowRegistrySnapshot { browser, device }
     }
 
     pub fn insert_restored_browser_flow(

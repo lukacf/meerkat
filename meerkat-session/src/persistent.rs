@@ -1580,19 +1580,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let result = match self.inner.create_session(req).await {
             Ok(result) => result,
             Err(error) => {
-                if Self::callback_pending_terminal(&error).is_some()
-                    && let Some(session_id) = callback_session_id
-                {
-                    let _ = self.persist_full_session(&session_id).await;
-                }
-                if let SessionError::PostAdmissionFailure { id: session_id, .. } = &error {
+                let committed_session_id = match &error {
+                    SessionError::PostAdmissionFailure { id, .. } => Some(id.clone()),
+                    _ if Self::callback_pending_terminal(&error).is_some() => callback_session_id,
+                    _ => None,
+                };
+                if let Some(session_id) = committed_session_id {
                     self.install_create_session_sidecars(
-                        session_id,
+                        &session_id,
                         Arc::clone(&gate),
                         create_projection_session_tx,
                     )
                     .await;
-                    if let Ok(saved_len) = self.persist_full_session(session_id).await {
+                    if let Ok(saved_len) = self.persist_full_session(&session_id).await {
                         checkpointer
                             .last_saved_len
                             .store(saved_len, std::sync::atomic::Ordering::Release);
@@ -2841,7 +2841,15 @@ mod tests {
     struct DummyAgent {
         session: Arc<std::sync::Mutex<Session>>,
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
-        run_failure: Option<String>,
+        run_failure: Option<DummyRunFailure>,
+    }
+
+    enum DummyRunFailure {
+        Internal(String),
+        CallbackPending {
+            tool_name: String,
+            args: serde_json::Value,
+        },
     }
 
     #[async_trait::async_trait]
@@ -2851,8 +2859,18 @@ mod tests {
             prompt: meerkat_core::types::ContentInput,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
-            if let Some(message) = self.run_failure.clone() {
-                return Err(meerkat_core::error::AgentError::InternalError(message));
+            if let Some(failure) = self.run_failure.as_ref() {
+                return Err(match failure {
+                    DummyRunFailure::Internal(message) => {
+                        meerkat_core::error::AgentError::InternalError(message.clone())
+                    }
+                    DummyRunFailure::CallbackPending { tool_name, args } => {
+                        meerkat_core::error::AgentError::CallbackPending {
+                            tool_name: tool_name.clone(),
+                            args: args.clone(),
+                        }
+                    }
+                });
             }
             let session_id = self.session_id();
             let result = {
@@ -3248,7 +3266,9 @@ mod tests {
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
-                run_failure: Some("synthetic run failure".to_string()),
+                run_failure: Some(DummyRunFailure::Internal(
+                    "synthetic run failure".to_string(),
+                )),
             })
         }
     }
@@ -3274,7 +3294,39 @@ mod tests {
                 inner: DummyAgent {
                     session: Arc::new(std::sync::Mutex::new(session)),
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
-                    run_failure: Some("synthetic create turn failure".to_string()),
+                    run_failure: Some(DummyRunFailure::Internal(
+                        "synthetic create turn failure".to_string(),
+                    )),
+                },
+            })
+        }
+    }
+
+    struct EventfulCallbackPendingBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for EventfulCallbackPendingBuilder {
+        type Agent = EventfulDummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(EventfulDummyAgent {
+                inner: DummyAgent {
+                    session: Arc::new(std::sync::Mutex::new(session)),
+                    system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                    run_failure: Some(DummyRunFailure::CallbackPending {
+                        tool_name: "get_weather".to_string(),
+                        args: serde_json::json!({"city": "Tokyo"}),
+                    }),
                 },
             })
         }
@@ -6783,6 +6835,81 @@ mod tests {
             )
             .await
             .expect("post-admission session should retain live projection machinery");
+
+        event_store.wait_for_seq(&session_id, 2).await;
+        let events_path = dir
+            .path()
+            .join(".rkat")
+            .join("sessions")
+            .join(session_id.to_string())
+            .join("events.jsonl");
+        let projected = read_projected_events_after(&events_path, "run_completed").await;
+        assert!(projected.contains("run_started"));
+        assert!(projected.contains("run_completed"));
+    }
+
+    #[tokio::test]
+    async fn test_callback_pending_create_installs_projection_and_checkpointer() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            EventfulCallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+        let req =
+            create_request_with_metadata("pause for callback", InitialTurnPolicy::RunImmediately);
+        let session_id = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .expect("test request should seed a session")
+            .id()
+            .clone();
+
+        let error = service
+            .create_session(req)
+            .await
+            .expect_err("callback-pending first turn should surface as a resumable create error");
+        assert!(
+            matches!(
+                error,
+                SessionError::Agent(AgentError::CallbackPending { .. })
+            ),
+            "expected callback-pending create error, got {error:?}"
+        );
+
+        assert!(
+            service
+                .checkpointer_gates
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "callback-pending create errors must install the same checkpointer gate as successful creates"
+        );
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "project future callback-pending event".to_string(),
+                    source: Some("test".to_string()),
+                    idempotency_key: Some("callback-pending-create-projection".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("callback-pending session should retain live projection machinery");
 
         event_store.wait_for_seq(&session_id, 2).await;
         let events_path = dir

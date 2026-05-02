@@ -172,6 +172,8 @@ pub struct AppState {
     pub request_executor: Arc<SurfaceRequestExecutor>,
     #[cfg(test)]
     test_cancel_after_rest_continue_final_recheck_before_admission: bool,
+    #[cfg(test)]
+    test_cancel_after_rest_continue_mcp_boundary_before_failure: bool,
     /// Persistent TokenStore for OAuth-backed bindings. Shared with the
     /// AgentFactory so both read and write paths (login, resolve,
     /// logout) see the same credentials.
@@ -451,6 +453,8 @@ impl AppState {
             request_executor,
             #[cfg(test)]
             test_cancel_after_rest_continue_final_recheck_before_admission: false,
+            #[cfg(test)]
+            test_cancel_after_rest_continue_mcp_boundary_before_failure: false,
             token_store,
             auth_lease,
             provider_registry,
@@ -2924,12 +2928,36 @@ fn cancelled_terminal(
     }
 }
 
+fn surface_effect_failure_terminal(
+    ctx: Option<&RequestContext>,
+    committed_surface_effects: bool,
+    err: ApiError,
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+    if committed_surface_effects {
+        committed_terminal(ctx, Err(err))
+    } else {
+        failed_terminal(ctx, err)
+    }
+}
+
 #[cfg(test)]
 async fn maybe_cancel_rest_continue_after_final_recheck_before_admission(
     state: &AppState,
     ctx: Option<&RequestContext>,
 ) {
     if state.test_cancel_after_rest_continue_final_recheck_before_admission
+        && let Some(ctx) = ctx
+    {
+        let _ = state.request_executor.cancel_request(ctx.key()).await;
+    }
+}
+
+#[cfg(test)]
+async fn maybe_cancel_rest_continue_after_mcp_boundary_before_failure(
+    state: &AppState,
+    ctx: Option<&RequestContext>,
+) {
+    if state.test_cancel_after_rest_continue_mcp_boundary_before_failure
         && let Some(ctx) = ctx
     {
         let _ = state.request_executor.cancel_request(ctx.key()).await;
@@ -4053,22 +4081,26 @@ async fn continue_session_inner(
             turn_prompt = ContentInput::Blocks(blocks);
         }
     }
+    #[cfg(test)]
+    maybe_cancel_rest_continue_after_mcp_boundary_before_failure(state, req_ctx.as_ref()).await;
 
     let adapter = state.runtime_adapter.clone();
     let final_result = if requires_rebuild {
         let Some(session) = loaded_session else {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(
+            return surface_effect_failure_terminal(
                 req_ctx.as_ref(),
+                mcp_boundary_committed,
                 ApiError::NotFound(format!("Session not found: {session_id}")),
             );
         };
         let Some(bindings) = prepared_bindings else {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(
+            return surface_effect_failure_terminal(
                 req_ctx.as_ref(),
+                mcp_boundary_committed,
                 ApiError::Internal("request lifecycle bindings were not prepared".to_string()),
             );
         };
@@ -4175,7 +4207,11 @@ async fn continue_session_inner(
                 .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
+                return surface_effect_failure_terminal(
+                    req_ctx.as_ref(),
+                    mcp_boundary_committed,
+                    ApiError::BadRequest(err),
+                );
             }
         };
         if let Err(err) = validate_prompt_video_input(
@@ -4193,7 +4229,11 @@ async fn continue_session_inner(
             .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
+            return surface_effect_failure_terminal(
+                req_ctx.as_ref(),
+                mcp_boundary_committed,
+                ApiError::BadRequest(err),
+            );
         }
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
@@ -4206,8 +4246,9 @@ async fn continue_session_inner(
                 .await;
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
+                return surface_effect_failure_terminal(
                     req_ctx.as_ref(),
+                    mcp_boundary_committed,
                     ApiError::Internal(format!("Failed to rebuild session: {e}")),
                 );
             }
@@ -4297,7 +4338,11 @@ async fn continue_session_inner(
                 }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
+                return surface_effect_failure_terminal(
+                    req_ctx.as_ref(),
+                    mcp_boundary_committed,
+                    ApiError::Internal(err.to_string()),
+                );
             }
         };
         if let Some(ctx) = req_ctx.as_ref() {
@@ -4321,8 +4366,9 @@ async fn continue_session_inner(
             if keep_alive && comms_rt.is_none() {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
+                return surface_effect_failure_terminal(
                     req_ctx.as_ref(),
+                    mcp_boundary_committed,
                     ApiError::BadRequest(
                         "keep_alive requires a session created with comms_name".to_string(),
                     ),
@@ -4339,7 +4385,11 @@ async fn continue_session_inner(
                 Err(err) => {
                     drop(caller_event_tx);
                     drain_event_forwarder(&session_id, forward_task).await;
-                    return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
+                    return surface_effect_failure_terminal(
+                        req_ctx.as_ref(),
+                        mcp_boundary_committed,
+                        ApiError::BadRequest(err),
+                    );
                 }
             };
         let current_identity = stored_metadata
@@ -4352,7 +4402,11 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
+            return surface_effect_failure_terminal(
+                req_ctx.as_ref(),
+                mcp_boundary_committed,
+                ApiError::BadRequest(err),
+            );
         }
 
         let input =
@@ -4411,7 +4465,11 @@ async fn continue_session_inner(
                 }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
+                return surface_effect_failure_terminal(
+                    req_ctx.as_ref(),
+                    mcp_boundary_committed,
+                    ApiError::Internal(err.to_string()),
+                );
             }
         };
         #[cfg(feature = "comms")]
@@ -4490,8 +4548,8 @@ async fn continue_session_inner(
                     .await;
                 state.runtime_adapter.unregister_session(&session_id).await;
             }
-            // Session exists for continue; failed terminals still take the
-            // machine-owned unpublished path.
+            // Session exists for continue; failures after committed session or
+            // boundary effects complete through committed terminal authority.
             committed_terminal(req_ctx.as_ref(), Err(err))
         }
     }
@@ -8047,6 +8105,110 @@ mod tests {
             );
             state.session_service.read(&session_id).await.expect(
                 "committed MCP boundary cancellation must not run unpublished rebuild cleanup",
+            );
+        }
+
+        #[tokio::test]
+        async fn test_post_mcp_boundary_validation_failure_after_cancel_uses_committed_terminal() {
+            let (mut state, _temp) = make_test_state().await;
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            state.test_cancel_after_rest_continue_mcp_boundary_before_failure = true;
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    model: state.default_model.to_string(),
+                    prompt: "Hello".to_string().into(),
+                    render_metadata: None,
+                    system_prompt: None,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("deferred session create should succeed");
+            let session_id = created.session_id;
+            {
+                let mut map = state.mcp_sessions.write().await;
+                let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+                let (tx, rx) = mpsc::unbounded_channel();
+                map.insert(
+                    session_id.clone(),
+                    SessionMcpState {
+                        adapter,
+                        turn_counter: 0,
+                        lifecycle_tx: tx,
+                        lifecycle_rx: rx,
+                        drain_task_running: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+
+            let ctx = state
+                .request_executor
+                .try_begin_request(
+                    "rest-validation-failure-after-mcp-boundary-cancel",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+            let request = ContinueSessionRequest {
+                session_id: session_id.to_string(),
+                prompt: inline_video_prompt(),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                keep_alive: Some(false),
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                max_tokens: None,
+                hooks_override: None,
+                skill_refs: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            };
+
+            let terminal =
+                continue_session_inner(&state, &session_id.to_string(), request, Some(ctx.clone()))
+                    .await;
+            let resolution = state
+                .request_executor
+                .resolve_terminal(Some(ctx.key()), terminal)
+                .await;
+
+            match resolution {
+                RequestTerminalResolution::Emit(Err(ApiError::BadRequest(message))) => {
+                    assert!(
+                        message.contains("inline video input is not supported"),
+                        "unexpected validation message: {message}"
+                    );
+                }
+                other => panic!(
+                    "post-MCP-boundary validation failure must not be replaced by cancellation, got {other:?}"
+                ),
+            }
+            assert_eq!(
+                state
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .get(&session_id)
+                    .expect("MCP session should remain registered")
+                    .turn_counter,
+                1,
+                "test must commit the REST MCP boundary before the validation failure"
             );
         }
 

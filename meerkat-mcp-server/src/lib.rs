@@ -1246,6 +1246,13 @@ fn format_agent_result_tool(
     }
 }
 
+fn is_callback_pending_session_error(err: &SessionError) -> bool {
+    matches!(
+        err.agent_error(),
+        Some(meerkat::AgentError::CallbackPending { .. })
+    )
+}
+
 fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
     if tools.is_empty() {
         None
@@ -3015,7 +3022,11 @@ async fn handle_meerkat_run(
         Ok(run_result) => format_agent_result_tool(Ok(run_result), &session_id),
         Err(err) => {
             if session_exists {
-                Err(post_commit_session_created_error(&session_id, &err))
+                if is_callback_pending_session_error(&err) {
+                    format_agent_result_tool(Err(err), &session_id)
+                } else {
+                    Err(post_commit_session_created_error(&session_id, &err))
+                }
             } else {
                 state.runtime_adapter.unregister_session(&session_id).await;
                 ingress.clear_session(&session_id).await;
@@ -5013,6 +5024,93 @@ mod tests {
                 .contains_key(&session_id.to_string()),
             "resolving a resumable post-commit error must not unregister the MCP adapter"
         );
+    }
+
+    #[tokio::test]
+    async fn meerkat_run_callback_pending_preserves_pending_tool_payload_after_session_commit() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let callback_client: Arc<dyn meerkat::LlmClient> = Arc::new(TestClient::new(vec![
+            LlmEvent::ToolCallComplete {
+                id: "call-1".to_string(),
+                name: "get_weather".to_string(),
+                args: json!({"city": "Tokyo"}),
+                meta: None,
+            },
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::ToolUse,
+                },
+            },
+        ]));
+        let state = MeerkatMcpState::new_with_store_and_llm_client(store, callback_client).await;
+        let request_executor = state.surface_request_executor(Duration::from_millis(1));
+        let request_key = "mcp-create-callback-pending";
+        let context = request_executor
+            .try_begin_request(
+                request_key,
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+        let mut input = test_run_input("weather in Tokyo");
+        input.tools = vec![McpToolDef {
+            name: "get_weather".to_string(),
+            description: "Get weather".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"}
+                },
+                "required": ["city"]
+            }),
+            handler: Some("callback".to_string()),
+        }];
+
+        let result = Box::pin(handle_meerkat_run(
+            &state,
+            input,
+            None,
+            Some(context.clone()),
+        ))
+        .await
+        .expect("callback-pending create should return the pending tool-call payload");
+        let payload = unwrap_payload(result.clone());
+        assert_eq!(payload["status"], "pending_tool_call");
+        assert_eq!(payload["pending_tool_calls"][0]["tool_name"], "get_weather");
+        assert_eq!(payload["pending_tool_calls"][0]["args"]["city"], "Tokyo");
+        let session_id = meerkat::SessionId::parse(
+            payload["session_id"]
+                .as_str()
+                .expect("pending payload includes session id"),
+        )
+        .expect("pending payload session id should parse");
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("callback-pending create must leave a resumable session");
+
+        assert_eq!(
+            request_executor.cancel_request(context.key()).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel after callback-pending admission must not replace the pending payload"
+        );
+        let resolution = request_executor
+            .resolve_terminal(
+                Some(context.key()),
+                context.classify_success_terminal(json!({
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "result": result,
+                })),
+            )
+            .await;
+        assert!(matches!(resolution, RequestTerminalResolution::Emit(_)));
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("resolving callback-pending payload must not run rollback cleanup");
     }
 
     #[tokio::test]

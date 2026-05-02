@@ -113,7 +113,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             &removed_browser,
             &removed_device,
             now_millis,
-            SnapshotRemovalMode::Merge,
+            SnapshotPersistPolicy::merge(),
         )
         .map_err(|err| {
             DslTransitionError::new(
@@ -445,6 +445,21 @@ impl RuntimeOAuthFlowHandle {
         )
     }
 
+    fn persist_registry_payloads_claiming_admission(
+        &self,
+        operation: &'static str,
+        removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+        removed_device: &[PersistedOAuthDeviceFlowRemoval],
+    ) -> Result<(), OAuthFlowError> {
+        persist_registry_payloads_claiming_admission(
+            &self.registry,
+            &self.store,
+            operation,
+            removed_browser,
+            removed_device,
+        )
+    }
+
     fn browser_record_expires_at_millis(
         &self,
         record: &OAuthFlowRecord,
@@ -746,7 +761,7 @@ fn persist_registry_payloads(
         removed_browser,
         removed_device,
         now_millis,
-        SnapshotRemovalMode::Merge,
+        SnapshotPersistPolicy::merge(),
     )
 }
 
@@ -766,7 +781,27 @@ fn persist_registry_payloads_claiming_removal(
         removed_browser,
         removed_device,
         now_millis,
-        SnapshotRemovalMode::Claim,
+        SnapshotPersistPolicy::claim_removal(),
+    )
+}
+
+fn persist_registry_payloads_claiming_admission(
+    registry: &OAuthFlowRegistry,
+    store: &StoreSlot,
+    operation: &'static str,
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
+) -> Result<(), OAuthFlowError> {
+    let now_millis = current_time_millis();
+    let snapshot = registry.snapshot_for_persistence(now_millis);
+    persist_registry_snapshot(
+        &snapshot,
+        store,
+        operation,
+        removed_browser,
+        removed_device,
+        now_millis,
+        SnapshotPersistPolicy::claim_admission(registry.max_outstanding()),
     )
 }
 
@@ -776,6 +811,35 @@ enum SnapshotRemovalMode {
     Claim,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotPersistPolicy {
+    removal_mode: SnapshotRemovalMode,
+    admission_capacity: Option<usize>,
+}
+
+impl SnapshotPersistPolicy {
+    fn merge() -> Self {
+        Self {
+            removal_mode: SnapshotRemovalMode::Merge,
+            admission_capacity: None,
+        }
+    }
+
+    fn claim_removal() -> Self {
+        Self {
+            removal_mode: SnapshotRemovalMode::Claim,
+            admission_capacity: None,
+        }
+    }
+
+    fn claim_admission(max_outstanding: usize) -> Self {
+        Self {
+            removal_mode: SnapshotRemovalMode::Merge,
+            admission_capacity: Some(max_outstanding),
+        }
+    }
+}
+
 fn persist_registry_snapshot(
     snapshot: &OAuthFlowRegistrySnapshot,
     store: &StoreSlot,
@@ -783,7 +847,7 @@ fn persist_registry_snapshot(
     removed_browser: &[PersistedOAuthBrowserFlowRemoval],
     removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
-    removal_mode: SnapshotRemovalMode,
+    policy: SnapshotPersistPolicy,
 ) -> Result<(), OAuthFlowError> {
     let store = store
         .lock()
@@ -805,7 +869,8 @@ fn persist_registry_snapshot(
             removed_browser,
             removed_device,
             now_millis,
-            removal_mode,
+            policy.removal_mode,
+            policy.admission_capacity,
         )?;
         serde_json::to_vec(&merged)
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))
@@ -813,9 +878,16 @@ fn persist_registry_snapshot(
     match store.update_auth_oauth_flow_snapshot(&mut update) {
         Ok(()) => Ok(()),
         Err(crate::store::RuntimeStoreError::NotFound(_))
-            if removal_mode == SnapshotRemovalMode::Claim =>
+            if policy.removal_mode == SnapshotRemovalMode::Claim =>
         {
             Err(OAuthFlowError::Missing)
+        }
+        Err(crate::store::RuntimeStoreError::Internal(detail))
+            if policy.admission_capacity.is_some() && detail == DURABLE_OAUTH_CAPACITY_EXCEEDED =>
+        {
+            Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: policy.admission_capacity.unwrap_or(0),
+            })
         }
         Err(err) => Err(OAuthFlowError::PersistenceFailed {
             operation,
@@ -826,6 +898,7 @@ fn persist_registry_snapshot(
 
 type BrowserSnapshotKey = (String, String, Option<String>, String);
 type DeviceSnapshotKey = (String, String, Option<String>, String);
+const DURABLE_OAUTH_CAPACITY_EXCEEDED: &str = "oauth durable capacity exceeded";
 
 fn target_snapshot_key(target: &ConnectionRef) -> (String, String, Option<String>) {
     (
@@ -959,6 +1032,18 @@ fn ensure_removed_flows_are_active(
     Ok(())
 }
 
+fn ensure_merged_snapshot_within_capacity(
+    merged: &OAuthFlowRegistrySnapshot,
+    max_outstanding: usize,
+) -> Result<(), crate::store::RuntimeStoreError> {
+    if merged.browser.len().saturating_add(merged.device.len()) > max_outstanding {
+        return Err(crate::store::RuntimeStoreError::Internal(
+            DURABLE_OAUTH_CAPACITY_EXCEEDED.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn merge_oauth_registry_snapshot(
     current: Option<&[u8]>,
     local: &OAuthFlowRegistrySnapshot,
@@ -966,6 +1051,7 @@ fn merge_oauth_registry_snapshot(
     removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
     removal_mode: SnapshotRemovalMode,
+    admission_capacity: Option<usize>,
 ) -> Result<OAuthFlowRegistrySnapshot, crate::store::RuntimeStoreError> {
     let mut merged = match current {
         Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(bytes)
@@ -1049,6 +1135,9 @@ fn merge_oauth_registry_snapshot(
     merged
         .device_removed
         .sort_by_key(persisted_device_removal_key);
+    if let Some(max_outstanding) = admission_capacity {
+        ensure_merged_snapshot_within_capacity(&merged, max_outstanding)?;
+    }
     Ok(merged)
 }
 
@@ -1285,7 +1374,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 (Vec::new(), Vec::new())
             };
         self.expire_collected_flows(pruned);
-        if let Err(err) = self.persist_registry_payloads_removing(
+        if let Err(err) = self.persist_registry_payloads_claiming_admission(
             "admit_oauth_browser_flow",
             &removed_browser,
             &removed_device,
@@ -1457,7 +1546,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 (Vec::new(), Vec::new())
             };
         self.expire_collected_flows(pruned);
-        if let Err(err) = self.persist_registry_payloads_removing(
+        if let Err(err) = self.persist_registry_payloads_claiming_admission(
             "admit_oauth_device_flow",
             &removed_browser,
             &removed_device,
@@ -2518,6 +2607,118 @@ mod tests {
                 .join()
                 .expect("first device consume thread should not panic"),
             Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn concurrent_persistent_browser_admits_require_fresh_durable_capacity() {
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let first_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let first = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
+                Duration::from_secs(60),
+                1,
+                Arc::new(RuntimeAuthLeaseHandle::new()),
+                Some(Arc::downgrade(&first_store)),
+            ),
+        );
+        let second = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
+            Duration::from_secs(60),
+            1,
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            Some(Arc::downgrade(&second_store)),
+        );
+        let first_target = target();
+        let second_target = alternate_target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let first_redirect_uri = "http://127.0.0.1/first-callback";
+        let second_redirect_uri = "http://127.0.0.1/second-callback";
+
+        store.block_next_oauth_persist();
+        let first_admit = std::thread::spawn({
+            let first = Arc::clone(&first);
+            let first_target = first_target.clone();
+            move || {
+                first.start(
+                    first_target,
+                    provider,
+                    first_redirect_uri.to_string(),
+                    "first-verifier".to_string(),
+                )
+            }
+        });
+        store.wait_for_blocked_oauth_persist();
+
+        second
+            .start(
+                second_target,
+                provider,
+                second_redirect_uri.to_string(),
+                "second-verifier".to_string(),
+            )
+            .expect("second authority wins durable browser admission race");
+        store.release_blocked_oauth_persist();
+        assert!(matches!(
+            first_admit
+                .join()
+                .expect("first browser admit thread should not panic"),
+            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
+        ));
+    }
+
+    #[test]
+    fn concurrent_persistent_device_admits_require_fresh_durable_capacity() {
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let first_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let first = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
+                Duration::from_secs(60),
+                1,
+                Arc::new(RuntimeAuthLeaseHandle::new()),
+                Some(Arc::downgrade(&first_store)),
+            ),
+        );
+        let second = RuntimeOAuthFlowHandle::new_with_capacity_auth_lease_and_store(
+            Duration::from_secs(60),
+            1,
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            Some(Arc::downgrade(&second_store)),
+        );
+        let first_target = target();
+        let second_target = alternate_target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+
+        store.block_next_oauth_persist();
+        let first_admit = std::thread::spawn({
+            let first = Arc::clone(&first);
+            let first_target = first_target.clone();
+            move || {
+                first.admit_device_code(
+                    first_target,
+                    provider,
+                    "first-device-code".to_string(),
+                    Duration::from_secs(60),
+                )
+            }
+        });
+        store.wait_for_blocked_oauth_persist();
+
+        second
+            .admit_device_code(
+                second_target,
+                provider,
+                "second-device-code".to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("second authority wins durable device admission race");
+        store.release_blocked_oauth_persist();
+        assert!(matches!(
+            first_admit
+                .join()
+                .expect("first device admit thread should not panic"),
+            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
         ));
     }
 

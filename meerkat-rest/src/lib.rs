@@ -1141,6 +1141,17 @@ fn rest_turn_keep_alive_override(
     }
 }
 
+fn rest_turn_keep_alive_policy(
+    turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+
+    match turn_metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
+        Some(TurnMetadataOverride::Set(policy)) => Some(*policy),
+        Some(TurnMetadataOverride::Clear) | None => None,
+    }
+}
+
 async fn canonical_skill_keys_for_state(
     state: &AppState,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -3813,6 +3824,7 @@ async fn continue_session_inner(
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
+    let keep_alive_policy = rest_turn_keep_alive_policy(turn_metadata.as_ref());
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
@@ -4100,7 +4112,11 @@ async fn continue_session_inner(
             if let Some(explicit_keep_alive) = keep_alive_override {
                 match state
                     .session_service
-                    .apply_runtime_session_keep_alive(&session_id, explicit_keep_alive)
+                    .apply_runtime_session_keep_alive(
+                        &session_id,
+                        explicit_keep_alive,
+                        keep_alive_policy,
+                    )
                     .await
                 {
                     Ok(()) => {}

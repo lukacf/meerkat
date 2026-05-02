@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::lifecycle::run_primitive::{
-    KeepAliveMode, KeepAlivePolicy, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata,
-    TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
+    KeepAlivePolicy, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata, TurnInstruction,
+    TurnInstructionKind, TurnMetadataOverride,
 };
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
@@ -206,6 +206,7 @@ fn recovery_initial_turn_metadata(
     preload_skills: Option<Vec<SkillKey>>,
     additional_instructions: Option<Vec<String>>,
     keep_alive: bool,
+    keep_alive_policy: Option<KeepAlivePolicy>,
     runtime_owned_recovery: bool,
 ) -> Option<RuntimeTurnMetadata> {
     if !runtime_owned_recovery {
@@ -234,10 +235,9 @@ fn recovery_initial_turn_metadata(
         }
     }
     if keep_alive && metadata.keep_alive.is_none() {
-        metadata.keep_alive = Some(TurnMetadataOverride::Set(KeepAlivePolicy {
-            ttl: std::time::Duration::from_secs(30),
-            policy: KeepAliveMode::Pinned,
-        }));
+        metadata.keep_alive = Some(TurnMetadataOverride::Set(
+            keep_alive_policy.unwrap_or_else(crate::SessionMetadata::default_keep_alive_policy),
+        ));
     }
 
     (!metadata.is_empty()).then_some(metadata)
@@ -340,6 +340,7 @@ pub fn build_recovered_session(
         recovered_preload_skills.clone(),
         recovered_additional_instructions.clone(),
         keep_alive,
+        metadata.keep_alive_policy,
         runtime_owned_recovery,
     );
 
@@ -496,6 +497,7 @@ mod tests {
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,
+                keep_alive_policy: None,
                 comms_name: Some("peer-a".to_string()),
                 peer_meta: Some(
                     PeerMeta::default()
@@ -955,6 +957,7 @@ mod tests {
             Some(vec![skill.clone()]),
             Some(vec!["persisted instruction".to_string(), " ".to_string()]),
             true,
+            None,
             true,
         )
         .expect("runtime-owned recovery metadata");
@@ -982,6 +985,10 @@ mod tests {
             Some(vec![skill.clone()]),
             Some(vec!["persisted instruction".to_string(), " ".to_string()]),
             true,
+            Some(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(75),
+                policy: KeepAliveMode::PolicyDriven,
+            }),
             true,
         )
         .expect("runtime-owned recovery metadata from split compatibility state");
@@ -993,6 +1000,14 @@ mod tests {
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].kind, TurnInstructionKind::Host);
         assert_eq!(instructions[0].body, "persisted instruction");
+        assert_eq!(
+            metadata_from_split.keep_alive,
+            Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(75),
+                policy: KeepAliveMode::PolicyDriven,
+            })),
+            "runtime-owned recovery must preserve persisted keep_alive policy"
+        );
 
         assert!(
             recovery_initial_turn_metadata(
@@ -1000,6 +1015,7 @@ mod tests {
                 Some(vec![skill_key("standalone-skill")]),
                 Some(vec!["standalone instruction".to_string()]),
                 true,
+                None,
                 false,
             )
             .is_none(),

@@ -4343,6 +4343,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -4380,6 +4381,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -4422,6 +4424,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()

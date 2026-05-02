@@ -37,6 +37,19 @@ where
         .map(|metadata| metadata.map(Into::into))
 }
 
+fn serialize_public_runtime_turn_metadata<S>(
+    metadata: &Option<RuntimeTurnMetadata>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    metadata
+        .clone()
+        .map(meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata::from)
+        .serialize(serializer)
+}
+
 /// Common header for all input variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +308,7 @@ pub struct PromptInput {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_public_runtime_turn_metadata",
         deserialize_with = "deserialize_public_runtime_turn_metadata"
     )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
@@ -389,6 +403,7 @@ pub struct PeerInput {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_public_runtime_turn_metadata",
         deserialize_with = "deserialize_public_runtime_turn_metadata"
     )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
@@ -505,6 +520,7 @@ pub struct FlowStepInput {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_public_runtime_turn_metadata",
         deserialize_with = "deserialize_public_runtime_turn_metadata"
     )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
@@ -976,6 +992,70 @@ mod tests {
                 || message.contains("unknown field"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn runtime_input_turn_metadata_keep_alive_uses_wire_ttl_secs_shape() {
+        use meerkat_core::lifecycle::run_primitive::{
+            KeepAliveMode, KeepAlivePolicy, TurnMetadataOverride,
+        };
+
+        let metadata = RuntimeTurnMetadata {
+            keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(90),
+                policy: KeepAliveMode::PolicyDriven,
+            })),
+            ..Default::default()
+        };
+        let inputs = [
+            Input::Prompt(PromptInput {
+                header: make_header(),
+                text: "hello".into(),
+                blocks: None,
+                turn_metadata: Some(metadata.clone()),
+                build_only_overrides: None,
+            }),
+            Input::Peer(PeerInput {
+                header: make_header(),
+                convention: Some(PeerConvention::Message),
+                body: "hello".into(),
+                payload: None,
+                blocks: None,
+                turn_metadata: Some(metadata.clone()),
+                handling_mode: None,
+            }),
+            Input::FlowStep(FlowStepInput {
+                header: make_header(),
+                step_id: "step-1".into(),
+                instructions: "run".into(),
+                blocks: None,
+                turn_metadata: Some(metadata.clone()),
+            }),
+        ];
+
+        for input in inputs {
+            let json = serde_json::to_value(&input).unwrap();
+            assert_eq!(
+                json["turn_metadata"]["keep_alive"]["value"]["ttl_secs"], 90,
+                "durable runtime input must serialize keep_alive through the public wire shape: {json}"
+            );
+            assert!(
+                json["turn_metadata"]["keep_alive"]["value"]
+                    .get("ttl")
+                    .is_none(),
+                "durable runtime input must not serialize core-only keep_alive.ttl: {json}"
+            );
+
+            let parsed: Input = serde_json::from_value(json).unwrap();
+            let parsed_metadata = match parsed {
+                Input::Prompt(input) => input.turn_metadata,
+                Input::Peer(input) => input.turn_metadata,
+                Input::FlowStep(input) => input.turn_metadata,
+                other => panic!("unexpected parsed input: {other:?}"),
+            }
+            .expect("metadata should round-trip");
+            assert_eq!(parsed_metadata.keep_alive, metadata.keep_alive);
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ use super::turn_executor::{
     ActorTurnTicket, FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
 };
 use crate::error::MobError;
+use crate::event::{MobEventKind, NewMobEvent};
 use crate::ids::{MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -11,6 +12,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
 use meerkat_core::types::ContentInput;
 use std::collections::BTreeMap;
@@ -345,6 +347,20 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 )
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let initial_turn_metadata = entry.initial_turn_metadata.clone();
+                let mut turn_metadata = RuntimeTurnMetadata {
+                    flow_tool_overlay,
+                    ..Default::default()
+                };
+                if let Some(metadata) = initial_turn_metadata.clone() {
+                    turn_metadata.merge(metadata).map_err(|err| {
+                        MobError::Internal(format!(
+                            "turn-driven flow initial turn_metadata conflict on {target}: {}: {}",
+                            err.field, err.reason
+                        ))
+                    })?;
+                }
+
                 let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
                 let bridge_handle = Self::spawn_subscription_bridge_enveloped(
                     event_rx,
@@ -364,18 +380,31 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             system_prompt: None,
                             event_tx: Some(event_tx),
                             pre_turn_context_appends: Vec::new(),
-                            turn_metadata: flow_tool_overlay.map(|overlay| {
-                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                                    flow_tool_overlay: Some(overlay),
-                                    ..Default::default()
-                                }
-                            }),
+                            turn_metadata: (!turn_metadata.is_empty()).then_some(turn_metadata),
                         },
                     )
                     .await
                 {
                     bridge_handle.abort();
                     return Err(error);
+                }
+                if initial_turn_metadata.is_some() {
+                    self.handle
+                        .events
+                        .append(NewMobEvent {
+                            mob_id: self.handle.definition.id.clone(),
+                            timestamp: None,
+                            kind: MobEventKind::MemberInitialTurnMetadataConsumed {
+                                agent_identity: entry.agent_identity.clone(),
+                                generation: entry.generation,
+                            },
+                        })
+                        .await?;
+                    self.handle
+                        .roster
+                        .write()
+                        .await
+                        .clear_initial_turn_metadata(&entry.agent_identity, entry.generation);
                 }
                 bridge_handle
             }
@@ -480,6 +509,31 @@ mod tests {
             budget.load(Ordering::Acquire),
             2,
             "release should increment when a slot is available"
+        );
+    }
+
+    #[test]
+    fn turn_driven_flow_dispatch_merges_spawn_initial_turn_metadata() {
+        let source = include_str!("actor_turn_executor.rs");
+        let start = source
+            .find("impl FlowTurnExecutor for ActorFlowTurnExecutor")
+            .expect("flow executor impl should exist");
+        let end = source
+            .find("Ok(FlowTurnTicket::Actor")
+            .expect("flow dispatch body should contain ticket return");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("entry.initial_turn_metadata.clone()"),
+            "flow-step dispatch must read spawned member initial turn metadata"
+        );
+        assert!(
+            body.contains(".merge(metadata)"),
+            "flow-step dispatch must merge spawn metadata into canonical RuntimeTurnMetadata"
+        );
+        assert!(
+            body.contains("MemberInitialTurnMetadataConsumed"),
+            "flow-step dispatch must consume spawn metadata after successful first dispatch"
         );
     }
 

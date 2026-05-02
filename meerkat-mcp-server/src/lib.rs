@@ -1057,6 +1057,17 @@ fn turn_metadata_keep_alive_override(
     }
 }
 
+fn turn_metadata_keep_alive_policy(
+    metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
+    match metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
+        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(policy)) => {
+            Some(*policy)
+        }
+        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) | None => None,
+    }
+}
+
 async fn mcp_persisted_session_has_comms_name(
     state: &MeerkatMcpState,
     session_id: &meerkat::SessionId,
@@ -1081,6 +1092,7 @@ async fn apply_mcp_resume_keep_alive_override(
     ingress: &runtime_ingress::McpRuntimeIngressContext,
     session_id: &meerkat::SessionId,
     keep_alive: bool,
+    keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
 ) -> Result<(), ToolCallError> {
     let comms_rt = state.service.comms_runtime(session_id).await;
     if keep_alive && comms_rt.is_none() {
@@ -1095,7 +1107,7 @@ async fn apply_mcp_resume_keep_alive_override(
     }
     state
         .service
-        .apply_runtime_session_keep_alive(session_id, keep_alive)
+        .apply_runtime_session_keep_alive(session_id, keep_alive, keep_alive_policy)
         .await
         .map_err(|error| {
             ToolCallError::internal(format!("failed to persist keep_alive: {error}"))
@@ -3003,6 +3015,7 @@ async fn handle_meerkat_resume(
     let turn_metadata = normalize_mcp_turn_metadata(input.turn_metadata.clone(), None);
     let keep_alive_override = turn_metadata_keep_alive_override(turn_metadata.as_ref())
         .map_err(ToolCallError::invalid_params)?;
+    let keep_alive_policy = turn_metadata_keep_alive_policy(turn_metadata.as_ref());
     let keep_alive = match keep_alive_override {
         Some(val) => val,
         None => stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive),
@@ -3163,7 +3176,14 @@ async fn handle_meerkat_resume(
         }
     } else {
         if keep_alive_override.is_some() {
-            apply_mcp_resume_keep_alive_override(state, &ingress, &session_id, keep_alive).await?;
+            apply_mcp_resume_keep_alive_override(
+                state,
+                &ingress,
+                &session_id,
+                keep_alive,
+                keep_alive_policy,
+            )
+            .await?;
         }
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
@@ -3424,6 +3444,8 @@ mod tests {
             provider_params: None,
             tooling: meerkat_core::SessionTooling::default(),
             keep_alive,
+            keep_alive_policy: keep_alive
+                .then_some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
             comms_name,
             peer_meta: None,
             realm_id: None,
@@ -4781,7 +4803,7 @@ mod tests {
         let (state, session_id) = state_with_persisted_session_metadata(true, None).await;
         let ingress = state.runtime_ingress_context();
 
-        apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, false)
+        apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, false, None)
             .await
             .expect("keep-alive clear should persist");
 
@@ -4810,9 +4832,15 @@ mod tests {
             "fixture must cover no live comms runtime"
         );
 
-        apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, true)
-            .await
-            .expect("persisted comms_name should authorize keep-alive before rematerialization");
+        apply_mcp_resume_keep_alive_override(
+            &state,
+            &ingress,
+            &session_id,
+            true,
+            Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+        )
+        .await
+        .expect("persisted comms_name should authorize keep-alive before rematerialization");
 
         let session = state
             .service
@@ -4834,9 +4862,15 @@ mod tests {
         let (state, session_id) = state_with_persisted_session_metadata(false, None).await;
         let ingress = state.runtime_ingress_context();
 
-        let err = apply_mcp_resume_keep_alive_override(&state, &ingress, &session_id, true)
-            .await
-            .expect_err("keep-alive without live or persisted comms identity should fail");
+        let err = apply_mcp_resume_keep_alive_override(
+            &state,
+            &ingress,
+            &session_id,
+            true,
+            Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+        )
+        .await
+        .expect_err("keep-alive without live or persisted comms identity should fail");
 
         assert!(
             err.message.contains("comms_name"),

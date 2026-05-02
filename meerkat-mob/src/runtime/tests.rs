@@ -1045,6 +1045,21 @@ impl SessionService for MockSessionService {
                 Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => false,
                 None => build.map(|b| b.keep_alive).unwrap_or(false),
             };
+            let keep_alive_policy = keep_alive.then_some(
+                initial_turn_metadata
+                    .and_then(|metadata| match metadata.keep_alive.as_ref() {
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                policy,
+                            ),
+                        ) => Some(*policy),
+                        Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+                        )
+                        | None => None,
+                    })
+                    .unwrap_or_else(meerkat_core::SessionMetadata::default_keep_alive_policy),
+            );
             let active_skills = initial_turn_metadata
                 .and_then(|metadata| metadata.skill_references.clone())
                 .or_else(|| build.and_then(|b| b.preload_skills.clone()));
@@ -1077,6 +1092,7 @@ impl SessionService for MockSessionService {
                     active_skills,
                 },
                 keep_alive,
+                keep_alive_policy,
                 comms_name: build.and_then(|b| b.comms_name.clone()),
                 peer_meta: build.and_then(|b| b.peer_meta.clone()),
                 realm_id: build.and_then(|b| b.realm_id.clone()),
@@ -9289,6 +9305,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 )]),
             },
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: Some(test_comms_name("worker", "w-1")),
             peer_meta: Some(
                 meerkat_core::PeerMeta::default()

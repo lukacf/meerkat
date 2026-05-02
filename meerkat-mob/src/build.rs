@@ -705,6 +705,7 @@ mod tests {
                     active_skills: None,
                 },
                 keep_alive: false,
+                keep_alive_policy: None,
                 comms_name: Some("test-mob/lead/lead-1".to_string()),
                 peer_meta: None,
                 realm_id: None,

@@ -150,6 +150,7 @@ enum SessionCommand {
     /// Update the keep_alive flag in durable session metadata.
     UpdateKeepAlive {
         keep_alive: bool,
+        keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
         reply_tx: oneshot::Sender<()>,
     },
     UpdateMobToolAuthority {
@@ -499,7 +500,12 @@ pub trait SessionAgent: Send {
     /// Called by the session task when the runtime overrides keep-alive on a
     /// live session. This ensures subsequent inheriting calls observe the
     /// updated value.
-    fn update_keep_alive(&mut self, _keep_alive: bool) {}
+    fn update_keep_alive(
+        &mut self,
+        _keep_alive: bool,
+        _keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+    ) {
+    }
 
     /// Update the canonical mob operator authority persisted on the session.
     fn update_mob_tool_authority_context(
@@ -1540,6 +1546,37 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         self.start_turn_inner(id, req).await
     }
 
+    pub(crate) async fn update_session_keep_alive_runtime_policy(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+        keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                keep_alive_policy,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply channel".to_string(),
+            ))
+        })
+    }
+
     async fn start_turn_inner(
         &self,
         id: &SessionId,
@@ -1909,6 +1946,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         self.start_turn_inner(id, req).await
     }
 
+    async fn start_turn_runtime_owned(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        EphemeralSessionService::start_turn_runtime_owned(self, id, req).await
+    }
+
     async fn set_session_client(
         &self,
         id: &SessionId,
@@ -2168,28 +2213,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         keep_alive: bool,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::UpdateKeepAlive {
-                keep_alive,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-        reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped reply channel".to_string(),
-            ))
-        })
+        EphemeralSessionService::update_session_keep_alive_runtime_policy(
+            self, id, keep_alive, None,
+        )
+        .await
     }
 
     async fn update_session_mob_authority_context(
@@ -2821,11 +2848,13 @@ async fn session_task<A: SessionAgent>(
                     }
                 }
                 match keep_alive {
-                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => {
-                        agent.update_keep_alive(true);
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        policy,
+                    )) => {
+                        agent.update_keep_alive(true, Some(policy));
                     }
                     Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
-                        agent.update_keep_alive(false);
+                        agent.update_keep_alive(false, None);
                     }
                     None => {}
                 }
@@ -3113,9 +3142,10 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::UpdateKeepAlive {
                 keep_alive,
+                keep_alive_policy,
                 reply_tx,
             } => {
-                agent.update_keep_alive(keep_alive);
+                agent.update_keep_alive(keep_alive, keep_alive_policy);
                 let _ = reply_tx.send(());
             }
             SessionCommand::UpdateMobToolAuthority {

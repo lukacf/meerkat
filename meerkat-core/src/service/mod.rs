@@ -1171,6 +1171,20 @@ pub trait SessionService: Send + Sync {
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError>;
 
+    /// Start a runtime-admitted turn on an existing session.
+    ///
+    /// Unlike the public [`SessionService::start_turn`] seam, this accepts
+    /// runtime-owned stamps in [`RuntimeTurnMetadata`]. Runtime-backed surfaces
+    /// should use this path after admission instead of re-entering the public
+    /// request validator.
+    async fn start_turn_runtime_owned(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn(id, req).await
+    }
+
     /// Cancel an in-flight turn.
     ///
     /// Returns `NotRunning` if no turn is active.

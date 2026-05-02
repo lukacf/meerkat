@@ -798,12 +798,19 @@ impl SessionRuntime {
     const DEFAULT_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
 
     fn turn_metadata_for_keep_alive(keep_alive: bool) -> RuntimeTurnMetadata {
+        Self::turn_metadata_for_keep_alive_policy(keep_alive, None)
+    }
+
+    fn turn_metadata_for_keep_alive_policy(
+        keep_alive: bool,
+        policy: Option<KeepAlivePolicy>,
+    ) -> RuntimeTurnMetadata {
         RuntimeTurnMetadata {
             keep_alive: Some(if keep_alive {
-                TurnMetadataOverride::Set(KeepAlivePolicy {
+                TurnMetadataOverride::Set(policy.unwrap_or(KeepAlivePolicy {
                     ttl: std::time::Duration::from_secs(Self::DEFAULT_TURN_KEEP_ALIVE_TTL_SECS),
                     policy: KeepAliveMode::Pinned,
-                })
+                }))
             } else {
                 TurnMetadataOverride::Clear
             }),
@@ -816,6 +823,15 @@ impl SessionRuntime {
             Some(TurnMetadataOverride::Set(_)) => Some(true),
             Some(TurnMetadataOverride::Clear) => Some(false),
             None => None,
+        }
+    }
+
+    fn turn_metadata_keep_alive_policy(
+        metadata: Option<&RuntimeTurnMetadata>,
+    ) -> Option<KeepAlivePolicy> {
+        match metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
+            Some(TurnMetadataOverride::Set(policy)) => Some(*policy),
+            Some(TurnMetadataOverride::Clear) | None => None,
         }
     }
 
@@ -939,6 +955,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         keep_alive: bool,
+        keep_alive_policy: Option<KeepAlivePolicy>,
     ) -> Result<(), RpcError> {
         if self
             .apply_pending_keep_alive_override(session_id, keep_alive)
@@ -962,7 +979,7 @@ impl SessionRuntime {
         }
 
         self.service
-            .apply_runtime_session_keep_alive(session_id, keep_alive)
+            .apply_runtime_session_keep_alive(session_id, keep_alive, keep_alive_policy)
             .await
             .map_err(session_error_to_rpc)?;
 
@@ -979,7 +996,10 @@ impl SessionRuntime {
                     session_id,
                     stored_session,
                     SurfaceSessionRecoveryOverrides {
-                        turn_metadata: Some(Self::turn_metadata_for_keep_alive(true)),
+                        turn_metadata: Some(Self::turn_metadata_for_keep_alive_policy(
+                            true,
+                            keep_alive_policy,
+                        )),
                         ..Default::default()
                     },
                 )
@@ -2301,6 +2321,7 @@ impl SessionRuntime {
         }
 
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata.as_ref());
+        let keep_alive_policy = Self::turn_metadata_keep_alive_policy(turn_metadata.as_ref());
 
         #[cfg(feature = "comms")]
         let pending_keep_alive_override_validated = if let Some(keep_alive) = keep_alive_override {
@@ -2349,7 +2370,7 @@ impl SessionRuntime {
                 // Persist explicit override so subsequent inheriting calls observe it.
                 if keep_alive_override.is_some() {
                     self.service
-                        .apply_runtime_session_keep_alive(session_id, keep_alive)
+                        .apply_runtime_session_keep_alive(session_id, keep_alive, keep_alive_policy)
                         .await
                         .map_err(session_error_to_rpc)?;
                 }
@@ -2651,13 +2672,18 @@ impl SessionRuntime {
         let turn_metadata = primitive.turn_metadata();
         let service_turn_metadata = turn_metadata.cloned();
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
+        let keep_alive_policy = Self::turn_metadata_keep_alive_policy(turn_metadata);
 
         #[cfg(feature = "comms")]
         if let Some(keep_alive) = keep_alive_override
             && !self.staged_sessions.contains(session_id).await
         {
-            self.apply_runtime_turn_keep_alive_override_before_validation(session_id, keep_alive)
-                .await?;
+            self.apply_runtime_turn_keep_alive_override_before_validation(
+                session_id,
+                keep_alive,
+                keep_alive_policy,
+            )
+            .await?;
         }
 
         let effective_identity = self
@@ -3459,6 +3485,7 @@ impl SessionRuntime {
         }
 
         // Normal turn on an existing (materialized) session.
+        let keep_alive_policy = Self::turn_metadata_keep_alive_policy(turn_metadata_ref);
         let keep_alive = match keep_alive_override {
             Some(keep_alive) => keep_alive,
             None => self
@@ -3501,7 +3528,7 @@ impl SessionRuntime {
                 });
             }
             self.service
-                .apply_runtime_session_keep_alive(session_id, keep_alive)
+                .apply_runtime_session_keep_alive(session_id, keep_alive, keep_alive_policy)
                 .await
                 .map_err(session_error_to_rpc)?;
             // W2-G: never reconfigure a mob-owned drain from the

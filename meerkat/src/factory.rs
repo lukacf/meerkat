@@ -4004,6 +4004,25 @@ impl AgentFactory {
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
+        let requested_keep_alive_policy =
+            build_config
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| match metadata.keep_alive.as_ref() {
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        policy,
+                    )) => Some(*policy),
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                    | None => None,
+                });
+        let resumed_keep_alive_policy = resumed_session_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.keep_alive_policy);
+        let keep_alive_policy = build_config
+            .keep_alive
+            .then_some(requested_keep_alive_policy.or(resumed_keep_alive_policy))
+            .flatten();
+
         let metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model;
             metadata.max_tokens = max_tokens;
@@ -4022,6 +4041,7 @@ impl AgentFactory {
                 metadata.tooling.active_skills = active_skill_ids;
             }
             metadata.keep_alive = build_config.keep_alive;
+            metadata.keep_alive_policy = keep_alive_policy;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;
             metadata.realm_id = build_config.realm_id;
@@ -4048,6 +4068,7 @@ impl AgentFactory {
                     active_skills: active_skill_ids,
                 },
                 keep_alive: build_config.keep_alive,
+                keep_alive_policy,
                 comms_name: build_config.comms_name,
                 peer_meta: build_config.peer_meta,
                 realm_id: build_config.realm_id,
@@ -4284,6 +4305,7 @@ mod tests {
             provider_params: None,
             tooling,
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: None,
             peer_meta: None,
             realm_id: None,
@@ -5900,6 +5922,7 @@ mod tests {
                 provider_params: None,
                 tooling: SessionTooling::default(),
                 keep_alive: false,
+                keep_alive_policy: None,
                 comms_name: None,
                 peer_meta: None,
                 realm_id: None,

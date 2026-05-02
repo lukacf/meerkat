@@ -202,9 +202,17 @@ impl SessionAgent for FactoryAgent {
         Ok(())
     }
 
-    fn update_keep_alive(&mut self, keep_alive: bool) {
+    fn update_keep_alive(
+        &mut self,
+        keep_alive: bool,
+        keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+    ) {
         if let Some(mut metadata) = self.agent.session().session_metadata() {
             metadata.keep_alive = keep_alive;
+            metadata.keep_alive_policy = keep_alive.then_some(
+                keep_alive_policy
+                    .unwrap_or_else(meerkat_core::SessionMetadata::default_keep_alive_policy),
+            );
             if let Err(e) = self.agent.session_mut().set_session_metadata(metadata) {
                 tracing::warn!(error = %e, "failed to update keep_alive in session metadata");
             }

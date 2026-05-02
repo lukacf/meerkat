@@ -515,7 +515,11 @@ impl SessionAgent for RecordingTurnAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn update_keep_alive(&mut self, keep_alive: bool) {
+    fn update_keep_alive(
+        &mut self,
+        keep_alive: bool,
+        _keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+    ) {
         self.keep_alive_updates
             .lock()
             .expect("keep-alive updates lock poisoned")

@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use meerkat_core::connection::ConnectionRef;
 use meerkat_core::lifecycle::run_primitive::{
-    KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction,
-    TurnMetadataOverride,
+    KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
+    TurnInstruction, TurnMetadataOverride,
 };
 use meerkat_core::ops::ToolAccessPolicy;
 use meerkat_core::skills::SkillKey;
@@ -489,9 +489,56 @@ struct PublicRuntimeTurnMetadata {
     connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
-    keep_alive: Option<TurnMetadataOverride<KeepAlivePolicy>>,
+    keep_alive: Option<TurnMetadataOverride<PublicKeepAlivePolicy>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     render_metadata: Option<RenderMetadata>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicKeepAlivePolicy {
+    ttl_secs: u64,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    policy: KeepAliveMode,
+}
+
+impl From<KeepAlivePolicy> for PublicKeepAlivePolicy {
+    fn from(value: KeepAlivePolicy) -> Self {
+        Self {
+            ttl_secs: value.ttl.as_secs(),
+            policy: value.policy,
+        }
+    }
+}
+
+impl From<PublicKeepAlivePolicy> for KeepAlivePolicy {
+    fn from(value: PublicKeepAlivePolicy) -> Self {
+        Self {
+            ttl: std::time::Duration::from_secs(value.ttl_secs),
+            policy: value.policy,
+        }
+    }
+}
+
+fn public_keep_alive_override_from_core(
+    value: Option<TurnMetadataOverride<KeepAlivePolicy>>,
+) -> Option<TurnMetadataOverride<PublicKeepAlivePolicy>> {
+    match value {
+        Some(TurnMetadataOverride::Set(policy)) => Some(TurnMetadataOverride::Set(policy.into())),
+        Some(TurnMetadataOverride::Clear) => Some(TurnMetadataOverride::Clear),
+        None => None,
+    }
+}
+
+fn core_keep_alive_override_from_public(
+    value: Option<TurnMetadataOverride<PublicKeepAlivePolicy>>,
+) -> Option<TurnMetadataOverride<KeepAlivePolicy>> {
+    match value {
+        Some(TurnMetadataOverride::Set(policy)) => Some(TurnMetadataOverride::Set(policy.into())),
+        Some(TurnMetadataOverride::Clear) => Some(TurnMetadataOverride::Clear),
+        None => None,
+    }
 }
 
 impl From<PublicRuntimeTurnMetadata> for RuntimeTurnMetadata {
@@ -505,7 +552,7 @@ impl From<PublicRuntimeTurnMetadata> for RuntimeTurnMetadata {
             provider: value.provider,
             provider_params: value.provider_params,
             connection_ref: value.connection_ref,
-            keep_alive: value.keep_alive,
+            keep_alive: core_keep_alive_override_from_public(value.keep_alive),
             render_metadata: value.render_metadata,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
@@ -524,7 +571,7 @@ impl From<RuntimeTurnMetadata> for PublicRuntimeTurnMetadata {
             provider: value.provider,
             provider_params: value.provider_params,
             connection_ref: value.connection_ref,
-            keep_alive: value.keep_alive,
+            keep_alive: public_keep_alive_override_from_core(value.keep_alive),
             render_metadata: value.render_metadata,
         }
     }
@@ -1705,6 +1752,84 @@ mod tests {
 
         let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn session_materialization_keep_alive_uses_wire_ttl_secs_shape() {
+        let mut spec = fixture_session_materialization(vec![]);
+        spec.turn_metadata.keep_alive = Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+            ttl: std::time::Duration::from_secs(45),
+            policy: KeepAliveMode::PolicyDriven,
+        }));
+
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            json["turn_metadata"]["keep_alive"]["value"]["ttl_secs"], 45,
+            "schedule materialization must publish canonical wire keep_alive ttl_secs: {json}"
+        );
+        assert!(
+            json["turn_metadata"]["keep_alive"]["value"]
+                .get("ttl")
+                .is_none(),
+            "schedule materialization must not publish core-only keep_alive ttl: {json}"
+        );
+
+        let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.turn_metadata.keep_alive,
+            spec.turn_metadata.keep_alive
+        );
+
+        let wire_json = serde_json::json!({
+            "turn_metadata": {
+                "model": "claude-sonnet-4-6",
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 75,
+                        "policy": "policy_driven"
+                    }
+                }
+            }
+        });
+        let parsed: SessionMaterializationSpec = serde_json::from_value(wire_json).unwrap();
+        assert_eq!(
+            parsed.turn_metadata.keep_alive,
+            Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(75),
+                policy: KeepAliveMode::PolicyDriven,
+            }))
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_keep_alive_uses_wire_ttl_secs_shape() {
+        let action = ScheduledSessionAction::Prompt {
+            prompt: ContentInput::from("scheduled hello"),
+            system_prompt: None,
+            turn_metadata: Some(Box::new(RuntimeTurnMetadata {
+                keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(55),
+                    policy: KeepAliveMode::Pinned,
+                })),
+                ..Default::default()
+            })),
+        };
+
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json["turn_metadata"]["keep_alive"]["value"]["ttl_secs"], 55,
+            "scheduled prompt action must publish canonical wire keep_alive ttl_secs: {json}"
+        );
+        assert!(
+            json["turn_metadata"]["keep_alive"]["value"]
+                .get("ttl")
+                .is_none(),
+            "scheduled prompt action must not publish core-only keep_alive ttl: {json}"
+        );
+
+        let parsed: ScheduledSessionAction = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, action);
     }
 
     #[test]

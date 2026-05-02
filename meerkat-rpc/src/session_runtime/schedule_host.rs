@@ -238,9 +238,22 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(default_llm_client);
         }
 
-        self.create_session(build_config, Some(create.labels.clone()), None)
+        let keep_alive = create.requests_keep_alive();
+        let session_id = self
+            .create_session(build_config, Some(create.labels.clone()), None)
             .await
-            .map_err(|error| ScheduleDomainError::Internal(error.message))
+            .map_err(|error| ScheduleDomainError::Internal(error.message))?;
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = self.service.comms_runtime(&session_id).await;
+            let comms_rt = Self::comms_runtime_for_peer_ingress(keep_alive, comms_rt);
+            self.runtime_adapter
+                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+                .await;
+        }
+        #[cfg(not(feature = "comms"))]
+        let _ = keep_alive;
+        Ok(session_id)
     }
 
     async fn deliver_scheduled_prompt(
@@ -410,5 +423,26 @@ mod tests {
                 "RPC scheduled materialization must not write split carrier `{split}`"
             );
         }
+    }
+
+    #[test]
+    fn rpc_scheduled_materialization_derives_keep_alive_from_turn_metadata() {
+        let source = include_str!("schedule_host.rs");
+        let start = source
+            .find("pub(super) async fn materialize_scheduled_session")
+            .expect("scheduled materialization should exist");
+        let end = source
+            .find("    async fn deliver_scheduled_prompt")
+            .expect("scheduled materialization end sentinel should exist");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("let keep_alive = create.requests_keep_alive()"),
+            "RPC scheduled materialization must derive keep_alive from canonical initial_turn_metadata"
+        );
+        assert!(
+            body.contains("update_peer_ingress_context"),
+            "RPC scheduled materialization must update peer ingress when canonical metadata requests keep_alive"
+        );
     }
 }

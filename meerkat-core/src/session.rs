@@ -10,6 +10,7 @@
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
 use crate::Provider;
+use crate::lifecycle::run_primitive::{KeepAliveMode, KeepAlivePolicy, TurnMetadataOverride};
 use crate::peer_meta::PeerMeta;
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
@@ -1104,6 +1105,8 @@ pub struct SessionMetadata {
     pub tooling: SessionTooling,
     #[serde(default)]
     pub keep_alive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive_policy: Option<KeepAlivePolicy>,
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (populated when comms is enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1184,6 +1187,37 @@ pub struct SessionLlmRequestPolicy {
 }
 
 impl SessionMetadata {
+    pub fn default_keep_alive_policy() -> KeepAlivePolicy {
+        KeepAlivePolicy {
+            ttl: std::time::Duration::from_secs(30),
+            policy: KeepAliveMode::Pinned,
+        }
+    }
+
+    pub fn effective_keep_alive_policy(&self) -> Option<KeepAlivePolicy> {
+        self.keep_alive.then_some(
+            self.keep_alive_policy
+                .unwrap_or_else(Self::default_keep_alive_policy),
+        )
+    }
+
+    pub fn apply_keep_alive_override(
+        &mut self,
+        override_policy: Option<TurnMetadataOverride<KeepAlivePolicy>>,
+    ) {
+        match override_policy {
+            Some(TurnMetadataOverride::Set(policy)) => {
+                self.keep_alive = true;
+                self.keep_alive_policy = Some(policy);
+            }
+            Some(TurnMetadataOverride::Clear) => {
+                self.keep_alive = false;
+                self.keep_alive_policy = None;
+            }
+            None => {}
+        }
+    }
+
     /// Return the current durable LLM identity for this session.
     pub fn llm_identity(&self) -> SessionLlmIdentity {
         SessionLlmIdentity {

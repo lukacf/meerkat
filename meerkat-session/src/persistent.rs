@@ -635,13 +635,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         keep_alive: bool,
+        keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
     ) -> Result<(), SessionError> {
         let previous = self
             .export_session_with_labels(id)
             .await
             .ok()
-            .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive));
-        match self.inner.update_session_keep_alive(id, keep_alive).await {
+            .and_then(|session| {
+                session
+                    .session_metadata()
+                    .map(|meta| (meta.keep_alive, meta.keep_alive_policy))
+            });
+        match self
+            .inner
+            .update_session_keep_alive_runtime_policy(id, keep_alive, keep_alive_policy)
+            .await
+        {
             Ok(()) => {}
             Err(SessionError::NotFound { .. }) => {
                 let Some(mut session) = self.load_authoritative_session_base(id).await? else {
@@ -656,6 +665,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     ))));
                 };
                 metadata.keep_alive = keep_alive;
+                metadata.keep_alive_policy = keep_alive.then_some(
+                    keep_alive_policy
+                        .unwrap_or_else(meerkat_core::SessionMetadata::default_keep_alive_policy),
+                );
                 session.set_session_metadata(metadata).map_err(|err| {
                     SessionError::Agent(AgentError::InternalError(format!(
                         "failed to serialize runtime keep_alive metadata for session {id}: {err}"
@@ -669,8 +682,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match self.persist_full_session(id).await {
             Ok(_) => Ok(()),
             Err(error) => {
-                if let Some(previous) = previous {
-                    let _ = self.inner.update_session_keep_alive(id, previous).await;
+                if let Some((previous, previous_policy)) = previous {
+                    let _ = self
+                        .inner
+                        .update_session_keep_alive_runtime_policy(id, previous, previous_policy)
+                        .await;
                 }
                 Err(error)
             }
@@ -1732,6 +1748,27 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // Always persist after a direct start_turn call. Runtime-backed sessions
         // that go through apply_runtime_turn() have their own atomic boundary
         // commit path and don't call start_turn on PersistentSessionService.
+        let _ = self.persist_full_session(id).await?;
+
+        Ok(result)
+    }
+
+    async fn start_turn_runtime_owned(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self.recover_live_session_from_store_if_needed(id).await?;
+        let result = match self.inner.start_turn_runtime_owned(id, req).await {
+            Ok(result) => result,
+            Err(error) => {
+                if Self::callback_pending_terminal(&error).is_some() {
+                    let _ = self.persist_full_session(id).await;
+                }
+                return Err(error);
+            }
+        };
         let _ = self.persist_full_session(id).await?;
 
         Ok(result)
@@ -3008,6 +3045,7 @@ mod tests {
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
                         keep_alive: false,
+                        keep_alive_policy: None,
                         comms_name: None,
                         peer_meta: None,
                         realm_id: None,
@@ -3091,13 +3129,21 @@ mod tests {
             }
         }
 
-        fn update_keep_alive(&mut self, keep_alive: bool) {
+        fn update_keep_alive(
+            &mut self,
+            keep_alive: bool,
+            keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+        ) {
             let mut session = match self.session.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
             if let Some(mut meta) = session.session_metadata() {
                 meta.keep_alive = keep_alive;
+                meta.keep_alive_policy = keep_alive.then_some(
+                    keep_alive_policy
+                        .unwrap_or_else(meerkat_core::SessionMetadata::default_keep_alive_policy),
+                );
                 let _ = session.set_session_metadata(meta);
             }
         }
@@ -3231,8 +3277,12 @@ mod tests {
             self.inner.session_clone()
         }
 
-        fn update_keep_alive(&mut self, keep_alive: bool) {
-            self.inner.update_keep_alive(keep_alive);
+        fn update_keep_alive(
+            &mut self,
+            keep_alive: bool,
+            keep_alive_policy: Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy>,
+        ) {
+            self.inner.update_keep_alive(keep_alive, keep_alive_policy);
         }
 
         fn update_mob_tool_authority_context(
@@ -3449,6 +3499,7 @@ mod tests {
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
                         keep_alive: false,
+                        keep_alive_policy: None,
                         comms_name: None,
                         peer_meta: None,
                         realm_id: None,
@@ -3695,6 +3746,7 @@ mod tests {
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
                         keep_alive: false,
+                        keep_alive_policy: None,
                         comms_name: None,
                         peer_meta: None,
                         realm_id: None,
@@ -6858,6 +6910,7 @@ mod tests {
                 provider_params: None,
                 tooling: meerkat_core::SessionTooling::default(),
                 keep_alive: false,
+                keep_alive_policy: None,
                 comms_name: None,
                 peer_meta: None,
                 realm_id: Some("realm-test".to_string()),
@@ -7244,6 +7297,7 @@ mod tests {
             provider_params: None,
             tooling: meerkat_core::SessionTooling::default(),
             keep_alive: false,
+            keep_alive_policy: None,
             comms_name: None,
             peer_meta: None,
             realm_id: None,
@@ -7288,7 +7342,11 @@ mod tests {
 
         // Update keep_alive to true on the live session.
         service
-            .apply_runtime_session_keep_alive(&id, true)
+            .apply_runtime_session_keep_alive(
+                &id,
+                true,
+                Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+            )
             .await
             .expect("runtime keep_alive update should succeed");
 
@@ -7322,7 +7380,11 @@ mod tests {
         let id = created.session_id;
 
         service
-            .apply_runtime_session_keep_alive(&id, true)
+            .apply_runtime_session_keep_alive(
+                &id,
+                true,
+                Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+            )
             .await
             .expect("runtime keep_alive enable should persist");
         service
@@ -7331,7 +7393,7 @@ mod tests {
             .expect("discard live session");
 
         service
-            .apply_runtime_session_keep_alive(&id, false)
+            .apply_runtime_session_keep_alive(&id, false, None)
             .await
             .expect("runtime keep_alive disable should persist without live session");
 
@@ -7361,7 +7423,13 @@ mod tests {
 
         // --- Transition: false → true with store failure ---
         fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, true).await;
+        let result = service
+            .apply_runtime_session_keep_alive(
+                &id,
+                true,
+                Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+            )
+            .await;
         assert!(result.is_err(), "false→true should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -7372,7 +7440,11 @@ mod tests {
 
         // --- Bring live state to true successfully ---
         service
-            .apply_runtime_session_keep_alive(&id, true)
+            .apply_runtime_session_keep_alive(
+                &id,
+                true,
+                Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+            )
             .await
             .unwrap();
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -7380,7 +7452,13 @@ mod tests {
 
         // --- Transition: true → true with store failure (idempotent retry) ---
         fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, true).await;
+        let result = service
+            .apply_runtime_session_keep_alive(
+                &id,
+                true,
+                Some(meerkat_core::SessionMetadata::default_keep_alive_policy()),
+            )
+            .await;
         assert!(result.is_err(), "true→true should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
@@ -7391,7 +7469,9 @@ mod tests {
 
         // --- Transition: true → false with store failure ---
         fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, false).await;
+        let result = service
+            .apply_runtime_session_keep_alive(&id, false, None)
+            .await;
         assert!(result.is_err(), "true→false should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();

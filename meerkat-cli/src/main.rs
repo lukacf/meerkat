@@ -5042,10 +5042,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             return Ok(output);
         }
 
-        // Ephemeral path: start_turn + placeholder receipt.
+        // Ephemeral path: start_turn_runtime_owned + placeholder receipt.
         let result = self
             .service
-            .start_turn(&self.session_id, turn_req)
+            .start_turn_runtime_owned(&self.session_id, turn_req)
             .await
             .map_err(|e| {
                 meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_runtime_turn(
@@ -11421,6 +11421,28 @@ default_model = "gemma"
         assert!(
             appends[0].text.contains("ash twelve"),
             "terminal peer-response context must reach the CLI start_turn request"
+        );
+    }
+
+    #[test]
+    fn cli_ephemeral_runtime_executor_uses_runtime_owned_turn_seam() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("// Ephemeral path:")
+            .expect("ephemeral executor path should exist");
+        let end = source[start..]
+            .find("CoreApplyOutput::with_run_result")
+            .map(|offset| start + offset)
+            .expect("ephemeral executor path should return core apply output");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("start_turn_runtime_owned"),
+            "CLI ephemeral fallback must not send runtime-owned stamps through public start_turn"
+        );
+        assert!(
+            !body.contains(".start_turn(&self.session_id, turn_req)"),
+            "CLI ephemeral fallback must use the runtime-owned seam"
         );
     }
 

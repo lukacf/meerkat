@@ -1156,7 +1156,10 @@ for (const pkg of localPackages.values()) {
           : target.kind.includes("bin")
           ? localDeps(pkg, false, true)
           : localDeps(pkg, false);
-        const depsWithOptionalExternal = [...new Set([...localDependencyLabels, ...optionalExternal])].sort();
+        const targetDeps = shouldRewriteAgentFactoryDepsFor(key, false)
+          ? rewriteAgentFactoryDeps(localDependencyLabels)
+          : localDependencyLabels;
+        const depsWithOptionalExternal = [...new Set([...targetDeps, ...optionalExternal])].sort();
         const depsExpr = depsWithOptionalExternal.length
           ? `${listExpr(depsWithOptionalExternal)} + ${externalNormal}`
           : externalNormal;

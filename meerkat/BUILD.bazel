@@ -237,6 +237,8 @@ rust_test(
         "//meerkat-comms:package_runfiles",
         "//meerkat-core:cargo_manifest",
         "//meerkat-core:package_runfiles",
+        "//meerkat-mcp-server:cargo_manifest",
+        "//meerkat-mcp-server:package_runfiles",
         "//meerkat-mob:cargo_manifest",
         "//meerkat-mob:package_runfiles",
         "//meerkat-rest:cargo_manifest",

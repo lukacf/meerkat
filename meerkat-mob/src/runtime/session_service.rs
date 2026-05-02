@@ -195,18 +195,6 @@ pub trait MobSessionService:
         ))
     }
 
-    async fn apply_runtime_turn_with_reserved_admission(
-        &self,
-        session_id: &SessionId,
-        run_id: RunId,
-        req: StartTurnRequest,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-    ) -> Result<CoreApplyOutput, SessionError> {
-        self.apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
-            .await
-    }
-
     async fn apply_runtime_context_appends(
         &self,
         session_id: &SessionId,

@@ -1417,20 +1417,6 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
-    async fn apply_runtime_turn_with_reserved_admission(
-        &self,
-        session_id: &SessionId,
-        run_id: RunId,
-        req: StartTurnRequest,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-    ) -> Result<CoreApplyOutput, SessionError> {
-        self.reject_archived_persisted_session(session_id).await?;
-        self.service
-            .apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
-            .await
-    }
-
     async fn apply_runtime_context_appends(
         &self,
         session_id: &SessionId,
@@ -13523,6 +13509,57 @@ mod tests {
             .create_session(mock_build_config(), None, None)
             .await
             .expect("completed mob runtime executor apply should release active admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_runtime_executor_materialized_deferred_first_turn_consumes_staged_pre_admission() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let service = runtime.session_service();
+
+        let direct = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("mob/direct deferred create should reserve capacity");
+        let primitive = runtime_content_turn_primitive();
+        let input_id = primitive
+            .contributing_input_ids()
+            .first()
+            .cloned()
+            .expect("runtime primitive should carry input id");
+        let admission = runtime
+            .reserve_active_turn(&direct.session_id)
+            .await
+            .expect("reserve staged-origin runtime pre-admission");
+        runtime
+            .insert_runtime_pre_admission(direct.session_id.clone(), input_id, admission)
+            .expect("insert runtime pre-admission");
+
+        let mut executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+            runtime.session_service(),
+            Some(Arc::clone(&runtime)),
+            direct.session_id.clone(),
+            crate::router::NotificationSink::noop(),
+        );
+        executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("mob runtime executor should materialize the deferred first turn");
+
+        assert!(
+            !runtime.has_staged_capacity_admission(&direct.session_id),
+            "successful first-turn materialization must not restore staged capacity"
+        );
+        runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("completed materialized first turn should release active admission");
     }
 
     #[cfg(feature = "mob")]

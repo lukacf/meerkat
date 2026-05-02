@@ -391,50 +391,66 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             }
         });
 
-        let req = meerkat_core::service::StartTurnRequest {
-            prompt,
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: Some(event_tx),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            pre_turn_context_appends,
-            turn_metadata: primitive.turn_metadata().cloned(),
-        };
-
+        let turn_metadata = primitive.turn_metadata().cloned();
+        let skill_references = turn_metadata
+            .as_ref()
+            .and_then(|meta| meta.skill_references.clone());
+        let flow_tool_overlay = turn_metadata
+            .as_ref()
+            .and_then(|meta| meta.flow_tool_overlay.clone());
         let pre_admission = self.runtime.as_ref().and_then(|runtime| {
             runtime.take_runtime_pre_admission(&self.session_id, primitive.contributing_input_ids())
         });
-        let result = if pre_admission.is_some() {
-            self.session_service
-                .apply_runtime_turn_with_reserved_admission(
-                    &self.session_id,
-                    run_id,
-                    req,
-                    primitive.apply_boundary(),
-                    primitive.contributing_input_ids().to_vec(),
-                )
-                .await
-        } else {
-            self.session_service
-                .apply_runtime_turn(
-                    &self.session_id,
-                    run_id,
-                    req,
-                    primitive.apply_boundary(),
-                    primitive.contributing_input_ids().to_vec(),
-                )
-                .await
+        let result = match (self.runtime.as_ref(), pre_admission) {
+            (Some(runtime), Some(pre_admission)) => {
+                let turn_overrides =
+                    crate::session_runtime::SessionRuntime::turn_overrides_from_metadata(
+                        primitive.turn_metadata(),
+                    );
+                runtime
+                    .apply_runtime_turn_with_pre_admission(
+                        &self.session_id,
+                        run_id,
+                        &primitive,
+                        prompt,
+                        event_tx,
+                        skill_references,
+                        flow_tool_overlay,
+                        None,
+                        turn_overrides,
+                        Some(pre_admission),
+                    )
+                    .await
+                    .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.message))
+            }
+            (_, pre_admission) => {
+                drop(pre_admission);
+                let req = meerkat_core::service::StartTurnRequest {
+                    prompt,
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: Some(event_tx),
+                    skill_references,
+                    flow_tool_overlay,
+                    pre_turn_context_appends,
+                    turn_metadata,
+                };
+                self.session_service
+                    .apply_runtime_turn(
+                        &self.session_id,
+                        run_id,
+                        req,
+                        primitive.apply_boundary(),
+                        primitive.contributing_input_ids().to_vec(),
+                    )
+                    .await
+                    .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
+            }
         };
-        drop(pre_admission);
 
         let _ = forwarder.await;
-        result.map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
+        result
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

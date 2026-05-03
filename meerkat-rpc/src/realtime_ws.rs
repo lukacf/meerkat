@@ -4729,7 +4729,7 @@ mod tests {
                     reconnect_policy: None,
                     channel_config: None,
                 },
-                conservative_capabilities(),
+                test_open_grant(),
                 None,
             )
             .await;

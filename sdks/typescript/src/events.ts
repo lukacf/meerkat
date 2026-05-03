@@ -49,8 +49,19 @@ export type StopReason =
   | "content_filter"
   | "cancelled";
 
+export type ToolCallArguments = Readonly<Record<string, unknown>>;
+
 /** Which budget dimension triggered a warning. */
 export type BudgetType = "tokens" | "time" | "tool_calls";
+
+/** Terminal state for a completed background job. */
+export type BackgroundJobTerminalStatus =
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "cancelled"
+  | "retired"
+  | "terminated";
 
 /** Hook lifecycle points. */
 export type HookPoint =
@@ -189,7 +200,7 @@ export interface ToolCallRequestedEvent {
   readonly type: "tool_call_requested";
   readonly id: string;
   readonly name: string;
-  readonly args: unknown;
+  readonly args: ToolCallArguments;
 }
 
 export interface ToolResultReceivedEvent {
@@ -449,6 +460,15 @@ export interface ToolConfigChangedEvent {
   readonly payload: ToolConfigChangedPayload;
 }
 
+export interface BackgroundJobCompletedEvent {
+  readonly type: "background_job_completed";
+  readonly jobId: string;
+  readonly displayName: string;
+  readonly legacyStatus?: string;
+  readonly terminalStatus: BackgroundJobTerminalStatus;
+  readonly detail: string;
+}
+
 // ---------------------------------------------------------------------------
 // Unknown / forward-compat
 // ---------------------------------------------------------------------------
@@ -500,6 +520,7 @@ export type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
+  | BackgroundJobCompletedEvent
   | MalformedEvent
   | UnknownEvent;
 
@@ -569,6 +590,14 @@ function requireBooleanField(raw: Record<string, unknown>, field: string): boole
   const value = raw[field];
   if (typeof value !== "boolean") {
     throw new Error(`${field} must be boolean`);
+  }
+  return value;
+}
+
+function requireRecordField(raw: Record<string, unknown>, field: string): Record<string, unknown> {
+  const value = raw[field];
+  if (!isPlainRecord(value)) {
+    throw new Error(`${field} must be object`);
   }
   return value;
 }
@@ -997,7 +1026,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "text_complete":
       return { type, content: requireStringField(raw, "content") };
     case "tool_call_requested":
-      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), args: raw.args };
+      return {
+        type,
+        id: requireStringField(raw, "id"),
+        name: requireStringField(raw, "name"),
+        args: requireRecordField(raw, "args"),
+      };
     case "tool_result_received":
       return {
         type,
@@ -1115,6 +1149,21 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
+      };
+    }
+    case "background_job_completed": {
+      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
+      return {
+        type,
+        jobId: requireStringField(raw, "job_id"),
+        displayName: requireStringField(raw, "display_name"),
+        ...(legacyStatus != null ? { legacyStatus } : {}),
+        terminalStatus: requireOneOf(
+          requireStringField(raw, "terminal_status"),
+          "terminal_status",
+          ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
+        ),
+        detail: requireStringField(raw, "detail"),
       };
     }
 

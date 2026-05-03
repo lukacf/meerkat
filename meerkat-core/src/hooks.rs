@@ -1,7 +1,7 @@
 //! Hook contracts and engine interfaces.
 
 use crate::error::AgentError;
-use crate::event::{AgentErrorClass, AgentErrorReport};
+use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
 use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResult, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -151,7 +151,7 @@ pub enum HookPatch {
     /// Replace assistant text content in the latest model response.
     AssistantText { text: String },
     /// Replace serialized tool arguments.
-    ToolArgs { args: Value },
+    ToolArgs { args: ToolCallArguments },
     /// Mutate tool result payload before it is persisted.
     ToolResult {
         content: String,
@@ -212,7 +212,7 @@ pub struct HookLlmResponse {
 pub struct HookToolCall {
     pub tool_use_id: String,
     pub name: String,
-    pub args: Value,
+    pub args: ToolCallArguments,
 }
 
 /// Tool result view exposed to hooks.
@@ -370,6 +370,29 @@ impl HookExecutionReport {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Project an authoritative hook denial into the typed agent error shape.
+    ///
+    /// Runtime policy owns whether the returned error terminalizes the run.
+    /// This projection only preserves the denial facts emitted by the hook
+    /// engine without reclassifying them through string matching.
+    pub fn denial_error(&self, point: HookPoint) -> Option<AgentError> {
+        match self.decision.as_ref()? {
+            HookDecision::Deny {
+                hook_id,
+                reason_code,
+                message,
+                payload,
+            } => Some(AgentError::HookDenied {
+                hook_id: hook_id.clone(),
+                point,
+                reason_code: *reason_code,
+                message: message.clone(),
+                payload: payload.clone(),
+            }),
+            HookDecision::Allow => None,
+        }
+    }
 }
 
 pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
@@ -413,6 +436,31 @@ pub enum HookEngineError {
     ExecutionFailed { hook_id: HookId, reason: String },
     #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
     Timeout { hook_id: HookId, timeout_ms: u64 },
+}
+
+impl HookEngineError {
+    pub fn hook_id(&self) -> Option<&HookId> {
+        match self {
+            Self::InvalidConfiguration(_) => None,
+            Self::ExecutionFailed { hook_id, .. } | Self::Timeout { hook_id, .. } => Some(hook_id),
+        }
+    }
+
+    pub fn into_agent_error(self) -> AgentError {
+        match self {
+            Self::InvalidConfiguration(reason) => AgentError::HookConfigInvalid { reason },
+            Self::Timeout {
+                hook_id,
+                timeout_ms,
+            } => AgentError::HookTimeout {
+                hook_id,
+                timeout_ms,
+            },
+            Self::ExecutionFailed { hook_id, reason } => {
+                AgentError::HookExecutionFailed { hook_id, reason }
+            }
+        }
+    }
 }
 
 /// Runtime-independent engine interface.
@@ -459,6 +507,37 @@ mod tests {
             media_type: media_type.to_string(),
             data: data.into(),
         }
+    }
+
+    #[test]
+    fn hook_tool_call_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "tool_use_id": "tc_1",
+            "name": "search",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<HookToolCall>(value)
+            .expect_err("hook surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn hook_tool_args_patch_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "patch_type": "tool_args",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<HookPatch>(value)
+            .expect_err("hook patch surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

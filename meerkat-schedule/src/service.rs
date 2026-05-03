@@ -923,6 +923,7 @@ mod tests {
             tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
                 "shell".to_string(),
             ])),
+            tool_filter_witnesses: Default::default(),
             model: "claude-sonnet-4-6".into(),
             provider_params: None,
         }

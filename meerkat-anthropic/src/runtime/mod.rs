@@ -15,7 +15,7 @@ use meerkat_core::AuthError;
     all(not(target_arch = "wasm32"), feature = "foundry")
 ))]
 use meerkat_core::HttpAuthorizer;
-use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
@@ -65,66 +65,6 @@ fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthErr
     }
 }
 
-/// Allowed (backend, auth) combinations for Anthropic.
-pub const ALLOWED_BINDINGS: &[(AnthropicBackendKind, AnthropicAuthMethod)] = &[
-    // Native Anthropic API.
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ApiKey,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::StaticBearer,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ClaudeAiOauth,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::OauthToApiKey,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Bedrock.
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::BedrockBearer,
-    ),
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::BedrockAwsSigv4,
-    ),
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Vertex.
-    (
-        AnthropicBackendKind::Vertex,
-        AnthropicAuthMethod::VertexGoogleAuth,
-    ),
-    (
-        AnthropicBackendKind::Vertex,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Foundry.
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::FoundryApiKey,
-    ),
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::FoundryAzureAd,
-    ),
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-];
-
 pub struct AnthropicProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -134,44 +74,17 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         Provider::Anthropic
     }
 
-    fn validate_binding(
-        &self,
-        connection_ref: &meerkat_core::ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        if backend.provider != Provider::Anthropic || auth.provider != Provider::Anthropic {
-            return Err(ProviderBindingError::ProviderMismatch);
-        }
-        let backend_kind = AnthropicBackendKind::parse(&backend.backend_kind).ok_or_else(|| {
-            ProviderBindingError::UnknownBackendKind(backend.backend_kind.clone())
-        })?;
-        let auth_method = AnthropicAuthMethod::parse(&auth.auth_method)
-            .ok_or_else(|| ProviderBindingError::UnknownAuthMethod(auth.auth_method.clone()))?;
-        if !ALLOWED_BINDINGS.contains(&(backend_kind, auth_method)) {
-            return Err(ProviderBindingError::UnsupportedCombination {
-                backend: backend.backend_kind.clone(),
-                auth: auth.auth_method.clone(),
-            });
-        }
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
-            provider: Provider::Anthropic,
-            backend: NormalizedBackendKind::Anthropic(backend_kind),
-            auth: NormalizedAuthMethod::Anthropic(auth_method),
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
-    }
-
     async fn resolve_binding(
         &self,
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        let auth_method = match binding.auth {
+        if binding.provider() != Provider::Anthropic {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
+        let auth_method = match binding.auth() {
             NormalizedAuthMethod::Anthropic(m) => m,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -179,7 +92,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 ));
             }
         };
-        let backend_kind = match binding.backend {
+        let backend_kind = match binding.backend() {
             NormalizedBackendKind::Anthropic(k) => k,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -188,14 +101,14 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             }
         };
 
-        let source_label = format!("anthropic:{}", binding.auth_profile.id);
+        let source_label = format!("anthropic:{}", binding.auth_profile().id);
         let lease: Arc<dyn AuthLease> = match auth_method {
             AnthropicAuthMethod::ApiKey
             | AnthropicAuthMethod::StaticBearer
             | AnthropicAuthMethod::BedrockBearer
             | AnthropicAuthMethod::FoundryApiKey => {
                 let secret =
-                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                    resolve_simple_secret(&binding.auth_profile().source, env, binding).await?;
                 let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
                 Arc::new(StaticLease::inline_secret(
                     secret,
@@ -205,7 +118,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 ))
             }
             AnthropicAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
+                resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
             AnthropicAuthMethod::BedrockAwsSigv4 => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
@@ -257,7 +170,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
                             meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
+                                binding.connection_ref(),
                             ),
                         );
                     }
@@ -311,7 +224,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
                             meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
+                                binding.connection_ref(),
                             ),
                         );
                     }
@@ -321,7 +234,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         AuthMetadata {
                             provider_metadata: Some(meerkat_core::ProviderAuthMetadata::Anthropic(
                                 meerkat_core::AnthropicAuthMetadata {
-                                    foundry_deployment: binding.backend_profile.base_url.clone(),
+                                    foundry_deployment: binding.backend_profile().base_url.clone(),
                                     ..Default::default()
                                 },
                             )),
@@ -351,7 +264,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         _ => unreachable!("OAuth branch only handles OAuth auth methods"),
                     };
                     validate_oauth_target_for_auth_mode(
-                        &binding.auth_profile,
+                        binding.auth_profile(),
                         Provider::Anthropic,
                         expected_mode,
                     )
@@ -501,7 +414,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         Ok(ResolvedConnection {
             provider: Provider::Anthropic,
             backend: NormalizedBackendKind::Anthropic(backend_kind),
-            backend_profile: binding.backend_profile.clone(),
+            backend_profile: binding.backend_profile().clone(),
             auth_lease: lease,
         })
     }
@@ -683,15 +596,15 @@ fn bedrock_region(binding: &ValidatedBinding) -> Result<String, ProviderAuthErro
                  set auth_profile.metadata_defaults.provider_metadata.aws_region or \
                  backend_profile.options.aws_region/region. Region is not inferred from \
                  BackendProfile.base_url.",
-                binding.connection_ref.realm.as_str(),
-                binding.connection_ref.binding.as_str()
+                binding.connection_ref().realm.as_str(),
+                binding.connection_ref().binding.as_str()
             ))
         })
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
 fn explicit_anthropic_aws_region(binding: &ValidatedBinding) -> Option<String> {
-    match &binding.auth_profile.metadata_defaults.provider_metadata {
+    match &binding.auth_profile().metadata_defaults.provider_metadata {
         Some(meerkat_core::ProviderAuthMetadata::Anthropic(metadata)) => metadata
             .aws_region
             .as_deref()
@@ -711,18 +624,21 @@ fn non_empty_region(region: String) -> Option<String> {
 mod tests {
     use super::*;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
     #[test]
-    fn allowed_bindings_cover_api_key_and_oauth_variants() {
-        assert!(ALLOWED_BINDINGS.contains(&(
-            AnthropicBackendKind::AnthropicApi,
-            AnthropicAuthMethod::ApiKey,
-        )));
-        assert!(ALLOWED_BINDINGS.contains(&(
-            AnthropicBackendKind::AnthropicApi,
-            AnthropicAuthMethod::ClaudeAiOauth,
-        )));
+    fn typed_catalog_covers_api_key_and_oauth_variants() {
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ClaudeAiOauth),
+        ));
     }
 
     #[test]
@@ -736,42 +652,42 @@ mod tests {
         base_url: Option<&str>,
         metadata_region: Option<&str>,
     ) -> ValidatedBinding {
-        ValidatedBinding {
-            connection_ref: meerkat_core::ConnectionRef {
+        let backend = BackendProfile {
+            id: "bedrock-backend".into(),
+            provider: Provider::Anthropic,
+            backend_kind: AnthropicBackendKind::Bedrock.as_str().into(),
+            base_url: base_url.map(str::to_string),
+            options,
+        };
+        let auth = AuthProfile {
+            id: "bedrock-auth".into(),
+            provider: Provider::Anthropic,
+            auth_method: AnthropicAuthMethod::BedrockAwsSigv4.as_str().into(),
+            source: meerkat_core::CredentialSourceSpec::PlatformDefault,
+            constraints: Default::default(),
+            metadata_defaults: meerkat_core::AuthMetadataDefaults {
+                provider_metadata: metadata_region.map(|region| {
+                    meerkat_core::ProviderAuthMetadata::Anthropic(
+                        meerkat_core::AnthropicAuthMetadata {
+                            aws_region: Some(region.into()),
+                            ..Default::default()
+                        },
+                    )
+                }),
+                ..Default::default()
+            },
+        };
+        ProviderRuntimeCatalog::validate_binding(
+            &meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::BindingId::parse("bedrock").unwrap(),
                 profile: None,
             },
-            provider: Provider::Anthropic,
-            backend: NormalizedBackendKind::Anthropic(AnthropicBackendKind::Bedrock),
-            auth: NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::BedrockAwsSigv4),
-            backend_profile: Arc::new(BackendProfile {
-                id: "bedrock-backend".into(),
-                provider: Provider::Anthropic,
-                backend_kind: AnthropicBackendKind::Bedrock.as_str().into(),
-                base_url: base_url.map(str::to_string),
-                options,
-            }),
-            auth_profile: Arc::new(AuthProfile {
-                id: "bedrock-auth".into(),
-                provider: Provider::Anthropic,
-                auth_method: AnthropicAuthMethod::BedrockAwsSigv4.as_str().into(),
-                source: meerkat_core::CredentialSourceSpec::PlatformDefault,
-                constraints: Default::default(),
-                metadata_defaults: meerkat_core::AuthMetadataDefaults {
-                    provider_metadata: metadata_region.map(|region| {
-                        meerkat_core::ProviderAuthMetadata::Anthropic(
-                            meerkat_core::AnthropicAuthMetadata {
-                                aws_region: Some(region.into()),
-                                ..Default::default()
-                            },
-                        )
-                    }),
-                    ..Default::default()
-                },
-            }),
-            policy: BindingPolicy::default(),
-        }
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap()
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]

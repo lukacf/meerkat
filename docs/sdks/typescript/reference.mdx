@@ -359,6 +359,7 @@ type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
+  | BackgroundJobCompletedEvent
   | UnknownEvent;
 ```
 
@@ -474,6 +475,29 @@ type ToolConfigChangeStatus =
   | { kind: "warning_failed_closed"; error: string }
   | { kind: "external_tool_delta"; phase: "pending" | "applied" | "draining" | "forced" | "failed"; detail?: string };
 ```
+
+### Background job events
+
+```typescript
+type BackgroundJobTerminalStatus =
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "cancelled"
+  | "retired"
+  | "terminated";
+
+interface BackgroundJobCompletedEvent {
+  type: "background_job_completed";
+  jobId: string;
+  displayName: string;
+  terminalStatus: BackgroundJobTerminalStatus;
+  legacyStatus?: string;
+  detail: string;
+}
+```
+
+`terminalStatus` is the semantic status. `legacyStatus` is the optional wire `status` display mirror.
 
 ### Stream management
 

@@ -3006,6 +3006,10 @@ pub enum RuntimeApplyFailureCause {
     RuntimeContextApply,
     #[serde(rename = "RuntimeTurn")]
     RuntimeTurn,
+    #[serde(rename = "HookDenied")]
+    HookDenied,
+    #[serde(rename = "HookRuntimeFailure")]
+    HookRuntimeFailure,
     #[serde(rename = "ExecutorStopped")]
     ExecutorStopped,
     #[serde(rename = "ExecutorControlFailed")]
@@ -3020,6 +3024,8 @@ impl RuntimeApplyFailureCause {
             Self::PrimitiveRejected => "PrimitiveRejected",
             Self::RuntimeContextApply => "RuntimeContextApply",
             Self::RuntimeTurn => "RuntimeTurn",
+            Self::HookDenied => "HookDenied",
+            Self::HookRuntimeFailure => "HookRuntimeFailure",
             Self::ExecutorStopped => "ExecutorStopped",
             Self::ExecutorControlFailed => "ExecutorControlFailed",
             Self::ExecutorInternal => "ExecutorInternal",
@@ -3034,6 +3040,8 @@ impl std::convert::TryFrom<&str> for RuntimeApplyFailureCause {
             "PrimitiveRejected" => Ok(Self::PrimitiveRejected),
             "RuntimeContextApply" => Ok(Self::RuntimeContextApply),
             "RuntimeTurn" => Ok(Self::RuntimeTurn),
+            "HookDenied" => Ok(Self::HookDenied),
+            "HookRuntimeFailure" => Ok(Self::HookRuntimeFailure),
             "ExecutorStopped" => Ok(Self::ExecutorStopped),
             "ExecutorControlFailed" => Ok(Self::ExecutorControlFailed),
             "ExecutorInternal" => Ok(Self::ExecutorInternal),

@@ -4,9 +4,9 @@
 //! This module owns the cross-cutting runtime shapes used by sessions,
 //! factories, and surfaces. Provider-runtime-side typed enums
 //! (`OpenAiBackendKind`, `AnthropicAuthMethod`, etc.) live in
-//! `meerkat-client/src/providers/*` — `meerkat-core` stays generic and
-//! carries `backend_kind` / `auth_method` as strings normalized at the
-//! provider-runtime boundary.
+//! [`crate::provider_matrix`]. Runtime config still carries `backend_kind` /
+//! `auth_method` as strings until they are normalized at the provider-runtime
+//! catalog boundary.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,6 +17,9 @@ use thiserror::Error;
 use crate::Config;
 use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
+use crate::provider_matrix::{
+    AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
+};
 
 // ---------------------------------------------------------------------
 // Runtime shapes (what providers/surfaces consume at runtime)
@@ -586,14 +589,26 @@ impl RealmConnectionSet {
 
     fn synthesize_default(provider: Provider, inline_secret: Option<String>) -> Self {
         let (backend_kind, env_var, fallback) = match provider {
-            Provider::Anthropic => ("anthropic_api", "ANTHROPIC_API_KEY", vec![]),
-            Provider::OpenAI => ("openai_api", "OPENAI_API_KEY", vec![]),
+            Provider::Anthropic => (
+                AnthropicBackendKind::AnthropicApi.as_str(),
+                "ANTHROPIC_API_KEY",
+                vec![],
+            ),
+            Provider::OpenAI => (
+                OpenAiBackendKind::OpenAiApi.as_str(),
+                "OPENAI_API_KEY",
+                vec![],
+            ),
             Provider::Gemini => (
-                "google_genai",
+                GoogleBackendKind::GoogleGenAi.as_str(),
                 "GEMINI_API_KEY",
                 vec!["GOOGLE_API_KEY".to_string()],
             ),
-            Provider::SelfHosted => ("self_hosted", "RKAT_SELF_HOSTED_API_KEY", vec![]),
+            Provider::SelfHosted => (
+                SelfHostedBackendKind::SelfHosted.as_str(),
+                "RKAT_SELF_HOSTED_API_KEY",
+                vec![],
+            ),
             Provider::Other => ("other_api", "RKAT_OTHER_API_KEY", vec![]),
         };
         let backend = BackendProfile {

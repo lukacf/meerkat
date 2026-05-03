@@ -17,7 +17,9 @@ use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::cmp::Ordering;
+use std::fmt;
 
 /// Canonical typed source identity for streamed agent events.
 ///
@@ -192,6 +194,104 @@ impl BackgroundJobTerminalStatus {
             | OperationStatus::Running
             | OperationStatus::Retiring => None,
         }
+    }
+}
+
+fn deserialize_legacy_background_job_status<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.as_str().map(str::to_owned)))
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ToolCallArguments(
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
+    )]
+    Value,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallArgumentsError {
+    message: String,
+}
+
+impl ToolCallArgumentsError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ToolCallArgumentsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for ToolCallArgumentsError {}
+
+impl ToolCallArguments {
+    pub fn from_value(value: Value) -> Result<Self, ToolCallArgumentsError> {
+        if value.is_object() {
+            Ok(Self(value))
+        } else {
+            Err(ToolCallArgumentsError::new(format!(
+                "tool call arguments must be a JSON object, got {}",
+                value_kind(&value)
+            )))
+        }
+    }
+
+    pub fn from_raw_json(raw: &RawValue) -> Result<Self, ToolCallArgumentsError> {
+        let value = serde_json::from_str(raw.get()).map_err(|error| {
+            ToolCallArgumentsError::new(format!("tool call arguments must be valid JSON: {error}"))
+        })?;
+        Self::from_value(value)
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCallArguments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::from_value(Value::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<Value> for ToolCallArguments {
+    type Error = ToolCallArgumentsError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        Self::from_value(value)
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -1282,7 +1382,7 @@ pub enum AgentEvent {
     ToolCallRequested {
         id: String,
         name: String,
-        args: Value,
+        args: ToolCallArguments,
     },
 
     /// Tool result received (injected into conversation)
@@ -1423,11 +1523,34 @@ pub enum AgentEvent {
     BackgroundJobCompleted {
         job_id: String,
         display_name: String,
-        status: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_status: Option<BackgroundJobTerminalStatus>,
+        /// Legacy display mirror for consumers still rendering string status.
+        #[serde(rename = "status")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_legacy_background_job_status"
+        )]
+        legacy_status: Option<String>,
+        terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
+}
+
+impl AgentEvent {
+    pub fn background_job_completed(
+        job_id: impl Into<String>,
+        display_name: impl Into<String>,
+        terminal_status: BackgroundJobTerminalStatus,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::BackgroundJobCompleted {
+            job_id: job_id.into(),
+            display_name: display_name.into(),
+            legacy_status: Some(terminal_status.as_str().to_string()),
+            terminal_status,
+            detail: detail.into(),
+        }
+    }
 }
 
 /// Scope attribution frame for multi-agent streaming.
@@ -1639,13 +1762,11 @@ pub fn format_verbose_event_with_config(
         AgentEvent::BackgroundJobCompleted {
             job_id,
             display_name,
-            status,
             terminal_status,
             detail,
+            ..
         } => {
-            let status = terminal_status
-                .map(BackgroundJobTerminalStatus::as_str)
-                .unwrap_or(status.as_str());
+            let status = terminal_status.as_str();
             Some(format!(
                 "  BG job {job_id} ({display_name}) {status}: {detail}"
             ))
@@ -1698,6 +1819,38 @@ mod tests {
             media_type: media_type.to_string(),
             data: data.into(),
         }
+    }
+
+    fn tool_args(value: Value) -> ToolCallArguments {
+        ToolCallArguments::from_value(value).expect("test tool args must be an object")
+    }
+
+    #[test]
+    fn tool_call_arguments_reject_string_projection() {
+        let err = ToolCallArguments::from_value(serde_json::json!("{\"path\":"))
+            .expect_err("provider argument strings must not become semantic tool-call args");
+
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tool_call_requested_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "type": "tool_call_requested",
+            "id": "tc_1",
+            "name": "search",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<AgentEvent>(value)
+            .expect_err("event surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2060,7 +2213,7 @@ mod tests {
             AgentEvent::ToolCallRequested {
                 id: "tc_1".to_string(),
                 name: "read_file".to_string(),
-                args: serde_json::json!({"path": "/tmp/test"}),
+                args: tool_args(serde_json::json!({"path": "/tmp/test"})),
             },
             AgentEvent::ToolResultReceived {
                 id: "tc_1".to_string(),
@@ -2139,13 +2292,12 @@ mod tests {
                 )
                 .with_applied_at_turn(Some(12)),
             },
-            AgentEvent::BackgroundJobCompleted {
-                job_id: "j_123".to_string(),
-                display_name: "sleep 2".to_string(),
-                status: "completed".to_string(),
-                terminal_status: Some(BackgroundJobTerminalStatus::Completed),
-                detail: "exit_code: 0".to_string(),
-            },
+            AgentEvent::background_job_completed(
+                "j_123",
+                "sleep 2",
+                BackgroundJobTerminalStatus::Completed,
+                "exit_code: 0",
+            ),
         ];
 
         for event in events {
@@ -2166,13 +2318,12 @@ mod tests {
 
     #[test]
     fn background_job_completed_carries_typed_terminal_status() {
-        let event = AgentEvent::BackgroundJobCompleted {
-            job_id: "j_123".to_string(),
-            display_name: "sleep 2".to_string(),
-            status: BackgroundJobTerminalStatus::Failed.as_str().to_string(),
-            terminal_status: Some(BackgroundJobTerminalStatus::Failed),
-            detail: "exit_code: 1".to_string(),
-        };
+        let event = AgentEvent::background_job_completed(
+            "j_123",
+            "sleep 2",
+            BackgroundJobTerminalStatus::Failed,
+            "exit_code: 1",
+        );
 
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "background_job_completed");
@@ -2182,36 +2333,125 @@ mod tests {
         let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
         match roundtrip {
             AgentEvent::BackgroundJobCompleted {
-                status,
+                legacy_status,
                 terminal_status,
                 ..
             } => {
-                assert_eq!(status, "failed");
-                assert_eq!(terminal_status, Some(BackgroundJobTerminalStatus::Failed));
+                assert_eq!(legacy_status.as_deref(), Some("failed"));
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
             }
             other => unreachable!("unexpected event: {other:?}"),
         }
+    }
 
-        let legacy_json = serde_json::json!({
+    #[test]
+    fn background_job_completed_requires_typed_terminal_status() {
+        let string_only_json = serde_json::json!({
             "type": "background_job_completed",
             "job_id": "j_123",
             "display_name": "sleep 2",
-            "status": "failed",
+            "status": "completed",
             "detail": "exit_code: 1"
         });
-        let legacy_event: AgentEvent = serde_json::from_value(legacy_json).unwrap();
-        match legacy_event {
+        assert!(
+            serde_json::from_value::<AgentEvent>(string_only_json).is_err(),
+            "legacy status-only payload must not decode as completed"
+        );
+
+        let malformed_status_only_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": "success",
+            "detail": "exit_code: 0"
+        });
+        assert!(
+            serde_json::from_value::<AgentEvent>(malformed_status_only_json).is_err(),
+            "unknown legacy status string must not become success"
+        );
+
+        let unknown_typed_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": "completed",
+            "terminal_status": "success",
+            "detail": "exit_code: 0"
+        });
+        assert!(
+            serde_json::from_value::<AgentEvent>(unknown_typed_json).is_err(),
+            "unknown typed terminal status must fail closed"
+        );
+
+        let typed_without_legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "terminal_status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let event: AgentEvent = serde_json::from_value(typed_without_legacy_json).unwrap();
+        match event {
             AgentEvent::BackgroundJobCompleted {
                 job_id,
                 display_name,
-                status,
+                legacy_status,
                 terminal_status,
                 detail,
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(status, "failed");
-                assert_eq!(terminal_status, None);
+                assert_eq!(legacy_status, None);
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
+                assert_eq!(detail, "exit_code: 1");
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
+        let stale_legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": "completed",
+            "terminal_status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let event: AgentEvent = serde_json::from_value(stale_legacy_json).unwrap();
+        match event {
+            AgentEvent::BackgroundJobCompleted {
+                job_id,
+                display_name,
+                legacy_status,
+                terminal_status,
+                detail,
+            } => {
+                assert_eq!(job_id, "j_123");
+                assert_eq!(display_name, "sleep 2");
+                assert_eq!(legacy_status.as_deref(), Some("completed"));
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
+                assert_eq!(detail, "exit_code: 1");
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
+        let malformed_legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": 0,
+            "terminal_status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let event: AgentEvent = serde_json::from_value(malformed_legacy_json).unwrap();
+        match event {
+            AgentEvent::BackgroundJobCompleted {
+                legacy_status,
+                terminal_status,
+                detail,
+                ..
+            } => {
+                assert_eq!(legacy_status, None);
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
             other => unreachable!("unexpected event: {other:?}"),
@@ -2584,7 +2824,7 @@ mod tests {
             AgentEvent::ToolCallRequested {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
-                args: serde_json::json!({}),
+                args: tool_args(serde_json::json!({})),
             },
             AgentEvent::ToolResultReceived {
                 id: "tool-1".to_string(),
@@ -2679,13 +2919,12 @@ mod tests {
                 )
                 .with_applied_at_turn(Some(1)),
             },
-            AgentEvent::BackgroundJobCompleted {
-                job_id: "j_123".to_string(),
-                display_name: "sleep 2".to_string(),
-                status: "completed".to_string(),
-                terminal_status: Some(BackgroundJobTerminalStatus::Completed),
-                detail: "exit_code: 0".to_string(),
-            },
+            AgentEvent::background_job_completed(
+                "j_123",
+                "sleep 2",
+                BackgroundJobTerminalStatus::Completed,
+                "exit_code: 0",
+            ),
         ];
 
         let mut kinds = std::collections::BTreeSet::new();

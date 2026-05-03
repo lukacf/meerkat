@@ -61,6 +61,7 @@ from meerkat.errors import (
 from meerkat.events import (
     AgentErrorReason,
     AgentErrorReport,
+    BackgroundJobCompleted,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionStarted,
@@ -1207,6 +1208,91 @@ def test_parse_tool_config_changed_with_non_boolean_persisted():
     assert isinstance(event, UnknownEvent)
     assert event.type == "malformed_event"
     assert event.data == raw
+
+
+def test_parse_background_job_completed_uses_typed_terminal_status():
+    raw = {
+        "type": "background_job_completed",
+        "job_id": "j_123",
+        "display_name": "sleep 2",
+        "status": "completed",
+        "terminal_status": "failed",
+        "detail": "exit_code: 1",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, BackgroundJobCompleted)
+    assert event.job_id == "j_123"
+    assert event.display_name == "sleep 2"
+    assert event.legacy_status == "completed"
+    assert event.terminal_status == "failed"
+    assert event.detail == "exit_code: 1"
+
+
+def test_parse_background_job_completed_allows_absent_legacy_status():
+    raw = {
+        "type": "background_job_completed",
+        "job_id": "j_123",
+        "display_name": "sleep 2",
+        "terminal_status": "failed",
+        "detail": "exit_code: 1",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, BackgroundJobCompleted)
+    assert event.legacy_status is None
+    assert event.terminal_status == "failed"
+
+
+def test_parse_background_job_completed_ignores_malformed_legacy_status():
+    raw = {
+        "type": "background_job_completed",
+        "job_id": "j_123",
+        "display_name": "sleep 2",
+        "status": 0,
+        "terminal_status": "failed",
+        "detail": "exit_code: 1",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, BackgroundJobCompleted)
+    assert event.legacy_status is None
+    assert event.terminal_status == "failed"
+
+
+def test_parse_background_job_completed_requires_typed_terminal_status():
+    raw = {
+        "type": "background_job_completed",
+        "job_id": "j_123",
+        "display_name": "sleep 2",
+        "status": "completed",
+        "detail": "exit_code: 0",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
+
+
+def test_parse_background_job_completed_rejects_unknown_terminal_status():
+    raw = {
+        "type": "background_job_completed",
+        "job_id": "j_123",
+        "display_name": "sleep 2",
+        "status": "completed",
+        "terminal_status": "success",
+        "detail": "exit_code: 0",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
+
+
+def test_background_job_completed_constructor_requires_terminal_status():
+    with pytest.raises(TypeError):
+        BackgroundJobCompleted(
+            job_id="j_123",
+            display_name="sleep 2",
+            detail="exit_code: 0",
+        )
 
 
 def test_parse_turn_completed_with_usage():

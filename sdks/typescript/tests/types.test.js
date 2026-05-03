@@ -244,6 +244,15 @@ describe("Typed Events", () => {
         },
         reason: "malformed operation/status semantics must not become an empty typed payload",
       },
+      {
+        raw: {
+          type: "tool_call_requested",
+          id: "t1",
+          name: "search",
+          args: "{\"query\":\"rust\"}",
+        },
+        reason: "tool-call args string JSON must not become semantic args",
+      },
     ];
 
     for (const { raw, reason } of cases) {
@@ -931,6 +940,90 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "malformed_event");
     assert.equal(event.rawType, "tool_config_changed");
+    assert.deepEqual(event.raw, raw);
+  });
+
+  it("should parse background_job_completed from typed terminal status", () => {
+    const event = parseEvent({
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      terminal_status: "failed",
+      detail: "exit_code: 1",
+    });
+
+    assert.equal(event.type, "background_job_completed");
+    if (event.type === "background_job_completed") {
+      assert.equal(event.jobId, "j_123");
+      assert.equal(event.displayName, "sleep 2");
+      assert.equal(event.legacyStatus, "completed");
+      assert.equal(event.terminalStatus, "failed");
+      assert.equal(event.detail, "exit_code: 1");
+    }
+  });
+
+  it("should parse background_job_completed without legacy status mirror", () => {
+    const event = parseEvent({
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      terminal_status: "failed",
+      detail: "exit_code: 1",
+    });
+
+    assert.equal(event.type, "background_job_completed");
+    if (event.type === "background_job_completed") {
+      assert.equal(event.legacyStatus, undefined);
+      assert.equal(event.terminalStatus, "failed");
+    }
+  });
+
+  it("should ignore malformed background_job_completed legacy status mirror", () => {
+    const event = parseEvent({
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: 0,
+      terminal_status: "failed",
+      detail: "exit_code: 1",
+    });
+
+    assert.equal(event.type, "background_job_completed");
+    if (event.type === "background_job_completed") {
+      assert.equal(event.legacyStatus, undefined);
+      assert.equal(event.terminalStatus, "failed");
+    }
+  });
+
+  it("should reject background_job_completed without typed terminal status", () => {
+    const raw = {
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      detail: "exit_code: 0",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "background_job_completed");
+    assert.deepEqual(event.raw, raw);
+  });
+
+  it("should reject unknown background_job_completed terminal status", () => {
+    const raw = {
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      terminal_status: "success",
+      detail: "exit_code: 0",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "background_job_completed");
     assert.deepEqual(event.raw, raw);
   });
 

@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::{
-    AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch,
-    HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView, ToolDef,
-    ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
+    AgentBuilder, AgentError, AgentErrorClass, AgentEvent, AgentLlmClient, AgentSessionStore,
+    AgentToolDispatcher, HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation,
+    HookOutcome, HookPatch, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason,
+    ToolCallArguments, ToolCallView, ToolDef, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -26,6 +26,7 @@ type DynAgent =
 enum ClientMode {
     TextOnly,
     ToolThenText,
+    ToolThenTextMalformedArgs,
     FailImmediately,
 }
 
@@ -67,9 +68,17 @@ impl AgentLlmClient for ScenarioClient {
                 StopReason::EndTurn,
                 Usage::default(),
             )),
-            ClientMode::ToolThenText => {
+            ClientMode::ToolThenText | ClientMode::ToolThenTextMalformedArgs => {
                 if index == 0 {
-                    let args = RawValue::from_string(r#"{"value":"orig"}"#.to_string())
+                    let args_json = match self.mode {
+                        ClientMode::ToolThenText => r#"{"value":"orig"}"#.to_string(),
+                        ClientMode::ToolThenTextMalformedArgs => {
+                            serde_json::to_string("{\"value\":")
+                                .map_err(|e| AgentError::InternalError(e.to_string()))?
+                        }
+                        _ => unreachable!("tool-call branch is only used for tool modes"),
+                    };
+                    let args = RawValue::from_string(args_json)
                         .map_err(|e| AgentError::InternalError(e.to_string()))?;
                     Ok(LlmStreamResult::new(
                         vec![meerkat_core::AssistantBlock::ToolUse {
@@ -193,6 +202,7 @@ struct TestHookEngine {
     pre_tool_args_patch: Option<Value>,
     post_tool_content_patch: Option<String>,
     invocations: Arc<Mutex<Vec<HookPoint>>>,
+    pre_tool_seen_args: Arc<Mutex<Vec<Value>>>,
 }
 
 #[async_trait]
@@ -230,6 +240,12 @@ impl HookEngine for TestHookEngine {
                 }
             }
             HookPoint::PreToolExecution => {
+                if let Some(tool_call) = invocation.tool_call.as_ref() {
+                    self.pre_tool_seen_args
+                        .lock()
+                        .await
+                        .push(tool_call.args.as_value().clone());
+                }
                 if self.pre_tool_deny {
                     decision = Some(HookDecision::deny(
                         HookId::new("deny-pre-tool"),
@@ -239,7 +255,10 @@ impl HookEngine for TestHookEngine {
                     ));
                 }
                 if let Some(args) = &self.pre_tool_args_patch {
-                    patches.push(HookPatch::ToolArgs { args: args.clone() });
+                    patches.push(HookPatch::ToolArgs {
+                        args: ToolCallArguments::from_value(args.clone())
+                            .expect("test hook patch args must be an object"),
+                    });
                 }
             }
             HookPoint::PostToolExecution => {
@@ -309,8 +328,147 @@ async fn build_agent(
 fn test_hooks() -> TestHookEngine {
     TestHookEngine {
         invocations: Arc::new(Mutex::new(Vec::new())),
+        pre_tool_seen_args: Arc::new(Mutex::new(Vec::new())),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn malformed_provider_tool_call_args_fail_closed_before_event_or_hook_projection() {
+    let seen_args = Arc::new(Mutex::new(Vec::new()));
+    let seen_tokens = Arc::new(Mutex::new(Vec::new()));
+    let hooks = test_hooks();
+    let invocations = Arc::clone(&hooks.invocations);
+    let pre_tool_seen_args = Arc::clone(&hooks.pre_tool_seen_args);
+    let mut agent = build_agent(
+        ClientMode::ToolThenTextMalformedArgs,
+        hooks,
+        seen_args.clone(),
+        seen_tokens.clone(),
+    )
+    .await;
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
+    let err = agent
+        .run_with_events("test".to_string().into(), tx)
+        .await
+        .expect_err("malformed provider tool-call args must fail closed");
+
+    assert!(
+        matches!(&err, AgentError::ToolError(message)
+            if message.contains("Invalid arguments")
+                && message.contains("tool call arguments")),
+        "unexpected error: {err}"
+    );
+    assert!(
+        seen_args.lock().await.is_empty(),
+        "malformed provider args must not reach the dispatcher"
+    );
+    assert_eq!(
+        seen_tokens.lock().await.len(),
+        1,
+        "malformed provider args must not continue into a follow-up LLM turn"
+    );
+
+    let recorded_invocations = invocations.lock().await.clone();
+    assert!(
+        !recorded_invocations.contains(&HookPoint::PreToolExecution),
+        "malformed provider args must not project into PreToolExecution hooks"
+    );
+    assert!(
+        pre_tool_seen_args.lock().await.is_empty(),
+        "malformed provider args must not become hook tool-call args"
+    );
+
+    let mut saw_run_failed = false;
+    let mut saw_tool_call_requested = false;
+    let mut saw_tool_result_event = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::RunFailed {
+                error_class,
+                error_report,
+                ..
+            } => {
+                saw_run_failed = true;
+                assert_eq!(error_class, AgentErrorClass::Tool);
+                assert!(
+                    error_report
+                        .as_ref()
+                        .is_some_and(|report| report.message.contains("tool call arguments")),
+                    "RunFailed should carry the typed projection failure"
+                );
+            }
+            AgentEvent::ToolCallRequested { .. } => saw_tool_call_requested = true,
+            AgentEvent::ToolExecutionCompleted { .. } | AgentEvent::ToolResultReceived { .. } => {
+                saw_tool_result_event = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_run_failed,
+        "malformed provider args should emit RunFailed"
+    );
+    assert!(
+        !saw_tool_call_requested,
+        "malformed provider args must not project into ToolCallRequested events"
+    );
+    assert!(
+        !saw_tool_result_event,
+        "malformed provider args must not be emitted as a recoverable tool result"
+    );
+}
+
+#[tokio::test]
+async fn valid_provider_tool_call_args_project_to_event_hook_and_dispatch() {
+    let seen_args = Arc::new(Mutex::new(Vec::new()));
+    let seen_tokens = Arc::new(Mutex::new(Vec::new()));
+    let hooks = test_hooks();
+    let invocations = Arc::clone(&hooks.invocations);
+    let pre_tool_seen_args = Arc::clone(&hooks.pre_tool_seen_args);
+    let mut agent = build_agent(
+        ClientMode::ToolThenText,
+        hooks,
+        seen_args.clone(),
+        seen_tokens.clone(),
+    )
+    .await;
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
+    agent
+        .run_with_events("test".to_string().into(), tx)
+        .await
+        .expect("valid provider tool-call args should execute");
+
+    assert_eq!(
+        seen_args.lock().await.as_slice(),
+        [serde_json::json!({"value":"orig"})]
+    );
+    assert!(
+        invocations
+            .lock()
+            .await
+            .contains(&HookPoint::PreToolExecution),
+        "valid provider args should project into PreToolExecution hooks"
+    );
+    assert_eq!(
+        pre_tool_seen_args.lock().await.as_slice(),
+        [serde_json::json!({"value":"orig"})],
+        "valid provider args should project into hook tool-call args"
+    );
+
+    let mut saw_tool_call_requested = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::ToolCallRequested { args, .. } = event {
+            saw_tool_call_requested = true;
+            assert_eq!(args.as_value(), &serde_json::json!({"value":"orig"}));
+        }
+    }
+    assert!(
+        saw_tool_call_requested,
+        "valid provider args should project into ToolCallRequested events"
+    );
 }
 
 #[tokio::test]

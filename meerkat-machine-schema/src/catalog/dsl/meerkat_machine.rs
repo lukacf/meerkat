@@ -858,6 +858,8 @@ pub enum RuntimeApplyFailureCause {
     PrimitiveRejected,
     RuntimeContextApply,
     RuntimeTurn,
+    HookDenied,
+    HookRuntimeFailure,
     ExecutorStopped,
     ExecutorControlFailed,
     ExecutorInternal,

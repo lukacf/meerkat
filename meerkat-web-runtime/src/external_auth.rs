@@ -180,7 +180,7 @@ impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver 
         &self,
         binding: &meerkat_providers::ValidatedBinding,
     ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
-        let promise = invoke_external_auth_resolver(&binding.connection_ref)
+        let promise = invoke_external_auth_resolver(binding.connection_ref())
             .map_err(auth_error_from_invoke_error)?;
         let js_value = wasm_bindgen_futures::JsFuture::from(promise)
             .await

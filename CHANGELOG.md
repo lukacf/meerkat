@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `background_job_completed` events now require typed `terminal_status` for completion semantics; the legacy `status` string is retained only as an optional display mirror.
+
 ## [0.5.2] - 2026-04-12
 
 ### Added

@@ -12,6 +12,15 @@
 //!
 //! Idempotent: replaying from checkpoint produces identical output.
 //! `.rkat/` files are derived output, never canonical source for resume.
+//!
+//! Projection contract:
+//! - Owner: `EventStore` owns event order and durable sequence state.
+//! - Rebuild trigger: missing checkpoints resume from the event log start;
+//!   invalid, unreadable, or ahead-of-log checkpoints force full replay.
+//! - Staleness policy: checkpoints are cursors over derived output only and
+//!   are stale when they exceed `EventStore::last_seq`.
+//! - Failure behavior: event-store read failures propagate; projection never
+//!   invents or allocates event sequences.
 
 use crate::event_store::EventStore;
 use meerkat_core::event::AgentEvent;
@@ -204,7 +213,23 @@ impl SessionProjector {
     ) -> Result<u64, ProjectionError> {
         match self.read_checkpoint_state(session_id).await {
             CheckpointState::Valid(checkpoint) => {
-                self.project(event_store, session_id, checkpoint + 1).await
+                let durable_last_seq = event_store
+                    .last_seq(session_id)
+                    .await
+                    .map_err(|e| ProjectionError::EventStore(e.to_string()))?;
+                if checkpoint > durable_last_seq {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        checkpoint,
+                        durable_last_seq,
+                        "projection checkpoint is ahead of durable event store; replaying derived files"
+                    );
+                    self.replay(event_store, session_id).await
+                } else if checkpoint == durable_last_seq {
+                    Ok(checkpoint)
+                } else {
+                    self.project(event_store, session_id, checkpoint + 1).await
+                }
             }
             CheckpointState::Missing => self.project(event_store, session_id, 1).await,
             CheckpointState::Invalid => self.replay(event_store, session_id).await,
@@ -476,6 +501,44 @@ mod tests {
 
         let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
         assert_eq!(checkpoint.trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_rebuilds_after_stale_checkpoint_ahead_of_event_store_tail() {
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "authoritative tail".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+
+        let session_dir = projector.session_dir(&sid);
+        tokio::fs::write(session_dir.join("checkpoint"), b"99")
+            .await
+            .unwrap();
+        tokio::fs::write(session_dir.join("events.jsonl"), b"stale projection\n")
+            .await
+            .unwrap();
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 2);
+
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        assert!(!events_content.contains("stale projection"));
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
+        assert_eq!(checkpoint.trim(), "2");
     }
 
     #[tokio::test]

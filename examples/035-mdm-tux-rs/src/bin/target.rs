@@ -1209,7 +1209,7 @@ impl CoreExecutor for TargetCoreExecutor {
         self.service
             .apply_runtime_turn(&self.session_id, run_id, req, boundary, input_ids)
             .await
-            .map_err(|e| CoreExecutorError::apply_failed_runtime_turn(e.to_string()))
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

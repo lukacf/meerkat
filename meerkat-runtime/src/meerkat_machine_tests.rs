@@ -1465,6 +1465,82 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
 }
 
 #[tokio::test]
+async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
+
+    struct HookDeniedExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for HookDeniedExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed(
+                CoreApplyFailureCause::hook_denied("hook denied pre-tool execution"),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(HookDeniedExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed hook denial"))
+        .await
+        .expect("input should be accepted");
+
+    let (cause, message) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observed = {
+                let sessions = adapter.sessions.read().await;
+                let entry = sessions.get(&session_id).expect("session should exist");
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                authority
+                    .state
+                    .last_runtime_apply_failure_cause
+                    .map(|cause| {
+                        (
+                            cause,
+                            authority.state.last_runtime_apply_failure_message.clone(),
+                        )
+                    })
+            };
+            if let Some(observed) = observed {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should terminalize the typed hook denial");
+
+    assert_eq!(cause, mm_dsl::RuntimeApplyFailureCause::HookDenied);
+    assert_eq!(message.as_deref(), Some("hook denied pre-tool execution"));
+}
+
+#[tokio::test]
 async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -14141,6 +14217,68 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
     assert_eq!(state.active_revision, 0);
 }
 
+#[tokio::test]
+async fn stage_persistent_filter_rejects_missing_filter_witnesses() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+
+    let err = adapter
+        .stage_persistent_filter(&session_id, filter, Default::default())
+        .await
+        .expect_err("runtime-backed staging must reject name-only persistent filters");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "missing-witness rejection should name the filter tool: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should remain readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed filter staging must leave machine visibility unchanged"
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        authority.state.staged_filter,
+        mm_dsl::ToolFilter::All,
+        "failed filter staging must not mutate DSL staged filter authority"
+    );
+}
+
+#[test]
+fn machine_visibility_restore_requires_bound_dsl_authority() {
+    let owner = MachineToolVisibilityOwner::new();
+
+    let err = owner
+        .replace_visibility_state(meerkat_core::SessionToolVisibilityState::default())
+        .expect_err("machine visibility restore must require a bound DSL authority");
+
+    assert!(
+        err.to_string().contains("not bound"),
+        "unbound restore should report the missing machine authority: {err}"
+    );
+    assert_eq!(
+        owner
+            .visibility_state()
+            .expect("owner state should remain readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed restore must leave machine visibility state unchanged"
+    );
+}
+
 fn callback_tool_provenance(source_id: &str) -> meerkat_core::ToolProvenance {
     meerkat_core::ToolProvenance {
         kind: meerkat_core::ToolSourceKind::Callback,
@@ -14183,6 +14321,46 @@ fn seed_deferred_tool_authority_catalog(
 }
 
 #[tokio::test]
+async fn stage_persistent_filter_rejects_filter_authority_mismatched_with_visible_catalog() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("secret", "catalog");
+    seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &[]);
+    let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+    let forged_witnesses = [(
+        "secret".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:forged".to_string()),
+            last_seen_provenance: Some(callback_tool_provenance("forged")),
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let err = adapter
+        .stage_persistent_filter(&session_id, filter, forged_witnesses)
+        .await
+        .expect_err("runtime-backed staging must reject forged filter authority");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "mismatch rejection should name the filter tool: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should remain readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed mismatched staging must leave machine visibility unchanged"
+    );
+}
+
+#[tokio::test]
 async fn request_deferred_tools_updates_machine_owned_visibility_state() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -14219,6 +14397,46 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
         "requested deferred tools must be staged on the machine-owned state"
     );
     assert_eq!(state.staged_revision, revision.0);
+}
+
+#[tokio::test]
+async fn machine_requested_deferred_names_rejects_name_only_staging() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+
+    let err = bindings
+        .tool_visibility_owner()
+        .stage_requested_deferred_names(["deferred_tool".to_string()].into_iter().collect())
+        .expect_err("name-only deferred staging must not become authority");
+
+    assert!(
+        err.to_string().contains("deferred_tool"),
+        "missing-witness rejection should name the deferred tool: {err}"
+    );
+    let state = bindings
+        .tool_visibility_owner()
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert!(
+        state.staged_requested_deferred_names.is_empty(),
+        "failed name-only staging must not stage deferred names"
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        authority.state.staged_deferred_names.is_empty()
+            && authority.state.staged_deferred_authorities.is_empty(),
+        "failed name-only staging must not mutate DSL deferred authority"
+    );
 }
 
 #[tokio::test]
@@ -14544,9 +14762,18 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
         .await
         .expect("bindings should prepare");
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+    let witnesses = [(
+        "secret".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:test".to_string()),
+            last_seen_provenance: None,
+        },
+    )]
+    .into_iter()
+    .collect();
 
     adapter
-        .stage_persistent_filter(&session_id, filter.clone(), Default::default())
+        .stage_persistent_filter(&session_id, filter.clone(), witnesses)
         .await
         .expect("stage should succeed");
     let promoted = bindings
@@ -14643,6 +14870,158 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
     assert!(
         state.staged_requested_deferred_names.is_empty(),
         "failed authority sync must not install staged routing names"
+    );
+}
+
+#[tokio::test]
+async fn replace_visibility_state_rejects_name_only_inherited_filter_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        inherited_base_filter: meerkat_core::ToolFilter::Allow(
+            ["secret".to_string()].into_iter().collect(),
+        ),
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must not install inherited names without witnesses");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "rejection should name the missing inherited filter witness: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should still be readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed inherited authority restore must leave machine visibility unchanged"
+    );
+}
+
+#[tokio::test]
+async fn replace_visibility_state_rejects_active_filter_without_witnesses() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        active_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        active_revision: 1,
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must not install active filter names without witnesses");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "rejection should name the missing active filter witness: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should still be readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed active-filter restore must leave machine visibility unchanged"
+    );
+}
+
+#[tokio::test]
+async fn replace_visibility_state_rejects_staged_filter_with_empty_witness() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        filter_witnesses: [(
+            "secret".to_string(),
+            meerkat_core::ToolVisibilityWitness::default(),
+        )]
+        .into_iter()
+        .collect(),
+        staged_revision: 1,
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must not install staged filter names with empty witnesses");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "rejection should name the empty staged filter witness: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should still be readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed staged-filter restore must leave machine visibility unchanged"
+    );
+}
+
+#[tokio::test]
+async fn replace_visibility_state_rejects_filter_authority_mismatched_with_visible_catalog() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("secret", "catalog");
+    seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &[]);
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        active_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        filter_witnesses: [(
+            "secret".to_string(),
+            meerkat_core::ToolVisibilityWitness {
+                stable_owner_key: Some("callback:forged".to_string()),
+                last_seen_provenance: Some(callback_tool_provenance("forged")),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        active_revision: 1,
+        staged_revision: 1,
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must reject forged active/staged filter authority");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "rejection should name the mismatched active/staged filter witness: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should still be readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed mismatched filter restore must leave machine visibility unchanged"
     );
 }
 

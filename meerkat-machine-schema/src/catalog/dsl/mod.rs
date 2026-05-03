@@ -504,6 +504,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "PrimitiveRejected",
                     "RuntimeContextApply",
                     "RuntimeTurn",
+                    "HookDenied",
+                    "HookRuntimeFailure",
                     "ExecutorStopped",
                     "ExecutorControlFailed",
                     "ExecutorInternal",

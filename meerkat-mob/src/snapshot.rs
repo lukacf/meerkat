@@ -1,5 +1,6 @@
 //! Parent tool scope snapshot for inheriting tool visibility into mob children.
 
+use meerkat_core::WitnessedToolFilter;
 use meerkat_core::tool_scope::ToolFilter;
 use meerkat_core::types::ToolDef;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,11 @@ impl ParentToolScopeSnapshot {
         ToolFilter::Allow(self.visible_tool_names.iter().cloned().collect())
     }
 
+    /// Convert this snapshot into a witnessed allow filter.
+    pub fn to_witnessed_tool_filter(&self) -> WitnessedToolFilter {
+        self.witnessed_filter_for(self.to_tool_filter())
+    }
+
     /// Build a tool filter with additional allow/deny overlays applied on top
     /// of the snapshot's visible set.
     ///
@@ -49,6 +55,19 @@ impl ParentToolScopeSnapshot {
         }
 
         ToolFilter::Allow(names.into_iter().collect())
+    }
+
+    /// Build a witnessed filter with additional allow/deny overlays applied.
+    pub fn with_witnessed_overlays(
+        &self,
+        allow_overlay: Option<&HashSet<String>>,
+        deny_overlay: Option<&HashSet<String>>,
+    ) -> WitnessedToolFilter {
+        self.witnessed_filter_for(self.with_overlays(allow_overlay, deny_overlay))
+    }
+
+    fn witnessed_filter_for(&self, filter: ToolFilter) -> WitnessedToolFilter {
+        meerkat_core::tool_scope::witnessed_tool_filter_for_defs(filter, &self.visible_tool_defs)
     }
 
     /// Create a snapshot from a set of visible tool definitions.

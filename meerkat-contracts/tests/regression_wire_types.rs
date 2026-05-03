@@ -16,11 +16,17 @@ use meerkat_contracts::{
     WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
     WireUsage,
 };
+use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
     HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    ToolCallArguments, ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
+    Usage,
 };
+
+fn tool_args(value: serde_json::Value) -> ToolCallArguments {
+    ToolCallArguments::from_value(value).expect("test tool args must be an object")
+}
 
 // ---------------------------------------------------------------------------
 // 1. WireRunResult required fields
@@ -406,7 +412,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolCallRequested {
             id: "tc1".to_string(),
             name: "read_file".to_string(),
-            args: serde_json::json!({"path": "/tmp"}),
+            args: tool_args(serde_json::json!({"path": "/tmp"})),
         },
         AgentEvent::ToolResultReceived {
             id: "tc1".to_string(),
@@ -492,6 +498,12 @@ fn agent_event_all_variants_roundtrip() {
             )
             .with_applied_at_turn(Some(5)),
         },
+        AgentEvent::background_job_completed(
+            "j_123",
+            "sleep 2",
+            BackgroundJobTerminalStatus::Completed,
+            "exit_code: 0",
+        ),
     ];
 
     for event in &direct_variants {
@@ -571,7 +583,7 @@ fn agent_event_all_variants_roundtrip() {
         );
     }
 
-    // All 31 AgentEvent variants are covered: 28 direct + 3 from JSON.
+    // All 32 AgentEvent variants are covered: 29 direct + 3 from JSON.
     // If a new variant is added and not covered here, the exhaustive
     // agent_event_type() match in meerkat-core will fail to compile,
     // prompting addition here too.
@@ -658,7 +670,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolCallRequested {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            args: serde_json::json!({}),
+            args: tool_args(serde_json::json!({})),
         },
         AgentEvent::ToolResultReceived {
             id: "tool-1".to_string(),
@@ -754,6 +766,12 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             )
             .with_applied_at_turn(Some(1)),
         },
+        AgentEvent::background_job_completed(
+            "j_123",
+            "sleep 2",
+            BackgroundJobTerminalStatus::Completed,
+            "exit_code: 0",
+        ),
     ];
 
     for event in events {

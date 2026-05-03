@@ -40,14 +40,28 @@ where
             }
         }
 
-        let mut report = hook_engine
+        let mut report = match hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
-            .map_err(Self::map_hook_engine_error)?;
-        let mut published = hook_engine
+        {
+            Ok(report) => report,
+            Err(err) => {
+                self.emit_hook_engine_error(&invocation, event_tx, &err)
+                    .await;
+                return Err(Self::map_hook_engine_error(err));
+            }
+        };
+        let mut published = match hook_engine
             .drain_published_patches(&invocation.session_id)
             .await
-            .map_err(Self::map_hook_engine_error)?;
+        {
+            Ok(published) => published,
+            Err(err) => {
+                self.emit_hook_engine_error(&invocation, event_tx, &err)
+                    .await;
+                return Err(Self::map_hook_engine_error(err));
+            }
+        };
         report.published_patches.append(&mut published);
 
         for outcome in &report.outcomes {
@@ -114,20 +128,26 @@ where
     }
 
     fn map_hook_engine_error(err: HookEngineError) -> AgentError {
-        match err {
-            HookEngineError::InvalidConfiguration(reason) => {
-                AgentError::HookConfigInvalid { reason }
-            }
-            HookEngineError::Timeout {
-                hook_id,
-                timeout_ms,
-            } => AgentError::HookTimeout {
-                hook_id,
-                timeout_ms,
-            },
-            HookEngineError::ExecutionFailed { hook_id, reason } => {
-                AgentError::HookExecutionFailed { hook_id, reason }
-            }
+        err.into_agent_error()
+    }
+
+    async fn emit_hook_engine_error(
+        &self,
+        invocation: &HookInvocation,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+        err: &HookEngineError,
+    ) {
+        if let Some(hook_id) = err.hook_id() {
+            crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx,
+                AgentEvent::HookFailed {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                    error: err.to_string(),
+                },
+            )
+            .await;
         }
     }
 }

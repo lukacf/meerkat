@@ -427,7 +427,10 @@ fn helper_options_from_spec(
     });
     options.tool_access_policy = spec.tool_access_policy.clone();
     if let Some(snapshot) = &spec.resolved_spawn_snapshot {
-        options.inherited_tool_filter = Some(snapshot.tool_filter.clone());
+        options.inherited_tool_filter = Some(meerkat_core::WitnessedToolFilter::new(
+            snapshot.tool_filter.clone(),
+            snapshot.tool_filter_witnesses.clone(),
+        ));
         options.model_override = Some(snapshot.model.clone());
         options.provider_params_override = snapshot.provider_params.clone();
     }
@@ -850,6 +853,27 @@ mod tests {
         let runtime = Arc::new(RecordingMobRuntime::default());
         let host = MobMcpScheduleHost::from_runtime(runtime.clone());
         let filter = ToolFilter::Allow(["send", "read_file"].into_iter().collect());
+        let filter_witnesses: std::collections::BTreeMap<
+            String,
+            meerkat_core::ToolVisibilityWitness,
+        > = [
+            (
+                "send".to_string(),
+                meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key: Some("test-owner:send".to_string()),
+                    last_seen_provenance: None,
+                },
+            ),
+            (
+                "read_file".to_string(),
+                meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key: Some("test-owner:read_file".to_string()),
+                    last_seen_provenance: None,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
         let binding = MobTargetBinding::SpawnHelper {
             mob_id: "ops".to_string(),
             member_id: "deploy-monitor".to_string(),
@@ -862,6 +886,7 @@ mod tests {
                 }),
                 resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
                     tool_filter: filter.clone(),
+                    tool_filter_witnesses: filter_witnesses.clone(),
                     model: "claude-snapshot".to_string(),
                     provider_params: Some(serde_json::json!({"thinking_budget": 1024})),
                 }),
@@ -885,7 +910,13 @@ mod tests {
             options.role_name.as_ref().map(|name| name.as_str()),
             Some("delegate")
         );
-        assert_eq!(options.inherited_tool_filter.as_ref(), Some(&filter));
+        assert_eq!(
+            options.inherited_tool_filter.as_ref(),
+            Some(&meerkat_core::WitnessedToolFilter::new(
+                filter,
+                filter_witnesses
+            ))
+        );
         assert_eq!(options.model_override.as_deref(), Some("claude-snapshot"));
         assert_eq!(
             options.provider_params_override,

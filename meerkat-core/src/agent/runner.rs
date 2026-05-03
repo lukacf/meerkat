@@ -3,7 +3,7 @@
 use crate::budget::Budget;
 use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
-use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
+use crate::hooks::{HookInvocation, HookPatch, HookPoint};
 use crate::ops::ToolDispatchOutcome;
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
@@ -661,20 +661,8 @@ where
             )
             .await?;
 
-        if let Some(HookDecision::Deny {
-            hook_id,
-            reason_code,
-            message,
-            payload,
-        }) = report.decision
-        {
-            return Err(AgentError::HookDenied {
-                hook_id,
-                point: HookPoint::RunStarted,
-                reason_code,
-                message,
-                payload,
-            });
+        if let Some(error) = report.denial_error(HookPoint::RunStarted) {
+            return Err(error);
         }
         Ok(())
     }
@@ -691,20 +679,8 @@ where
             )
             .await?;
 
-        if let Some(HookDecision::Deny {
-            hook_id,
-            reason_code,
-            message,
-            payload,
-        }) = report.decision
-        {
-            return Err(AgentError::HookDenied {
-                hook_id,
-                point: HookPoint::RunCompleted,
-                reason_code,
-                message,
-                payload,
-            });
+        if let Some(error) = report.denial_error(HookPoint::RunCompleted) {
+            return Err(error);
         }
 
         for outcome in &report.outcomes {
@@ -835,20 +811,8 @@ where
             )
             .await?;
 
-        if let Some(HookDecision::Deny {
-            hook_id,
-            reason_code,
-            message,
-            payload,
-        }) = report.decision
-        {
-            return Err(AgentError::HookDenied {
-                hook_id,
-                point: HookPoint::RunFailed,
-                reason_code,
-                message,
-                payload,
-            });
+        if let Some(error) = report.denial_error(HookPoint::RunFailed) {
+            return Err(error);
         }
         Ok(())
     }

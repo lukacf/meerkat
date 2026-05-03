@@ -182,7 +182,6 @@ const sessionState: SessionState = {
   mob_id: '',
   model: 'claude-sonnet-4-5',
   usage: { input_tokens: 1, output_tokens: 2 },
-  run_counter: 0,
   message_count: 0,
   is_active: true,
   last_assistant_text: null,
@@ -314,7 +313,7 @@ function handleEvent(event: AgentEvent): string {
     case 'tool_config_changed':
       return event.payload.target;
     case 'background_job_completed':
-      return `${event.display_name}:${event.status}`;
+      return `${event.display_name}:${event.terminal_status}`;
     case 'reasoning_delta':
       return event.delta;
     case 'reasoning_complete':
@@ -325,6 +324,26 @@ function handleEvent(event: AgentEvent): string {
     }
   }
 }
+
+const backgroundJobWithoutLegacyStatus: AgentEvent = {
+  type: 'background_job_completed',
+  job_id: 'j_123',
+  display_name: 'sleep 2',
+  terminal_status: 'failed',
+  detail: 'exit_code: 1',
+};
+
+// @ts-expect-error terminal_status is required; status is only a legacy display mirror.
+const backgroundJobStringOnly: AgentEvent = {
+  type: 'background_job_completed',
+  job_id: 'j_123',
+  display_name: 'sleep 2',
+  status: 'completed',
+  detail: 'exit_code: 0',
+};
+
+handleEvent(backgroundJobWithoutLegacyStatus);
+void backgroundJobStringOnly;
 
 const typedSkillsResolved: AgentEvent = {
   type: 'skills_resolved',

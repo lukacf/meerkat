@@ -1446,6 +1446,7 @@ mod tests {
             "requires_scoped_override": false,
             "provider_plan": {
                 "endpoint": "generations",
+                "request_shape": "gpt_image",
                 "output": {
                     "size": "landscape1536x1024",
                     "quality": "low",

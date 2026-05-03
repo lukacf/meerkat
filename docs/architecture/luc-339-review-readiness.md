@@ -50,8 +50,8 @@ The following exact Web SDK default/fabrication paths became impossible:
   `staged`.
 - Member and mob-wide subscription decoders no longer synthesize
   `{ type: "unknown" }`, empty `source`, or empty `role` from malformed event
-  envelopes. They require generated `payload.type`, mob-wide `source`, and
-  mob-wide `role`.
+  envelopes. They require generated `payload.type`, a validated mob-wide
+  runtime-id `source` object, and mob-wide `role`.
 - `Mob.events()` no longer returns a raw cast of malformed event log rows; it
   requires `cursor`, `timestamp`, `mob_id`, and `kind`.
 
@@ -67,3 +67,7 @@ an inert projection of the already-required generated `status` field.
 - Formatting: `make fmt-check` passed.
 - Broad check: `MEERKAT_BUILDBUDDY=1 make check` passed via BuildBuddy
   invocation `46c526e1-9a54-4d2b-aa19-e22f94ab1b8d`.
+- AI review follow-up: mob-wide `source` now requires the real runtime-id object
+  shape and rejects the legacy string source instead of projecting
+  `agent_identity`.
+  Revalidated with `npm test` in `sdks/web` and `make agent-gate`.

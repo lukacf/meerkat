@@ -206,10 +206,17 @@ export interface MobSpawnManyResult {
 }
 
 export interface MobSpawnManyResultEntry {
-  agent_identity?: string;
-  error?: string;
-  member_ref?: WireMemberRef;
-  ok: boolean;
+  result: MobSpawnManyResultPayload;
+  status: MobSpawnManyResultStatus;
+}
+
+export interface MobSpawnManySpawnedResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+}
+
+export interface MobSpawnManyFailedResult {
+  message: string;
 }
 
 export interface MobSpawnReceiptWire {
@@ -990,6 +997,10 @@ export type WireMemberState = "active" | "retiring";
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
 export type WireMobRuntimeMode = "autonomous_host" | "turn_driven";
+
+export type MobSpawnManyResultStatus = "spawned" | "failed";
+
+export type MobSpawnManyResultPayload = MobSpawnManySpawnedResult | MobSpawnManyFailedResult;
 
 export interface MobCollectionPolicyInputAll {
   type: "all";

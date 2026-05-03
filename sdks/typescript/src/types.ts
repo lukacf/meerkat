@@ -362,13 +362,6 @@ export interface MobFlowStatus {
   readonly run?: Record<string, unknown> | null;
 }
 
-export interface MobSpawnManyResultEntry {
-  readonly ok: boolean;
-  readonly agentIdentity?: string;
-  readonly memberRef?: MobMemberRef;
-  readonly error?: string;
-}
-
 type MobTurnStartWireOptions = Omit<
   MobTurnStartParams,
   "mob_id" | "agent_identity" | "prompt"

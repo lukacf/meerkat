@@ -24,7 +24,7 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/reset/destroy
+//! - `mob_lifecycle(mob_id, action)` — typed lifecycle action string carrier
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, agent_identity)`
@@ -501,23 +501,15 @@ where
     with_runtime_state(|state| f(state.mob_state.clone()))
 }
 
-fn spawn_result_payload(mob_id: &MobId, result: &meerkat_mob::SpawnResult) -> serde_json::Value {
-    let identity_str = result.agent_identity.to_string();
-    serde_json::json!({
-        "agent_identity": result.agent_identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
-    })
-}
-
 fn spawn_member_result_payload(
     mob_id: &MobId,
     result: &meerkat_mob::SpawnResult,
-) -> serde_json::Value {
-    let mut payload = spawn_result_payload(mob_id, result);
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("status".to_string(), serde_json::json!("ok"));
-    }
-    payload
+) -> meerkat_contracts::MobSpawnManyResultEntry {
+    let identity_str = result.agent_identity.to_string();
+    meerkat_contracts::MobSpawnManyResultEntry::spawned(
+        identity_str.clone(),
+        meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+    )
 }
 
 fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> serde_json::Value {
@@ -1619,32 +1611,32 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 
 /// Perform a lifecycle action on a mob.
 ///
-/// `action`: one of "stop", "resume", "complete", "reset", "destroy".
+/// `action` is a compatibility string carrier that is immediately
+/// deserialized into the typed wire lifecycle action contract.
 #[wasm_bindgen]
 pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+    let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
+        err_js(
+            "invalid_action",
+            &format!("invalid lifecycle action: {err}"),
+        )
+    })?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    match action {
-        "stop" => mob_state.mob_stop(&id).await.map_err(err_mob)?,
-        "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
-        "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
-        "reset" => mob_state.mob_reset(&id).await.map_err(err_mob)?,
-        "destroy" => {
-            // WASM lifecycle wrapper is `() on success`; Rust/RPC callers
-            // that need the structured MobDestroyReport use the RPC
-            // mob/lifecycle handler directly.
-            let _report = mob_state.mob_destroy(&id).await.map_err(err_mob)?;
-        }
-        _ => {
-            return Err(err_js(
-                "invalid_action",
-                &format!(
-                    "unknown lifecycle action: {action} (expected stop/resume/complete/reset/destroy)"
-                ),
-            ));
-        }
-    }
+    // WASM lifecycle wrapper is `() on success`; the structured
+    // MobDestroyReport is available through public/RPC lifecycle result
+    // envelopes for consumers that need cleanup detail.
+    let _destroy_report = mob_state
+        .mob_lifecycle_action(&id, action)
+        .await
+        .map_err(err_mob)?;
     Ok(())
+}
+
+fn parse_mob_lifecycle_action_arg(
+    action: &str,
+) -> Result<meerkat_contracts::WireMobLifecycleAction, serde_json::Error> {
+    serde_json::from_value(serde_json::Value::String(action.to_string()))
 }
 
 /// Fetch mob events.
@@ -1670,7 +1662,7 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
 /// `specs_json`: JSON array of `{ "profile": "...", "agent_identity": "...", "initial_message"?: "...",
 ///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
 ///
-/// Returns JSON array of results per spec.
+/// Returns JSON array of typed result entries per spec.
 #[wasm_bindgen]
 pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1696,14 +1688,11 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .await
         .map_err(err_mob)?;
 
-    let result_json: Vec<serde_json::Value> = results
+    let result_json: Vec<meerkat_contracts::MobSpawnManyResultEntry> = results
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => serde_json::json!({
-                "status": "error",
-                "error": e.to_string(),
-            }),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.to_string()),
         })
         .collect();
 
@@ -2289,6 +2278,8 @@ enum SubscriptionInner {
     /// Mob-wide attributed event receiver from the event router.
     /// The entire handle is stored to keep the router task alive (Drop cancels it).
     MobWide(std::cell::RefCell<meerkat_mob::MobEventRouterHandle>),
+    #[cfg(all(test, target_arch = "wasm32"))]
+    InjectedProjectionFailure,
 }
 
 /// Per-subscription state wrapping the inner receiver.
@@ -2406,6 +2397,8 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
 ///
 /// Returns a JSON array of event objects. Drains all buffered events
 /// since the last poll. Non-blocking: returns `[]` if no new events.
+/// If any buffered event cannot be projected to JSON, returns a typed
+/// `serialize_error` instead of silently omitting the event.
 ///
 /// For per-member subscriptions (`mob_member_subscribe`), returns
 /// `EventEnvelope<AgentEvent>` objects. For mob-wide subscriptions
@@ -2429,10 +2422,10 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
                 let mut rx = rx_cell.borrow_mut();
                 loop {
                     match rx.try_recv() {
-                        Ok(event) => match serde_json::to_value(&event) {
-                            Ok(val) => events.push(val),
-                            Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
-                        },
+                        Ok(event) => events.push(
+                            serialize_subscription_item(&event, "subscription agent event")
+                                .map_err(|message| err_js("serialize_error", &message))?,
+                        ),
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
                             events.push(serde_json::json!({
@@ -2448,17 +2441,43 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
             SubscriptionInner::MobWide(handle_cell) => {
                 let mut router_handle = handle_cell.borrow_mut();
                 while let Ok(attributed) = router_handle.event_rx.try_recv() {
-                    match serde_json::to_value(&attributed) {
-                        Ok(val) => events.push(val),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize attributed event");
-                        }
+                    events.push(
+                        serialize_subscription_item(&attributed, "subscription attributed event")
+                            .map_err(|message| err_js("serialize_error", &message))?,
+                    );
+                }
+            }
+            #[cfg(all(test, target_arch = "wasm32"))]
+            SubscriptionInner::InjectedProjectionFailure => {
+                struct FailingProjection;
+
+                impl Serialize for FailingProjection {
+                    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        Err(serde::ser::Error::custom("injected projection failure"))
                     }
                 }
+
+                events.push(
+                    serialize_subscription_item(
+                        &FailingProjection,
+                        "subscription injected test event",
+                    )
+                    .map_err(|message| err_js("serialize_error", &message))?,
+                );
             }
         }
         serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))
     })
+}
+
+fn serialize_subscription_item<T: Serialize + ?Sized>(
+    item: &T,
+    projection: &str,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(item).map_err(|e| format!("failed to serialize {projection}: {e}"))
 }
 
 /// Close a subscription and free resources.
@@ -2480,7 +2499,8 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        merge_runtime_system_context_state, parse_mobpack, poll_subscription,
+        merge_runtime_system_context_state, parse_mob_lifecycle_action_arg, parse_mobpack,
+        poll_subscription, serialize_subscription_item,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2490,7 +2510,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{build_service_infrastructure, populate_realm_from_api_keys};
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{helper_result_payload, spawn_member_result_payload, spawn_result_payload};
+    use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat::SessionServiceControlExt;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2825,25 +2845,79 @@ capabilities = [{capability_values}]
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_member_result_payload_returns_identity_native_fields() {
+    fn spawn_member_result_payload_returns_typed_spawn_many_entry() {
         let identity = meerkat_mob::AgentIdentity::from("test-member");
         let runtime_id = meerkat_mob::AgentRuntimeId::initial(identity.clone());
         let fence = meerkat_mob::FenceToken::new(1);
         let result = meerkat_mob::SpawnResult::new(identity, runtime_id, fence);
         let mob_id = MobId::from("mob-test");
 
-        let payload = spawn_result_payload(&mob_id, &result);
-        assert_eq!(payload["agent_identity"], "test-member");
+        let entry = spawn_member_result_payload(&mob_id, &result);
+        let payload = serde_json::to_value(&entry).expect("serialize typed spawn_many result");
+        assert_eq!(payload["status"], "spawned");
+        assert_eq!(payload["result"]["agent_identity"], "test-member");
+        assert!(
+            payload.get("agent_identity").is_none(),
+            "spawn_many row must not retain flat agent_identity carrier"
+        );
+        assert!(
+            payload.get("member_ref").is_none(),
+            "spawn_many row must not retain flat member_ref carrier"
+        );
+        assert!(
+            payload.get("ok").is_none(),
+            "spawn_many row must not retain legacy ok carrier"
+        );
+        assert!(
+            payload.get("error").is_none(),
+            "spawn_many row must not retain string-error carrier"
+        );
         assert!(
             payload.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak to app-facing payloads"
         );
-        let member_ref = payload["member_ref"].as_str().expect("member_ref");
+        let member_ref = payload["result"]["member_ref"]
+            .as_str()
+            .expect("member_ref");
         assert!(!member_ref.is_empty(), "member_ref must be populated");
 
-        let spawn_payload = spawn_member_result_payload(&mob_id, &result);
-        assert_eq!(spawn_payload["status"], "ok");
-        assert_eq!(spawn_payload["agent_identity"], "test-member");
+        let round_trip: meerkat_contracts::MobSpawnManyResultEntry =
+            serde_json::from_value(payload).expect("typed spawn_many entry must deserialize");
+        assert_eq!(round_trip, entry);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn spawn_member_failure_payload_uses_typed_result_message() {
+        let entry = meerkat_contracts::MobSpawnManyResultEntry::failed("profile missing");
+        let payload = serde_json::to_value(&entry).expect("serialize failed spawn_many result");
+
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["result"]["message"], "profile missing");
+        assert!(
+            payload.get("error").is_none(),
+            "failed spawn_many row must not retain string-error carrier"
+        );
+
+        let round_trip: meerkat_contracts::MobSpawnManyResultEntry =
+            serde_json::from_value(payload)
+                .expect("typed failed spawn_many entry must deserialize");
+        assert_eq!(round_trip, entry);
+    }
+
+    #[test]
+    fn mob_lifecycle_action_string_carrier_uses_typed_contract_boundary() {
+        let action = parse_mob_lifecycle_action_arg("resume")
+            .expect("valid lifecycle action must deserialize");
+        assert_eq!(action, meerkat_contracts::WireMobLifecycleAction::Resume);
+
+        let err = parse_mob_lifecycle_action_arg("explode")
+            .expect_err("unknown lifecycle action must fail typed deserialization");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2950,6 +3024,134 @@ capabilities = [{capability_values}]
 
         destroy_session(handle).expect("destroy session");
         assert!(get_session_state(handle).is_err());
+    }
+
+    #[test]
+    fn poll_subscription_empty_success_is_clean_empty_array() {
+        let (_tx, rx) = crate::tokio::sync::broadcast::channel(1);
+
+        let handle = SUBSCRIPTIONS.with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let handle = registry.next_handle;
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+            registry.subscriptions.insert(
+                handle,
+                EventSubscription {
+                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
+                },
+            );
+            handle
+        });
+
+        let payload = poll_subscription(handle).expect("empty poll should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("empty poll should be json");
+        assert_eq!(
+            parsed.as_array().map(Vec::len),
+            Some(0),
+            "clean empty poll must remain a successful empty array"
+        );
+
+        let close_result = close_subscription(handle);
+        assert!(close_result.is_ok());
+    }
+
+    #[test]
+    fn serialize_subscription_item_reports_projection_failure() {
+        struct FailingProjection;
+
+        impl serde::Serialize for FailingProjection {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("injected projection failure"))
+            }
+        }
+
+        let error =
+            serialize_subscription_item(&FailingProjection, "subscription injected test event")
+                .expect_err("projection failure should be reported");
+
+        assert!(
+            error.contains("failed to serialize subscription injected test event"),
+            "projection failure should name the failed subscription projection"
+        );
+        assert!(
+            error.contains("injected projection failure"),
+            "projection failure should preserve the serialization cause"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn attributed_subscription_item_serializes_runtime_id_source_shape() {
+        let source = meerkat_mob::AgentRuntimeId::new(
+            meerkat_mob::AgentIdentity::from("worker-runtime"),
+            meerkat_mob::Generation::new(3),
+        );
+        let attributed = meerkat_mob::AttributedEvent {
+            source,
+            source_fence_token: meerkat_mob::FenceToken::new(9),
+            role: meerkat_mob::ProfileName::from("worker"),
+            envelope: meerkat_core::EventEnvelope::new(
+                "worker-runtime",
+                7,
+                Some("mob-web-unit".to_string()),
+                meerkat_core::AgentEvent::TextDelta {
+                    delta: "hello".to_string(),
+                },
+            ),
+        };
+
+        let parsed = serialize_subscription_item(&attributed, "subscription attributed event")
+            .expect("canonical attributed subscription event should serialize");
+
+        assert!(
+            parsed["source"].as_str().is_none(),
+            "AgentRuntimeId source must not be projected as a lossy string"
+        );
+        assert_eq!(parsed["source"]["identity"], "worker-runtime");
+        assert_eq!(parsed["source"]["generation"], 3);
+        assert_eq!(parsed["source_fence_token"], 9);
+        assert_eq!(parsed["role"], "worker");
+        assert_eq!(parsed["envelope"]["payload"]["type"], "text_delta");
+        assert_eq!(parsed["envelope"]["payload"]["delta"], "hello");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    #[allow(clippy::expect_used)]
+    fn poll_subscription_fails_closed_when_projection_serialization_fails() {
+        let handle = SUBSCRIPTIONS.with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let handle = registry.next_handle;
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+            registry.subscriptions.insert(
+                handle,
+                EventSubscription {
+                    inner: SubscriptionInner::InjectedProjectionFailure,
+                },
+            );
+            handle
+        });
+
+        let error =
+            poll_subscription(handle).expect_err("projection failure must fail public poll");
+        let error_json = error.as_string().expect("typed error json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&error_json).expect("typed error should be json");
+        assert_eq!(parsed["code"], "serialize_error");
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("injected projection failure"),
+            "projection failure should surface the serialization cause"
+        );
+
+        let close_result = close_subscription(handle);
+        assert!(close_result.is_ok());
     }
 
     #[test]

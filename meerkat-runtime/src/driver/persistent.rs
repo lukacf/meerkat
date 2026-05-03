@@ -171,6 +171,35 @@ impl PersistentRuntimeDriver {
         self.inner.sync_control_projection_from_dsl_authority();
     }
 
+    fn apply_destroy_dsl_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        let fallback_session_id =
+            crate::meerkat_machine::dsl::SessionId::from(self.runtime_id.to_string());
+        let authority = self.inner.shared_dsl_authority();
+        let transition = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_id = authority
+                .state
+                .session_id
+                .clone()
+                .unwrap_or(fallback_session_id);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
+            )
+        };
+        transition
+            .map(|_| {
+                self.inner.sync_control_projection_from_dsl_authority();
+            })
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "DSL authority (Destroy) rejected runtime destroy: {err:?}"
+                ))
+            })
+    }
+
     /// Get pending events (delegates to inner).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         self.inner.drain_events()
@@ -475,8 +504,11 @@ impl PersistentRuntimeDriver {
 
     pub async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
         let (checkpoint, report) = self.prepare_destroy_lifecycle();
-        self.inner
-            .force_runtime_authority(RuntimeState::Destroyed, None, None);
+        if let Err(err) = self.apply_destroy_dsl_authority() {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            self.inner.sync_control_projection_from_dsl_authority();
+            return Err(err);
+        }
         self.commit_prepared_destroy_lifecycle(checkpoint).await?;
         Ok(report)
     }

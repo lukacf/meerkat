@@ -889,12 +889,18 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         .ok_or("mob/spawn_many missing results array")?;
     assert_eq!(results.len(), 3, "expected three spawn results: {spawned}");
     assert!(
-        results.iter().all(|entry| entry["ok"] == true),
-        "all spawn_many entries should succeed: {spawned}"
+        results.iter().all(|entry| {
+            entry["status"] == "spawned"
+                && entry["result"]["agent_identity"].is_string()
+                && entry["result"]["member_ref"].is_string()
+                && entry.get("ok").is_none()
+                && entry.get("agent_identity").is_none()
+        }),
+        "all spawn_many entries should use typed spawned results: {spawned}"
     );
-    let worker_identity = results[1]["agent_identity"]
+    let worker_identity = results[1]["result"]["agent_identity"]
         .as_str()
-        .ok_or("worker spawn result missing agent_identity")?
+        .ok_or("worker spawn result missing result.agent_identity")?
         .to_string();
 
     let members = poll_members_until(&mut surface, mob_id, |payload| {
@@ -1173,7 +1179,7 @@ async fn e2e_scenario_30_cli_mob_rpc_flow_probe() -> Result<(), Box<dyn std::err
         spawn_mob_rpc_surface(&rkat, &project_dir, &pack, "bootstrap", Some(&api_key)).await?;
     let _ = rpc_call(&mut surface, 101, "initialize", json!({}), 20).await?;
 
-    let _ = rpc_call(
+    let spawned = rpc_call(
         &mut surface,
         102,
         "mob/spawn_many",
@@ -1188,6 +1194,19 @@ async fn e2e_scenario_30_cli_mob_rpc_flow_probe() -> Result<(), Box<dyn std::err
         30,
     )
     .await?;
+    let results = spawned["results"]
+        .as_array()
+        .ok_or("mob/spawn_many missing results array")?;
+    assert!(
+        results.iter().all(|entry| {
+            entry["status"] == "spawned"
+                && entry["result"]["agent_identity"].is_string()
+                && entry["result"]["member_ref"].is_string()
+                && entry.get("ok").is_none()
+                && entry.get("agent_identity").is_none()
+        }),
+        "flow smoke spawn_many entries should use typed spawned results: {spawned}"
+    );
 
     let flows = rpc_call(
         &mut surface,

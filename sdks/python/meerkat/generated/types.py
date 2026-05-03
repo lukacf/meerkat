@@ -277,11 +277,22 @@ class MobSpawnManyResult:
 
 @dataclass
 class MobSpawnManyResultEntry:
-    """One result entry in a `mob/spawn_many` response."""
-    ok: bool
-    agent_identity: Optional[str] = None
-    error: Optional[str] = None
-    member_ref: Optional[WireMemberRef] = None
+    """One typed result entry in a `mob/spawn_many` response."""
+    result: MobSpawnManyResultPayload
+    status: MobSpawnManyResultStatus
+
+
+@dataclass
+class MobSpawnManySpawnedResult:
+    """Successful per-member `mob/spawn_many` result payload."""
+    agent_identity: str
+    member_ref: WireMemberRef
+
+
+@dataclass
+class MobSpawnManyFailedResult:
+    """Failed per-member `mob/spawn_many` result payload."""
+    message: str
 
 
 @dataclass
@@ -1974,6 +1985,12 @@ WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unkn
 
 # Mob RPC helper wire type for WireMobRuntimeMode.
 WireMobRuntimeMode = Literal['autonomous_host', 'turn_driven']
+
+# Typed status for one `mob/spawn_many` row.
+MobSpawnManyResultStatus = Literal['spawned', 'failed']
+
+# Typed payload for one `mob/spawn_many` row.
+MobSpawnManyResultPayload = MobSpawnManySpawnedResult | MobSpawnManyFailedResult
 
 # Mob RPC helper wire type for MobCollectionPolicyInput.
 class MobCollectionPolicyInputAll(TypedDict, total=False):

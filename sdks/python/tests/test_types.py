@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import get_args, get_origin, get_type_hints
+from typing import Literal, get_args, get_origin, get_type_hints
 
 import pytest
 
@@ -218,9 +218,11 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 
 def test_generated_mob_spawn_many_preserves_nested_contract_types():
     from meerkat.generated.types import (
+        MobSpawnManyFailedResult as GeneratedMobSpawnManyFailedResult,
         MobSpawnManyParams as GeneratedMobSpawnManyParams,
         MobSpawnManyResult as GeneratedMobSpawnManyResult,
         MobSpawnManyResultEntry as GeneratedMobSpawnManyResultEntry,
+        MobSpawnManySpawnedResult as GeneratedMobSpawnManySpawnedResult,
         MobSpawnSpecParams as GeneratedMobSpawnSpecParams,
     )
 
@@ -237,6 +239,14 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     assert get_origin(result_hints["results"]) is list
     assert get_args(result_hints["results"]) == (GeneratedMobSpawnManyResultEntry,)
 
+    entry_hints = get_type_hints(GeneratedMobSpawnManyResultEntry)
+    assert get_origin(entry_hints["status"]) is Literal
+    assert get_args(entry_hints["status"]) == ("spawned", "failed")
+    assert get_args(entry_hints["result"]) == (
+        GeneratedMobSpawnManySpawnedResult,
+        GeneratedMobSpawnManyFailedResult,
+    )
+
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
         agent_identity="worker-1",
@@ -246,12 +256,19 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     assert params.specs[0].agent_identity == "worker-1"
 
     entry = GeneratedMobSpawnManyResultEntry(
-        ok=True,
-        agent_identity="worker-1",
-        member_ref="opaque-member-ref",
+        status="spawned",
+        result=GeneratedMobSpawnManySpawnedResult(
+            agent_identity="worker-1",
+            member_ref="opaque-member-ref",
+        ),
     )
-    result = GeneratedMobSpawnManyResult(results=[entry])
-    assert result.results[0].member_ref == "opaque-member-ref"
+    failure = GeneratedMobSpawnManyResultEntry(
+        status="failed",
+        result=GeneratedMobSpawnManyFailedResult(message="profile missing"),
+    )
+    result = GeneratedMobSpawnManyResult(results=[entry, failure])
+    assert result.results[0].result.member_ref == "opaque-member-ref"
+    assert result.results[1].result.message == "profile missing"
 
 
 @pytest.mark.asyncio
@@ -277,13 +294,15 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
         return {
             "results": [
                 {
-                    "ok": True,
-                    "agent_identity": "worker-1",
-                    "member_ref": _make_member_ref("mob-1", "worker-1"),
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": _make_member_ref("mob-1", "worker-1"),
+                    },
                 },
                 {
-                    "ok": False,
-                    "error": "profile missing",
+                    "status": "failed",
+                    "result": {"message": "profile missing"},
                 },
             ]
         }
@@ -296,10 +315,88 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     )
 
     assert isinstance(result, GeneratedMobSpawnManyResult)
-    assert [entry.ok for entry in result.results] == [True, False]
-    assert result.results[0].agent_identity == "worker-1"
-    assert result.results[0].member_ref == _make_member_ref("mob-1", "worker-1")
-    assert result.results[1].error == "profile missing"
+    assert [entry.status for entry in result.results] == ["spawned", "failed"]
+    assert result.results[0].result.agent_identity == "worker-1"
+    assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
+    assert result.results[1].result.message == "profile missing"
+
+
+@pytest.mark.asyncio
+async def test_spawn_mob_members_rejects_malformed_result_envelopes():
+    malformed_responses = [
+        {"results": [{"ok": True, "agent_identity": "worker-1", "member_ref": "ref-worker-1"}]},
+        {"results": [{"status": "spawned"}]},
+        {
+            "results": [
+                {
+                    "status": "ok",
+                    "result": {"agent_identity": "worker-1", "member_ref": "ref-worker-1"},
+                }
+            ]
+        },
+        {"results": [{"status": "spawned", "result": {"agent_identity": "worker-1"}}]},
+        {"results": [{"status": "failed", "result": {"message": ""}}]},
+        {
+            "results": [
+                {
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": "ref-worker-1",
+                    },
+                    "ok": True,
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {"message": "profile missing"},
+                    "error": "legacy profile missing",
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": "ref-worker-1",
+                        "ok": True,
+                    },
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {
+                        "message": "profile missing",
+                        "error": "legacy profile missing",
+                    },
+                }
+            ]
+        },
+        {},
+    ]
+
+    for response in malformed_responses:
+        client = MeerkatClient()
+
+        async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+            assert method == "mob/spawn_many"
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="mob/spawn_many"):
+            await client.spawn_mob_members(
+                "mob-1",
+                [{"profile": "worker", "agent_identity": "worker-1"}],
+            )
 
 
 def test_generated_mob_create_ensure_reconcile_preserve_nested_param_types():

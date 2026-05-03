@@ -4049,14 +4049,17 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         spawned["error"].is_null()
             && spawned["result"]["results"]
                 .as_array()
-                .is_some_and(|results| results.iter().all(|entry| entry["ok"] == true)),
+                .is_some_and(
+                    |results| results.iter().all(|entry| entry["status"] == "spawned"
+                        && entry["result"]["member_ref"].is_string())
+                ),
         "mob/spawn_many should succeed on shared realm surface: {spawned}"
     );
     let identities = spawned["result"]["results"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry["agent_identity"].as_str())
+        .filter_map(|entry| entry["result"]["agent_identity"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(
         identities,

@@ -1544,9 +1544,11 @@ describe("Parity wrappers", () => {
       if (method === "mob/spawn_many") {
         return {
           results: [{
-            ok: true,
-            agent_identity: "worker-1",
-            member_ref: makeMemberRef(params.mob_id, "worker-1"),
+            status: "spawned",
+            result: {
+              agent_identity: "worker-1",
+              member_ref: makeMemberRef(params.mob_id, "worker-1"),
+            },
           }],
         };
       }
@@ -1640,11 +1642,9 @@ describe("Parity wrappers", () => {
     assert.equal(spawnedOne.memberRef, makeMemberRef("mob-1", "worker-0"));
     assert.equal(spawnedOne.agentRuntimeId, undefined);
     assert.equal(spawnedOne.fenceToken, undefined);
-    assert.equal(spawned[0].ok, true);
-    assert.equal(spawned[0].agentIdentity, "worker-1");
-    assert.equal(spawned[0].memberRef, makeMemberRef("mob-1", "worker-1"));
-    assert.equal(spawned[0].agentRuntimeId, undefined);
-    assert.equal(spawned[0].fenceToken, undefined);
+    assert.equal(spawned[0].status, "spawned");
+    assert.equal(spawned[0].result.agent_identity, "worker-1");
+    assert.equal(spawned[0].result.member_ref, makeMemberRef("mob-1", "worker-1"));
     assert.equal(append.agent_identity, "worker-1");
     assert.equal(events.events.length, 1);
     assert.equal(created.notFound, false);
@@ -1717,6 +1717,63 @@ describe("Parity wrappers", () => {
     });
     assert.equal(calls[4].params.after_cursor, 10);
     assert.equal(calls[4].params.limit, 5);
+  });
+
+  it("rejects malformed mob spawn_many result envelopes", async () => {
+    const malformedResponses = [
+      { results: [{ ok: true, agent_identity: "worker-1", member_ref: "ref-worker-1" }] },
+      { results: [{ status: "spawned" }] },
+      {
+        results: [
+          {
+            status: "ok",
+            result: { agent_identity: "worker-1", member_ref: "ref-worker-1" },
+          },
+        ],
+      },
+      { results: [{ status: "spawned", result: { agent_identity: "worker-1" } }] },
+      { results: [{ status: "failed", result: { message: "" } }] },
+      {
+        results: [{
+          status: "spawned",
+          result: { agent_identity: "worker-1", member_ref: "ref-worker-1" },
+          ok: true,
+        }],
+      },
+      {
+        results: [{
+          status: "failed",
+          result: { message: "profile missing" },
+          error: "legacy profile missing",
+        }],
+      },
+      {
+        results: [{
+          status: "spawned",
+          result: { agent_identity: "worker-1", member_ref: "ref-worker-1", ok: true },
+        }],
+      },
+      {
+        results: [{
+          status: "failed",
+          result: { message: "profile missing", error: "legacy profile missing" },
+        }],
+      },
+      {},
+    ];
+
+    for (const response of malformedResponses) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+
+      await assert.rejects(
+        () => client.spawnMobMembers("mob-1", [{ profile: "worker", agentIdentity: "worker-1" }]),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("mob/spawn_many"),
+      );
+    }
   });
 
   it("builds mob turn_start params against the generated contract shape", () => {

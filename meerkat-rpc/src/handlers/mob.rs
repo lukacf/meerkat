@@ -14,8 +14,9 @@ use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
 use meerkat_contracts::{
-    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobBackendKind,
-    WireMobMemberStatus, WireMobRuntimeMode,
+    MobCreateParams, MobCreateResult, MobMemberListEntryWire, MobSpawnManyResult,
+    MobSpawnManyResultEntry, WireMemberState, WireMobBackendKind, WireMobMemberStatus,
+    WireMobRuntimeMode,
 };
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
@@ -449,17 +450,6 @@ pub struct MobSpawnSpecParams {
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
-#[derive(Debug, Serialize)]
-struct SpawnManyResultEntry {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_identity: Option<meerkat_mob::AgentIdentity>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    member_ref: Option<meerkat_contracts::WireMemberRef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 /// Handle `mob/spawn_many` — batch spawn multiple members.
 pub async fn handle_spawn_many(
     id: Option<RpcId>,
@@ -496,30 +486,23 @@ pub async fn handle_spawn_many(
 
     match state.mob_spawn_many(&mob_id, specs).await {
         Ok(results) => {
-            let entries: Vec<SpawnManyResultEntry> = results
+            let entries: Vec<MobSpawnManyResultEntry> = results
                 .into_iter()
                 .map(|r| match r {
                     Ok(spawn_result) => {
                         let identity_str = spawn_result.agent_identity.to_string();
-                        SpawnManyResultEntry {
-                            ok: true,
-                            agent_identity: Some(spawn_result.agent_identity),
-                            member_ref: Some(meerkat_contracts::WireMemberRef::encode(
-                                mob_id.as_str(),
-                                &identity_str,
-                            )),
-                            error: None,
-                        }
+                        MobSpawnManyResultEntry::spawned(
+                            identity_str.clone(),
+                            WireMemberRef::encode(mob_id.as_str(), &identity_str),
+                        )
                     }
-                    Err(err) => SpawnManyResultEntry {
-                        ok: false,
-                        agent_identity: None,
-                        member_ref: None,
-                        error: Some(err.to_string()),
-                    },
+                    Err(err) => MobSpawnManyResultEntry::failed(err.to_string()),
                 })
                 .collect();
-            RpcResponse::success(id, serde_json::json!({ "results": entries }))
+            RpcResponse::success(
+                id,
+                serde_json::json!(MobSpawnManyResult { results: entries }),
+            )
         }
         Err(err) => invalid_params(id, err.to_string()),
     }

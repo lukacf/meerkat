@@ -23,6 +23,8 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   EventEnvelope,
+  AgentRuntimeId,
+  SubscriptionLaggedEvent,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -85,46 +87,211 @@ function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
   };
 }
 
-function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
-  if (!raw || typeof raw !== 'object') {
-    return raw as MemberEventItem;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireOnlyKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+  message: string,
+): void {
+  const allowed = new Set(allowedKeys);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new Error(message);
+    }
   }
-  const record = raw as Record<string, unknown>;
-  if (record.type === 'lagged') {
-    return raw as MemberEventItem;
+}
+
+function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid mob spawn response: malformed result entry');
   }
-  const agentIdentity =
-    typeof record.agent_identity === 'string' && record.agent_identity.length > 0
-      ? record.agent_identity
-      : undefined;
+  if ('ok' in raw) {
+    throw new Error('Invalid mob spawn response: legacy ok result row');
+  }
+  requireOnlyKeys(raw, ['status', 'result'], 'Invalid mob spawn response: malformed result entry');
+
+  const status = raw.status;
+  if (status !== 'spawned' && status !== 'failed') {
+    throw new Error('Invalid mob spawn response: invalid result status');
+  }
+  if (!isRecord(raw.result)) {
+    throw new Error('Invalid mob spawn response: missing result payload');
+  }
+
+  if (status === 'failed') {
+    requireOnlyKeys(
+      raw.result,
+      ['message'],
+      'Invalid mob spawn response: malformed failed result payload',
+    );
+    const message = raw.result.message;
+    if (typeof message !== 'string' || message.length === 0) {
+      throw new Error('Invalid mob spawn response: failed result missing message');
+    }
+    throw new Error(`Mob spawn failed: ${message}`);
+  }
+
+  requireOnlyKeys(
+    raw.result,
+    ['agent_identity', 'member_ref'],
+    'Invalid mob spawn response: malformed spawned result payload',
+  );
+  const agentIdentity = raw.result.agent_identity;
+  const memberRef = raw.result.member_ref;
+  if (typeof agentIdentity !== 'string' || agentIdentity.length === 0) {
+    throw new Error('Invalid mob spawn response: spawned result missing agent_identity');
+  }
+  if (typeof memberRef !== 'string' || memberRef.length === 0) {
+    throw new Error('Invalid mob spawn response: spawned result missing member_ref');
+  }
   return {
+    mob_id: mobId,
     agent_identity: agentIdentity,
-    member_ref: agentIdentity ? encodeMemberRef(mobId, agentIdentity) : undefined,
-    cursor:
-      typeof record.cursor === 'string' || typeof record.cursor === 'number'
-        ? record.cursor
-        : undefined,
-    event:
-      record.event && typeof record.event === 'object'
-        ? (record.event as EventEnvelope['event'])
-        : { type: 'unknown' },
+    member_ref: memberRef,
   };
 }
 
-function normalizeAttributedEvent(raw: unknown, mobId: string): AttributedEventItem {
-  if (!raw || typeof raw !== 'object') {
-    return raw as AttributedEventItem;
+function requireStringField(
+  record: Record<string, unknown>,
+  field: string,
+  message: string,
+): string {
+  const value = record[field];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(message);
   }
-  const record = raw as Record<string, unknown>;
-  if (record.type === 'lagged') {
-    return raw as AttributedEventItem;
+  return value;
+}
+
+function requireNumberField(
+  record: Record<string, unknown>,
+  field: string,
+  message: string,
+): number {
+  const value = record[field];
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(message);
   }
-  const envelope = normalizeEventEnvelope(record.envelope, mobId);
+  return value;
+}
+
+function normalizeAgentRuntimeId(raw: unknown): AgentRuntimeId {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid mob subscription event: missing source');
+  }
+  requireOnlyKeys(
+    raw,
+    ['identity', 'generation'],
+    'Invalid mob subscription event: malformed source',
+  );
+  const identity = requireStringField(
+    raw,
+    'identity',
+    'Invalid mob subscription event: source missing identity',
+  );
+  const generation = requireNumberField(
+    raw,
+    'generation',
+    'Invalid mob subscription event: source missing generation',
+  );
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new Error('Invalid mob subscription event: source generation must be a non-negative integer');
+  }
+  return { identity, generation };
+}
+
+function normalizeLaggedEvent(record: Record<string, unknown>): SubscriptionLaggedEvent {
+  const skipped = record.skipped;
+  if (typeof skipped !== 'number' || !Number.isFinite(skipped)) {
+    throw new Error('Invalid subscription lagged event: missing skipped count');
+  }
   return {
-    source: typeof record.source === 'string' ? record.source : '',
-    role: typeof record.role === 'string' ? record.role : '',
-    envelope: envelope && 'event' in envelope ? envelope : { event: { type: 'unknown' } },
+    type: 'lagged',
+    skipped,
   };
+}
+
+function normalizeEventEnvelope(raw: unknown): MemberEventItem {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid subscription event envelope: expected object');
+  }
+  const record = raw;
+  if (record.type === 'lagged') {
+    return normalizeLaggedEvent(record);
+  }
+  const payload = record.payload;
+  if (!isRecord(payload) || typeof payload.type !== 'string' || payload.type.length === 0) {
+    throw new Error('Invalid subscription event envelope: missing payload');
+  }
+
+  const envelope: EventEnvelope = {
+    event_id: requireStringField(
+      record,
+      'event_id',
+      'Invalid subscription event envelope: missing event_id',
+    ),
+    source_id: requireStringField(
+      record,
+      'source_id',
+      'Invalid subscription event envelope: missing source_id',
+    ),
+    seq: requireNumberField(
+      record,
+      'seq',
+      'Invalid subscription event envelope: missing seq',
+    ),
+    timestamp_ms: requireNumberField(
+      record,
+      'timestamp_ms',
+      'Invalid subscription event envelope: missing timestamp_ms',
+    ),
+    payload: payload as EventEnvelope['payload'],
+  };
+
+  if (typeof record.mob_id === 'string' && record.mob_id.length > 0) {
+    envelope.mob_id = record.mob_id;
+  }
+
+  return envelope;
+}
+
+function normalizeAttributedEvent(raw: unknown): AttributedEventItem {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid mob subscription event: expected object');
+  }
+  const record = raw;
+  if (record.type === 'lagged') {
+    return normalizeLaggedEvent(record);
+  }
+  const envelope = normalizeEventEnvelope(record.envelope);
+  if ('type' in envelope) {
+    throw new Error('Invalid mob subscription event: lagged envelope is not attributed event data');
+  }
+
+  const attributed = {
+    source: normalizeAgentRuntimeId(record.source),
+    role: requireStringField(
+      record,
+      'role',
+      'Invalid mob subscription event: missing role',
+    ),
+    envelope,
+  };
+
+  if (
+    typeof record.source_fence_token === 'number'
+    && Number.isFinite(record.source_fence_token)
+  ) {
+    return {
+      ...attributed,
+      source_fence_token: record.source_fence_token,
+    };
+  }
+
+  return attributed;
 }
 
 /** Capability-bearing handle for one mob member. */
@@ -175,10 +342,7 @@ export class Member {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeEventEnvelope(item)),
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -203,19 +367,11 @@ export class Mob {
       this.mobId,
       JSON.stringify(specs.map(spawnSpecPayload)),
     );
-    return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry) => {
-      if (typeof entry.agent_identity !== 'string' || entry.agent_identity.length === 0) {
-        throw new Error('Invalid mob spawn response: missing agent_identity');
-      }
-      if (typeof entry.member_ref !== 'string' || entry.member_ref.length === 0) {
-        throw new Error('Invalid mob spawn response: missing member_ref');
-      }
-      return {
-        mob_id: typeof entry.mob_id === 'string' ? entry.mob_id : this.mobId,
-        agent_identity: entry.agent_identity,
-        member_ref: entry.member_ref,
-      };
-    });
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error('Invalid mob spawn response: results must be a list');
+    }
+    return parsed.map((entry) => normalizeSpawnManyEntry(entry, this.mobId));
   }
 
   /** Retire an agent from the mob. */
@@ -527,10 +683,7 @@ export class Mob {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeEventEnvelope(item)),
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -540,10 +693,7 @@ export class Mob {
     const handle = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeAttributedEvent(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeAttributedEvent(item)),
       () => this.bindings.close_subscription(handle),
     );
   }

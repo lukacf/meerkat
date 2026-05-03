@@ -23,8 +23,12 @@ import type {
   MobMemberStatusResult,
   MobReconcileParams,
   MobSpawnManyParams,
+  MobSpawnManyFailedResult,
   MobSpawnManyResult,
   MobSpawnManyResultEntry,
+  MobSpawnManyResultPayload,
+  MobSpawnManyResultStatus,
+  MobSpawnManySpawnedResult,
   MobSpawnParams,
   MobSpawnReceiptWire,
   MobSpawnResult,
@@ -401,17 +405,32 @@ const generatedMobSpawnManyParams: MobSpawnManyParams = {
 };
 
 const generatedMobSpawnManyResultEntry: MobSpawnManyResultEntry = {
-  ok: true,
-  agent_identity: "worker-3",
-  member_ref: "opaque-member-ref",
+  status: "spawned",
+  result: {
+    agent_identity: "worker-3",
+    member_ref: "opaque-member-ref",
+  },
 };
 
 const generatedMobSpawnManyResult: MobSpawnManyResult = {
   results: [generatedMobSpawnManyResultEntry],
 };
 
+const generatedMobSpawnManyStatus: MobSpawnManyResultStatus = "failed";
+const generatedMobSpawnManyFailure: MobSpawnManyFailedResult = {
+  message: "profile missing",
+};
+const generatedMobSpawnManyPayload: MobSpawnManyResultPayload = generatedMobSpawnManyFailure;
+const generatedMobSpawnManySpawned: MobSpawnManySpawnedResult = {
+  agent_identity: "worker-4",
+  member_ref: "opaque-member-ref-4",
+};
+
 void generatedMobSpawnManyParams;
 void generatedMobSpawnManyResult;
+void generatedMobSpawnManyStatus;
+void generatedMobSpawnManyPayload;
+void generatedMobSpawnManySpawned;
 
 const generatedMobTurnStart: MobTurnStartParams = {
   mob_id: "mob-1",

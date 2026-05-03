@@ -5180,6 +5180,19 @@
         "title": "MobSpawnHelperParams",
         "type": "object"
       },
+      "MobSpawnManyFailedResult": {
+        "additionalProperties": false,
+        "description": "Failed per-member `mob/spawn_many` result payload.",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
       "MobSpawnManyParams": {
         "additionalProperties": false,
         "description": "Request payload for `mob/spawn_many`.",
@@ -5218,36 +5231,55 @@
         "type": "object"
       },
       "MobSpawnManyResultEntry": {
-        "description": "One result entry in a `mob/spawn_many` response.",
+        "additionalProperties": false,
+        "description": "One typed result entry in a `mob/spawn_many` response.",
         "properties": {
-          "agent_identity": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "result": {
+            "$ref": "#/components/schemas/MobSpawnManyResultPayload"
           },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "member_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireMemberRef"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "ok": {
-            "type": "boolean"
+          "status": {
+            "$ref": "#/components/schemas/MobSpawnManyResultStatus"
           }
         },
         "required": [
-          "ok"
+          "status",
+          "result"
+        ],
+        "type": "object"
+      },
+      "MobSpawnManyResultPayload": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MobSpawnManySpawnedResult"
+          },
+          {
+            "$ref": "#/components/schemas/MobSpawnManyFailedResult"
+          }
+        ],
+        "description": "Typed payload for one `mob/spawn_many` row."
+      },
+      "MobSpawnManyResultStatus": {
+        "description": "Typed status for one `mob/spawn_many` row.",
+        "enum": [
+          "spawned",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "MobSpawnManySpawnedResult": {
+        "additionalProperties": false,
+        "description": "Successful per-member `mob/spawn_many` result payload.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "member_ref": {
+            "$ref": "#/components/schemas/WireMemberRef"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "member_ref"
         ],
         "type": "object"
       },

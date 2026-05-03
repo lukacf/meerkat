@@ -10,11 +10,11 @@ import type {
   MobMember,
   MobMemberRef,
   MobSpawnResult,
-  MobSpawnManyResultEntry,
   MobStatus,
   SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
+import type { MobSpawnManyResultEntry } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
 export type MobHandlingMode = "queue" | "steer";

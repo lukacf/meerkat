@@ -54,6 +54,7 @@ import {
   type McpLiveOpResponse,
   type McpReloadParams,
   type McpRemoveParams,
+  type MobSpawnManyResultEntry,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -92,7 +93,6 @@ import type {
   MobProfileDeleteResult,
   MobProfileLookupResult,
   MobSpawnResult,
-  MobSpawnManyResultEntry,
   MobStatus,
   MobSummary,
   MobTurnStartOptions,
@@ -1038,28 +1038,96 @@ export class MeerkatClient {
       mob_id: mobId,
       specs: specs.map(mobSpawnManySpecPayload),
     });
-    const entries = Array.isArray(result.results)
-      ? (result.results as Array<Record<string, unknown>>)
-      : [];
+    if (!Array.isArray(result.results)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/spawn_many response: results must be a list",
+      );
+    }
+    const entries = result.results as unknown[];
     return entries.map((entry) => {
-      const ok = Boolean(entry.ok);
-      const agentIdentity =
-        entry.agent_identity != null ? String(entry.agent_identity) : undefined;
-      const memberRef =
-        typeof entry.member_ref === "string" && entry.member_ref.length > 0
-          ? entry.member_ref
-          : undefined;
-      if (ok && (!agentIdentity || !memberRef)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
         throw new MeerkatError(
           "INVALID_RESPONSE",
-          "Invalid mob/spawn_many response: successful entry missing member_ref",
+          "Invalid mob/spawn_many response: malformed result entry",
+        );
+      }
+      const record = entry as Record<string, unknown>;
+      const entryKeys = Object.keys(record);
+      if (
+        entryKeys.some((key) => key !== "status" && key !== "result") ||
+        "ok" in record ||
+        "error" in record ||
+        "agent_identity" in record ||
+        "member_ref" in record
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: legacy result carrier fields are not allowed",
+        );
+      }
+      const status = record.status;
+      const rawResult = record.result;
+      if (status !== "spawned" && status !== "failed") {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: invalid result status",
+        );
+      }
+      if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: missing result payload",
+        );
+      }
+      const resultRecord = rawResult as Record<string, unknown>;
+      if (status === "spawned") {
+        if (Object.keys(resultRecord).some((key) => key !== "agent_identity" && key !== "member_ref")) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            "Invalid mob/spawn_many response: spawned result has unknown fields",
+          );
+        }
+        const agentIdentity = resultRecord.agent_identity;
+        const memberRef = resultRecord.member_ref;
+        if (typeof agentIdentity !== "string" || agentIdentity.length === 0) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            "Invalid mob/spawn_many response: spawned result missing agent_identity",
+          );
+        }
+        if (typeof memberRef !== "string" || memberRef.length === 0) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            "Invalid mob/spawn_many response: spawned result missing member_ref",
+          );
+        }
+        return {
+          status,
+          result: {
+            agent_identity: agentIdentity,
+            member_ref: memberRef,
+          },
+        };
+      }
+      if (Object.keys(resultRecord).some((key) => key !== "message")) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: failed result has unknown fields",
+        );
+      }
+      const message = resultRecord.message;
+      if (typeof message !== "string" || message.length === 0) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: failed result missing message",
         );
       }
       return {
-        ok,
-        agentIdentity,
-        memberRef,
-        error: entry.error != null ? String(entry.error) : undefined,
+        status,
+        result: {
+          message,
+        },
       };
     });
   }

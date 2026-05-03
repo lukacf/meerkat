@@ -424,7 +424,14 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
   "expires_at": 1893456000,
   "last_refresh": 1700000000,
   "scopes": ["openid", "email"],
-  "account_id": "acct-fresh"
+  "account_id": "acct-fresh",
+  "metadata": {
+    "meerkat_auth_lifecycle": {
+      "published": true,
+      "version": 2,
+      "expires_at": 1893456000
+    }
+  }
 }"#,
     );
 
@@ -449,6 +456,14 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
         let stderr = String::from_utf8_lossy(&refresh.stderr);
         if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
             eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        if stderr.contains("token endpoint error") {
+            assert!(
+                !stderr.contains("missing secret for auth resolution"),
+                "refresh must resolve the binding-scoped token before reaching the provider; stderr={stderr}"
+            );
+            eprintln!("SKIP: fake refresh token was rejected by the provider endpoint");
             return;
         }
         panic!("refresh must use the binding-scoped token key; stderr={stderr}");

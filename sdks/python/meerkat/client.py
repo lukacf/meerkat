@@ -38,8 +38,10 @@ from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
     MobDefinitionInput,
+    MobSpawnManyFailedResult,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
+    MobSpawnManySpawnedResult,
     MobTurnStartParams,
     RealtimeCapabilitiesResult,
     RealtimeOpenInfo,
@@ -1319,41 +1321,75 @@ class MeerkatClient:
 
         normalized: list[MobSpawnManyResultEntry] = []
         for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("ok"), bool):
+            if not isinstance(entry, dict):
                 raise MeerkatError(
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: malformed result entry",
                 )
-            ok = entry["ok"]
-            agent_identity = entry.get("agent_identity")
-            member_ref = entry.get("member_ref")
-            error = entry.get("error")
-            if agent_identity is not None and not isinstance(agent_identity, str):
+            entry_keys = set(entry.keys())
+            if entry_keys - {"status", "result"} or any(
+                key in entry for key in ("ok", "error", "agent_identity", "member_ref")
+            ):
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: agent_identity must be a string",
+                    "Invalid mob/spawn_many response: legacy result carrier fields are not allowed",
                 )
-            if member_ref is not None and not isinstance(member_ref, str):
+            status = entry.get("status")
+            payload = entry.get("result")
+            if status not in ("spawned", "failed"):
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: member_ref must be a string",
+                    "Invalid mob/spawn_many response: invalid result status",
                 )
-            if error is not None and not isinstance(error, str):
+            if not isinstance(payload, dict):
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: error must be a string",
+                    "Invalid mob/spawn_many response: missing result payload",
                 )
-            if ok and (not agent_identity or not member_ref):
+            if status == "spawned":
+                if set(payload.keys()) - {"agent_identity", "member_ref"}:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        "Invalid mob/spawn_many response: spawned result has unknown fields",
+                    )
+                agent_identity = payload.get("agent_identity")
+                member_ref = payload.get("member_ref")
+                if not isinstance(agent_identity, str) or not agent_identity:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        "Invalid mob/spawn_many response: spawned result missing agent_identity",
+                    )
+                if not isinstance(member_ref, str) or not member_ref:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        "Invalid mob/spawn_many response: spawned result missing member_ref",
+                    )
+                normalized.append(
+                    MobSpawnManyResultEntry(
+                        status="spawned",
+                        result=MobSpawnManySpawnedResult(
+                            agent_identity=agent_identity,
+                            member_ref=member_ref,
+                        ),
+                    )
+                )
+                continue
+
+            if set(payload.keys()) - {"message"}:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: successful entry missing member_ref",
+                    "Invalid mob/spawn_many response: failed result has unknown fields",
+                )
+            message = payload.get("message")
+            if not isinstance(message, str) or not message:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: failed result missing message",
                 )
             normalized.append(
                 MobSpawnManyResultEntry(
-                    ok=ok,
-                    agent_identity=agent_identity,
-                    member_ref=member_ref,
-                    error=error,
+                    status="failed",
+                    result=MobSpawnManyFailedResult(message=message),
                 )
             )
         return MobSpawnManyResult(results=normalized)

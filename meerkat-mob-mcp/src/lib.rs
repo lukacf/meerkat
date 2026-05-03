@@ -30,7 +30,10 @@ mod tokio {
 use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
-use meerkat_contracts::MobDefinitionInput;
+use meerkat_contracts::{
+    MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireMemberRef,
+    WireMobLifecycleAction,
+};
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -529,6 +532,32 @@ impl MobMcpState {
 
     pub async fn mob_reset(&self, mob_id: &MobId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.reset().await
+    }
+
+    pub async fn mob_lifecycle_action(
+        &self,
+        mob_id: &MobId,
+        action: WireMobLifecycleAction,
+    ) -> Result<Option<meerkat_mob::MobDestroyReport>, MobError> {
+        match action {
+            WireMobLifecycleAction::Stop => {
+                self.mob_stop(mob_id).await?;
+                Ok(None)
+            }
+            WireMobLifecycleAction::Resume => {
+                self.mob_resume(mob_id).await?;
+                Ok(None)
+            }
+            WireMobLifecycleAction::Complete => {
+                self.mob_complete(mob_id).await?;
+                Ok(None)
+            }
+            WireMobLifecycleAction::Reset => {
+                self.mob_reset(mob_id).await?;
+                Ok(None)
+            }
+            WireMobLifecycleAction::Destroy => self.mob_destroy(mob_id).await.map(Some),
+        }
     }
 
     /// Destroy a mob. Rejects implicit delegation mobs — use
@@ -2085,7 +2114,7 @@ impl MobMcpDispatcher {
             tool(
                 "mob_lifecycle",
                 &format!("Lifecycle action on a mob. action: stop | resume | reset | complete | destroy. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"action":{"type":"string","enum":["stop","resume","reset","complete","destroy"]}},"required":["mob_id","action"]}),
+                lifecycle_input_schema(),
             ),
             tool(
                 "mob_events",
@@ -2280,6 +2309,11 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
     })
 }
 
+fn lifecycle_input_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(MobLifecycleParams))
+        .unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
 fn content_input_schema() -> serde_json::Value {
     json!({
         "oneOf": [
@@ -2364,11 +2398,6 @@ struct MobCreateArgs {
 struct MobListArgs {
     #[serde(default)]
     mob_id: Option<String>,
-}
-#[derive(Deserialize)]
-struct LifecycleArgs {
-    mob_id: String,
-    action: String,
 }
 #[derive(Deserialize)]
 struct MobIdArgs {
@@ -2615,49 +2644,18 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 }
             }
             "mob_lifecycle" => {
-                let args: LifecycleArgs = call
+                let args: MobLifecycleParams = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let mob_id = MobId::from(args.mob_id);
-                match args.action.as_str() {
-                    "stop" => self
-                        .state
-                        .mob_stop(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
-                    "resume" => self
-                        .state
-                        .mob_resume(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
-                    "reset" => self
-                        .state
-                        .mob_reset(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
-                    "complete" => self
-                        .state
-                        .mob_complete(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
-                    "destroy" => {
-                        // MCP tool surface treats destroy as "() on success";
-                        // the structured MobDestroyReport is available via the
-                        // RPC lifecycle handler for consumers that care about
-                        // force-destroyed members and partial-cleanup errors.
-                        let _report = self
-                            .state
-                            .mob_destroy(&mob_id)
-                            .await
-                            .map_err(|e| map_mob_err(call, e))?;
-                    }
-                    other => {
-                        return Err(ToolError::invalid_arguments(
-                            call.name,
-                            format!("unknown lifecycle action: {other}"),
-                        ));
-                    }
-                }
+                // MCP tool surface treats destroy as "() on success"; the
+                // structured MobDestroyReport is available via public/RPC
+                // lifecycle result envelopes for consumers that need detail.
+                let _destroy_report = self
+                    .state
+                    .mob_lifecycle_action(&mob_id, args.action)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_events" => {
@@ -2737,49 +2735,32 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         Ok(s)
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;
-                // Single-spec fast path returns flat result; multi-spec returns results array.
-                if specs.len() == 1 {
-                    // SAFETY: len checked above
-                    let Some(spec) = specs.into_iter().next() else {
-                        unreachable!()
-                    };
-                    let spawn_result = self
-                        .state
-                        .mob_spawn_spec(&MobId::from(args.mob_id), spec)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?;
-                    encode(
-                        call,
-                        json!({
-                            "ok": true,
-                            "agent_identity": spawn_result.agent_identity,
-                        }),
-                    )
-                } else {
-                    let results = self
-                        .state
-                        .mob_spawn_many(&MobId::from(args.mob_id), specs)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?;
-                    let results = results
-                        .into_iter()
-                        .map(
-                            |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
-                                match result {
-                                    Ok(spawn_result) => json!({
-                                        "ok": true,
-                                        "agent_identity": spawn_result.agent_identity,
-                                    }),
-                                    Err(error) => json!({
-                                        "ok": false,
-                                        "error": error.to_string(),
-                                    }),
+                let mob_id = MobId::from(args.mob_id);
+                let results = self
+                    .state
+                    .mob_spawn_many(&mob_id, specs)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                let results = results
+                    .into_iter()
+                    .map(
+                        |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
+                            match result {
+                                Ok(spawn_result) => {
+                                    let identity = spawn_result.agent_identity.to_string();
+                                    json!(MobSpawnManyResultEntry::spawned(
+                                        identity.clone(),
+                                        WireMemberRef::encode(mob_id.as_str(), &identity),
+                                    ))
                                 }
-                            },
-                        )
-                        .collect::<Vec<_>>();
-                    encode(call, json!({"results": results}))
-                }
+                                Err(error) => {
+                                    json!(MobSpawnManyResultEntry::failed(error.to_string()))
+                                }
+                            }
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                encode(call, json!({"results": results}))
             }
             "mob_retire_member" => {
                 let args: RetireArgs = call
@@ -4073,6 +4054,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_mob_lifecycle_rejects_unknown_action_at_contract_boundary() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        call_tool(
+            &d,
+            "mob_create",
+            json!({"definition":{"id":"typed_agent_lifecycle_rejects_unknown","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+        )
+        .await;
+
+        let error = call_tool_err(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": "typed_agent_lifecycle_rejects_unknown", "action": "explode"}),
+        )
+        .await;
+        let ToolError::InvalidArguments { reason, .. } = error else {
+            panic!("unknown lifecycle action must be InvalidArguments, got: {error:?}");
+        };
+        assert!(
+            reason.contains("unknown variant") && !reason.contains("unknown lifecycle action"),
+            "unexpected error: {reason}"
+        );
+
+        let status = call_tool(
+            &d,
+            "mob_list",
+            json!({"mob_id": "typed_agent_lifecycle_rejects_unknown"}),
+        )
+        .await;
+        assert_eq!(status["status"], "Running");
+
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": "typed_agent_lifecycle_rejects_unknown", "action": "destroy"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_mob_lifecycle_accepts_typed_contract_params() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        call_tool(
+            &d,
+            "mob_create",
+            json!({"definition":{"id":"typed_agent_lifecycle_complete","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+        )
+        .await;
+
+        let params = MobLifecycleParams {
+            mob_id: "typed_agent_lifecycle_complete".to_string(),
+            action: WireMobLifecycleAction::Complete,
+        };
+        let payload = serde_json::to_value(&params).expect("typed lifecycle params serialize");
+        let result = call_tool(&d, "mob_lifecycle", payload).await;
+
+        assert_eq!(result["ok"], true);
+
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": "typed_agent_lifecycle_complete", "action": "destroy"}),
+        )
+        .await;
+    }
+
     #[test]
     fn test_mob_wire_schema_uses_external_binding_without_raw_peer_atoms() {
         let tools = tools_list();
@@ -4653,7 +4707,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(spawned["agent_identity"], "w-ext");
+        let row = &spawned["results"].as_array().expect("typed spawn results")[0];
+        assert_eq!(row["status"], "spawned");
+        assert_eq!(row["result"]["agent_identity"], "w-ext");
+        assert!(row["result"]["member_ref"].is_string());
+        assert!(row.get("ok").is_none());
     }
 
     #[tokio::test]
@@ -4723,7 +4781,10 @@ mod tests {
         let results = spawned["results"].as_array().expect("results array");
         assert_eq!(results.len(), 2, "expected two batch rows");
         assert!(
-            results.iter().all(|row| row["ok"] == json!(true)),
+            results
+                .iter()
+                .all(|row| row["status"] == json!("spawned")
+                    && row["result"]["member_ref"].is_string()),
             "all batch spawn rows should succeed"
         );
 

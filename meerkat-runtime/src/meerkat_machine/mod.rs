@@ -107,7 +107,7 @@ fn runtime_store_identity(store: &Arc<dyn RuntimeStore>) -> PersistentAuthAuthor
         .auth_authority_key()
         .map(PersistentAuthAuthorityKey::Durable)
         .unwrap_or_else(|| {
-            PersistentAuthAuthorityKey::Process(Arc::as_ptr(store) as *const () as usize)
+            PersistentAuthAuthorityKey::Process(Arc::as_ptr(store).cast::<()>() as usize)
         })
 }
 

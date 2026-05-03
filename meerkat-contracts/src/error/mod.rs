@@ -228,6 +228,9 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::NotFound { .. } => ErrorCode::SessionNotFound,
             meerkat_core::SessionError::Busy { .. } => ErrorCode::SessionBusy,
             meerkat_core::SessionError::NotRunning { .. } => ErrorCode::SessionNotRunning,
+            meerkat_core::SessionError::Agent(meerkat_core::AgentError::Cancelled) => {
+                ErrorCode::RequestCancelled
+            }
             meerkat_core::SessionError::Agent(_) => ErrorCode::AgentError,
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
@@ -266,6 +269,16 @@ mod tests {
         let json = serde_json::to_value(&err).unwrap_or_default();
         assert_eq!(json["code"], "SESSION_NOT_FOUND");
         assert_eq!(json["category"], "session");
+    }
+
+    #[test]
+    fn session_cancelled_wire_error_uses_request_cancelled_code() {
+        let err = WireError::from(meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::Cancelled,
+        ));
+
+        assert_eq!(err.code, ErrorCode::RequestCancelled);
+        assert_eq!(err.category, ErrorCategory::Request);
     }
 
     #[test]

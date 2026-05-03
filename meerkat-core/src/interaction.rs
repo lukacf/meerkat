@@ -37,12 +37,12 @@ pub enum ResponseStatus {
     Failed,
 }
 
-/// Canonical terminality classification of a `ResponseStatus`.
+/// Terminality projection for a typed `ResponseStatus`.
 ///
-/// Consumers that care about progress-vs-terminal (and, within terminal,
-/// whether the response completed or failed) must read this typed class
-/// rather than re-`match` on `ResponseStatus` — that duplication is how
-/// "terminal" drifts from one call site to another.
+/// Runtime-backed peer ingress receives this as part of the typed
+/// `PeerIngressClassification` emitted by the machine authority. Downstream
+/// runtime/public projections must consume that carried terminality instead of
+/// re-matching raw response status after admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TerminalityClass {
@@ -640,8 +640,10 @@ pub struct PeerIngressAdmission {
 ///
 /// Runtime-backed comms must use the MeerkatMachine
 /// `PeerIngressClassified` effect as authority. This adapter exists only for
-/// standalone comms runtimes without a session DSL and is ratcheted by comms
-/// tests so session-backed ingress cannot silently fall back to it.
+/// standalone comms runtimes without a session DSL and for tests that need a
+/// wire-compatible projection of machine behavior. Raw inbox ingress and
+/// runtime-required classified ingress must not use it as a second authority
+/// for auth exemptions, lifecycle intent, or response terminality.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressMachinePolicy {
     silent_request_intents: BTreeSet<String>,

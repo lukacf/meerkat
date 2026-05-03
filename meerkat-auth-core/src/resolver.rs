@@ -165,6 +165,18 @@ pub enum ManagedStoreLifecycle {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn managed_store_lifecycle_from_phase(phase: AuthStatusPhase) -> ManagedStoreLifecycle {
+    match phase {
+        AuthStatusPhase::Valid => ManagedStoreLifecycle::Authorized,
+        AuthStatusPhase::Expiring
+        | AuthStatusPhase::Expired
+        | AuthStatusPhase::ReauthRequired
+        | AuthStatusPhase::RefreshFailed
+        | AuthStatusPhase::Unknown => ManagedStoreLifecycle::RefreshRequired,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OAuthLifecycleMarkerRelation {
     Matches,
@@ -339,11 +351,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         now,
         Some(meerkat_core::persisted_token_expires_at_epoch_secs(&tokens)),
     );
-    let lifecycle = if token_phase == AuthStatusPhase::Expired {
-        ManagedStoreLifecycle::RefreshRequired
-    } else {
-        ManagedStoreLifecycle::Authorized
-    };
+    let lifecycle = managed_store_lifecycle_from_phase(token_phase);
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
         let mut snapshot = auth_lease.snapshot(&lease_key);
@@ -413,15 +421,15 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         }
 
         return match phase {
-            AuthStatusPhase::Valid | AuthStatusPhase::Expiring => Ok(managed_store_tokens(
+            AuthStatusPhase::Valid => Ok(managed_store_tokens(
                 store,
                 key,
                 tokens,
                 Some(snapshot),
-                lifecycle,
+                managed_store_lifecycle_from_phase(phase),
                 lifecycle_guard,
             )),
-            AuthStatusPhase::Expired => Ok(managed_store_tokens(
+            AuthStatusPhase::Expiring | AuthStatusPhase::Expired => Ok(managed_store_tokens(
                 store,
                 key,
                 tokens,
@@ -1878,6 +1886,43 @@ mod tests {
             err,
             ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
         ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_source_rejects_expiring_authmachine_freshness() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let mut tokens = chatgpt_oauth_tokens("expiring-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(30));
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let transition = AuthLeaseTransition {
+            generation: 7,
+            credential_published_at_millis: Some(2_000),
+        };
+        let marked =
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(&tokens, transition);
+        store.save(&key, &marked).await.unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(
+                StaticAuthLeaseHandle::valid_generation_with_expiry_and_publication_time(
+                    7,
+                    expires_at,
+                    Some(2_000),
+                ),
+            );
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderAuthError::Auth(AuthError::Expired)),
+            "expiring OAuth token must be rejected at the AuthMachine/token-store boundary, got {err}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

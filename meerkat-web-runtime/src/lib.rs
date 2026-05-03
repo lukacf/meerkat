@@ -1576,7 +1576,7 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
 
 /// Get the status of a mob.
 ///
-/// Returns JSON with the mob state.
+/// Returns JSON with the generated mob status plus the legacy state projection.
 #[wasm_bindgen]
 pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1584,6 +1584,7 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
     let result = serde_json::json!({
         "mob_id": mob_id,
+        "status": state.as_str(),
         "state": state.as_str(),
     });
     Ok(JsValue::from_str(&result.to_string()))
@@ -1591,20 +1592,21 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 
 /// List all mobs.
 ///
-/// Returns JSON array of `{ mob_id, state }`.
+/// Returns a generated `MobListResult` JSON envelope.
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mobs = mob_state.mob_list().await;
-    let result: Vec<serde_json::Value> = mobs
+    let rows: Vec<serde_json::Value> = mobs
         .into_iter()
         .map(|(id, state)| {
             serde_json::json!({
                 "mob_id": id.to_string(),
-                "state": state.as_str(),
+                "status": state.as_str(),
             })
         })
         .collect();
+    let result = serde_json::json!({ "mobs": rows });
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2069,6 +2071,7 @@ pub async fn mob_member_send(
         .map_err(err_mob)?;
     let identity_str = receipt.identity.to_string();
     let payload = serde_json::json!({
+        "mob_id": id.as_str(),
         "agent_identity": receipt.identity,
         "member_ref": meerkat_contracts::WireMemberRef::encode(id.as_str(), &identity_str),
         "handling_mode": match receipt.handling_mode {
@@ -2111,9 +2114,16 @@ pub async fn mob_respawn(
     });
     match mob_state.mob_respawn(&id, mid, initial_message).await {
         Ok(receipt) => {
+            let identity_str = receipt.identity.to_string();
             let result = serde_json::json!({
                 "status": "completed",
-                "receipt": receipt,
+                "receipt": {
+                    "identity": identity_str,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        id.as_str(),
+                        &identity_str,
+                    ),
+                },
             });
             Ok(JsValue::from_str(&result.to_string()))
         }
@@ -2121,9 +2131,16 @@ pub async fn mob_respawn(
             receipt,
             failed_peer_ids,
         }) => {
+            let identity_str = receipt.identity.to_string();
             let result = serde_json::json!({
                 "status": "topology_restore_failed",
-                "receipt": receipt,
+                "receipt": {
+                    "identity": identity_str,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        id.as_str(),
+                        &identity_str,
+                    ),
+                },
                 "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
             });
             Ok(JsValue::from_str(&result.to_string()))
@@ -2238,7 +2255,8 @@ pub async fn mob_run_flow(
 
 /// Read flow run status.
 ///
-/// Returns JSON with run state and ledgers, or null if not found.
+/// Returns a generated `MobFlowStatusResult` JSON envelope whose `run` field
+/// carries run state and ledgers, or null when not found.
 #[wasm_bindgen]
 pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -2247,13 +2265,9 @@ pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsVa
         .parse()
         .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
     let status = mob_state.mob_flow_status(&id, rid).await.map_err(err_mob)?;
-    match status {
-        Some(run) => {
-            let json = serde_json::to_string(&run).map_err(|e| err_str("serialize_error", e))?;
-            Ok(JsValue::from_str(&json))
-        }
-        None => Ok(JsValue::from_str("null")),
-    }
+    let json = serde_json::to_string(&serde_json::json!({ "run": status }))
+        .map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Cancel an in-flight flow run.

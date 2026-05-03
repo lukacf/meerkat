@@ -242,10 +242,7 @@ export class Member {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeEventEnvelope(item, this.mobId)),
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -586,10 +583,7 @@ export class Mob {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeEventEnvelope(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeEventEnvelope(item, this.mobId)),
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -599,10 +593,7 @@ export class Mob {
     const handle = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) =>
-        Array.isArray(raw)
-          ? raw.map((item) => normalizeAttributedEvent(item, this.mobId))
-          : [],
+      (raw) => raw.map((item) => normalizeAttributedEvent(item, this.mobId)),
       () => this.bindings.close_subscription(handle),
     );
   }

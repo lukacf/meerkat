@@ -2278,6 +2278,8 @@ enum SubscriptionInner {
     /// Mob-wide attributed event receiver from the event router.
     /// The entire handle is stored to keep the router task alive (Drop cancels it).
     MobWide(std::cell::RefCell<meerkat_mob::MobEventRouterHandle>),
+    #[cfg(all(test, target_arch = "wasm32"))]
+    InjectedProjectionFailure,
 }
 
 /// Per-subscription state wrapping the inner receiver.
@@ -2395,6 +2397,8 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
 ///
 /// Returns a JSON array of event objects. Drains all buffered events
 /// since the last poll. Non-blocking: returns `[]` if no new events.
+/// If any buffered event cannot be projected to JSON, returns a typed
+/// `serialize_error` instead of silently omitting the event.
 ///
 /// For per-member subscriptions (`mob_member_subscribe`), returns
 /// `EventEnvelope<AgentEvent>` objects. For mob-wide subscriptions
@@ -2418,10 +2422,10 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
                 let mut rx = rx_cell.borrow_mut();
                 loop {
                     match rx.try_recv() {
-                        Ok(event) => match serde_json::to_value(&event) {
-                            Ok(val) => events.push(val),
-                            Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
-                        },
+                        Ok(event) => events.push(
+                            serialize_subscription_item(&event, "subscription agent event")
+                                .map_err(|message| err_js("serialize_error", &message))?,
+                        ),
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
                             events.push(serde_json::json!({
@@ -2437,17 +2441,43 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
             SubscriptionInner::MobWide(handle_cell) => {
                 let mut router_handle = handle_cell.borrow_mut();
                 while let Ok(attributed) = router_handle.event_rx.try_recv() {
-                    match serde_json::to_value(&attributed) {
-                        Ok(val) => events.push(val),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize attributed event");
-                        }
+                    events.push(
+                        serialize_subscription_item(&attributed, "subscription attributed event")
+                            .map_err(|message| err_js("serialize_error", &message))?,
+                    );
+                }
+            }
+            #[cfg(all(test, target_arch = "wasm32"))]
+            SubscriptionInner::InjectedProjectionFailure => {
+                struct FailingProjection;
+
+                impl Serialize for FailingProjection {
+                    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        Err(serde::ser::Error::custom("injected projection failure"))
                     }
                 }
+
+                events.push(
+                    serialize_subscription_item(
+                        &FailingProjection,
+                        "subscription injected test event",
+                    )
+                    .map_err(|message| err_js("serialize_error", &message))?,
+                );
             }
         }
         serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))
     })
+}
+
+fn serialize_subscription_item<T: Serialize + ?Sized>(
+    item: &T,
+    projection: &str,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(item).map_err(|e| format!("failed to serialize {projection}: {e}"))
 }
 
 /// Close a subscription and free resources.
@@ -2470,7 +2500,7 @@ mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
         merge_runtime_system_context_state, parse_mob_lifecycle_action_arg, parse_mobpack,
-        poll_subscription,
+        poll_subscription, serialize_subscription_item,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2994,6 +3024,98 @@ capabilities = [{capability_values}]
 
         destroy_session(handle).expect("destroy session");
         assert!(get_session_state(handle).is_err());
+    }
+
+    #[test]
+    fn poll_subscription_empty_success_is_clean_empty_array() {
+        let (_tx, rx) = crate::tokio::sync::broadcast::channel(1);
+
+        let handle = SUBSCRIPTIONS.with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let handle = registry.next_handle;
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+            registry.subscriptions.insert(
+                handle,
+                EventSubscription {
+                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
+                },
+            );
+            handle
+        });
+
+        let payload = poll_subscription(handle).expect("empty poll should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("empty poll should be json");
+        assert_eq!(
+            parsed.as_array().map(Vec::len),
+            Some(0),
+            "clean empty poll must remain a successful empty array"
+        );
+
+        let close_result = close_subscription(handle);
+        assert!(close_result.is_ok());
+    }
+
+    #[test]
+    fn serialize_subscription_item_reports_projection_failure() {
+        struct FailingProjection;
+
+        impl serde::Serialize for FailingProjection {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("injected projection failure"))
+            }
+        }
+
+        let error =
+            serialize_subscription_item(&FailingProjection, "subscription injected test event")
+                .expect_err("projection failure should be reported");
+
+        assert!(
+            error.contains("failed to serialize subscription injected test event"),
+            "projection failure should name the failed subscription projection"
+        );
+        assert!(
+            error.contains("injected projection failure"),
+            "projection failure should preserve the serialization cause"
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    #[allow(clippy::expect_used)]
+    fn poll_subscription_fails_closed_when_projection_serialization_fails() {
+        let handle = SUBSCRIPTIONS.with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let handle = registry.next_handle;
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+            registry.subscriptions.insert(
+                handle,
+                EventSubscription {
+                    inner: SubscriptionInner::InjectedProjectionFailure,
+                },
+            );
+            handle
+        });
+
+        let error =
+            poll_subscription(handle).expect_err("projection failure must fail public poll");
+        let error_json = error.as_string().expect("typed error json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&error_json).expect("typed error should be json");
+        assert_eq!(parsed["code"], "serialize_error");
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("injected projection failure"),
+            "projection failure should surface the serialization cause"
+        );
+
+        let close_result = close_subscription(handle);
+        assert!(close_result.is_ok());
     }
 
     #[test]

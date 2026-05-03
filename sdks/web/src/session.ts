@@ -103,7 +103,7 @@ export class Session {
     if (this.destroyed) throw new Error('Session has been destroyed');
     return new EventSubscription<SessionEvent>(
       () => (this.destroyed ? '[]' : this.pollFn(this.handle)),
-      (raw) => (Array.isArray(raw) ? (raw as SessionEvent[]) : []),
+      (raw) => raw as SessionEvent[],
     );
   }
 

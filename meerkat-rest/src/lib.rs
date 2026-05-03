@@ -6990,7 +6990,7 @@ mod tests {
         });
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        release.notify_one();
+        release.notify_waiters();
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
@@ -7009,7 +7009,7 @@ mod tests {
             );
         assert_eq!(admitted.0, StatusCode::ACCEPTED);
 
-        release.notify_one();
+        release.notify_waiters();
     }
 
     #[tokio::test]

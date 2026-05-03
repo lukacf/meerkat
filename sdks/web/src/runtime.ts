@@ -1,4 +1,4 @@
-import { Mob } from './mob.js';
+import { Mob, parseMobStatusResult } from './mob.js';
 import { Session } from './session.js';
 import type {
   RuntimeConfig,
@@ -9,6 +9,7 @@ import type {
   ToolCallback,
   MobStatus,
 } from './types.js';
+import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
 const EXPECTED_VERSION = '0.6.0';
@@ -48,6 +49,34 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseJsonPayload(json: string, context: string): unknown {
+  try {
+    return JSON.parse(json) as unknown;
+  } catch (error) {
+    throw new Error(`${context}: invalid JSON`);
+  }
+}
+
+function parseMobListResult(raw: unknown): MobStatus[] {
+  const context = 'Invalid mob/list response';
+  if (!isRecord(raw)) {
+    throw new Error(`${context}: malformed envelope`);
+  }
+
+  const record = raw as Partial<WireMobListResult> & Record<string, unknown>;
+  if (!Array.isArray(record.mobs)) {
+    throw new Error(`${context}: missing mobs`);
+  }
+
+  return record.mobs.map((mob, index) =>
+    parseMobStatusResult(mob, `${context}.mobs[${index}]`),
+  );
 }
 
 /**
@@ -340,7 +369,7 @@ export class MeerkatRuntime {
   /** List all active mobs. */
   async listMobs(): Promise<MobStatus[]> {
     const json = await this.wasm.mob_list();
-    return JSON.parse(json) as MobStatus[];
+    return parseMobListResult(parseJsonPayload(json, 'Invalid mob/list response'));
   }
 
   /** Wire two agents across different mobs for cross-mob comms. */

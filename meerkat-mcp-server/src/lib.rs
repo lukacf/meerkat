@@ -1239,7 +1239,12 @@ fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
 ) -> Result<Value, ToolCallError> {
-    format_agent_result(result, session_id).map_err(ToolCallError::internal)
+    match result {
+        Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
+            Err(request_cancelled_tool_error())
+        }
+        result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
+    }
 }
 
 fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
@@ -1285,6 +1290,19 @@ fn post_commit_session_created_error(
     session_id: &meerkat::SessionId,
     err: &SessionError,
 ) -> ToolCallError {
+    if matches!(err, SessionError::Agent(meerkat::AgentError::Cancelled)) {
+        return ToolCallError::new(
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
+            "request cancelled",
+            Some(json!({
+                "session_id": session_id.to_string(),
+                "session_ref": session_id.to_string(),
+                "session_created": true,
+                "resumable": true,
+            })),
+        );
+    }
+
     ToolCallError::internal_with_data(
         format!("Agent error: {err}"),
         json!({
@@ -1299,7 +1317,7 @@ fn post_commit_session_created_error(
 fn request_cancelled_tool_error() -> ToolCallError {
     ToolCallError::new(
         meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
-        "request cancelled before start",
+        "request cancelled",
         None,
     )
 }
@@ -2110,11 +2128,22 @@ impl McpArchiveCleanup {
     }
 }
 
+async fn archive_with_mcp_machine_authority(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat::SessionId,
+) -> Result<(), SessionError> {
+    service
+        .archive_with_machine_authority(session_id, runtime_adapter.session_control_authority())
+        .await
+}
+
 async fn archive_session_with_runtime_cleanup(
     state: &MeerkatMcpState,
     session_id: meerkat::SessionId,
 ) -> Result<(), SessionError> {
     let service = Arc::clone(&state.service);
+    let runtime_adapter = Arc::clone(&state.runtime_adapter);
     let cleanup = McpArchiveCleanup {
         ingress: state.runtime_ingress_context(),
         #[cfg(feature = "mob")]
@@ -2123,7 +2152,12 @@ async fn archive_session_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
+        let result = archive_with_mcp_machine_authority(
+            service.as_ref(),
+            runtime_adapter.as_ref(),
+            &session_id,
+        )
+        .await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             cleanup.run(&session_id).await;
         }
@@ -2856,19 +2890,31 @@ async fn handle_meerkat_run(
             }))
             .await;
         let service = state.service.clone();
+        let archive_runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cleanup = session_id.clone();
         let ingress_for_cleanup = ingress.clone();
         context.set_unpublished_cleanup(request_action(move || {
             let service = service.clone();
+            let archive_runtime_adapter = archive_runtime_adapter.clone();
             let ingress = ingress_for_cleanup.clone();
             let session_id = session_id_for_cleanup.clone();
             async move {
-                let _ = service.archive(&session_id).await;
+                let _ = archive_with_mcp_machine_authority(
+                    service.as_ref(),
+                    archive_runtime_adapter.as_ref(),
+                    &session_id,
+                )
+                .await;
                 ingress.clear_session(&session_id).await;
             }
         }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            let _ = state.service.archive(&session_id).await;
+            let _ = archive_with_mcp_machine_authority(
+                state.service.as_ref(),
+                state.runtime_adapter.as_ref(),
+                &session_id,
+            )
+            .await;
             ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
         }
@@ -2955,7 +3001,12 @@ async fn handle_meerkat_run(
     ));
 
     reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
-        let _ = state.service.archive(&session_id).await;
+        let _ = archive_with_mcp_machine_authority(
+            state.service.as_ref(),
+            state.runtime_adapter.as_ref(),
+            &session_id,
+        )
+        .await;
         state.runtime_adapter.unregister_session(&session_id).await;
         ingress.clear_session(&session_id).await;
     })
@@ -5588,6 +5639,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_format_agent_result_tool_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = format_agent_result_tool(
+            Err(SessionError::Agent(meerkat::AgentError::Cancelled)),
+            &session_id,
+        )
+        .expect_err("cancelled terminal should be a tool error");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[test]
+    fn test_post_commit_session_created_error_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = post_commit_session_created_error(
+            &session_id,
+            &SessionError::Agent(meerkat::AgentError::Cancelled),
+        );
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        let data = err.data.as_ref().expect("structured cancellation data");
+        assert_eq!(
+            data.get("session_created").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
     #[cfg(feature = "comms")]
     #[test]
     fn test_tools_list_has_keep_alive_parameter() {
@@ -5878,11 +5963,13 @@ mod tests {
         assert_eq!(history_payload["has_more"], true);
         assert_eq!(history_payload["messages"].as_array().unwrap().len(), 2);
 
-        state
-            .service
-            .archive(session.id())
-            .await
-            .expect("archive should succeed");
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("archive should succeed");
 
         let archived_history = Box::pin(handle_tools_call(
             &state,

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
@@ -217,11 +217,6 @@ pub(crate) enum LeaseRefreshLifecycle {
 enum LeaseRefreshStart {
     Started(LeaseRefreshLifecycle),
     WaitForInFlight,
-}
-
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-pub(crate) fn token_is_fresh_at(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    expires_at - now > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]

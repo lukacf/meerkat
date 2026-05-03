@@ -1112,6 +1112,170 @@ mod tests {
     }
 
     #[test]
+    fn runtime_backed_missing_machine_rejects_auth_lifecycle_response_and_plain_cases() {
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let ctx = make_context(true, trusted, vec!["review"]);
+        ctx.require_machine_authority.store(true, Ordering::SeqCst);
+        let response_id = Uuid::new_v4();
+
+        let external_cases = [
+            MessageKind::Request {
+                intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+            MessageKind::Request {
+                intent: "mob.peer_added".to_string(),
+                params: serde_json::json!({"peer": "new-agent"}),
+                handling_mode: None,
+            },
+            MessageKind::Response {
+                in_reply_to: response_id,
+                status: crate::types::Status::Completed,
+                result: serde_json::json!({"ok": true}),
+                handling_mode: None,
+            },
+        ];
+
+        for kind in external_cases {
+            let result = ctx.classify(&InboxItem::External {
+                envelope: make_envelope(&sender, kind),
+            });
+            assert!(
+                result.is_none(),
+                "runtime-backed ingress must fail closed instead of letting the compatibility classifier decide"
+            );
+        }
+
+        let plain_result = ctx.classify(&InboxItem::PlainEvent {
+            blocks: None,
+            body: "event body".to_string(),
+            source: meerkat_core::PlainEventSource::Tcp,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            interaction_id: None,
+            render_metadata: None,
+        });
+        assert!(
+            plain_result.is_none(),
+            "plain event projection must also require machine authority on runtime-backed ingress"
+        );
+    }
+
+    #[test]
+    fn machine_result_overrides_local_auth_lifecycle_and_terminality_conventions() {
+        let sender = make_keypair();
+
+        let auth_override = PeerIngressAdmission {
+            classification: meerkat_core::PeerIngressClassification::required(
+                PeerInputClass::ActionableRequest,
+                PeerIngressKind::Request,
+            ),
+            lifecycle_peer: None,
+            request_id: None,
+            rendered_text: "machine-required-supervisor-bridge".to_string(),
+        };
+        let auth_machine =
+            RecordingPeerCommsHandle::accepting_with_external_override(auth_override);
+        let auth_ctx = make_context_with_machine(
+            true,
+            TrustedPeers::new(),
+            vec![],
+            Some(auth_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
+        );
+        let auth_result = auth_ctx.classify(&InboxItem::External {
+            envelope: make_envelope(
+                &sender,
+                MessageKind::Request {
+                    intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
+                    params: serde_json::json!({}),
+                    handling_mode: None,
+                },
+            ),
+        });
+        assert!(
+            auth_result.is_none(),
+            "local supervisor-bridge exemption must not admit when machine returned auth-required"
+        );
+        assert_eq!(auth_machine.external_calls(), 1);
+
+        let lifecycle_override = PeerIngressAdmission {
+            classification: meerkat_core::PeerIngressClassification::required(
+                PeerInputClass::ActionableRequest,
+                PeerIngressKind::Request,
+            ),
+            lifecycle_peer: None,
+            request_id: None,
+            rendered_text: "machine-actionable-peer-added".to_string(),
+        };
+        let lifecycle_machine =
+            RecordingPeerCommsHandle::accepting_with_external_override(lifecycle_override);
+        let trusted = make_trusted_peers("orchestrator", &sender.public_key());
+        let lifecycle_ctx = make_context_with_machine(
+            true,
+            trusted,
+            vec![],
+            Some(lifecycle_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
+        );
+        let lifecycle = lifecycle_ctx
+            .classify(&InboxItem::External {
+                envelope: make_envelope(
+                    &sender,
+                    MessageKind::Request {
+                        intent: "mob.peer_added".to_string(),
+                        params: serde_json::json!({"peer": "new-agent"}),
+                        handling_mode: None,
+                    },
+                ),
+            })
+            .expect("machine-accepted request should classify");
+        assert_eq!(lifecycle.class, PeerInputClass::ActionableRequest);
+        assert_eq!(lifecycle.lifecycle_peer, None);
+        assert_eq!(lifecycle_machine.external_calls(), 1);
+
+        let response_override = PeerIngressAdmission {
+            classification: meerkat_core::PeerIngressClassification {
+                class: PeerInputClass::ResponseProgress,
+                kind: PeerIngressKind::Response,
+                auth: PeerIngressAuthDecision::Required,
+                lifecycle_kind: None,
+                response_terminality: Some(TerminalityClass::Progress),
+            },
+            lifecycle_peer: None,
+            request_id: Some(Uuid::new_v4().to_string()),
+            rendered_text: "machine-progress-response".to_string(),
+        };
+        let response_machine =
+            RecordingPeerCommsHandle::accepting_with_external_override(response_override);
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let response_ctx = make_context_with_machine(
+            true,
+            trusted,
+            vec![],
+            Some(response_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
+        );
+        let response = response_ctx
+            .classify(&InboxItem::External {
+                envelope: make_envelope(
+                    &sender,
+                    MessageKind::Response {
+                        in_reply_to: Uuid::new_v4(),
+                        status: crate::types::Status::Completed,
+                        result: serde_json::json!({"ok": true}),
+                        handling_mode: None,
+                    },
+                ),
+            })
+            .expect("machine-accepted response should classify");
+        assert_eq!(response.class, PeerInputClass::ResponseProgress);
+        assert_eq!(
+            response.response_terminality,
+            Some(TerminalityClass::Progress)
+        );
+        assert_eq!(response_machine.external_calls(), 1);
+    }
+
+    #[test]
     fn classify_untrusted_legacy_bridge_intent_drops_at_ingress() {
         let sender = make_keypair();
         let trusted = TrustedPeers::new(); // sender NOT trusted yet

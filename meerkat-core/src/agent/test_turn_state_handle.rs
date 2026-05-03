@@ -32,7 +32,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Mutex, MutexGuard,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
@@ -604,6 +604,7 @@ pub struct TestTurnStateHandle {
     state: Mutex<LocalState>,
     run_completed_effects: AtomicUsize,
     run_failed_effects: AtomicUsize,
+    suppress_terminal_cause_snapshots: AtomicBool,
 }
 
 impl TestTurnStateHandle {
@@ -612,6 +613,7 @@ impl TestTurnStateHandle {
             state: Mutex::new(LocalState::new()),
             run_completed_effects: AtomicUsize::new(0),
             run_failed_effects: AtomicUsize::new(0),
+            suppress_terminal_cause_snapshots: AtomicBool::new(false),
         }
     }
 
@@ -630,6 +632,11 @@ impl TestTurnStateHandle {
 
     pub fn run_failed_effect_count(&self) -> usize {
         self.run_failed_effects.load(Ordering::SeqCst)
+    }
+
+    pub fn suppress_terminal_cause_snapshots_for_test(&self) {
+        self.suppress_terminal_cause_snapshots
+            .store(true, Ordering::SeqCst);
     }
 }
 
@@ -941,7 +948,14 @@ impl TurnStateHandle for TestTurnStateHandle {
                 TurnTerminalOutcome::None => None,
                 other => Some(other),
             },
-            terminal_cause_kind: fields.terminal_cause_kind,
+            terminal_cause_kind: if self
+                .suppress_terminal_cause_snapshots
+                .load(Ordering::SeqCst)
+            {
+                None
+            } else {
+                fields.terminal_cause_kind
+            },
             extraction_attempts: u64::from(fields.extraction_attempts),
             max_extraction_retries: u64::from(fields.max_extraction_retries),
             llm_retry_attempt: fields.llm_retry_attempt,

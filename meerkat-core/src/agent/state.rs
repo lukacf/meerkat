@@ -2366,9 +2366,12 @@ where
         let classification = classify_terminal(&outcome);
         match classification {
             Some(SurfaceResultClass::HardFailure) => {
-                let cause_kind = self
-                    .turn_terminal_cause_kind()?
-                    .unwrap_or_else(|| TurnTerminalCauseKind::from_terminal_outcome(outcome));
+                let Some(cause_kind) = self.turn_terminal_cause_kind()? else {
+                    self.pending_fatal_diagnostic = None;
+                    return Err(AgentError::InternalError(format!(
+                        "hard-failure terminal outcome {outcome:?} missing machine-owned terminal_cause_kind"
+                    )));
+                };
                 let message = self
                     .pending_fatal_diagnostic
                     .take()
@@ -5563,6 +5566,60 @@ mod tests {
         assert_eq!(
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::TurnLimitReached)
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_failure_missing_machine_cause_fails_closed_without_synthesizing() {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+
+        let turn_handle = Arc::new(TestTurnStateHandle::new());
+        turn_handle.suppress_terminal_cause_snapshots_for_test();
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(FatalLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("missing machine terminal cause should fail closed");
+
+        match err {
+            AgentError::InternalError(message) => {
+                assert!(
+                    message.contains("missing machine-owned terminal_cause_kind"),
+                    "unexpected missing-cause invariant error: {message}"
+                );
+                assert!(
+                    message.contains("Failed"),
+                    "invariant error should name the terminal outcome: {message}"
+                );
+            }
+            AgentError::TerminalFailure { cause_kind, .. } => panic!(
+                "core shell must not synthesize a public terminal cause from outcome, got {cause_kind:?}"
+            ),
+            other => panic!("expected fail-closed invariant error, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind, None,
+            "fixture must prove the machine snapshot has no terminal cause"
         );
     }
 

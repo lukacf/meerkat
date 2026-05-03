@@ -10,6 +10,7 @@ use crate::event::AgentErrorClass;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
 use crate::retry::LlmRetrySchedule;
+use serde::{Deserialize, Serialize};
 
 /// Canonical phases for turn execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +67,9 @@ pub enum TurnPrimitiveKind {
 }
 
 /// Terminal outcome of a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnTerminalOutcome {
     None,
     Completed,
@@ -77,27 +80,158 @@ pub enum TurnTerminalOutcome {
     StructuredOutputValidationFailed,
 }
 
+/// Closed machine-owned classifier for why a turn reached a terminal failure.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnTerminalCauseKind {
+    Unknown,
+    HookDenied,
+    HookFailure,
+    LlmFailure,
+    ToolFailure,
+    StructuredOutputValidationFailed,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    TurnLimitReached,
+    RuntimeApplyFailure,
+    FatalFailure,
+}
+
+impl TurnTerminalCauseKind {
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        match error {
+            AgentError::HookDenied { .. } => Self::HookDenied,
+            AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. } => Self::HookFailure,
+            AgentError::Llm { .. } => Self::LlmFailure,
+            AgentError::ToolError(_) | AgentError::InvalidToolAccess { .. } => Self::ToolFailure,
+            AgentError::StructuredOutputValidationFailed { .. }
+            | AgentError::InvalidOutputSchema(_) => Self::StructuredOutputValidationFailed,
+            AgentError::TokenBudgetExceeded { .. } | AgentError::ToolCallBudgetExceeded { .. } => {
+                Self::BudgetExhausted
+            }
+            AgentError::TimeBudgetExceeded { .. } => Self::TimeBudgetExceeded,
+            AgentError::MaxTurnsReached { .. } => Self::TurnLimitReached,
+            AgentError::TerminalFailure { cause_kind, .. } => *cause_kind,
+            _ => Self::FatalFailure,
+        }
+    }
+
+    pub fn from_error_class(class: AgentErrorClass) -> Self {
+        match class {
+            AgentErrorClass::Hook => Self::HookFailure,
+            AgentErrorClass::Llm => Self::LlmFailure,
+            AgentErrorClass::Tool => Self::ToolFailure,
+            AgentErrorClass::StructuredOutput | AgentErrorClass::InvalidOutputSchema => {
+                Self::StructuredOutputValidationFailed
+            }
+            AgentErrorClass::Budget => Self::BudgetExhausted,
+            AgentErrorClass::MaxTurns => Self::TurnLimitReached,
+            _ => Self::FatalFailure,
+        }
+    }
+
+    pub fn from_terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
+        match outcome {
+            TurnTerminalOutcome::BudgetExhausted => Self::BudgetExhausted,
+            TurnTerminalOutcome::TimeBudgetExceeded => Self::TimeBudgetExceeded,
+            TurnTerminalOutcome::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+            TurnTerminalOutcome::Failed => Self::FatalFailure,
+            TurnTerminalOutcome::None
+            | TurnTerminalOutcome::Completed
+            | TurnTerminalOutcome::Cancelled => Self::Unknown,
+        }
+    }
+
+    pub fn agent_error_class(self) -> AgentErrorClass {
+        match self {
+            Self::HookDenied | Self::HookFailure => AgentErrorClass::Hook,
+            Self::LlmFailure => AgentErrorClass::Llm,
+            Self::ToolFailure => AgentErrorClass::Tool,
+            Self::StructuredOutputValidationFailed => AgentErrorClass::StructuredOutput,
+            Self::BudgetExhausted | Self::TimeBudgetExceeded => AgentErrorClass::Budget,
+            Self::TurnLimitReached => AgentErrorClass::MaxTurns,
+            Self::RuntimeApplyFailure => AgentErrorClass::Internal,
+            Self::Unknown | Self::FatalFailure => AgentErrorClass::Terminal,
+        }
+    }
+
+    pub fn default_message(self, outcome: TurnTerminalOutcome) -> &'static str {
+        match self {
+            Self::HookDenied => "hook denied terminal turn",
+            Self::HookFailure => "hook failure terminal turn",
+            Self::LlmFailure => "LLM failure terminal turn",
+            Self::ToolFailure => "tool failure terminal turn",
+            Self::StructuredOutputValidationFailed => "structured output validation failed",
+            Self::BudgetExhausted => "budget exhausted",
+            Self::TimeBudgetExceeded => "time budget exceeded",
+            Self::TurnLimitReached => "turn limit reached",
+            Self::RuntimeApplyFailure => "runtime apply failure",
+            Self::FatalFailure => "fatal turn failure",
+            Self::Unknown => match outcome {
+                TurnTerminalOutcome::None => "turn did not reach a terminal outcome",
+                TurnTerminalOutcome::Completed => "turn completed",
+                TurnTerminalOutcome::Cancelled => "turn cancelled",
+                TurnTerminalOutcome::Failed => "turn failed",
+                TurnTerminalOutcome::BudgetExhausted => "budget exhausted",
+                TurnTerminalOutcome::TimeBudgetExceeded => "time budget exceeded",
+                TurnTerminalOutcome::StructuredOutputValidationFailed => {
+                    "structured output validation failed"
+                }
+            },
+        }
+    }
+}
+
 /// Typed reason for a turn failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnFailureReason {
     pub class: AgentErrorClass,
+    pub cause_kind: TurnTerminalCauseKind,
     pub message: String,
 }
 
 impl TurnFailureReason {
     pub fn new(class: AgentErrorClass, message: impl Into<String>) -> Self {
+        Self::with_cause(
+            TurnTerminalCauseKind::from_error_class(class),
+            class,
+            message,
+        )
+    }
+
+    pub fn with_cause(
+        cause_kind: TurnTerminalCauseKind,
+        class: AgentErrorClass,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             class,
+            cause_kind,
             message: message.into(),
         }
     }
 
     pub fn from_agent_error(error: &AgentError) -> Self {
-        Self::new(AgentErrorClass::from(error), error.to_string())
+        Self::with_cause(
+            TurnTerminalCauseKind::from_agent_error(error),
+            AgentErrorClass::from(error),
+            error.to_string(),
+        )
     }
 
     pub fn budget_exceeded(exceeded: BudgetExceeded) -> Self {
         let class = AgentErrorClass::Budget;
+        let cause_kind = match exceeded.dimension {
+            BudgetDimension::Time => TurnTerminalCauseKind::TimeBudgetExceeded,
+            BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
+                TurnTerminalCauseKind::BudgetExhausted
+            }
+        };
         let message = match exceeded.dimension {
             BudgetDimension::Tokens => {
                 format!(
@@ -118,31 +252,40 @@ impl TurnFailureReason {
                 )
             }
         };
-        Self::new(class, message)
+        Self::with_cause(cause_kind, class, message)
     }
 
     pub fn terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
         match outcome {
-            TurnTerminalOutcome::BudgetExhausted => {
-                Self::new(AgentErrorClass::Budget, "budget exhausted")
-            }
-            TurnTerminalOutcome::TimeBudgetExceeded => {
-                Self::new(AgentErrorClass::Budget, "time budget exceeded")
-            }
-            TurnTerminalOutcome::StructuredOutputValidationFailed => Self::new(
+            TurnTerminalOutcome::BudgetExhausted => Self::with_cause(
+                TurnTerminalCauseKind::BudgetExhausted,
+                AgentErrorClass::Budget,
+                "budget exhausted",
+            ),
+            TurnTerminalOutcome::TimeBudgetExceeded => Self::with_cause(
+                TurnTerminalCauseKind::TimeBudgetExceeded,
+                AgentErrorClass::Budget,
+                "time budget exceeded",
+            ),
+            TurnTerminalOutcome::StructuredOutputValidationFailed => Self::with_cause(
+                TurnTerminalCauseKind::StructuredOutputValidationFailed,
                 AgentErrorClass::StructuredOutput,
                 "structured output validation failed",
             ),
-            TurnTerminalOutcome::Cancelled => Self::new(AgentErrorClass::Cancelled, "cancelled"),
+            TurnTerminalOutcome::Cancelled => Self::with_cause(
+                TurnTerminalCauseKind::Unknown,
+                AgentErrorClass::Cancelled,
+                "cancelled",
+            ),
             TurnTerminalOutcome::Completed | TurnTerminalOutcome::None => {
                 Self::new(AgentErrorClass::Terminal, "terminal outcome")
             }
-            TurnTerminalOutcome::Failed => Self::new(AgentErrorClass::Terminal, "turn failed"),
+            TurnTerminalOutcome::Failed => Self::with_cause(
+                TurnTerminalCauseKind::FatalFailure,
+                AgentErrorClass::Terminal,
+                "turn failed",
+            ),
         }
-    }
-
-    pub fn to_dsl_error(&self) -> String {
-        format!("{:?}: {}", self.class, self.message)
     }
 }
 
@@ -419,5 +562,23 @@ mod tests {
                 "ImmediateContext"
             ]
         );
+    }
+
+    #[test]
+    fn terminal_cause_classification_ignores_display_message() {
+        let first = TurnFailureReason::with_cause(
+            TurnTerminalCauseKind::HookDenied,
+            AgentErrorClass::Hook,
+            "display one",
+        );
+        let second = TurnFailureReason::with_cause(
+            TurnTerminalCauseKind::HookDenied,
+            AgentErrorClass::Hook,
+            "display two",
+        );
+
+        assert_eq!(first.cause_kind, TurnTerminalCauseKind::HookDenied);
+        assert_eq!(second.cause_kind, TurnTerminalCauseKind::HookDenied);
+        assert_ne!(first.message, second.message);
     }
 }

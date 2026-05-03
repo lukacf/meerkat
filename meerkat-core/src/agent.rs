@@ -41,7 +41,7 @@ use crate::tool_catalog::{
 };
 use crate::tool_scope::ToolScope;
 use crate::turn_execution_authority::{
-    ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
@@ -150,6 +150,7 @@ pub struct AgentExecutionSnapshot {
     pub boundary_count: u32,
     pub cancel_after_boundary: bool,
     pub terminal_outcome: TurnTerminalOutcome,
+    pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub extraction_attempts: u32,
     pub max_extraction_retries: u32,
     pub applied_cursor: CompletionSeq,
@@ -958,13 +959,13 @@ where
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
-    /// Run-scoped diagnostic stash for originating hard-failure errors.
+    /// Run-scoped display-message stash for originating hard-failure errors.
     ///
     /// When an exhausted hard LLM-call failure (e.g., CallTimeout, NetworkTimeout)
     /// routes through machine-owned FatalFailure, the originating `AgentError` is
-    /// stashed here so `build_result()` can surface it instead of a generic
-    /// `TerminalFailure`. This is ephemeral, consumed once, and non-authoritative
-    /// for terminal phase/classification.
+    /// stashed here so `build_result()` can reuse its human-readable message.
+    /// Terminal class/cause come from the machine-owned terminal cause snapshot,
+    /// not from this ephemeral diagnostic.
     pub(crate) pending_fatal_diagnostic: Option<AgentError>,
     /// True once the current run has accepted `RunCompleted` hooks.
     pub(crate) run_completed_hooks_applied: bool,

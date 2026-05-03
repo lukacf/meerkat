@@ -278,7 +278,7 @@ pub use tool_scope::{
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
-    TurnPrimitiveKind, TurnTerminalOutcome,
+    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,

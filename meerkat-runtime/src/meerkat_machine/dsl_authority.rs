@@ -141,6 +141,7 @@ pub(crate) fn project_state(
         boundary_count: 0,
         cancel_after_boundary: false,
         terminal_outcome: None,
+        terminal_cause_kind: None,
         last_runtime_apply_failure_cause: None,
         last_runtime_apply_failure_message: None,
         extraction_attempts: 0,

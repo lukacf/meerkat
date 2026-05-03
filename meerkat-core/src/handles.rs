@@ -42,7 +42,8 @@ use crate::tool_scope::{
     ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
-    ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
+    TurnTerminalOutcome,
 };
 use crate::types::SessionId;
 
@@ -574,6 +575,9 @@ pub struct TurnStateSnapshot {
     /// Typed terminal outcome recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means the turn has not reached a terminal phase.
     pub terminal_outcome: Option<TurnTerminalOutcome>,
+    /// Typed terminal cause recorded by the DSL. `None` means no failure cause
+    /// has been selected for the current turn.
+    pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
     pub llm_retry_attempt: u32,

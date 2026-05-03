@@ -432,6 +432,29 @@ fn generated_meerkat_kernel_content_shape_routes_wire_labels_through_core() {
 }
 
 #[test]
+fn generated_meerkat_terminal_failures_require_typed_cause() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+
+    assert!(
+        rendered.contains("pub enum TurnTerminalCauseKind"),
+        "generated kernel must expose a closed terminal-cause enum:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("pub struct FatalFailure {\n        pub error: String,\n    }"),
+        "FatalFailure must not remain constructible as a string-only semantic cause path:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub terminal_cause_kind: TurnTerminalCauseKind,"),
+        "terminal failure inputs/effects must carry a typed cause beside display text:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct TurnRunFailed")
+            && rendered.contains("TurnRunFailed(effects::TurnRunFailed)"),
+        "TurnRunFailed must remain emitted with the typed cause payload:\n{rendered}"
+    );
+}
+
+#[test]
 fn generated_meerkat_closed_dsl_domains_use_string_enum_bindings() {
     let rendered = render_machine_kernel_module(&meerkat_machine());
 
@@ -474,6 +497,22 @@ fn generated_meerkat_closed_dsl_domains_use_string_enum_bindings() {
                 "Cancelled",
                 "Retired",
                 "Terminated",
+            ],
+        ),
+        (
+            "TurnTerminalCauseKind",
+            &[
+                "Unknown",
+                "HookDenied",
+                "HookFailure",
+                "LlmFailure",
+                "ToolFailure",
+                "StructuredOutputValidationFailed",
+                "BudgetExhausted",
+                "TimeBudgetExceeded",
+                "TurnLimitReached",
+                "RuntimeApplyFailure",
+                "FatalFailure",
             ],
         ),
     ] {

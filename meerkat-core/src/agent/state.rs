@@ -19,7 +19,7 @@ use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
-    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
     terminal_outcome_for_budget_exceeded,
 };
 use crate::types::{
@@ -308,6 +308,10 @@ where
             .runtime_turn_authority_snapshot()?
             .terminal_outcome
             .unwrap_or(TurnTerminalOutcome::None))
+    }
+
+    fn turn_terminal_cause_kind(&self) -> Result<Option<TurnTerminalCauseKind>, AgentError> {
+        Ok(self.runtime_turn_authority_snapshot()?.terminal_cause_kind)
     }
 
     fn turn_extraction_attempts(&self) -> Result<u32, AgentError> {
@@ -2362,14 +2366,19 @@ where
         let classification = classify_terminal(&outcome);
         match classification {
             Some(SurfaceResultClass::HardFailure) => {
-                // Consume the pending diagnostic once — prefer the originating
-                // typed error over a generic TerminalFailure so that
-                // provider/reason/message truth is preserved on the surface.
-                if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
-                    Err(diagnostic)
-                } else {
-                    Err(AgentError::TerminalFailure { outcome })
-                }
+                let cause_kind = self
+                    .turn_terminal_cause_kind()?
+                    .unwrap_or_else(|| TurnTerminalCauseKind::from_terminal_outcome(outcome));
+                let message = self
+                    .pending_fatal_diagnostic
+                    .take()
+                    .map(|diagnostic| diagnostic.to_string())
+                    .unwrap_or_else(|| cause_kind.default_message(outcome).to_string());
+                Err(AgentError::TerminalFailure {
+                    outcome,
+                    cause_kind,
+                    message,
+                })
             }
             _ => {
                 // Success, Cancelled, or no terminal outcome yet (early exit).
@@ -4141,6 +4150,11 @@ mod tests {
             crate::TurnTerminalOutcome::Failed,
             "RunCompleted hook denial should leave the canonical turn snapshot failed"
         );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::HookDenied),
+            "RunCompleted hook denial should leave the machine-owned terminal cause"
+        );
     }
 
     #[tokio::test]
@@ -4286,6 +4300,11 @@ mod tests {
             crate::TurnTerminalOutcome::Failed,
             "boundary hook denial should terminalize through the turn authority"
         );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::HookDenied),
+            "boundary hook denial should surface the machine-owned terminal cause"
+        );
     }
 
     #[tokio::test]
@@ -4349,6 +4368,11 @@ mod tests {
             snapshot.terminal_outcome,
             crate::TurnTerminalOutcome::Failed,
             "post-LLM hook denial should terminalize through the turn authority"
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::HookDenied),
+            "post-LLM hook denial should retain the typed machine terminal cause"
         );
     }
 
@@ -5442,6 +5466,104 @@ mod tests {
         assert_eq!(result.text, "done");
         // The inherited base filter restricts to only "visible"
         assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
+    }
+
+    struct FatalLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for FatalLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Err(AgentError::llm(
+                "mock",
+                crate::error::LlmFailureReason::AuthError,
+                "display-only LLM failure",
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_fatal_llm_failure_uses_machine_terminal_cause() {
+        let mut agent = build_agent(Arc::new(FatalLlmClient)).await;
+        agent.config.max_turns = Some(1);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("fatal LLM failure should terminalize the run");
+
+        match err {
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } => {
+                assert_eq!(outcome, crate::TurnTerminalOutcome::Failed);
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::LlmFailure);
+                assert!(message.contains("display-only LLM failure"));
+            }
+            other => panic!("expected machine-owned terminal failure, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_failure_without_pending_diagnostic_uses_machine_terminal_cause() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(0);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("turn limit should terminalize the run");
+
+        match err {
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } => {
+                assert_eq!(outcome, crate::TurnTerminalOutcome::Failed);
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::TurnLimitReached);
+                assert!(message.contains("turn limit reached"));
+            }
+            other => panic!("expected machine-owned turn-limit terminal failure, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::TurnLimitReached)
+        );
     }
 
     /// Mock LLM client that returns high usage, causing budget exhaustion

@@ -41,7 +41,7 @@ use crate::ops::OperationId;
 use crate::retry::LlmRetrySchedule;
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionInput, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 #[derive(Debug, Clone)]
@@ -65,6 +65,7 @@ struct LocalFields {
     boundary_count: u32,
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
+    terminal_cause_kind: Option<TurnTerminalCauseKind>,
     extraction_attempts: u32,
     max_extraction_retries: u32,
     llm_retry_attempt: u32,
@@ -88,6 +89,7 @@ impl LocalFields {
             boundary_count: 0,
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
+            terminal_cause_kind: None,
             extraction_attempts: 0,
             max_extraction_retries: 0,
             llm_retry_attempt: 0,
@@ -325,6 +327,8 @@ impl LocalState {
                     CallingLlm
                 } else {
                     fields.terminal_outcome = TurnTerminalOutcome::StructuredOutputValidationFailed;
+                    fields.terminal_cause_kind =
+                        Some(TurnTerminalCauseKind::StructuredOutputValidationFailed);
                     Failed
                 }
             }
@@ -361,7 +365,7 @@ impl LocalState {
             (
                 ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
                 | ErrorRecovery,
-                FatalFailure { run_id, .. },
+                FatalFailure { run_id, reason },
             ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
@@ -373,6 +377,7 @@ impl LocalState {
                     fields.barrier_satisfied = true;
                 }
                 fields.terminal_outcome = TurnTerminalOutcome::Failed;
+                fields.terminal_cause_kind = Some(reason.cause_kind);
                 Failed
             }
             (
@@ -425,8 +430,9 @@ impl LocalState {
                     fields.barrier_satisfied = true;
                 }
                 fields.boundary_count += 1;
-                fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                Completed
+                fields.terminal_outcome = TurnTerminalOutcome::Failed;
+                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
+                Failed
             }
             (
                 ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
@@ -444,6 +450,7 @@ impl LocalState {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
+                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
                 Completed
             }
             (
@@ -462,6 +469,7 @@ impl LocalState {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::TimeBudgetExceeded;
+                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
                 Completed
             }
             (
@@ -480,6 +488,13 @@ impl LocalState {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = terminal_outcome_for_budget_exceeded(*exceeded);
+                fields.terminal_cause_kind = Some(match fields.terminal_outcome {
+                    TurnTerminalOutcome::BudgetExhausted => TurnTerminalCauseKind::BudgetExhausted,
+                    TurnTerminalOutcome::TimeBudgetExceeded => {
+                        TurnTerminalCauseKind::TimeBudgetExceeded
+                    }
+                    _ => TurnTerminalCauseKind::Unknown,
+                });
                 Completed
             }
             (
@@ -926,6 +941,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                 TurnTerminalOutcome::None => None,
                 other => Some(other),
             },
+            terminal_cause_kind: fields.terminal_cause_kind,
             extraction_attempts: u64::from(fields.extraction_attempts),
             max_extraction_retries: u64::from(fields.max_extraction_retries),
             llm_retry_attempt: fields.llm_retry_attempt,

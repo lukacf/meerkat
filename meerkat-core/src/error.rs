@@ -347,9 +347,11 @@ pub enum AgentError {
     HookConfigInvalid { reason: String },
 
     /// Turn execution reached a terminal outcome classified as HardFailure.
-    #[error("Terminal failure: {outcome:?}")]
+    #[error("Terminal failure: {outcome:?} ({cause_kind:?}): {message}")]
     TerminalFailure {
         outcome: crate::turn_execution_authority::TurnTerminalOutcome,
+        cause_kind: crate::turn_execution_authority::TurnTerminalCauseKind,
+        message: String,
     },
 
     /// The session has no pending user/tool-results boundary for `run_pending`.
@@ -636,16 +638,23 @@ mod tests {
 
     #[test]
     fn test_terminal_failure_carries_typed_outcome() {
-        use crate::turn_execution_authority::TurnTerminalOutcome;
+        use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 
-        // TerminalFailure must carry the typed enum, not a Debug-formatted string.
+        // TerminalFailure must carry typed enums, not Debug-formatted strings.
         let err = AgentError::TerminalFailure {
             outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
+            message: "llm failed".to_string(),
         };
         match &err {
-            AgentError::TerminalFailure { outcome } => {
-                // If this compiles, outcome is TurnTerminalOutcome, not String.
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                ..
+            } => {
+                // If this compiles, outcome/cause_kind are typed enums, not Strings.
                 assert_eq!(*outcome, TurnTerminalOutcome::Failed);
+                assert_eq!(*cause_kind, TurnTerminalCauseKind::LlmFailure);
             }
             other => panic!("expected TerminalFailure, got: {other}"),
         }
@@ -653,28 +662,38 @@ mod tests {
 
     #[test]
     fn test_terminal_failure_display_includes_outcome() {
-        use crate::turn_execution_authority::TurnTerminalOutcome;
+        use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 
         let err = AgentError::TerminalFailure {
             outcome: TurnTerminalOutcome::TimeBudgetExceeded,
+            cause_kind: TurnTerminalCauseKind::TimeBudgetExceeded,
+            message: "deadline reached".to_string(),
         };
         let display = err.to_string();
         assert!(
             display.contains("TimeBudgetExceeded"),
             "display should include the outcome variant name: {display}"
         );
+        assert!(
+            display.contains("TimeBudgetExceeded") && display.contains("deadline reached"),
+            "display should include cause and display message: {display}"
+        );
     }
 
     #[test]
     fn test_terminal_failure_all_hard_failure_outcomes() {
-        use crate::turn_execution_authority::TurnTerminalOutcome;
+        use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 
         // Both hard-failure outcomes should be representable.
         for outcome in [
             TurnTerminalOutcome::Failed,
             TurnTerminalOutcome::TimeBudgetExceeded,
         ] {
-            let err = AgentError::TerminalFailure { outcome };
+            let err = AgentError::TerminalFailure {
+                outcome,
+                cause_kind: TurnTerminalCauseKind::FatalFailure,
+                message: "terminal".to_string(),
+            };
             assert!(
                 !err.is_graceful(),
                 "TerminalFailure({outcome:?}) should not be graceful"

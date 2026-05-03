@@ -812,6 +812,8 @@ fn machine_apply_turn_run_failed(
                 .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
             runtime_apply_failure_message: runtime_apply_failure
                 .map(|failure| failure.message().to_owned()),
+            terminal_cause_kind:
+                crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure,
             error: terminal_error.to_owned(),
         },
     )

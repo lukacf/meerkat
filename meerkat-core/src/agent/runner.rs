@@ -102,6 +102,7 @@ fn runtime_execution_snapshot(
         boundary_count: u32::try_from(snapshot.boundary_count).ok()?,
         cancel_after_boundary: snapshot.cancel_after_boundary,
         terminal_outcome,
+        terminal_cause_kind: snapshot.terminal_cause_kind,
         extraction_attempts: u32::try_from(snapshot.extraction_attempts).ok()?,
         max_extraction_retries: u32::try_from(snapshot.max_extraction_retries).ok()?,
         applied_cursor,

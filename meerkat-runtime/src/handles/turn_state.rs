@@ -243,7 +243,8 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::FatalFailure {
-                error: reason.to_dsl_error(),
+                terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
+                error: reason.message,
             },
             "TurnStateHandle::fatal_failure",
         )
@@ -347,7 +348,8 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
                 runtime_apply_failure_cause: None,
                 runtime_apply_failure_message: None,
-                error: reason.to_dsl_error(),
+                terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
+                error: reason.message,
             },
             "TurnStateHandle::run_failed",
         )?;
@@ -414,6 +416,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             boundary_count: state.boundary_count,
             cancel_after_boundary: state.cancel_after_boundary,
             terminal_outcome: state.terminal_outcome.map(TurnTerminalOutcome::from),
+            terminal_cause_kind: state.terminal_cause_kind.map(Into::into),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
             llm_retry_attempt: u32::try_from(state.llm_retry_attempt).unwrap_or(u32::MAX),

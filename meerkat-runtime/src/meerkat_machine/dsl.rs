@@ -1535,6 +1535,86 @@ impl From<TurnTerminalOutcome> for meerkat_core::turn_execution_authority::TurnT
     }
 }
 
+/// Typed turn terminal cause. Closed mirror of
+/// [`meerkat_core::turn_execution_authority::TurnTerminalCauseKind`] carried by
+/// MeerkatMachine terminal failure inputs/effects so display messages cannot
+/// classify terminal failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnTerminalCauseKind {
+    #[default]
+    Unknown,
+    HookDenied,
+    HookFailure,
+    LlmFailure,
+    ToolFailure,
+    StructuredOutputValidationFailed,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    TurnLimitReached,
+    RuntimeApplyFailure,
+    FatalFailure,
+}
+
+impl From<meerkat_core::turn_execution_authority::TurnTerminalCauseKind> for TurnTerminalCauseKind {
+    fn from(kind: meerkat_core::turn_execution_authority::TurnTerminalCauseKind) -> Self {
+        match kind {
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::Unknown => {
+                Self::Unknown
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::HookDenied => {
+                Self::HookDenied
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::HookFailure => {
+                Self::HookFailure
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::LlmFailure => {
+                Self::LlmFailure
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::ToolFailure => {
+                Self::ToolFailure
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::BudgetExhausted => {
+                Self::BudgetExhausted
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::TimeBudgetExceeded => {
+                Self::TimeBudgetExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::TurnLimitReached => {
+                Self::TurnLimitReached
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::RuntimeApplyFailure => {
+                Self::RuntimeApplyFailure
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::FatalFailure => {
+                Self::FatalFailure
+            }
+        }
+    }
+}
+
+impl From<TurnTerminalCauseKind> for meerkat_core::turn_execution_authority::TurnTerminalCauseKind {
+    fn from(kind: TurnTerminalCauseKind) -> Self {
+        match kind {
+            TurnTerminalCauseKind::Unknown => Self::Unknown,
+            TurnTerminalCauseKind::HookDenied => Self::HookDenied,
+            TurnTerminalCauseKind::HookFailure => Self::HookFailure,
+            TurnTerminalCauseKind::LlmFailure => Self::LlmFailure,
+            TurnTerminalCauseKind::ToolFailure => Self::ToolFailure,
+            TurnTerminalCauseKind::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+            TurnTerminalCauseKind::BudgetExhausted => Self::BudgetExhausted,
+            TurnTerminalCauseKind::TimeBudgetExceeded => Self::TimeBudgetExceeded,
+            TurnTerminalCauseKind::TurnLimitReached => Self::TurnLimitReached,
+            TurnTerminalCauseKind::RuntimeApplyFailure => Self::RuntimeApplyFailure,
+            TurnTerminalCauseKind::FatalFailure => Self::FatalFailure,
+        }
+    }
+}
+
 /// Typed classifier for failures surfaced by the runtime apply loop when a
 /// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
 /// The companion `last_runtime_apply_failure_message` state field carries the

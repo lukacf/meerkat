@@ -1436,6 +1436,34 @@ def _contract_string_list(source: dict[str, Any], key: str) -> list[str]:
     return values
 
 
+def _contract_string_map(
+    source: dict[str, Any],
+    key: str,
+    required_keys: list[str],
+) -> dict[str, list[str]]:
+    values = source.get(key)
+    if not isinstance(values, dict):
+        raise KeyError(f"auth connection contract `{key}` must be a string array map")
+    missing = [provider for provider in required_keys if provider not in values]
+    extra = sorted(provider for provider in values if provider not in required_keys)
+    if missing or extra:
+        raise KeyError(
+            f"auth connection contract `{key}` provider keys mismatch: "
+            f"missing={missing}, extra={extra}"
+        )
+    result: dict[str, list[str]] = {}
+    for provider in required_keys:
+        provider_values = values[provider]
+        if not isinstance(provider_values, list) or not all(
+            isinstance(value, str) for value in provider_values
+        ):
+            raise KeyError(
+                f"auth connection contract `{key}.{provider}` must be a string array"
+            )
+        result[provider] = provider_values
+    return result
+
+
 def _ts_const_array(name: str, values: list[str]) -> list[str]:
     rendered = ",\n  ".join(json.dumps(value) for value in values)
     return [
@@ -1444,6 +1472,22 @@ def _ts_const_array(name: str, values: list[str]) -> list[str]:
         "] as const;",
         "",
     ]
+
+
+def _ts_const_array_record(
+    name: str,
+    values: dict[str, list[str]],
+    satisfies: str,
+) -> list[str]:
+    lines = [f"export const {name} = {{"]
+    for key, entries in values.items():
+        lines.append(f"  {key}: [")
+        for entry in entries:
+            lines.append(f"    {json.dumps(entry)},")
+        lines.append("  ],")
+    lines.append(f"}} as const satisfies {satisfies};")
+    lines.append("")
+    return lines
 
 
 def _auth_rpc_method_key(method_name: str) -> str:
@@ -1526,6 +1570,16 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
     providers = _contract_string_list(contracts, "providers")
     backend_kinds = _contract_string_list(contracts, "backend_kinds")
     auth_methods = _contract_string_list(contracts, "auth_methods")
+    provider_backend_kinds = _contract_string_map(
+        contracts,
+        "provider_backend_kinds",
+        providers,
+    )
+    provider_auth_methods = _contract_string_map(
+        contracts,
+        "provider_auth_methods",
+        providers,
+    )
     source_kinds = _contract_string_list(contracts, "credential_source_kinds")
     status_states = _contract_string_list(contracts, "auth_status_states")
     device_states = _contract_string_list(contracts, "device_complete_states")
@@ -1549,6 +1603,20 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
     lines.extend(_ts_const_array("WIRE_AUTH_METHODS", auth_methods))
     lines.append("export type WireAuthMethod = typeof WIRE_AUTH_METHODS[number];")
     lines.append("")
+    lines.extend(
+        _ts_const_array_record(
+            "WIRE_PROVIDER_BACKEND_KINDS",
+            provider_backend_kinds,
+            "Record<WireAuthProvider, readonly WireBackendKind[]>",
+        )
+    )
+    lines.extend(
+        _ts_const_array_record(
+            "WIRE_PROVIDER_AUTH_METHODS",
+            provider_auth_methods,
+            "Record<WireAuthProvider, readonly WireAuthMethod[]>",
+        )
+    )
     lines.extend(_ts_const_array("WIRE_CREDENTIAL_SOURCE_KINDS", source_kinds))
     lines.append(
         "export type WireCredentialSourceKind = typeof WIRE_CREDENTIAL_SOURCE_KINDS[number];"
@@ -1864,6 +1932,28 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  return parseLiteral(value, WIRE_AUTH_METHODS, path, 'wire auth method');",
             "}",
             "",
+            "function validateProviderBackendKind(",
+            "  provider: WireAuthProvider,",
+            "  backendKind: WireBackendKind,",
+            "  path: string,",
+            "): void {",
+            "  const allowed = WIRE_PROVIDER_BACKEND_KINDS[provider];",
+            "  if (!(allowed as readonly string[]).includes(backendKind)) {",
+            "    fail(path, `wire backend kind for provider ${provider} (${allowed.join(', ')})`);",
+            "  }",
+            "}",
+            "",
+            "function validateProviderAuthMethod(",
+            "  provider: WireAuthProvider,",
+            "  authMethod: WireAuthMethod,",
+            "  path: string,",
+            "): void {",
+            "  const allowed = WIRE_PROVIDER_AUTH_METHODS[provider];",
+            "  if (!(allowed as readonly string[]).includes(authMethod)) {",
+            "    fail(path, `wire auth method for provider ${provider} (${allowed.join(', ')})`);",
+            "  }",
+            "}",
+            "",
             "export function parseWireCredentialSourceKind(",
             "  value: unknown,",
             "  path = 'source_kind',",
@@ -1894,8 +1984,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "export function parseWireBackendProfile(value: unknown, path = 'backend_profile'): WireBackendProfile {",
             "  const record = expectRecord(value, path);",
             "  expectString(record.id, `${path}.id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireBackendKind(record.backend_kind, `${path}.backend_kind`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const backendKind = parseWireBackendKind(record.backend_kind, `${path}.backend_kind`);",
+            "  validateProviderBackendKind(provider, backendKind, `${path}.backend_kind`);",
             "  optionalString(record, 'base_url', `${path}.base_url`);",
             "  return value as WireBackendProfile;",
             "}",
@@ -1903,8 +1994,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "export function parseWireAuthProfile(value: unknown, path = 'auth_profile'): WireAuthProfile {",
             "  const record = expectRecord(value, path);",
             "  expectString(record.id, `${path}.id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);",
             "  parseWireCredentialSourceKind(record.source_kind, `${path}.source_kind`);",
             "  return value as WireAuthProfile;",
             "}",
@@ -1941,8 +2033,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  const record = expectRecord(value, path);",
             "  validateBindingIdentity(record, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);",
             "  expectBoolean(record.stored, `${path}.stored`);",
             "  return value as WireAuthProfileCreated;",
             "}",
@@ -2025,8 +2118,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  const record = expectRecord(value, path);",
             "  validateBindingIdentity(record, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireAuthMethod(record.auth_mode, `${path}.auth_mode`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const authMode = parseWireAuthMethod(record.auth_mode, `${path}.auth_mode`);",
+            "  validateProviderAuthMethod(provider, authMode, `${path}.auth_mode`);",
             "  expectBoolean(record.has_api_key, `${path}.has_api_key`);",
             "  expectStringArray(record.scopes, `${path}.scopes`);",
             "  return value as WireProvisionApiKeyResult;",
@@ -2072,8 +2166,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "export function parseWireAuthStatus(value: unknown, path = 'auth_status'): WireAuthStatus {",
             "  const record = expectRecord(value, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);",
             "  parseWireAuthStatusState(record.state, `${path}.state`);",
             "  optionalString(record, 'expires_at', `${path}.expires_at`);",
             "  optionalString(record, 'last_refresh_at', `${path}.last_refresh_at`);",
@@ -2091,8 +2186,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  const record = expectRecord(value, path);",
             "  validateBindingIdentity(record, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);",
+            "  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);",
             "  parseWireAuthStatusState(record.state, `${path}.state`);",
             "  optionalString(record, 'expires_at', `${path}.expires_at`);",
             "  optionalString(record, 'last_refresh_at', `${path}.last_refresh_at`);",

@@ -49,6 +49,64 @@ export const WIRE_AUTH_METHODS = [
 
 export type WireAuthMethod = typeof WIRE_AUTH_METHODS[number];
 
+export const WIRE_PROVIDER_BACKEND_KINDS = {
+  anthropic: [
+    "anthropic_api",
+    "bedrock",
+    "vertex",
+    "foundry",
+  ],
+  openai: [
+    "openai_api",
+    "chatgpt_backend",
+  ],
+  gemini: [
+    "google_genai",
+    "vertex_ai",
+    "google_code_assist",
+  ],
+  self_hosted: [
+    "self_hosted",
+    "openai_compatible",
+  ],
+} as const satisfies Record<WireAuthProvider, readonly WireBackendKind[]>;
+
+export const WIRE_PROVIDER_AUTH_METHODS = {
+  anthropic: [
+    "api_key",
+    "static_bearer",
+    "claude_ai_oauth",
+    "oauth_to_api_key",
+    "external_authorizer",
+    "bedrock_bearer",
+    "bedrock_aws_sigv4",
+    "vertex_google_auth",
+    "foundry_api_key",
+    "foundry_azure_ad",
+  ],
+  openai: [
+    "api_key",
+    "static_bearer",
+    "managed_chatgpt_oauth",
+    "external_chatgpt_tokens",
+    "external_authorizer",
+  ],
+  gemini: [
+    "api_key",
+    "bearer_api_key",
+    "external_authorizer",
+    "adc",
+    "api_key_express",
+    "google_oauth",
+    "compute_adc",
+  ],
+  self_hosted: [
+    "api_key",
+    "static_bearer",
+    "none",
+  ],
+} as const satisfies Record<WireAuthProvider, readonly WireAuthMethod[]>;
+
 export const WIRE_CREDENTIAL_SOURCE_KINDS = [
   "inline_secret",
   "managed_store",
@@ -389,6 +447,28 @@ export function parseWireAuthMethod(value: unknown, path = 'auth_method'): WireA
   return parseLiteral(value, WIRE_AUTH_METHODS, path, 'wire auth method');
 }
 
+function validateProviderBackendKind(
+  provider: WireAuthProvider,
+  backendKind: WireBackendKind,
+  path: string,
+): void {
+  const allowed = WIRE_PROVIDER_BACKEND_KINDS[provider];
+  if (!(allowed as readonly string[]).includes(backendKind)) {
+    fail(path, `wire backend kind for provider ${provider} (${allowed.join(', ')})`);
+  }
+}
+
+function validateProviderAuthMethod(
+  provider: WireAuthProvider,
+  authMethod: WireAuthMethod,
+  path: string,
+): void {
+  const allowed = WIRE_PROVIDER_AUTH_METHODS[provider];
+  if (!(allowed as readonly string[]).includes(authMethod)) {
+    fail(path, `wire auth method for provider ${provider} (${allowed.join(', ')})`);
+  }
+}
+
 export function parseWireCredentialSourceKind(
   value: unknown,
   path = 'source_kind',
@@ -419,8 +499,9 @@ function validateBindingIdentity(record: Record<string, unknown>, path: string):
 export function parseWireBackendProfile(value: unknown, path = 'backend_profile'): WireBackendProfile {
   const record = expectRecord(value, path);
   expectString(record.id, `${path}.id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireBackendKind(record.backend_kind, `${path}.backend_kind`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const backendKind = parseWireBackendKind(record.backend_kind, `${path}.backend_kind`);
+  validateProviderBackendKind(provider, backendKind, `${path}.backend_kind`);
   optionalString(record, 'base_url', `${path}.base_url`);
   return value as WireBackendProfile;
 }
@@ -428,8 +509,9 @@ export function parseWireBackendProfile(value: unknown, path = 'backend_profile'
 export function parseWireAuthProfile(value: unknown, path = 'auth_profile'): WireAuthProfile {
   const record = expectRecord(value, path);
   expectString(record.id, `${path}.id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);
   parseWireCredentialSourceKind(record.source_kind, `${path}.source_kind`);
   return value as WireAuthProfile;
 }
@@ -466,8 +548,9 @@ export function parseWireAuthProfileCreated(
   const record = expectRecord(value, path);
   validateBindingIdentity(record, path);
   expectString(record.profile_id, `${path}.profile_id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);
   expectBoolean(record.stored, `${path}.stored`);
   return value as WireAuthProfileCreated;
 }
@@ -550,8 +633,9 @@ export function parseWireProvisionApiKeyResult(
   const record = expectRecord(value, path);
   validateBindingIdentity(record, path);
   expectString(record.profile_id, `${path}.profile_id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireAuthMethod(record.auth_mode, `${path}.auth_mode`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const authMode = parseWireAuthMethod(record.auth_mode, `${path}.auth_mode`);
+  validateProviderAuthMethod(provider, authMode, `${path}.auth_mode`);
   expectBoolean(record.has_api_key, `${path}.has_api_key`);
   expectStringArray(record.scopes, `${path}.scopes`);
   return value as WireProvisionApiKeyResult;
@@ -597,8 +681,9 @@ export function parseWireAuthError(value: unknown, path = 'auth_error'): WireAut
 export function parseWireAuthStatus(value: unknown, path = 'auth_status'): WireAuthStatus {
   const record = expectRecord(value, path);
   expectString(record.profile_id, `${path}.profile_id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);
   parseWireAuthStatusState(record.state, `${path}.state`);
   optionalString(record, 'expires_at', `${path}.expires_at`);
   optionalString(record, 'last_refresh_at', `${path}.last_refresh_at`);
@@ -616,8 +701,9 @@ export function parseWireAuthStatusDetail(
   const record = expectRecord(value, path);
   validateBindingIdentity(record, path);
   expectString(record.profile_id, `${path}.profile_id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
-  parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);
+  const authMethod = parseWireAuthMethod(record.auth_method, `${path}.auth_method`);
+  validateProviderAuthMethod(provider, authMethod, `${path}.auth_method`);
   parseWireAuthStatusState(record.state, `${path}.state`);
   optionalString(record, 'expires_at', `${path}.expires_at`);
   optionalString(record, 'last_refresh_at', `${path}.last_refresh_at`);

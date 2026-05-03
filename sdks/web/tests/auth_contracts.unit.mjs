@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { Auth } from '../dist/auth.js';
-import { parseWireRealmConnectionSet } from '../dist/generated/auth.js';
+import {
+  parseWireAuthProfile,
+  parseWireBackendProfile,
+  parseWireRealmConnectionSet,
+} from '../dist/generated/auth.js';
 
 const connectionRef = { realm: 'dev', binding: 'default_openai' };
 
@@ -176,6 +180,39 @@ test('Auth response parsers reject unknown backend, source, provider, auth, and 
         has_refresh_token: false,
       }).auth.status('dev', 'default_openai'),
     /state/,
+  );
+});
+
+test('generated auth parsers reject provider-specific auth and backend mismatches', async () => {
+  assert.throws(
+    () => parseWireAuthProfile({ ...authProfile, auth_method: 'google_oauth' }),
+    /auth_method/,
+  );
+  assert.throws(
+    () => parseWireBackendProfile({ ...backendProfile, backend_kind: 'vertex_ai' }),
+    /backend_kind/,
+  );
+
+  await assert.rejects(
+    () =>
+      authWithResponse({
+        realm_id: 'dev',
+        auth_profiles: [{ ...authProfile, auth_method: 'google_oauth' }],
+        backend_profiles: [backendProfile],
+        bindings: [binding],
+      }).auth.listProfiles('dev'),
+    /auth_method/,
+  );
+
+  await assert.rejects(
+    () =>
+      authWithResponse({
+        realm_id: 'dev',
+        auth_profiles: [authProfile],
+        backend_profiles: [{ ...backendProfile, backend_kind: 'vertex_ai' }],
+        bindings: [binding],
+      }).auth.listProfiles('dev'),
+    /backend_kind/,
   );
 });
 

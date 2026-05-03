@@ -1353,6 +1353,24 @@ mod tests {
                 "unknown"
             ])
         );
+        assert_eq!(
+            contracts["provider_backend_kinds"]["openai"],
+            serde_json::json!(["openai_api", "chatgpt_backend"])
+        );
+        assert!(
+            contracts["provider_auth_methods"]["openai"]
+                .as_array()
+                .expect("openai auth methods")
+                .contains(&serde_json::json!("managed_chatgpt_oauth")),
+            "provider auth relation map must include provider-specific methods"
+        );
+        assert!(
+            !contracts["provider_auth_methods"]["openai"]
+                .as_array()
+                .expect("openai auth methods")
+                .contains(&serde_json::json!("google_oauth")),
+            "provider auth relation map must not flatten other provider methods"
+        );
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

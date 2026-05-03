@@ -6719,7 +6719,7 @@ mod tests {
         );
         assert!(
             !plan.machine_routing_realtime_capable,
-            "uncatalogued Gemini image models must not be treated as realtime-capable"
+            "uncatalogued Gemini image targets must not be treated as realtime-capable"
         );
     }
 

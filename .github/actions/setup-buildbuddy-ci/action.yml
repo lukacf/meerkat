@@ -96,7 +96,7 @@ runs:
     - name: Cache Bazel external repositories
       uses: actions/cache@v5
       with:
-        path: /tmp/meerkat-bazel-repository-cache
+        path: ${{ runner.temp }}/buildbuddy-repository-cache
         key: buildbuddy-bazel-repository-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}
         restore-keys: |
           buildbuddy-bazel-repository-${{ runner.os }}-

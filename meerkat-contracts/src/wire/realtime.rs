@@ -49,6 +49,12 @@ impl RealtimeProtocolVersion {
     }
 }
 
+impl std::fmt::Display for RealtimeProtocolVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Typed realtime channel error code. Replaces the prior freeform `String` on
 /// [`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick
 /// exactly one variant so downstream SDKs can match without string folklore.
@@ -420,8 +426,8 @@ pub struct RealtimeOpenInfo {
     pub expires_at: String,
     pub target: RealtimeChannelTarget,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub supported_protocol_versions: Vec<String>,
-    pub default_protocol_version: String,
+    pub supported_protocol_versions: Vec<RealtimeProtocolVersion>,
+    pub default_protocol_version: RealtimeProtocolVersion,
     pub capabilities: RealtimeCapabilities,
 }
 
@@ -593,7 +599,7 @@ pub enum RealtimeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeChannelOpenFrame {
-    pub protocol_version: String,
+    pub protocol_version: RealtimeProtocolVersion,
     pub open_token: String,
     pub role: RealtimeChannelRole,
     pub turning_mode: RealtimeTurningMode,
@@ -610,7 +616,7 @@ pub struct RealtimeChannelInputFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeChannelOpenedFrame {
-    pub protocol_version: String,
+    pub protocol_version: RealtimeProtocolVersion,
     pub status: RealtimeChannelStatus,
     pub capabilities: RealtimeCapabilities,
     pub role: RealtimeChannelRole,
@@ -640,8 +646,11 @@ pub enum RealtimeErrorDetails {
     AudioFormatMismatch(AudioFormatMismatchContext),
     ToolCallTimeout(ToolCallTimeoutContext),
     UnsupportedProtocolVersion {
+        /// Raw rejected client input. This string is diagnostic projection
+        /// only; accepted/default/supported protocol truth is typed by
+        /// [`RealtimeProtocolVersion`].
         requested: String,
-        supported: Vec<String>,
+        supported: Vec<RealtimeProtocolVersion>,
     },
 }
 
@@ -742,4 +751,137 @@ pub enum RealtimeServerFrame {
     ChannelError(RealtimeChannelErrorFrame),
     #[serde(rename = "channel.closed")]
     ChannelClosed(RealtimeChannelClosedFrame),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_capabilities() -> RealtimeCapabilities {
+        RealtimeCapabilities {
+            input_kinds: vec![RealtimeInputKind::Text],
+            output_kinds: vec![RealtimeOutputKind::Text],
+            turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+            interrupt_supported: true,
+            transcript_supported: true,
+            tool_lifecycle_events_supported: false,
+            video_supported: false,
+            audio_input_format: None,
+            audio_output_format: None,
+        }
+    }
+
+    fn minimal_status() -> RealtimeChannelStatus {
+        RealtimeChannelStatus {
+            state: RealtimeChannelState::Ready,
+            attempt_count: 0,
+            next_retry_at: None,
+            deadline_at: None,
+            reason: None,
+        }
+    }
+
+    fn target() -> RealtimeChannelTarget {
+        RealtimeChannelTarget::SessionTarget {
+            session_id: "session-typed-protocol".to_string(),
+        }
+    }
+
+    #[test]
+    fn unknown_protocol_version_string_fails_at_typed_open_boundary() {
+        let payload = serde_json::json!({
+            "type": "channel.open",
+            "protocol_version": "999",
+            "open_token": "token-1",
+            "role": "primary",
+            "turning_mode": "provider_managed"
+        });
+
+        let err = serde_json::from_value::<RealtimeClientFrame>(payload)
+            .expect_err("unknown protocol versions must not deserialize as semantic truth");
+
+        assert!(
+            err.to_string().contains("unknown variant")
+                || err.to_string().contains("expected")
+                || err.to_string().contains("matching variant"),
+            "unexpected serde error: {err}"
+        );
+        assert_eq!(RealtimeProtocolVersion::parse("999"), None);
+    }
+
+    #[test]
+    fn open_info_open_and_opened_round_trip_typed_protocol_version() {
+        let open_info = RealtimeOpenInfo {
+            ws_url: "ws://127.0.0.1:4900/realtime/ws".to_string(),
+            open_token: "token-1".to_string(),
+            expires_at: "2026-04-15T12:00:00Z".to_string(),
+            target: target(),
+            supported_protocol_versions: RealtimeProtocolVersion::SUPPORTED.to_vec(),
+            default_protocol_version: RealtimeProtocolVersion::CURRENT,
+            capabilities: minimal_capabilities(),
+        };
+        let open_info_json = serde_json::to_value(&open_info).expect("open-info serializes");
+        assert_eq!(open_info_json["default_protocol_version"], "2");
+        assert_eq!(
+            open_info_json["supported_protocol_versions"],
+            serde_json::json!(["2"])
+        );
+        let decoded_open_info: RealtimeOpenInfo =
+            serde_json::from_value(open_info_json).expect("open-info deserializes");
+        assert_eq!(
+            decoded_open_info.default_protocol_version,
+            RealtimeProtocolVersion::CURRENT
+        );
+        assert_eq!(
+            decoded_open_info.supported_protocol_versions,
+            vec![RealtimeProtocolVersion::CURRENT]
+        );
+
+        let open = RealtimeClientFrame::ChannelOpen(RealtimeChannelOpenFrame {
+            protocol_version: decoded_open_info.default_protocol_version,
+            open_token: decoded_open_info.open_token,
+            role: RealtimeChannelRole::Primary,
+            turning_mode: RealtimeTurningMode::ProviderManaged,
+        });
+        let open_json = serde_json::to_value(&open).expect("channel.open serializes");
+        assert_eq!(open_json["protocol_version"], "2");
+        let decoded_open: RealtimeClientFrame =
+            serde_json::from_value(open_json).expect("channel.open deserializes");
+        match decoded_open {
+            RealtimeClientFrame::ChannelOpen(frame) => {
+                assert_eq!(frame.protocol_version, RealtimeProtocolVersion::CURRENT);
+            }
+            other => panic!("expected channel.open, got {other:?}"),
+        }
+
+        let opened = RealtimeServerFrame::ChannelOpened(RealtimeChannelOpenedFrame {
+            protocol_version: RealtimeProtocolVersion::CURRENT,
+            status: minimal_status(),
+            capabilities: minimal_capabilities(),
+            role: RealtimeChannelRole::Primary,
+        });
+        let opened_json = serde_json::to_value(&opened).expect("channel.opened serializes");
+        assert_eq!(opened_json["protocol_version"], "2");
+        let decoded_opened: RealtimeServerFrame =
+            serde_json::from_value(opened_json).expect("channel.opened deserializes");
+        match decoded_opened {
+            RealtimeServerFrame::ChannelOpened(frame) => {
+                assert_eq!(frame.protocol_version, RealtimeProtocolVersion::CURRENT);
+            }
+            other => panic!("expected channel.opened, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_protocol_error_keeps_raw_requested_string_diagnostic_only() {
+        let error = RealtimeErrorDetails::UnsupportedProtocolVersion {
+            requested: "999".to_string(),
+            supported: vec![RealtimeProtocolVersion::CURRENT],
+        };
+        let value = serde_json::to_value(&error).expect("error details serialize");
+
+        assert_eq!(value["requested"], "999");
+        assert_eq!(value["supported"], serde_json::json!(["2"]));
+        assert_eq!(RealtimeProtocolVersion::parse("999"), None);
+    }
 }

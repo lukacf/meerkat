@@ -2,9 +2,25 @@
 //!
 //! Gated behind the `session-store` feature.
 //!
-//! After each turn completes, the session snapshot is saved to the `SessionStore`
-//! and events are appended to the `EventStore`. On `read` and `list`, persisted
-//! sessions are merged with live (ephemeral) sessions.
+//! Runtime projection contract:
+//!
+//! - In runtime-backed mode, `RuntimeStore` snapshot commits own durable session
+//!   lifecycle truth. The `SessionStore` row is a compatibility projection.
+//! - `save_normalized_session` rebuilds that projection from the normalized
+//!   authoritative snapshot immediately after the runtime snapshot commit.
+//! - `read` and `list` must never treat raw `SessionStore` rows as canonical
+//!   runtime truth. Listing may use projection rows only as discovery keys and
+//!   then rebuild summaries from live/runtime authority.
+//! - If the projection update fails after a runtime authority commit, the
+//!   caller gets an error and the live handle is discarded. The stale row may
+//!   remain in `SessionStore`, but consumers must keep honoring runtime
+//!   authority or exclude/fail closed when no authority exists.
+//! - If a runtime snapshot commit fails after a direct live mutation, the
+//!   caller gets an error and the mutated live handle is discarded before it
+//!   can drive reads or listing as clean truth.
+//!
+//! Runtime-less compatibility mode still persists directly to `SessionStore`.
+//! Event-log file projection is separate best-effort derived state.
 
 #![cfg_attr(test, allow(dead_code))]
 
@@ -35,7 +51,7 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{MachineSessionControlAuthority, RuntimeMode, RuntimeState, RuntimeStore};
-use meerkat_store::{SessionFilter, SessionStore};
+use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -633,7 +649,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner
             .hot_swap_session_llm_identity(id, client, identity, request_policy)
             .await?;
-        self.persist_full_session(id).await.map(|_| ())
+        self.persist_full_session_or_discard_live(id)
+            .await
+            .map(|_| ())
     }
 
     /// Apply a runtime-turn metadata keep-alive update to a live session.
@@ -1259,8 +1277,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = match result {
             Ok(result) => result,
             Err((error, admission)) => {
-                if Self::callback_pending_terminal(&error).is_some() {
-                    let _ = self.persist_full_session(id).await;
+                if Self::callback_pending_terminal(&error).is_some()
+                    && let Err(persist_error) = self.persist_full_session_or_discard_live(id).await
+                {
+                    return Err((persist_error, admission));
                 }
                 return Err((error, admission));
             }
@@ -1270,7 +1290,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // that go through apply_runtime_turn() have their own atomic boundary
         // commit path and don't call start_turn on PersistentSessionService.
         let _ = self
-            .persist_full_session(id)
+            .persist_full_session_or_discard_live(id)
             .await
             .map_err(|error| (error, None))?;
 
@@ -1405,22 +1425,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?;
             if let Err(error) = self.store.save(&session).await {
-                tracing::warn!(
-                    session_id = %session.id(),
-                    error = %error,
-                    "failed to update session-store projection after runtime authority commit"
-                );
-                match self.discard_live_session(session.id()).await {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
-                    Err(discard_error) => {
-                        tracing::warn!(
-                            session_id = %session.id(),
-                            error = %discard_error,
-                            "failed to discard live session after runtime-backed projection update failure"
-                        );
-                    }
-                }
-                return Err(SessionError::Store(Box::new(error)));
+                return Err(self
+                    .fail_closed_runtime_projection_update(session.id(), error)
+                    .await);
             }
         } else {
             self.store
@@ -1429,6 +1436,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(|e| SessionError::Store(Box::new(e)))?;
         }
         Ok(session)
+    }
+
+    async fn fail_closed_runtime_projection_update(
+        &self,
+        id: &SessionId,
+        error: SessionStoreError,
+    ) -> SessionError {
+        tracing::error!(
+            session_id = %id,
+            error = %error,
+            "session-store projection update failed after runtime authority commit; failing closed"
+        );
+        match self.discard_live_session(id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(discard_error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %discard_error,
+                    "failed to discard live session after runtime-backed projection update failure"
+                );
+            }
+        }
+        SessionError::Store(Box::new(error))
     }
 
     async fn gate_for_session(&self, id: &SessionId) -> Arc<CheckpointerGate> {
@@ -2139,7 +2169,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 if Self::callback_pending_terminal(&error).is_some()
                     && let Some(session_id) = callback_session_id
                 {
-                    let _ = self.persist_full_session(&session_id).await;
+                    self.persist_full_session_or_discard_live(&session_id)
+                        .await?;
                 }
                 return Err(error);
             }
@@ -2161,13 +2192,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
         // skipped if the session hasn't changed since this save.
-        let saved_len = match self.persist_full_session(&result.session_id).await {
-            Ok(saved_len) => saved_len,
-            Err(error) => {
-                let _ = self.discard_live_session(&result.session_id).await;
-                return Err(error);
-            }
-        };
+        let saved_len = self
+            .persist_full_session_or_discard_live(&result.session_id)
+            .await?;
         checkpointer
             .last_saved_len
             .store(saved_len, std::sync::atomic::Ordering::Release);
@@ -2381,6 +2408,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             if live_ids.contains(&meta.id) {
                 continue;
             }
+            // Runtime-backed rows are discovery keys only. A stale or
+            // store-only projection must not contribute summary metadata unless
+            // runtime authority can rebuild the summary below.
             if let Some(session) = self.load_authoritative_session_base(&meta.id).await? {
                 if metadata_marks_archived(session.metadata()) {
                     continue;
@@ -3019,6 +3049,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let message_count = persisted.messages().len();
         Ok(message_count)
     }
+
+    async fn persist_full_session_or_discard_live(
+        &self,
+        id: &SessionId,
+    ) -> Result<usize, SessionError> {
+        match self.persist_full_session(id).await {
+            Ok(message_count) => Ok(message_count),
+            Err(error) => {
+                match self.discard_live_session(id).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(discard_error) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            error = %discard_error,
+                            "failed to discard live session after full-session persistence failure"
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3248,6 +3300,7 @@ mod tests {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
         fail_boundary_commits: AtomicBool,
+        fail_snapshot_commits: AtomicBool,
         session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         input_state_load_errors: Mutex<HashSet<LogicalRuntimeId>>,
         boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
@@ -3259,6 +3312,7 @@ mod tests {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
                 fail_boundary_commits: AtomicBool::new(false),
+                fail_snapshot_commits: AtomicBool::new(false),
                 session_snapshot_overrides: Mutex::new(HashMap::new()),
                 input_state_load_errors: Mutex::new(HashSet::new()),
                 boundary_commits: Mutex::new(Vec::new()),
@@ -3267,6 +3321,10 @@ mod tests {
 
         fn set_fail_boundary_commits(&self, fail: bool) {
             self.fail_boundary_commits.store(fail, Ordering::Release);
+        }
+
+        fn set_fail_snapshot_commits(&self, fail: bool) {
+            self.fail_snapshot_commits.store(fail, Ordering::Release);
         }
 
         fn hide_next_session_snapshot_loads(&self, count: usize) {
@@ -3348,6 +3406,11 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             session_delta: meerkat_runtime::store::SessionDelta,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            if self.fail_snapshot_commits.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic runtime snapshot commit failure".to_string(),
+                ));
+            }
             self.inner
                 .commit_session_snapshot(runtime_id, session_delta)
                 .await
@@ -3489,6 +3552,7 @@ mod tests {
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
         run_failure: Option<String>,
         flow_overlay_failure: Option<String>,
+        callback_pending_after_run: bool,
     }
 
     #[async_trait::async_trait]
@@ -3530,6 +3594,12 @@ mod tests {
                     skill_diagnostics: None,
                 }
             };
+            if self.callback_pending_after_run {
+                return Err(meerkat_core::error::AgentError::CallbackPending {
+                    tool_name: "test_callback".to_string(),
+                    args: serde_json::json!({}),
+                });
+            }
             Ok(result)
         }
 
@@ -3855,6 +3925,34 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
+            })
+        }
+    }
+
+    struct CallbackPendingBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for CallbackPendingBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
+                flow_overlay_failure: None,
+                callback_pending_after_run: true,
             })
         }
     }
@@ -3881,6 +3979,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: Some("synthetic flow overlay failure".to_string()),
+                callback_pending_after_run: false,
             })
         }
     }
@@ -3951,6 +4050,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4000,6 +4100,7 @@ mod tests {
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
                     flow_overlay_failure: None,
+                    callback_pending_after_run: false,
                 },
                 entered_runs: Arc::clone(&self.entered_runs),
                 entered_notify: Arc::clone(&self.entered_notify),
@@ -4128,6 +4229,7 @@ mod tests {
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
                     flow_overlay_failure: None,
+                    callback_pending_after_run: false,
                 },
             })
         }
@@ -4155,6 +4257,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: Some("synthetic run failure".to_string()),
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4194,6 +4297,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4398,6 +4502,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -6991,6 +7096,222 @@ mod tests {
             summary.message_count,
             raw_after.messages().len(),
             "list() must not present stale projection state as fresh canonical state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_callback_pending_projection_failure_surfaces_store_error() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+        let raw_before = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+
+        fail_store.set_fail_save(true);
+        let error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request("callback pending after projection failure"),
+            )
+            .await
+            .expect_err("callback-pending projection failure must surface the store error");
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "projection failure should win over callback-pending error, got {error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after callback projection failure"),
+            "callback-pending projection failure must evict stale live state"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should retain the callback-pending mutation");
+        assert!(
+            authoritative.messages().len() > raw_before.messages().len(),
+            "runtime authority should be ahead of the stale callback projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_resume_callback_pending_projection_failure_surfaces_store_error() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+        let resume_source = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist");
+        let raw_before = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("test should model resume after live handle discard");
+
+        let mut req = create_request(
+            "resume callback pending after projection failure",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        );
+        req.build = Some(SessionBuildOptions {
+            resume_session: Some(resume_source),
+            ..Default::default()
+        });
+
+        fail_store.set_fail_save(true);
+        let error = service
+            .create_session(req)
+            .await
+            .expect_err("resume callback-pending projection failure must surface the store error");
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "projection failure should win over resume callback-pending error, got {error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after resume callback projection failure"),
+            "resume callback-pending projection failure must evict stale live state"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should retain the resume callback-pending mutation");
+        assert!(
+            authoritative.messages().len() > raw_before.messages().len(),
+            "runtime authority should be ahead of the stale resume callback projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_direct_start_turn_snapshot_commit_failure_discards_live_state() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let initial_authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist before failed turn");
+
+        runtime_store.set_fail_snapshot_commits(true);
+        let error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request("failed direct snapshot commit must not leak"),
+            )
+            .await
+            .expect_err("runtime snapshot commit failure must propagate");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic runtime snapshot commit failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("live-session status should succeed"),
+            "failed direct start_turn snapshot commit must discard mutated live state"
+        );
+
+        runtime_store.set_fail_snapshot_commits(false);
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("created session should remain durable");
+        assert_eq!(
+            authoritative.messages().len(),
+            initial_authoritative.messages().len(),
+            "failed direct start_turn must not advance runtime authority"
+        );
+        assert!(
+            authoritative.messages().iter().all(|message| {
+                !format!("{message:?}").contains("failed direct snapshot commit must not leak")
+            }),
+            "failed direct start_turn must not leak into durable authority"
+        );
+
+        let view = service
+            .read(&result.session_id)
+            .await
+            .expect("read should fall back to durable runtime authority");
+        assert_eq!(
+            view.state.message_count,
+            initial_authoritative.messages().len(),
+            "read() must not report the failed live mutation as clean truth"
+        );
+        let listed = service
+            .list(SessionQuery::default())
+            .await
+            .expect("list should succeed after failed snapshot commit");
+        let summary = listed
+            .iter()
+            .find(|summary| summary.session_id == result.session_id)
+            .expect("durable session should remain listable");
+        assert_eq!(
+            summary.message_count,
+            initial_authoritative.messages().len(),
+            "list() must not report the failed live mutation as clean truth"
         );
     }
 

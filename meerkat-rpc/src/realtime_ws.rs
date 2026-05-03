@@ -521,7 +521,7 @@ pub enum RealtimeOpenError {
     #[error("unsupported protocol version '{requested}'")]
     UnsupportedProtocolVersion {
         requested: String,
-        supported: Vec<String>,
+        supported: Vec<RealtimeProtocolVersion>,
     },
     /// The open_token was minted under one realm and redeemed under another.
     /// Binding is resolved server-side; the token itself carries no realm
@@ -609,13 +609,6 @@ impl RealtimeWsHost {
         self.session_factory.clone()
     }
 
-    fn supported_protocol_version_strings(&self) -> Vec<String> {
-        self.supported_protocol_versions
-            .iter()
-            .map(|version| version.as_str().to_string())
-            .collect()
-    }
-
     /// Issue bootstrap info for a validated realtime target.
     ///
     /// `realm_id` captures the realm scope at mint time. It is NOT encoded in
@@ -650,8 +643,8 @@ impl RealtimeWsHost {
             open_token,
             expires_at: expires_at.to_rfc3339(),
             target,
-            supported_protocol_versions: self.supported_protocol_version_strings(),
-            default_protocol_version: self.default_protocol_version.as_str().to_string(),
+            supported_protocol_versions: self.supported_protocol_versions.clone(),
+            default_protocol_version: self.default_protocol_version,
             capabilities,
         }
     }
@@ -681,14 +674,15 @@ impl RealtimeWsHost {
         frame: &RealtimeChannelOpenFrame,
         observed_realm_id: Option<&str>,
     ) -> Result<AcceptedRealtimeOpen, RealtimeOpenError> {
-        let Some(protocol_version) = RealtimeProtocolVersion::parse(&frame.protocol_version)
-            .filter(|version| self.supported_protocol_versions.contains(version))
-        else {
+        if !self
+            .supported_protocol_versions
+            .contains(&frame.protocol_version)
+        {
             return Err(RealtimeOpenError::UnsupportedProtocolVersion {
-                requested: frame.protocol_version.clone(),
-                supported: self.supported_protocol_version_strings(),
+                requested: frame.protocol_version.as_str().to_string(),
+                supported: self.supported_protocol_versions.clone(),
             });
-        };
+        }
 
         let mut pending = self.pending_opens.lock().await;
         let Some(entry) = pending.get(&frame.open_token).cloned() else {
@@ -727,7 +721,7 @@ impl RealtimeWsHost {
         Ok(AcceptedRealtimeOpen {
             request: entry.request,
             capabilities: entry.capabilities,
-            protocol_version,
+            protocol_version: frame.protocol_version,
         })
     }
 
@@ -931,7 +925,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let expected_audio_input_format =
                         accepted.capabilities.audio_input_format.clone();
                     let opened = RealtimeServerFrame::ChannelOpened(RealtimeChannelOpenedFrame {
-                        protocol_version: accepted.protocol_version.as_str().to_string(),
+                        protocol_version: accepted.protocol_version,
                         status: opened_status.clone(),
                         capabilities: accepted.capabilities,
                         role: accepted.request.role,
@@ -4537,7 +4531,7 @@ mod tests {
         assert_eq!(info.target, request.target);
         let accepted_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: info.default_protocol_version.clone(),
+                protocol_version: info.default_protocol_version,
                 open_token: info.open_token.clone(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -4595,7 +4589,7 @@ mod tests {
 
         let accepted = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+                protocol_version: RealtimeProtocolVersion::CURRENT,
                 open_token: info.open_token,
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -4607,7 +4601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_open_frame_rejects_expired_role_mismatch_and_unsupported_protocol() {
+    async fn accept_open_frame_rejects_expired_role_mismatch_and_typed_unsupported_protocol() {
         let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws")
             .with_token_ttl(std::time::Duration::from_millis(1));
         let request = RealtimeOpenRequest {
@@ -4625,7 +4619,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let expired_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+                protocol_version: RealtimeProtocolVersion::CURRENT,
                 open_token: info.open_token.clone(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -4647,7 +4641,7 @@ mod tests {
             .await;
         let role_error_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+                protocol_version: RealtimeProtocolVersion::CURRENT,
                 open_token: fresh_info.open_token.clone(),
                 role: RealtimeChannelRole::Observer,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -4664,10 +4658,27 @@ mod tests {
         assert_eq!(role_error, RealtimeOpenError::RoleMismatch);
         assert_eq!(role_error.code(), RealtimeErrorCode::RoleMismatch);
 
-        let protocol_error_result = host
+        let mut version_rejecting_host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        version_rejecting_host.supported_protocol_versions = Vec::new();
+        let unsupported_info = version_rejecting_host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "fedcba98-7654-3210-fedc-ba9876543210".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                conservative_capabilities(),
+                None,
+            )
+            .await;
+        let protocol_error_result = version_rejecting_host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: "999".to_string(),
-                open_token: fresh_info.open_token,
+                protocol_version: RealtimeProtocolVersion::CURRENT,
+                open_token: unsupported_info.open_token,
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
             })
@@ -4683,8 +4694,8 @@ mod tests {
         assert_eq!(
             protocol_error,
             RealtimeOpenError::UnsupportedProtocolVersion {
-                requested: "999".to_string(),
-                supported: vec![RealtimeProtocolVersion::CURRENT.as_str().to_string()],
+                requested: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+                supported: Vec::new(),
             }
         );
         assert_eq!(
@@ -5082,7 +5093,7 @@ mod tests {
 
     fn realm_open_frame(info: &RealtimeOpenInfo) -> RealtimeChannelOpenFrame {
         RealtimeChannelOpenFrame {
-            protocol_version: info.default_protocol_version.clone(),
+            protocol_version: info.default_protocol_version,
             open_token: info.open_token.clone(),
             role: RealtimeChannelRole::Primary,
             turning_mode: RealtimeTurningMode::ProviderManaged,

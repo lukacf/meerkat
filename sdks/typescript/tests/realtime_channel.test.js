@@ -24,8 +24,8 @@ describe("RealtimeChannel scaffold", () => {
           open_token: "token-1",
           expires_at: "2026-04-15T12:00:00Z",
           target: params.target,
-          supported_protocol_versions: ["1"],
-          default_protocol_version: "1",
+          supported_protocol_versions: ["2"],
+          default_protocol_version: "2",
           capabilities: {
             input_kinds: ["text", "audio"],
             output_kinds: ["text", "audio"],
@@ -77,7 +77,7 @@ describe("RealtimeChannel scaffold", () => {
     const scopedStatus = await sessionChannel.status();
     const scopedCapabilities = await sessionChannel.capabilities();
 
-    assert.equal(openInfo.default_protocol_version, "1");
+    assert.equal(openInfo.default_protocol_version, "2");
     assert.equal(status.status.state, "opening");
     assert.deepEqual(capabilities.capabilities.turning_modes, ["provider_managed"]);
     assert.equal(scopedOpenInfo.open_token, "token-1");
@@ -113,8 +113,8 @@ describe("RealtimeChannel scaffold", () => {
             open_token: "token-mob",
             expires_at: "2026-04-15T12:00:00Z",
             target: params.target,
-            supported_protocol_versions: ["1"],
-            default_protocol_version: "1",
+            supported_protocol_versions: ["2"],
+            default_protocol_version: "2",
             capabilities: {
               input_kinds: ["text"],
               output_kinds: ["text"],

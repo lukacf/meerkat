@@ -11,10 +11,11 @@ pub use identity::{
 pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
 pub use catalog::{
-    CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
-    SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas, compat_composition_schemas,
-    meerkat_mob_seam_composition,
+    CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest,
+    MachineProductionOwnerRelation, ScenarioCoverage, SemanticCoverageEntry,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas, compat_composition_schemas, meerkat_mob_seam_composition,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriver,

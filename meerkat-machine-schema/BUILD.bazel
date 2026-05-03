@@ -403,14 +403,7 @@ rust_test(
         "fast",
     ],
     size = "small",
-    data = [
-        ":package_runfiles",
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
-        "//meerkat-machine-schema:cargo_manifest",
-        "//meerkat-runtime:cargo_manifest",
-        "//meerkat-runtime:package_runfiles",
-    ],
+    data = [],
     env = {
         "RUST_MIN_STACK": "16777216",
     },

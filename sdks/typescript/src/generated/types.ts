@@ -799,10 +799,6 @@ export interface SessionStreamCloseResult {
   stream_id: string;
 }
 
-export interface RuntimeStateParams {
-  session_id: string;
-}
-
 export interface RuntimeRealtimeAttachmentStatusParams {
   session_id: string;
 }
@@ -821,28 +817,6 @@ export interface RealtimeStatusParams {
 
 export interface RealtimeCapabilitiesParams {
   target: RealtimeChannelTarget;
-}
-
-export interface RuntimeAcceptParams {
-  input: unknown;
-  session_id: string;
-}
-
-export interface RuntimeRetireParams {
-  session_id: string;
-}
-
-export interface RuntimeResetParams {
-  session_id: string;
-}
-
-export interface InputStateParams {
-  input_id: string;
-  session_id: string;
-}
-
-export interface InputListParams {
-  session_id: string;
 }
 
 export interface ScheduleIdParams {
@@ -883,8 +857,6 @@ export interface McpLiveOpResponse {
   session_id: string;
   status: "staged" | "applied" | "rejected";
 }
-
-export type InputStateResult = WireInputState | null;
 
 export interface WireContentBlockText {
   text: string;
@@ -1681,15 +1653,6 @@ export interface RuntimeAcceptResult {
   state?: Record<string, unknown>;
 }
 
-export interface RuntimeRetireResult {
-  inputs_abandoned: number;
-  inputs_pending_drain?: number;
-}
-
-export interface RuntimeResetResult {
-  inputs_abandoned: number;
-}
-
 export interface WireInputStateHistoryEntry {
   from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
   reason?: string;
@@ -1713,10 +1676,6 @@ export interface WireInputState {
   recovery_count?: number;
   terminal_outcome?: "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
   updated_at: string;
-}
-
-export interface InputListResult {
-  inputs: Record<string, unknown>[];
 }
 
 export interface ScheduleListResult {

@@ -1,24 +1,17 @@
-//! v9 runtime RPC handlers — runtime/session_status, runtime/session_submit, and
-//! session/realtime_attachment_status.
+//! Runtime-backed session support handlers.
 
 use serde_json::value::RawValue;
 
 use meerkat_contracts::{
-    InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult, RuntimeResetParams, RuntimeResetResult,
-    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
-    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry,
-    WireRealtimeAttachmentStatus, wire::runtime::WireInputPolicy,
+    RuntimeAcceptOutcomeType, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
+    RuntimeRealtimeAttachmentStatusResult, WireInputLifecycleState, WireInputState,
+    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, wire::runtime::WireInputPolicy,
 };
-use meerkat_core::{InputId, SessionId};
+use meerkat_core::SessionId;
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
-use std::sync::Arc;
-use uuid::Uuid;
 
 use super::{RpcResponseExt, parse_params};
 use crate::protocol::{RpcId, RpcResponse};
-use crate::session_runtime::SessionRuntime;
 
 fn to_wire_realtime_attachment_status(
     status: meerkat_runtime::RealtimeAttachmentStatus,
@@ -62,23 +55,6 @@ fn to_wire_input_lifecycle_state(
         meerkat_runtime::InputLifecycleState::Abandoned => WireInputLifecycleState::Abandoned,
         _ => return Err("unsupported input lifecycle state variant".to_string()),
     })
-}
-
-pub(crate) fn to_wire_runtime_state(
-    state: meerkat_runtime::RuntimeState,
-) -> meerkat_contracts::WireRuntimeState {
-    match state {
-        meerkat_runtime::RuntimeState::Initializing => {
-            meerkat_contracts::WireRuntimeState::Initializing
-        }
-        meerkat_runtime::RuntimeState::Idle => meerkat_contracts::WireRuntimeState::Idle,
-        meerkat_runtime::RuntimeState::Attached => meerkat_contracts::WireRuntimeState::Attached,
-        meerkat_runtime::RuntimeState::Running => meerkat_contracts::WireRuntimeState::Running,
-        meerkat_runtime::RuntimeState::Retired => meerkat_contracts::WireRuntimeState::Retired,
-        meerkat_runtime::RuntimeState::Stopped => meerkat_contracts::WireRuntimeState::Stopped,
-        meerkat_runtime::RuntimeState::Destroyed => meerkat_contracts::WireRuntimeState::Destroyed,
-        _ => meerkat_contracts::WireRuntimeState::Destroyed,
-    }
 }
 
 pub(crate) fn to_wire_input_state(
@@ -188,197 +164,6 @@ pub(crate) fn to_wire_accept_result(
 
 // ---- Handlers ----
 
-pub async fn handle_runtime_status(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-) -> RpcResponse {
-    let params: RuntimeStateParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-
-    match adapter.runtime_state(&session_id).await {
-        Ok(state) => RpcResponse::success(
-            id,
-            RuntimeStateResult {
-                state: to_wire_runtime_state(state),
-            },
-        ),
-        Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
-    }
-}
-
-pub async fn handle_runtime_submit(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    runtime: &Arc<SessionRuntime>,
-    adapter: &std::sync::Arc<meerkat_runtime::MeerkatMachine>,
-) -> RpcResponse {
-    let params: RuntimeAcceptParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let input = match serde_json::from_value::<meerkat_runtime::Input>(params.input) {
-        Ok(input) => input,
-        Err(err) => {
-            return RpcResponse::error(
-                id,
-                crate::error::INVALID_PARAMS,
-                format!("invalid runtime input: {err}"),
-            );
-        }
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-
-    match runtime
-        .accept_runtime_input_with_active_admission(adapter, &session_id, input)
-        .await
-    {
-        Ok(outcome) => match to_wire_accept_result(outcome) {
-            Ok(result) => RpcResponse::success(id, result),
-            Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
-        },
-        Err(err) => RpcResponse::error(id, err.code, err.message),
-    }
-}
-
-pub async fn handle_runtime_submission(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-) -> RpcResponse {
-    let params: InputStateParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-    let input_id = match Uuid::parse_str(&params.input_id) {
-        Ok(id) => InputId::from_uuid(id),
-        Err(err) => {
-            return RpcResponse::error(
-                id,
-                crate::error::INVALID_PARAMS,
-                format!("invalid input_id: {err}"),
-            );
-        }
-    };
-
-    match adapter.input_state(&session_id, &input_id).await {
-        Ok(Some(state)) => match to_wire_input_state(state) {
-            Ok(result) => RpcResponse::success(id, result),
-            Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
-        },
-        Ok(None) => RpcResponse::error(id, crate::error::INVALID_PARAMS, "input not found"),
-        Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
-    }
-}
-
-pub async fn handle_runtime_submissions(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-) -> RpcResponse {
-    let params: InputListParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-
-    let input_ids = match adapter.list_active_inputs(&session_id).await {
-        Ok(ids) => ids,
-        Err(err) => return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
-    };
-    let mut inputs = Vec::with_capacity(input_ids.len());
-    for input_id in input_ids {
-        match adapter.input_state(&session_id, &input_id).await {
-            Ok(Some(state)) => match to_wire_input_state(state) {
-                Ok(wire) => inputs.push(wire),
-                Err(err) => return RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
-            },
-            Ok(None) => {}
-            Err(err) => {
-                return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string());
-            }
-        }
-    }
-    RpcResponse::success(id, InputListResult { inputs })
-}
-
-pub async fn handle_runtime_retire(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-) -> RpcResponse {
-    let params: RuntimeRetireParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-    match adapter.retire_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(
-            id,
-            RuntimeRetireResult {
-                inputs_abandoned: report.inputs_abandoned,
-                inputs_pending_drain: report.inputs_pending_drain,
-            },
-        ),
-        Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
-    }
-}
-
-pub async fn handle_runtime_reset(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    adapter: &dyn SessionServiceRuntimeExt,
-) -> RpcResponse {
-    let params: RuntimeResetParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let session_id = match SessionId::parse(&params.session_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
-        }
-    };
-    match adapter.reset_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(
-            id,
-            RuntimeResetResult {
-                inputs_abandoned: report.inputs_abandoned,
-            },
-        ),
-        Err(err) => RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
-    }
-}
-
 /// Handle `session/realtime_attachment_status` — get live attachment status for a session.
 pub async fn handle_runtime_realtime_attachment_status(
     id: Option<RpcId>,
@@ -411,7 +196,6 @@ pub async fn handle_runtime_realtime_attachment_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use meerkat_core::InputId;
     use meerkat_runtime::input_state::StoredInputState;
     use meerkat_runtime::{
@@ -419,101 +203,6 @@ mod tests {
         RuntimeState,
     };
     use serde_json::{json, value::to_raw_value};
-
-    struct RetiredRejectingAdapter;
-
-    #[async_trait]
-    impl SessionServiceRuntimeExt for RetiredRejectingAdapter {
-        fn runtime_mode(&self) -> RuntimeMode {
-            RuntimeMode::V9Compliant
-        }
-
-        async fn accept_input(
-            &self,
-            _session_id: &SessionId,
-            _input: Input,
-        ) -> Result<AcceptOutcome, RuntimeDriverError> {
-            Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Retired,
-            })
-        }
-
-        async fn accept_input_with_completion(
-            &self,
-            _session_id: &SessionId,
-            _input: Input,
-        ) -> Result<(AcceptOutcome, Option<meerkat_runtime::CompletionHandle>), RuntimeDriverError>
-        {
-            Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Retired,
-            })
-        }
-
-        async fn runtime_state(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<RuntimeState, RuntimeDriverError> {
-            Ok(RuntimeState::Retired)
-        }
-
-        async fn realtime_attachment_status(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, RuntimeDriverError> {
-            Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached)
-        }
-
-        async fn realtime_channel_status(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
-            Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached.into())
-        }
-
-        async fn retire_runtime(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<RetireReport, RuntimeDriverError> {
-            Ok(RetireReport {
-                inputs_abandoned: 0,
-                inputs_pending_drain: 0,
-            })
-        }
-
-        async fn reset_runtime(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<ResetReport, RuntimeDriverError> {
-            Ok(ResetReport {
-                inputs_abandoned: 0,
-            })
-        }
-
-        async fn input_state(
-            &self,
-            _session_id: &SessionId,
-            _input_id: &InputId,
-        ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
-            Ok(None)
-        }
-
-        async fn list_active_inputs(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<Vec<InputId>, RuntimeDriverError> {
-            Ok(Vec::new())
-        }
-
-        async fn reconfigure_session_llm_identity(
-            &self,
-            _session_id: &SessionId,
-            _request: meerkat_runtime::SessionLlmReconfigureRequest,
-        ) -> Result<meerkat_runtime::SessionLlmReconfigureReport, RuntimeDriverError> {
-            Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Retired,
-            })
-        }
-    }
 
     #[tokio::test]
     async fn realtime_attachment_status_returns_runtime_owned_status() {

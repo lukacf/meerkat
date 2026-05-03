@@ -806,6 +806,7 @@ fn completion_outcome_requires_rest_runtime_cleanup(
         }
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::Cancelled
         | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -820,6 +821,7 @@ fn completion_outcome_is_rest_apply_failure(
         }
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::Cancelled
         | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -1474,7 +1476,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await
-            .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
+            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -3495,6 +3497,9 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
             callback_pending_api_error(session_id, realm, tool_name, args, session_created),
         ),
+        meerkat_runtime::completion::CompletionOutcome::Cancelled => {
+            Err(ApiError::RequestCancelled { details: None })
+        }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(ApiError::Internal(format!("turn abandoned: {reason}")))
         }
@@ -3740,6 +3745,21 @@ async fn create_session(
     let executor = state.request_executor.clone();
     let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+fn create_session_error_to_api(err: SessionError) -> ApiError {
+    let message = err.to_string();
+    match &err {
+        SessionError::NotFound { .. } => ApiError::NotFound(message),
+        SessionError::Busy { .. } => ApiError::BadRequest(message),
+        SessionError::Agent(meerkat_core::error::AgentError::Cancelled) => {
+            ApiError::RequestCancelled { details: None }
+        }
+        SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
+            ApiError::BadRequest(message)
+        }
+        _ => ApiError::Agent(message),
+    }
 }
 
 /// Create and run a new session (typed-terminal inner body).
@@ -4002,15 +4022,7 @@ async fn create_session_inner(
             cleanup_archived_session_runtime(state, &session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            let api_err = match err {
-                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
-                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
-                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
-                    ApiError::BadRequest(err.to_string())
-                }
-                _ => ApiError::Agent(err.to_string()),
-            };
-            return RequestTerminal::RespondWithoutPublish(Err(api_err));
+            return RequestTerminal::RespondWithoutPublish(Err(create_session_error_to_api(err)));
         }
     };
 
@@ -6978,7 +6990,7 @@ mod tests {
         });
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        release.notify_one();
+        release.notify_waiters();
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
@@ -6997,7 +7009,7 @@ mod tests {
             );
         assert_eq!(admitted.0, StatusCode::ACCEPTED);
 
-        release.notify_one();
+        release.notify_waiters();
     }
 
     #[tokio::test]
@@ -10303,6 +10315,30 @@ mod tests {
         assert_eq!(details["resumable"], true);
         assert_eq!(details["tool_name"], "external_mock");
         assert_eq!(details["args"], json!({ "value": "browser" }));
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_surfaces_cancelled() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::Cancelled,
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("cancelled completion should map to API cancellation");
+
+        assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    #[test]
+    fn create_session_error_to_api_surfaces_cancelled_as_request_cancelled() {
+        let err = create_session_error_to_api(SessionError::Agent(
+            meerkat_core::error::AgentError::Cancelled,
+        ));
+
+        assert!(matches!(err, ApiError::RequestCancelled { details: None }));
     }
 
     #[cfg(feature = "mob")]

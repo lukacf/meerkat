@@ -27,6 +27,7 @@ import platform
 import shutil
 import tarfile
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -2231,24 +2232,38 @@ class MeerkatClient:
             "Retired runtime session control methods are no longer supported by the public RPC surface.",
         )
 
+    @staticmethod
+    def _warn_retired_runtime_session_control() -> None:
+        warnings.warn(
+            "Retired runtime session control methods are deprecated and always fail before transport.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     async def runtime_status(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submit(
         self, session_id: str, input: dict[str, Any] | ContentInput
     ) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submission(self, session_id: str, input_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submissions(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_retire(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_reset(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_realtime_attachment_status(

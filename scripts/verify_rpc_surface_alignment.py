@@ -16,10 +16,12 @@ def main() -> int:
     root = pathlib.Path(sys.argv[1])
 
     router_path = root / "meerkat-rpc" / "src" / "router.rs"
+    runtime_handlers_path = root / "meerkat-rpc" / "src" / "handlers" / "runtime.rs"
     catalog_path = root / "meerkat-contracts" / "src" / "rpc_catalog.rs"
     docs_path = root / "docs" / "api" / "rpc.mdx"
 
     router_text = router_path.read_text(encoding="utf-8")
+    runtime_handlers_text = runtime_handlers_path.read_text(encoding="utf-8")
     catalog_text = catalog_path.read_text(encoding="utf-8")
     docs_text = docs_path.read_text(encoding="utf-8")
 
@@ -91,7 +93,32 @@ def main() -> int:
     if failed:
         return 1
 
-    print("RPC surface alignment OK: router, catalog, and docs method table are in sync.")
+    retired_runtime_handlers = [
+        "handle_runtime_status",
+        "handle_runtime_submit",
+        "handle_runtime_submission",
+        "handle_runtime_submissions",
+        "handle_runtime_retire",
+        "handle_runtime_reset",
+    ]
+    public_retired_runtime_handlers = [
+        handler
+        for handler in retired_runtime_handlers
+        if re.search(rf"\bpub\s+async\s+fn\s+{handler}\b", runtime_handlers_text)
+    ]
+    if public_retired_runtime_handlers:
+        print(
+            "Retired runtime/session handler functions remain public in "
+            f"{runtime_handlers_path}:"
+        )
+        for handler in public_retired_runtime_handlers:
+            print(f"  - {handler}")
+        return 1
+
+    print(
+        "RPC surface alignment OK: router, catalog, docs method table, and "
+        "retired handler exports are in sync."
+    )
     return 0
 
 

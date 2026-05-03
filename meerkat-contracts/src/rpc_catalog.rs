@@ -931,8 +931,19 @@ mod tests {
     }
 
     #[test]
-    fn documented_surface_excludes_runtime_session_control_nouns() {
+    fn documented_surface_excludes_runtime_session_control_nouns_and_keeps_canonical_ingress() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
+        for supported in [
+            "session/external_event",
+            "session/peer_response_terminal",
+            "session/inject_context",
+            "session/realtime_attachment_status",
+        ] {
+            assert!(
+                methods.iter().any(|m| m == supported),
+                "canonical runtime-backed session control noun must remain advertised: {supported}"
+            );
+        }
         for retired in [
             "runtime/session_status",
             "runtime/session_submit",

@@ -27,15 +27,16 @@ export type AgentErrorReason = {
   duration_ms: number;
   reason_type: "llm_call_timeout";
 } | {
+  hook_id?: HookId | null;
   point: HookPoint;
   reason_code: HookReasonCode;
   reason_type: "hook_denied";
 } | {
-  hook_id: string;
+  hook_id: HookId;
   reason_type: "hook_timeout";
   timeout_ms: number;
 } | {
-  hook_id: string;
+  hook_id: HookId;
   reason: string;
   reason_type: "hook_execution_failed";
 } | {
@@ -287,27 +288,27 @@ export interface RunFailedEvent {
 }
 
 export interface HookStartedEvent {
-  hook_id: string;
+  hook_id: HookId;
   point: HookPoint;
   type: "hook_started";
 }
 
 export interface HookCompletedEvent {
   duration_ms: number;
-  hook_id: string;
+  hook_id: HookId;
   point: HookPoint;
   type: "hook_completed";
 }
 
 export interface HookFailedEvent {
   error: string;
-  hook_id: string;
+  hook_id: HookId;
   point: HookPoint;
   type: "hook_failed";
 }
 
 export interface HookDeniedEvent {
-  hook_id: string;
+  hook_id: HookId;
   message: string;
   payload?: unknown;
   point: HookPoint;
@@ -316,7 +317,7 @@ export interface HookDeniedEvent {
 }
 
 export interface HookRewriteAppliedEvent {
-  hook_id: string;
+  hook_id: HookId;
   patch: HookPatch;
   point: HookPoint;
   type: "hook_rewrite_applied";
@@ -324,7 +325,7 @@ export interface HookRewriteAppliedEvent {
 
 export interface HookPatchPublishedEvent {
   envelope: HookPatchEnvelope;
-  hook_id: string;
+  hook_id: HookId;
   point: HookPoint;
   type: "hook_patch_published";
 }

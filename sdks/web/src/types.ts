@@ -1,5 +1,6 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
 import type { AgentEvent, SkillKey, Usage } from './generated/events.js';
+import type { WireMobMemberStatus } from './generated/mob.js';
 
 // ─── Bootstrap config ───────────────────────────────────────────
 
@@ -377,6 +378,8 @@ export type MobPeerTarget = string | ExternalPeerTarget;
 /** Mob status. */
 export interface MobStatus {
   mob_id: string;
+  status: string;
+  /** @deprecated Use `status`. Kept as an inert projection of generated status. */
   state: string;
 }
 
@@ -395,12 +398,15 @@ export interface MobPeerConnectivitySnapshot {
 
 /** Point-in-time execution snapshot for a mob member. */
 export interface MobMemberSnapshot {
-  status: string;
+  status: WireMobMemberStatus;
   member_ref: MobMemberRef;
   output_preview?: string;
   error?: string;
   tokens_used: number;
   is_final: boolean;
+  current_session_id?: string;
+  realtime_attachment_status?: string;
+  external_member?: unknown;
   kickoff?: Record<string, unknown>;
   peer_connectivity?: MobPeerConnectivitySnapshot;
 }
@@ -422,6 +428,9 @@ export interface EventEnvelope {
   seq: number;
   mob_id?: string;
   timestamp_ms: number;
+  agent_identity?: string;
+  member_ref?: MobMemberRef;
+  cursor?: string | number;
   payload: AgentEvent | { type: string; [key: string]: unknown };
 }
 

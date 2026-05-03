@@ -241,6 +241,16 @@ pub trait ToolVisibilityOwner: Send + Sync {
     ) {
     }
 
+    fn replace_filter_tool_authority_catalog(
+        &self,
+        _catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) {
+    }
+
+    fn requires_filter_witnesses(&self) -> bool {
+        false
+    }
+
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError>;
 }
 
@@ -491,6 +501,9 @@ impl ToolScope {
         visibility_owner.replace_deferred_tool_authority_catalog(
             deferred_authority_catalog_for_base_tools(&base_tools, &deferred_tool_names),
         );
+        visibility_owner.replace_filter_tool_authority_catalog(
+            filter_authority_catalog_for_base_tools(&base_tools),
+        );
         let known_base_names: ToolNameSet = base_tools
             .iter()
             .map(|tool| tool.name.to_string())
@@ -525,8 +538,10 @@ impl ToolScope {
             .read()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let visibility_state = self.visibility_owner.visibility_state()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
 
-        let composed = Self::compose_state_filters(&state, &visibility_state);
+        let composed =
+            Self::compose_state_filters(&state, &visibility_state, require_filter_witnesses);
 
         Ok(state
             .base_tools
@@ -556,9 +571,14 @@ impl ToolScope {
     pub fn snapshot(&self) -> Option<ToolScopeSnapshot> {
         let state = self.state.read().ok()?;
         let visibility_state = self.visibility_owner.visibility_state().ok()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
         Some(ToolScopeSnapshot {
             known_base_names: sorted_names(&state.known_base_names),
-            visible_names: Self::visible_names_for_state(&state, &visibility_state),
+            visible_names: Self::visible_names_for_state(
+                &state,
+                &visibility_state,
+                require_filter_witnesses,
+            ),
             capability_base_filter: visibility_state.capability_base_filter.clone(),
             base_filter: visibility_state.inherited_base_filter.clone(),
             active_external_filter: visibility_state.active_filter.clone(),
@@ -646,10 +666,14 @@ impl ToolScope {
             .state
             .write()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
 
         let previous_base_names = state.known_base_names.clone();
-        let previous_visible_names =
-            Self::visible_names_for_state(&state, previous_visibility_state);
+        let previous_visible_names = Self::visible_names_for_state(
+            &state,
+            previous_visibility_state,
+            require_filter_witnesses,
+        );
         let previous_active_revision = ToolScopeRevision(previous_visibility_state.active_revision);
 
         state.base_tools = new_base_tools;
@@ -669,7 +693,8 @@ impl ToolScope {
             .active_turn_deny
             .retain(|name| known_base_names.contains(name.as_str()));
 
-        let tools = Self::visible_tools_for_state(&state, visibility_state);
+        let tools =
+            Self::visible_tools_for_state(&state, visibility_state, require_filter_witnesses);
         let visible_names = tools
             .iter()
             .map(|tool| tool.name.to_string())
@@ -679,6 +704,9 @@ impl ToolScope {
                 &state.base_tools,
                 &state.deferred_tool_names,
             ));
+        self.visibility_owner.replace_filter_tool_authority_catalog(
+            filter_authority_catalog_for_base_tools(&state.base_tools),
+        );
 
         Ok(ToolScopeBoundaryResult {
             previous_base_names: previous_base_names.to_string_set(),
@@ -732,16 +760,20 @@ impl ToolScope {
     fn visible_names_for_state(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
+        require_filter_witnesses: bool,
     ) -> Vec<String> {
-        let tools = Self::visible_tools_for_state(state, visibility_state);
+        let tools =
+            Self::visible_tools_for_state(state, visibility_state, require_filter_witnesses);
         tools.iter().map(|tool| tool.name.to_string()).collect()
     }
 
     fn visible_tools_for_state(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
+        require_filter_witnesses: bool,
     ) -> Arc<[Arc<ToolDef>]> {
-        let composed = Self::compose_state_filters(state, visibility_state);
+        let composed =
+            Self::compose_state_filters(state, visibility_state, require_filter_witnesses);
 
         state
             .base_tools
@@ -762,12 +794,14 @@ impl ToolScope {
     fn compose_state_filters(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
+        require_filter_witnesses: bool,
     ) -> ComposedToolFilter {
         let mut filters = vec![
             Self::effective_filter_for_current_projection(
                 state,
                 visibility_state,
                 &visibility_state.capability_base_filter,
+                false,
             ),
             Self::effective_inherited_filter_for_current_projection(
                 state,
@@ -778,6 +812,7 @@ impl ToolScope {
                 state,
                 visibility_state,
                 &visibility_state.active_filter,
+                require_filter_witnesses,
             ),
         ];
         if let Some(allow) = &state.active_turn_allow {
@@ -828,9 +863,14 @@ impl ToolScope {
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
         name: &str,
+        require_filter_witnesses: bool,
     ) -> bool {
-        Self::current_projection_tool(state, name).is_none_or(|tool| {
-            Self::witness_matches_tool(visibility_state.filter_witnesses.get(name), tool)
+        let witness = visibility_state.filter_witnesses.get(name);
+        Self::current_projection_tool(state, name).is_none_or(|tool| match witness {
+            Some(witness) => {
+                witness.has_identity_witness() && Self::witness_matches_tool(Some(witness), tool)
+            }
+            None => !require_filter_witnesses,
         })
     }
 
@@ -854,6 +894,7 @@ impl ToolScope {
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
         filter: &ToolFilter,
+        require_filter_witnesses: bool,
     ) -> ToolFilter {
         match filter {
             ToolFilter::All => ToolFilter::All,
@@ -861,7 +902,12 @@ impl ToolScope {
                 names
                     .iter()
                     .filter(|name| {
-                        Self::filter_name_applies(state, visibility_state, name.as_str())
+                        Self::filter_name_applies(
+                            state,
+                            visibility_state,
+                            name.as_str(),
+                            require_filter_witnesses,
+                        )
                     })
                     .cloned()
                     .collect(),
@@ -870,7 +916,12 @@ impl ToolScope {
                 names
                     .iter()
                     .filter(|name| {
-                        Self::filter_name_applies(state, visibility_state, name.as_str())
+                        Self::filter_name_applies(
+                            state,
+                            visibility_state,
+                            name.as_str(),
+                            require_filter_witnesses,
+                        )
                     })
                     .cloned()
                     .collect(),
@@ -980,11 +1031,13 @@ impl ToolScope {
             .read()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let visibility_state = self.visibility_owner.visibility_state()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
         Ok(Self::compose(&[
             Self::effective_filter_for_current_projection(
                 &state,
                 &visibility_state,
                 &visibility_state.capability_base_filter,
+                false,
             ),
             Self::effective_inherited_filter_for_current_projection(
                 &state,
@@ -995,6 +1048,7 @@ impl ToolScope {
                 &state,
                 &visibility_state,
                 &visibility_state.staged_filter,
+                require_filter_witnesses,
             ),
         ])
         .allows(name))
@@ -1185,7 +1239,11 @@ impl ToolScopeHandle {
 
         self.visibility_owner.stage_persistent_filter(
             filter.clone(),
-            filter_witnesses_for_base_tools(&state.base_tools, &filter),
+            filter_witnesses_for_base_tools_or_existing(
+                &state.base_tools,
+                &visibility_state.filter_witnesses,
+                &filter,
+            ),
         )
     }
 
@@ -1313,6 +1371,38 @@ pub fn validate_inherited_filter_witnesses(
     Err(ToolScopeStageError::MissingFilterWitnesses { names: missing })
 }
 
+pub fn validate_filter_witnesses_match_catalog(
+    filter: &ToolFilter,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<(), ToolScopeStageError> {
+    validate_inherited_filter_witnesses(filter, witnesses)?;
+    let Some(filter_names) = filter.names() else {
+        return Ok(());
+    };
+
+    let mut invalid = filter_names
+        .iter()
+        .filter(|name| {
+            let Some(expected) = catalog.get(name.as_str()) else {
+                return false;
+            };
+            witnesses
+                .get(name.as_str())
+                .is_some_and(|witness| !filter_witness_matches_catalog(witness, expected))
+        })
+        .map(|name| name.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    if invalid.is_empty() {
+        return Ok(());
+    }
+
+    invalid.sort_unstable();
+    invalid.dedup();
+    Err(ToolScopeStageError::InvalidFilterWitnesses { names: invalid })
+}
+
 pub fn validate_witnessed_filter_authority(
     filter: &ToolFilter,
     witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
@@ -1340,6 +1430,23 @@ pub fn validate_witnessed_filter_authority(
     Err(ToolScopeStageError::InvalidFilterWitnesses { names: invalid })
 }
 
+fn filter_witness_matches_catalog(
+    witness: &ToolVisibilityWitness,
+    expected: &ToolVisibilityWitness,
+) -> bool {
+    if let Some(owner) = witness.stable_owner_key.as_deref()
+        && expected.stable_owner_key.as_deref() != Some(owner)
+    {
+        return false;
+    }
+    if let Some(provenance) = witness.last_seen_provenance.as_ref()
+        && expected.last_seen_provenance.as_ref() != Some(provenance)
+    {
+        return false;
+    }
+    witness.has_identity_witness()
+}
+
 fn deferred_authority_catalog_for_base_tools(
     base_tools: &[Arc<ToolDef>],
     deferred_tool_names: &ToolNameSet,
@@ -1356,6 +1463,20 @@ fn deferred_authority_catalog_for_base_tools(
                     last_seen_provenance: Some(provenance.clone()),
                 },
             ))
+        })
+        .collect()
+}
+
+fn filter_authority_catalog_for_base_tools(
+    base_tools: &[Arc<ToolDef>],
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    base_tools
+        .iter()
+        .filter_map(|tool| {
+            let witness = filter_witness_for_tool(tool);
+            witness
+                .has_identity_witness()
+                .then(|| (tool.name.to_string(), witness))
         })
         .collect()
 }
@@ -1464,6 +1585,30 @@ fn filter_witnesses_for_base_tools(
 ) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
     let mut witnesses = std::collections::BTreeMap::new();
     extend_filter_witnesses(base_tools, &mut witnesses, filter);
+    witnesses
+}
+
+fn filter_witnesses_for_base_tools_or_existing(
+    base_tools: &Arc<[Arc<ToolDef>]>,
+    existing: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    filter: &ToolFilter,
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    let mut witnesses = filter_witnesses_for_base_tools(base_tools, filter);
+    let Some(filter_names) = filter.names() else {
+        return witnesses;
+    };
+
+    for name in filter_names {
+        if witnesses.contains_key(name.as_str()) {
+            continue;
+        }
+        if let Some(witness) = existing
+            .get(name.as_str())
+            .filter(|witness| witness.has_identity_witness())
+        {
+            witnesses.insert(name.as_str().to_string(), witness.clone());
+        }
+    }
     witnesses
 }
 

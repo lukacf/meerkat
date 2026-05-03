@@ -70,6 +70,10 @@ pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const MOB_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_MACHINE_PRODUCTION_RUST_MODULE: &str = "machines::mob_machine";
+pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
+pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
+pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
+pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
 
 fn with_production_rust_binding(
     mut schema: MachineSchema,

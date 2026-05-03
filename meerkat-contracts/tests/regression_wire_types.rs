@@ -11,13 +11,14 @@ use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
     RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
     RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent, WireRunResult,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
+    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion,
+    RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent,
+    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireUsage,
 };
 use meerkat_core::{
-    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookPatch, HookPoint,
-    HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
+    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
+    HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
     ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
 };
 
@@ -362,28 +363,28 @@ fn agent_event_all_variants_roundtrip() {
             error_report: None,
         },
         AgentEvent::HookStarted {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PreLlmRequest,
         },
         AgentEvent::HookCompleted {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PostLlmResponse,
             duration_ms: 42,
         },
         AgentEvent::HookFailed {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::RunStarted,
             error: "hook error".to_string(),
         },
         AgentEvent::HookDenied {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PreToolExecution,
             reason_code: HookReasonCode::PolicyViolation,
             message: "denied".to_string(),
             payload: None,
         },
         AgentEvent::HookRewriteApplied {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PostLlmResponse,
             patch: HookPatch::AssistantText {
                 text: "rewritten".to_string(),
@@ -599,35 +600,35 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             error_report: None,
         },
         AgentEvent::HookStarted {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
         },
         AgentEvent::HookCompleted {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             duration_ms: 1,
         },
         AgentEvent::HookFailed {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             error: "boom".to_string(),
         },
         AgentEvent::HookDenied {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             reason_code: HookReasonCode::RuntimeError,
             message: "denied".to_string(),
             payload: None,
         },
         AgentEvent::HookRewriteApplied {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             patch: HookPatch::AssistantText {
                 text: "patched".to_string(),
             },
         },
         AgentEvent::HookPatchPublished {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             envelope: serde_json::from_value(serde_json::json!({
                 "revision": 1,
@@ -857,8 +858,8 @@ fn realtime_open_info_required_fields() {
         target: RealtimeChannelTarget::SessionTarget {
             session_id: "session-1".to_string(),
         },
-        supported_protocol_versions: vec!["1".to_string()],
-        default_protocol_version: "1".to_string(),
+        supported_protocol_versions: vec![RealtimeProtocolVersion::CURRENT],
+        default_protocol_version: RealtimeProtocolVersion::CURRENT,
         capabilities: RealtimeCapabilities {
             input_kinds: vec![
                 RealtimeInputKind::Text,
@@ -892,6 +893,11 @@ fn realtime_open_info_required_fields() {
         value.get("default_protocol_version").is_some(),
         "missing default_protocol_version"
     );
+    assert_eq!(
+        value["supported_protocol_versions"],
+        serde_json::json!(["2"])
+    );
+    assert_eq!(value["default_protocol_version"], serde_json::json!("2"));
     assert!(value.get("capabilities").is_some(), "missing capabilities");
 }
 
@@ -943,7 +949,7 @@ fn realtime_open_request_roundtrip() {
 #[test]
 fn realtime_client_open_frame_pins_protocol_version_field() {
     let frame = RealtimeClientFrame::ChannelOpen(meerkat_contracts::RealtimeChannelOpenFrame {
-        protocol_version: "1".to_string(),
+        protocol_version: RealtimeProtocolVersion::CURRENT,
         open_token: "token-1".to_string(),
         role: RealtimeChannelRole::Observer,
         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -957,7 +963,7 @@ fn realtime_client_open_frame_pins_protocol_version_field() {
     );
     assert_eq!(
         value.get("protocol_version").and_then(|v| v.as_str()),
-        Some("1")
+        Some("2")
     );
     assert_eq!(
         value.get("open_token").and_then(|v| v.as_str()),

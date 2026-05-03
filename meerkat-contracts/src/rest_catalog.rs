@@ -263,41 +263,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/sessions/{id}/submit",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Accept a runtime input for a session",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/retire",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Retire a session runtime",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/reset",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Reset a session runtime",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/submissions",
-            vec![RestOperationDescriptor::new(
-                "get",
-                "List active inputs for a session",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{session_id}/submissions/{submission_id}",
-            vec![RestOperationDescriptor::new(
-                "get",
-                "Get the state of a specific input on a session",
-            )],
-        ),
-        RestPathDescriptor::new(
             "/mob/{id}/events",
             vec![RestOperationDescriptor::new("get", "SSE mob event stream")],
         ),
@@ -466,6 +431,11 @@ mod tests {
             "/auth/profiles/{id}/test",
             "/auth/status/{id}",
             "/auth/logout/{id}",
+            "/sessions/{id}/submit",
+            "/sessions/{id}/retire",
+            "/sessions/{id}/reset",
+            "/sessions/{id}/submissions",
+            "/sessions/{session_id}/submissions/{submission_id}",
         ] {
             assert!(
                 !paths.iter().any(|path| path == &retired),

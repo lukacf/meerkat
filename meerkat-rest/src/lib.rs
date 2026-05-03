@@ -56,7 +56,7 @@ use meerkat::{
 };
 use meerkat_contracts::{
     ErrorCode, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    RealtimeOpenRequest, RealtimeProtocolVersion, RealtimeStatusParams, RealtimeStatusResult,
     RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult, SessionLocator, SkillsParams,
     WireError, format_session_ref,
 };
@@ -806,6 +806,7 @@ fn completion_outcome_requires_rest_runtime_cleanup(
         }
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::Cancelled
         | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -820,6 +821,7 @@ fn completion_outcome_is_rest_apply_failure(
         }
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        | meerkat_runtime::completion::CompletionOutcome::Cancelled
         | meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -959,39 +961,88 @@ async fn resolve_validation_identity(
     })
 }
 
+#[derive(Debug, Clone)]
+enum PromptVideoInputValidationError {
+    InvalidBlock(String),
+    UnsupportedCapability(meerkat_core::UnsupportedModelCapabilityEvidence),
+}
+
+impl PromptVideoInputValidationError {
+    #[cfg(test)]
+    fn unsupported_evidence(&self) -> Option<&meerkat_core::UnsupportedModelCapabilityEvidence> {
+        match self {
+            Self::UnsupportedCapability(evidence) => Some(evidence),
+            Self::InvalidBlock(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PromptVideoInputValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBlock(message) => f.write_str(message),
+            Self::UnsupportedCapability(evidence) => evidence.fmt(f),
+        }
+    }
+}
+
+fn inline_video_registry_unavailable_evidence(
+    identity: &SessionLlmIdentity,
+) -> meerkat_core::UnsupportedModelCapabilityEvidence {
+    meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+        identity.provider,
+        identity.model.clone(),
+        meerkat_core::UnsupportedModelCapabilityReason::CapabilityRegistryUnavailable,
+    )
+}
+
+async fn require_inline_video_support(
+    config_runtime: &meerkat_core::ConfigRuntime,
+    identity: &SessionLlmIdentity,
+) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+    let Ok(snapshot) = config_runtime.get().await else {
+        return Err(inline_video_registry_unavailable_evidence(identity));
+    };
+    let Ok(registry) = snapshot.config.model_registry() else {
+        return Err(inline_video_registry_unavailable_evidence(identity));
+    };
+
+    registry.require_inline_video_for_provider(identity.provider, &identity.model)
+}
+
 async fn validate_prompt_video_input(
     config_runtime: &meerkat_core::ConfigRuntime,
     prompt: &ContentInput,
     identity: &SessionLlmIdentity,
-) -> Result<(), String> {
+) -> Result<(), PromptVideoInputValidationError> {
     let blocks = match prompt {
         ContentInput::Text(_) => return Ok(()),
         ContentInput::Blocks(blocks) => blocks,
     };
 
-    meerkat_core::validate_inline_video_blocks(blocks)?;
+    meerkat_core::validate_inline_video_blocks(blocks)
+        .map_err(PromptVideoInputValidationError::InvalidBlock)?;
 
-    let supports_inline_video = config_runtime
-        .get()
-        .await
-        .ok()
-        .and_then(|state| state.config.model_registry().ok())
-        .and_then(|registry| {
-            registry
-                .profile_for_provider(identity.provider, &identity.model)
-                .map(|profile| profile.inline_video)
-        })
-        .unwrap_or(false);
-
-    if meerkat_core::has_video(blocks) && !supports_inline_video {
-        return Err(format!(
-            "inline video input is not supported by model '{}' on provider '{}'",
-            identity.model,
-            identity.provider.as_str()
-        ));
+    if meerkat_core::has_video(blocks) {
+        require_inline_video_support(config_runtime, identity)
+            .await
+            .map_err(PromptVideoInputValidationError::UnsupportedCapability)?;
     }
 
     Ok(())
+}
+
+fn prompt_video_input_error_to_api(error: PromptVideoInputValidationError) -> ApiError {
+    match error {
+        PromptVideoInputValidationError::InvalidBlock(message) => ApiError::BadRequest(message),
+        PromptVideoInputValidationError::UnsupportedCapability(evidence) => {
+            ApiError::BadRequestWithData {
+                message: evidence.to_string(),
+                code: "UNSUPPORTED_MODEL_CAPABILITY".to_string(),
+                details: evidence.details(),
+            }
+        }
+    }
 }
 
 async fn apply_runtime_turn(
@@ -1252,11 +1303,11 @@ async fn apply_runtime_turn(
                 .map(|metadata| metadata.llm_identity())
         });
     if let Some(identity) = session_identity
-        && let Err(message) =
+        && let Err(error) =
             validate_prompt_video_input(&context.config_runtime, &prompt, &identity).await
     {
         return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
-            message,
+            error.to_string(),
         )));
     }
 
@@ -1474,7 +1525,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await
-            .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
+            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -3495,6 +3546,9 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
             callback_pending_api_error(session_id, realm, tool_name, args, session_created),
         ),
+        meerkat_runtime::completion::CompletionOutcome::Cancelled => {
+            Err(ApiError::RequestCancelled { details: None })
+        }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(ApiError::Internal(format!("turn abandoned: {reason}")))
         }
@@ -3742,6 +3796,21 @@ async fn create_session(
     with_request_lifecycle(&executor, req_ctx, outcome).await
 }
 
+fn create_session_error_to_api(err: SessionError) -> ApiError {
+    let message = err.to_string();
+    match &err {
+        SessionError::NotFound { .. } => ApiError::NotFound(message),
+        SessionError::Busy { .. } => ApiError::BadRequest(message),
+        SessionError::Agent(meerkat_core::error::AgentError::Cancelled) => {
+            ApiError::RequestCancelled { details: None }
+        }
+        SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
+            ApiError::BadRequest(message)
+        }
+        _ => ApiError::Agent(message),
+    }
+}
+
 /// Create and run a new session (typed-terminal inner body).
 async fn create_session_inner(
     state: &AppState,
@@ -3986,7 +4055,7 @@ async fn create_session_inner(
         cleanup_archived_session_runtime(state, &session_id).await;
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+        return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(err)));
     }
 
     let adapter = state.runtime_adapter.clone();
@@ -4002,15 +4071,7 @@ async fn create_session_inner(
             cleanup_archived_session_runtime(state, &session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            let api_err = match err {
-                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
-                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
-                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
-                    ApiError::BadRequest(err.to_string())
-                }
-                _ => ApiError::Agent(err.to_string()),
-            };
-            return RequestTerminal::RespondWithoutPublish(Err(api_err));
+            return RequestTerminal::RespondWithoutPublish(Err(create_session_error_to_api(err)));
         }
     };
 
@@ -4804,7 +4865,9 @@ async fn continue_session_inner(
                 .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(
+                err,
+            )));
         }
         let create_result = match state
             .session_service
@@ -5034,7 +5097,9 @@ async fn continue_session_inner(
                 .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(
+                err,
+            )));
         }
 
         // Install cancel action: interrupt the session.
@@ -5510,10 +5575,10 @@ async fn apply_mcp_boundary(
     // Emit events for queued actions from the background drain task.
     if !queued_actions.is_empty() {
         let drained = std::mem::take(&mut queued_actions);
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             drained,
@@ -5537,10 +5602,10 @@ async fn apply_mcp_boundary(
 
     queued_actions.extend(result.delta.lifecycle_actions);
     if !queued_actions.is_empty() {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             queued_actions,
@@ -5681,25 +5746,15 @@ async fn mcp_add(
     Json(req): Json<meerkat_contracts::McpAddParams>,
 ) -> Result<Json<meerkat_contracts::McpLiveOpResponse>, ApiError> {
     let session_id = validate_session_id_consistency(&id, &req.session_id, &state)?;
-    if req.server_name.trim().is_empty() {
+    let server_name = req.server_config.name.clone();
+    if server_name.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "server_name cannot be empty".to_string(),
         ));
     }
 
     let adapter = resolve_mcp_adapter(&state, &session_id).await?;
-
-    // Inject the server name into the config object.
-    let mut server_config = req.server_config;
-    if let Some(obj) = server_config.as_object_mut() {
-        obj.insert(
-            "name".to_string(),
-            serde_json::Value::String(req.server_name.clone()),
-        );
-    }
-
-    let config: meerkat_core::McpServerConfig = serde_json::from_value(server_config)
-        .map_err(|e| ApiError::BadRequest(format!("invalid server_config: {e}")))?;
+    let config = req.server_config;
 
     let rollback = if req.persisted {
         let authority = meerkat::surface::mcp_config_mutation_authority(
@@ -5725,7 +5780,7 @@ async fn mcp_add(
     Ok(Json(meerkat::surface::mcp_live_response(
         req.session_id,
         meerkat_contracts::McpLiveOperation::Add,
-        Some(req.server_name),
+        Some(server_name),
         rollback.is_some(),
     )))
 }
@@ -5875,6 +5930,11 @@ pub async fn shutdown_all_mcp_sessions(state: &AppState) {
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    BadRequestWithData {
+        message: String,
+        code: String,
+        details: Value,
+    },
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
@@ -5908,6 +5968,11 @@ impl IntoResponse for ApiError {
                 msg,
                 None,
             ),
+            ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            } => (StatusCode::BAD_REQUEST, code, message, Some(details)),
             ApiError::Unauthorized(msg) => (
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHORIZED".to_string(),
@@ -6978,7 +7043,7 @@ mod tests {
         });
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        release.notify_one();
+        release.notify_waiters();
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
@@ -6997,7 +7062,7 @@ mod tests {
             );
         assert_eq!(admitted.0, StatusCode::ACCEPTED);
 
-        release.notify_one();
+        release.notify_waiters();
     }
 
     #[tokio::test]
@@ -7923,9 +7988,19 @@ mod tests {
             .await
             .expect_err("wrong typed provider must not inherit Gemini inline-video support");
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("gemini-3-flash-preview"));
-        assert!(err.contains("anthropic"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("unsupported inline-video error should carry typed evidence");
+        assert_eq!(
+            evidence.capability,
+            meerkat_core::ModelCapability::InlineVideo
+        );
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Anthropic);
+        assert_eq!(evidence.model, "gemini-3-flash-preview");
     }
 
     #[tokio::test]
@@ -7941,9 +8016,15 @@ mod tests {
             .await
             .expect_err("unknown provider/model pair must fail closed without defaults");
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("uncatalogued-video-model"));
-        assert!(err.contains("other"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("unknown provider/model must carry typed unsupported evidence");
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Other);
+        assert_eq!(evidence.model, "uncatalogued-video-model");
     }
 
     #[tokio::test]
@@ -7961,9 +8042,15 @@ mod tests {
                 "known model/display strings must not select capability without typed provider",
             );
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("gemini-3-flash-preview"));
-        assert!(err.contains("other"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("providerless display/model strings must carry typed unsupported evidence");
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Other);
+        assert_eq!(evidence.model, "gemini-3-flash-preview");
     }
 
     #[tokio::test]
@@ -9028,8 +9115,8 @@ mod tests {
                 "type": "session_target",
                 "session_id": created.session_id.to_string(),
             },
-            "supported_protocol_versions": ["2026-04-01"],
-            "default_protocol_version": "2026-04-01",
+            "supported_protocol_versions": [RealtimeProtocolVersion::CURRENT],
+            "default_protocol_version": RealtimeProtocolVersion::CURRENT,
             "capabilities": {
                 "input_kinds": ["text", "audio"],
                 "output_kinds": ["text", "audio"],
@@ -9678,10 +9765,19 @@ mod tests {
         .await;
 
         match outcome {
-            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            })) => {
+                assert_eq!(code, "UNSUPPORTED_MODEL_CAPABILITY");
                 assert!(
                     message.contains("inline video"),
                     "expected inline video validation failure: {message}"
+                );
+                assert_eq!(
+                    details["unsupported_capability"]["capability"],
+                    serde_json::json!("inline_video")
                 );
             }
             other => panic!("expected bad request validation failure, got {other:?}"),
@@ -9755,10 +9851,19 @@ mod tests {
         .await;
 
         match outcome {
-            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            })) => {
+                assert_eq!(code, "UNSUPPORTED_MODEL_CAPABILITY");
                 assert!(
                     message.contains("inline video"),
                     "expected inline video validation failure: {message}"
+                );
+                assert_eq!(
+                    details["unsupported_capability"]["capability"],
+                    serde_json::json!("inline_video")
                 );
             }
             other => panic!("expected bad request validation failure, got {other:?}"),
@@ -10305,6 +10410,30 @@ mod tests {
         assert_eq!(details["args"], json!({ "value": "browser" }));
     }
 
+    #[test]
+    fn completion_outcome_to_api_result_surfaces_cancelled() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::Cancelled,
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("cancelled completion should map to API cancellation");
+
+        assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    #[test]
+    fn create_session_error_to_api_surfaces_cancelled_as_request_cancelled() {
+        let err = create_session_error_to_api(SessionError::Agent(
+            meerkat_core::error::AgentError::Cancelled,
+        ));
+
+        assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_compatibility_mob_routes_are_not_found() {
@@ -10512,8 +10641,7 @@ mod tests {
             let app = router(state);
             let body = serde_json::json!({
                 "session_id": fake_id.to_string(),
-                "server_name": "test-server",
-                "server_config": {"command": "echo", "args": ["hello"]}
+                "server_config": {"name": "test-server", "command": "echo", "args": ["hello"]}
             });
             let request = axum::http::Request::builder()
                 .method("POST")
@@ -10550,8 +10678,7 @@ mod tests {
             let app = router(state);
             let body = serde_json::json!({
                 "session_id": session_id.to_string(),
-                "server_name": "  ",
-                "server_config": {"command": "echo"}
+                "server_config": {"name": "  ", "command": "echo"}
             });
             let request = axum::http::Request::builder()
                 .method("POST")
@@ -10581,8 +10708,7 @@ mod tests {
             // POST to /sessions/X/mcp/add — route exists (will get 404 for missing session).
             let body = serde_json::json!({
                 "session_id": fake_id.to_string(),
-                "server_name": "srv",
-                "server_config": {"command": "echo"}
+                "server_config": {"name": "srv", "command": "echo"}
             });
             let request = axum::http::Request::builder()
                 .method("POST")
@@ -10996,8 +11122,7 @@ mod tests {
 
             let body = serde_json::json!({
                 "session_id": "fake",
-                "server_name": "srv",
-                "server_config": {"command": "echo"}
+                "server_config": {"name": "srv", "command": "echo"}
             });
             let request = axum::http::Request::builder()
                 .method("POST")

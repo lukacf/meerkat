@@ -1252,8 +1252,8 @@ impl SessionService for MockSessionService {
                 }
                 if fail_flow_turn_global || fail_flow_turn_session {
                     let _ = event_tx
-                        .send(EventEnvelope::new(
-                            format!("session:{session_id}"),
+                        .send(EventEnvelope::new_session(
+                            session_id.clone(),
                             1,
                             None,
                             AgentEvent::RunFailed {
@@ -1266,8 +1266,8 @@ impl SessionService for MockSessionService {
                         .await;
                 } else {
                     let _ = event_tx
-                        .send(EventEnvelope::new(
-                            format!("session:{session_id}"),
+                        .send(EventEnvelope::new_session(
+                            session_id.clone(),
                             1,
                             None,
                             AgentEvent::RunCompleted {

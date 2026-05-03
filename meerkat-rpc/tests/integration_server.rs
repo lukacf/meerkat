@@ -712,8 +712,8 @@ async fn mcp_live_methods_roundtrip_and_validation() {
         "method": "mcp/add",
         "params": {
             "session_id": session_id,
-            "server_name": "filesystem",
             "server_config": {
+                "name": "filesystem",
                 "command": "echo",
                 "args": [],
                 "env": {}
@@ -776,7 +776,6 @@ async fn mcp_live_methods_roundtrip_and_validation() {
         "method": "mcp/add",
         "params": {
             "session_id": "not-a-session-id",
-            "server_name": "",
             "server_config": {}
         }
     });
@@ -1064,7 +1063,6 @@ async fn test_mcp_add_persisted_true_not_rejected() {
         "method": "mcp/add",
         "params": {
             "session_id": "00000000-0000-0000-0000-000000000001",
-            "server_name": "test-server",
             "server_config": {"name": "test-server", "command": "echo", "args": [], "env": {}},
             "persisted": true
         }
@@ -1129,8 +1127,7 @@ async fn test_mcp_add_staged_response_has_persisted_false() {
         "method": "mcp/add",
         "params": {
             "session_id": session_id,
-            "server_name": "test-server",
-            "server_config": {"command": "echo", "args": [], "env": {}},
+            "server_config": {"name": "test-server", "command": "echo", "args": [], "env": {}},
             "persisted": false
         }
     });

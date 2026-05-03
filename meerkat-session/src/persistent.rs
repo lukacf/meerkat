@@ -2,9 +2,25 @@
 //!
 //! Gated behind the `session-store` feature.
 //!
-//! After each turn completes, the session snapshot is saved to the `SessionStore`
-//! and events are appended to the `EventStore`. On `read` and `list`, persisted
-//! sessions are merged with live (ephemeral) sessions.
+//! Runtime projection contract:
+//!
+//! - In runtime-backed mode, `RuntimeStore` snapshot commits own durable session
+//!   lifecycle truth. The `SessionStore` row is a compatibility projection.
+//! - `save_normalized_session` rebuilds that projection from the normalized
+//!   authoritative snapshot immediately after the runtime snapshot commit.
+//! - `read` and `list` must never treat raw `SessionStore` rows as canonical
+//!   runtime truth. Listing may use projection rows only as discovery keys and
+//!   then rebuild summaries from live/runtime authority.
+//! - If the projection update fails after a runtime authority commit, the
+//!   caller gets an error and the live handle is discarded. The stale row may
+//!   remain in `SessionStore`, but consumers must keep honoring runtime
+//!   authority or exclude/fail closed when no authority exists.
+//! - If a runtime snapshot commit fails after a direct live mutation, the
+//!   caller gets an error and the mutated live handle is discarded before it
+//!   can drive reads or listing as clean truth.
+//!
+//! Runtime-less compatibility mode still persists directly to `SessionStore`.
+//! Event-log file projection is separate best-effort derived state.
 
 #![cfg_attr(test, allow(dead_code))]
 
@@ -34,8 +50,8 @@ use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
-use meerkat_runtime::{RuntimeMode, RuntimeState, RuntimeStore};
-use meerkat_store::{SessionFilter, SessionStore};
+use meerkat_runtime::{MachineSessionControlAuthority, RuntimeMode, RuntimeState, RuntimeStore};
+use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -187,8 +203,10 @@ fn write_deferred_turn_state(
 fn rollback_tool_visibility_state_snapshot(
     session: &Session,
 ) -> Option<meerkat_core::SessionToolVisibilityState> {
-    if let Some(state) = session.tool_visibility_state() {
-        return Some(state);
+    match session.tool_visibility_state() {
+        Ok(Some(state)) => return Some(state),
+        Ok(None) => {}
+        Err(_) => return None,
     }
 
     let mut state = meerkat_core::SessionToolVisibilityState::default();
@@ -241,6 +259,12 @@ fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError
 /// and `archive()` sets `cancelled = true` under the lock before deleting.
 struct CheckpointerGate {
     cancelled: Mutex<bool>,
+}
+
+#[derive(Clone, Copy)]
+enum StoreOnlyArchiveMode {
+    Reject,
+    MachineAuthority,
 }
 
 /// Checkpointer that saves sessions to a [`SessionStore`].
@@ -625,7 +649,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner
             .hot_swap_session_llm_identity(id, client, identity, request_policy)
             .await?;
-        self.persist_full_session(id).await.map(|_| ())
+        self.persist_full_session_or_discard_live(id)
+            .await
+            .map(|_| ())
     }
 
     /// Apply a runtime-turn metadata keep-alive update to a live session.
@@ -781,7 +807,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
         SessionError::Unsupported(format!(
-            "{operation} cannot mutate store-only compatibility projection for session {id}; runtime-backed control mutations require an authoritative runtime snapshot"
+            "{operation} cannot mutate store-only compatibility projection for session {id}; session control mutations require an authoritative runtime/session machine snapshot"
         ))
     }
 
@@ -823,30 +849,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await;
         }
 
-        // Runtime-less services are a legacy compatibility lane. They have no
-        // runtime authority to update, so this path must stay unreachable when a
-        // runtime store is configured.
+        if self
+            .store
+            .exists(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+        {
+            return Err(Self::store_only_control_mutation_error(id, operation));
+        }
+
+        Ok(None)
+    }
+
+    async fn load_machine_authority_session_for_control(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        if let Some(runtime_store) = self.runtime_store.as_ref()
+            && let Some(runtime) =
+                Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
+        {
+            return Ok(Some(runtime));
+        }
+
         self.store
             .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))
-    }
-
-    async fn save_persisted_control_session(
-        &self,
-        session: Session,
-    ) -> Result<Session, SessionError> {
-        if self.runtime_store.is_none() {
-            // Legacy runtime-less compatibility only. This is not a runtime
-            // authority path; runtime-backed callers commit through
-            // `RuntimeStore::commit_session_snapshot` inside
-            // `save_normalized_session`.
-            tracing::debug!(
-                session_id = %session.id(),
-                "saving runtime-less legacy control mutation to session store"
-            );
-        }
-        self.save_normalized_session(session).await
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -1248,8 +1277,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = match result {
             Ok(result) => result,
             Err((error, admission)) => {
-                if Self::callback_pending_terminal(&error).is_some() {
-                    let _ = self.persist_full_session(id).await;
+                if Self::callback_pending_terminal(&error).is_some()
+                    && let Err(persist_error) = self.persist_full_session_or_discard_live(id).await
+                {
+                    return Err((persist_error, admission));
                 }
                 return Err((error, admission));
             }
@@ -1259,7 +1290,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // that go through apply_runtime_turn() have their own atomic boundary
         // commit path and don't call start_turn on PersistentSessionService.
         let _ = self
-            .persist_full_session(id)
+            .persist_full_session_or_discard_live(id)
             .await
             .map_err(|error| (error, None))?;
 
@@ -1394,22 +1425,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?;
             if let Err(error) = self.store.save(&session).await {
-                tracing::warn!(
-                    session_id = %session.id(),
-                    error = %error,
-                    "failed to update session-store projection after runtime authority commit"
-                );
-                match self.discard_live_session(session.id()).await {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
-                    Err(discard_error) => {
-                        tracing::warn!(
-                            session_id = %session.id(),
-                            error = %discard_error,
-                            "failed to discard live session after runtime-backed projection update failure"
-                        );
-                    }
-                }
-                return Err(SessionError::Store(Box::new(error)));
+                return Err(self
+                    .fail_closed_runtime_projection_update(session.id(), error)
+                    .await);
             }
         } else {
             self.store
@@ -1418,6 +1436,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(|e| SessionError::Store(Box::new(e)))?;
         }
         Ok(session)
+    }
+
+    async fn fail_closed_runtime_projection_update(
+        &self,
+        id: &SessionId,
+        error: SessionStoreError,
+    ) -> SessionError {
+        tracing::error!(
+            session_id = %id,
+            error = %error,
+            "session-store projection update failed after runtime authority commit; failing closed"
+        );
+        match self.discard_live_session(id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(discard_error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %discard_error,
+                    "failed to discard live session after runtime-backed projection update failure"
+                );
+            }
+        }
+        SessionError::Store(Box::new(error))
     }
 
     async fn gate_for_session(&self, id: &SessionId) -> Arc<CheckpointerGate> {
@@ -2128,7 +2169,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 if Self::callback_pending_terminal(&error).is_some()
                     && let Some(session_id) = callback_session_id
                 {
-                    let _ = self.persist_full_session(&session_id).await;
+                    self.persist_full_session_or_discard_live(&session_id)
+                        .await?;
                 }
                 return Err(error);
             }
@@ -2150,18 +2192,109 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
         // skipped if the session hasn't changed since this save.
-        let saved_len = match self.persist_full_session(&result.session_id).await {
-            Ok(saved_len) => saved_len,
-            Err(error) => {
-                let _ = self.discard_live_session(&result.session_id).await;
-                return Err(error);
-            }
-        };
+        let saved_len = self
+            .persist_full_session_or_discard_live(&result.session_id)
+            .await?;
         checkpointer
             .last_saved_len
             .store(saved_len, std::sync::atomic::Ordering::Release);
 
         Ok(result)
+    }
+
+    async fn archive_with_store_only_mode(
+        &self,
+        id: &SessionId,
+        store_only_mode: StoreOnlyArchiveMode,
+    ) -> Result<(), SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock().await;
+
+        let archived_snapshot = match self.export_session_with_labels(id).await {
+            Ok(session) => Some(session),
+            Err(SessionError::NotFound { .. }) => match store_only_mode {
+                StoreOnlyArchiveMode::Reject => {
+                    self.load_persisted_session_for_control(id, "archive")
+                        .await?
+                }
+                StoreOnlyArchiveMode::MachineAuthority => {
+                    self.load_machine_authority_session_for_control(id).await?
+                }
+            },
+            Err(err) => return Err(err),
+        };
+        if let Some(ref session) = archived_snapshot
+            && metadata_marks_archived(session.metadata())
+        {
+            if metadata_marks_transient_pending_archive(session.metadata()) {
+                let mut session = session.clone();
+                clear_transient_pending_archive_marker(&mut session);
+                let session = self.save_normalized_session(session).await?;
+                self.remember_archived_session(session).await;
+            } else {
+                self.remember_archived_session(session.clone()).await;
+            }
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+
+        // Acquire the checkpointer gate (if any) and hold it across the
+        // archival save. This prevents a concurrent checkpoint() from saving
+        // a live snapshot over the archived one. Setting cancelled under the
+        // lock ensures all future checkpoints are no-ops.
+        let gate = self.existing_gate_for_session(id).await;
+        let mut gate_guard = if let Some(ref gate) = gate {
+            let mut guard = gate.cancelled.lock().await;
+            *guard = true;
+            Some(guard)
+        } else {
+            None
+        };
+
+        let had_durable_snapshot = archived_snapshot.is_some();
+        let mut saved_archived_snapshot = false;
+        if let Some(mut session) = archived_snapshot.clone() {
+            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+            clear_transient_pending_archive_marker(&mut session);
+            match self.save_normalized_session(session).await {
+                Ok(session) => {
+                    saved_archived_snapshot = true;
+                    self.remember_archived_session(session).await;
+                }
+                Err(err) => {
+                    if let Some(ref mut guard) = gate_guard {
+                        **guard = false;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        let live_result = self.inner.archive(id).await;
+
+        // Gate guard is dropped here - any in-flight checkpoint that was
+        // blocked on the lock will now see cancelled == true and bail out.
+        drop(gate_guard.take());
+        self.checkpointer_gates.lock().await.remove(id);
+
+        match (&live_result, saved_archived_snapshot) {
+            // At least one side had the session - success.
+            (Ok(()), _) | (_, true) => Ok(()),
+            (_, false) if had_durable_snapshot => Ok(()),
+            // Neither side had it - propagate NotFound from the live service.
+            _ => live_result,
+        }
+    }
+
+    /// Archive through runtime/session machine authority when the service has
+    /// no live runtime snapshot yet, such as staged sessions owned by
+    /// `MeerkatMachine`.
+    pub async fn archive_with_machine_authority(
+        &self,
+        id: &SessionId,
+        _authority: MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        self.archive_with_store_only_mode(id, StoreOnlyArchiveMode::MachineAuthority)
+            .await
     }
 }
 
@@ -2275,6 +2408,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             if live_ids.contains(&meta.id) {
                 continue;
             }
+            // Runtime-backed rows are discovery keys only. A stale or
+            // store-only projection must not contribute summary metadata unless
+            // runtime authority can rebuild the summary below.
             if let Some(session) = self.load_authoritative_session_base(&meta.id).await? {
                 if metadata_marks_archived(session.metadata()) {
                     continue;
@@ -2320,79 +2456,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        let recovery_gate = self.recovery_gate_for_session(id).await;
-        let _recovery_guard = recovery_gate.lock().await;
-
-        let archived_snapshot = match self.export_session_with_labels(id).await {
-            Ok(session) => Some(session),
-            Err(SessionError::NotFound { .. }) => self.load_authoritative_session_base(id).await?,
-            Err(err) => return Err(err),
-        };
-        if let Some(ref session) = archived_snapshot
-            && metadata_marks_archived(session.metadata())
-        {
-            if metadata_marks_transient_pending_archive(session.metadata()) {
-                let mut session = session.clone();
-                clear_transient_pending_archive_marker(&mut session);
-                let session = self.save_normalized_session(session).await?;
-                self.remember_archived_session(session).await;
-            } else {
-                self.remember_archived_session(session.clone()).await;
-            }
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
-
-        // Acquire the checkpointer gate (if any) and hold it across the
-        // archival save. This prevents a concurrent checkpoint() from saving
-        // a live snapshot over the archived one. Setting cancelled under the
-        // lock ensures all future checkpoints are no-ops.
-        let gate = self.existing_gate_for_session(id).await;
-        let mut gate_guard = if let Some(ref gate) = gate {
-            let mut guard = gate.cancelled.lock().await;
-            *guard = true;
-            Some(guard)
-        } else {
-            None
-        };
-
-        let had_durable_snapshot = archived_snapshot.is_some();
-        let in_store = self
-            .store
-            .exists(id)
+        self.archive_with_store_only_mode(id, StoreOnlyArchiveMode::Reject)
             .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?;
-        let mut saved_archived_snapshot = false;
-        if let Some(mut session) = archived_snapshot.clone() {
-            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
-            clear_transient_pending_archive_marker(&mut session);
-            match self.save_normalized_session(session).await {
-                Ok(session) => {
-                    saved_archived_snapshot = true;
-                    self.remember_archived_session(session).await;
-                }
-                Err(err) => {
-                    if let Some(ref mut guard) = gate_guard {
-                        **guard = false;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
-        let live_result = self.inner.archive(id).await;
-
-        // Gate guard is dropped here — any in-flight checkpoint that was
-        // blocked on the lock will now see cancelled == true and bail out.
-        drop(gate_guard.take());
-        self.checkpointer_gates.lock().await.remove(id);
-
-        match (&live_result, in_store || saved_archived_snapshot) {
-            // At least one side had the session — success.
-            (Ok(()), _) | (_, true) => Ok(()),
-            (_, false) if had_durable_snapshot => Ok(()),
-            // Neither side had it — propagate NotFound from the live service.
-            _ => live_result,
-        }
     }
 
     async fn update_session_keep_alive(
@@ -2708,7 +2773,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
             .map_err(|err| err.into_control_error(id))?;
         write_system_context_state(&mut session, state)?;
-        self.save_persisted_control_session(session)
+        self.save_normalized_session(session)
             .await
             .map_err(SessionControlError::Session)?;
         Ok(AppendSystemContextResult { status })
@@ -2865,7 +2930,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         let accepted =
             state.stage_tool_results(req.results, meerkat_core::time_compat::SystemTime::now());
         write_deferred_turn_state(&mut session, state).map_err(control_error_into_session_error)?;
-        self.save_persisted_control_session(session).await?;
+        self.save_normalized_session(session).await?;
         Ok(StageToolResultsResult {
             accepted_result_count: accepted,
         })
@@ -2983,6 +3048,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let persisted = self.save_normalized_session(session).await?;
         let message_count = persisted.messages().len();
         Ok(message_count)
+    }
+
+    async fn persist_full_session_or_discard_live(
+        &self,
+        id: &SessionId,
+    ) -> Result<usize, SessionError> {
+        match self.persist_full_session(id).await {
+            Ok(message_count) => Ok(message_count),
+            Err(error) => {
+                match self.discard_live_session(id).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(discard_error) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            error = %discard_error,
+                            "failed to discard live session after full-session persistence failure"
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -3213,6 +3300,7 @@ mod tests {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
         fail_boundary_commits: AtomicBool,
+        fail_snapshot_commits: AtomicBool,
         session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         input_state_load_errors: Mutex<HashSet<LogicalRuntimeId>>,
         boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
@@ -3224,6 +3312,7 @@ mod tests {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
                 fail_boundary_commits: AtomicBool::new(false),
+                fail_snapshot_commits: AtomicBool::new(false),
                 session_snapshot_overrides: Mutex::new(HashMap::new()),
                 input_state_load_errors: Mutex::new(HashSet::new()),
                 boundary_commits: Mutex::new(Vec::new()),
@@ -3232,6 +3321,10 @@ mod tests {
 
         fn set_fail_boundary_commits(&self, fail: bool) {
             self.fail_boundary_commits.store(fail, Ordering::Release);
+        }
+
+        fn set_fail_snapshot_commits(&self, fail: bool) {
+            self.fail_snapshot_commits.store(fail, Ordering::Release);
         }
 
         fn hide_next_session_snapshot_loads(&self, count: usize) {
@@ -3313,6 +3406,11 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             session_delta: meerkat_runtime::store::SessionDelta,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            if self.fail_snapshot_commits.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic runtime snapshot commit failure".to_string(),
+                ));
+            }
             self.inner
                 .commit_session_snapshot(runtime_id, session_delta)
                 .await
@@ -3454,6 +3552,7 @@ mod tests {
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
         run_failure: Option<String>,
         flow_overlay_failure: Option<String>,
+        callback_pending_after_run: bool,
     }
 
     #[async_trait::async_trait]
@@ -3495,6 +3594,12 @@ mod tests {
                     skill_diagnostics: None,
                 }
             };
+            if self.callback_pending_after_run {
+                return Err(meerkat_core::error::AgentError::CallbackPending {
+                    tool_name: "test_callback".to_string(),
+                    args: serde_json::json!({}),
+                });
+            }
             Ok(result)
         }
 
@@ -3559,7 +3664,14 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let mut state = session.tool_visibility_state().unwrap_or_default();
+            let mut state = session
+                .tool_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to decode dummy visibility state: {err}"
+                    ))
+                })?
+                .unwrap_or_default();
             state.staged_filter = filter;
             state.staged_revision = state.staged_revision.max(state.active_revision) + 1;
             session.set_tool_visibility_state(state).map_err(|err| {
@@ -3813,6 +3925,34 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
+            })
+        }
+    }
+
+    struct CallbackPendingBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for CallbackPendingBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
+                flow_overlay_failure: None,
+                callback_pending_after_run: true,
             })
         }
     }
@@ -3839,6 +3979,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: Some("synthetic flow overlay failure".to_string()),
+                callback_pending_after_run: false,
             })
         }
     }
@@ -3909,6 +4050,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -3958,6 +4100,7 @@ mod tests {
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
                     flow_overlay_failure: None,
+                    callback_pending_after_run: false,
                 },
                 entered_runs: Arc::clone(&self.entered_runs),
                 entered_notify: Arc::clone(&self.entered_notify),
@@ -4086,6 +4229,7 @@ mod tests {
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                     run_failure: None,
                     flow_overlay_failure: None,
+                    callback_pending_after_run: false,
                 },
             })
         }
@@ -4113,6 +4257,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: Some("synthetic run failure".to_string()),
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4152,6 +4297,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4356,6 +4502,7 @@ mod tests {
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
                 run_failure: None,
                 flow_overlay_failure: None,
+                callback_pending_after_run: false,
             })
         }
     }
@@ -4428,7 +4575,14 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let mut state = session.tool_visibility_state().unwrap_or_default();
+            let mut state = session
+                .tool_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to decode dummy visibility state: {err}"
+                    ))
+                })?
+                .unwrap_or_default();
             let requested_name = format!("requested:{}", call.name);
             state
                 .staged_requested_deferred_names
@@ -5385,20 +5539,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_persistent_archive_store_only_session_succeeds() {
-        // After restart, sessions exist only in the persistent store —
-        // not in the live (inner) ephemeral service. archive() must still
-        // succeed by deleting from the store even when inner returns NotFound.
+    async fn test_raw_store_delete_removes_seeded_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let session = Session::new();
         let id = session.id().clone();
         store.save(&session).await.unwrap();
 
-        // Verify the session exists in the store
         assert!(store.load(&id).await.unwrap().is_some());
-
-        // Simulate the archive path: inner.archive() would return NotFound,
-        // but store.delete() should still succeed.
         store.delete(&id).await.unwrap();
         assert!(store.load(&id).await.unwrap().is_none());
     }
@@ -5413,9 +5560,11 @@ mod tests {
             None,
             memory_blob_store(),
         );
-        let session = Session::new();
-        let id = session.id().clone();
-        store.save(&session).await.unwrap();
+        let created = service
+            .create_session(create_request("archived", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
         service.archive(&id).await.unwrap();
         let archived = store
             .load(&id)
@@ -6947,6 +7096,222 @@ mod tests {
             summary.message_count,
             raw_after.messages().len(),
             "list() must not present stale projection state as fresh canonical state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_callback_pending_projection_failure_surfaces_store_error() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+        let raw_before = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+
+        fail_store.set_fail_save(true);
+        let error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request("callback pending after projection failure"),
+            )
+            .await
+            .expect_err("callback-pending projection failure must surface the store error");
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "projection failure should win over callback-pending error, got {error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after callback projection failure"),
+            "callback-pending projection failure must evict stale live state"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should retain the callback-pending mutation");
+        assert!(
+            authoritative.messages().len() > raw_before.messages().len(),
+            "runtime authority should be ahead of the stale callback projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_resume_callback_pending_projection_failure_surfaces_store_error() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CallbackPendingBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+        let resume_source = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist");
+        let raw_before = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("test should model resume after live handle discard");
+
+        let mut req = create_request(
+            "resume callback pending after projection failure",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        );
+        req.build = Some(SessionBuildOptions {
+            resume_session: Some(resume_source),
+            ..Default::default()
+        });
+
+        fail_store.set_fail_save(true);
+        let error = service
+            .create_session(req)
+            .await
+            .expect_err("resume callback-pending projection failure must surface the store error");
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "projection failure should win over resume callback-pending error, got {error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after resume callback projection failure"),
+            "resume callback-pending projection failure must evict stale live state"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should retain the resume callback-pending mutation");
+        assert!(
+            authoritative.messages().len() > raw_before.messages().len(),
+            "runtime authority should be ahead of the stale resume callback projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_direct_start_turn_snapshot_commit_failure_discards_live_state() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let initial_authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist before failed turn");
+
+        runtime_store.set_fail_snapshot_commits(true);
+        let error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request("failed direct snapshot commit must not leak"),
+            )
+            .await
+            .expect_err("runtime snapshot commit failure must propagate");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic runtime snapshot commit failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("live-session status should succeed"),
+            "failed direct start_turn snapshot commit must discard mutated live state"
+        );
+
+        runtime_store.set_fail_snapshot_commits(false);
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("created session should remain durable");
+        assert_eq!(
+            authoritative.messages().len(),
+            initial_authoritative.messages().len(),
+            "failed direct start_turn must not advance runtime authority"
+        );
+        assert!(
+            authoritative.messages().iter().all(|message| {
+                !format!("{message:?}").contains("failed direct snapshot commit must not leak")
+            }),
+            "failed direct start_turn must not leak into durable authority"
+        );
+
+        let view = service
+            .read(&result.session_id)
+            .await
+            .expect("read should fall back to durable runtime authority");
+        assert_eq!(
+            view.state.message_count,
+            initial_authoritative.messages().len(),
+            "read() must not report the failed live mutation as clean truth"
+        );
+        let listed = service
+            .list(SessionQuery::default())
+            .await
+            .expect("list should succeed after failed snapshot commit");
+        let summary = listed
+            .iter()
+            .find(|summary| summary.session_id == result.session_id)
+            .expect("durable session should remain listable");
+        assert_eq!(
+            summary.message_count,
+            initial_authoritative.messages().len(),
+            "list() must not report the failed live mutation as clean truth"
         );
     }
 
@@ -8571,144 +8936,182 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_control_mutations_reject_store_only_projection() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            Some(runtime_store.clone()),
-            memory_blob_store(),
-        );
-        let session = Session::new();
-        let id = session.id().clone();
-        store
-            .save(&session)
-            .await
-            .expect("test should seed a store-only compatibility projection");
+    async fn test_store_only_control_mutations_fail_closed_without_runtime_divergence() {
+        for runtime_backed in [true, false] {
+            let mode = if runtime_backed {
+                "runtime-backed"
+            } else {
+                "runtime-less"
+            };
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
+            let service_runtime_store = runtime_store
+                .as_ref()
+                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
+            let service = PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                Arc::clone(&store),
+                service_runtime_store,
+                memory_blob_store(),
+            );
+            let session = Session::new();
+            let id = session.id().clone();
+            store
+                .save(&session)
+                .await
+                .expect("test should seed a store-only compatibility projection");
 
-        let append_err = service
-            .append_system_context(
-                &id,
-                AppendSystemContextRequest {
-                    text: "must not become authority".to_string(),
-                    source: Some("api".to_string()),
-                    idempotency_key: Some("store-only-runtime-append".to_string()),
-                },
-            )
-            .await
-            .expect_err("store-only projection must not be promoted by append");
-        assert!(matches!(
-            append_err,
-            SessionControlError::Session(SessionError::Unsupported(ref message))
-                if message.contains("store-only compatibility projection")
-        ));
-
-        let stage_err = service
-            .stage_tool_results(
-                &id,
-                StageToolResultsRequest {
-                    results: vec![ToolResult::new(
-                        "tool-call-1".to_string(),
-                        "callback result".to_string(),
-                        false,
-                    )],
-                },
-            )
-            .await
-            .expect_err("store-only projection must not be promoted by staged tool results");
-        assert!(matches!(
-            stage_err,
-            SessionError::Unsupported(ref message)
-                if message.contains("store-only compatibility projection")
-        ));
-
-        let raw = store
-            .load(&id)
-            .await
-            .expect("raw store load should succeed")
-            .expect("store-only projection should remain present");
-        assert!(
-            raw.system_context_state().is_none(),
-            "append rejection must not mutate the store-only projection"
-        );
-        assert!(
-            raw.deferred_turn_state().is_none(),
-            "stage rejection must not mutate the store-only projection"
-        );
-        assert!(
-            runtime_store
-                .load_session_snapshot(
-                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id)
+            let append_err = service
+                .append_system_context(
+                    &id,
+                    AppendSystemContextRequest {
+                        text: format!("{mode} store-only append must fail closed"),
+                        source: Some("api".to_string()),
+                        idempotency_key: Some(format!("store-only-{mode}-append")),
+                    },
                 )
                 .await
-                .expect("runtime snapshot load should succeed")
-                .is_none(),
-            "store-only control mutations must not create runtime authority"
-        );
+                .expect_err("store-only projection must not be promoted by append");
+            assert!(
+                matches!(
+                    append_err,
+                    SessionControlError::Session(SessionError::Unsupported(ref message))
+                        if message.contains("store-only compatibility projection")
+                            && message.contains("machine snapshot")
+                ),
+                "{mode} append error should require machine authority: {append_err:?}"
+            );
+
+            let stage_err = service
+                .stage_tool_results(
+                    &id,
+                    StageToolResultsRequest {
+                        results: vec![ToolResult::new(
+                            "tool-call-1".to_string(),
+                            "callback result".to_string(),
+                            false,
+                        )],
+                    },
+                )
+                .await
+                .expect_err("store-only projection must not be promoted by staged tool results");
+            assert!(
+                matches!(
+                    stage_err,
+                    SessionError::Unsupported(ref message)
+                        if message.contains("store-only compatibility projection")
+                            && message.contains("machine snapshot")
+                ),
+                "{mode} stage error should require machine authority: {stage_err:?}"
+            );
+
+            let archive_err = service
+                .archive(&id)
+                .await
+                .expect_err("store-only projection must not own lifecycle archive");
+            assert!(
+                matches!(
+                    archive_err,
+                    SessionError::Unsupported(ref message)
+                        if message.contains("store-only compatibility projection")
+                            && message.contains("machine snapshot")
+                ),
+                "{mode} archive error should require machine authority: {archive_err:?}"
+            );
+
+            let raw = store
+                .load(&id)
+                .await
+                .expect("raw store load should succeed")
+                .expect("store-only projection should remain present");
+            assert!(
+                raw.system_context_state().is_none(),
+                "{mode} append rejection must not mutate the store-only projection"
+            );
+            assert!(
+                raw.deferred_turn_state().is_none(),
+                "{mode} stage rejection must not mutate the store-only projection"
+            );
+            assert!(
+                !metadata_marks_archived(raw.metadata()),
+                "{mode} archive rejection must not mutate lifecycle metadata"
+            );
+            if let Some(runtime_store) = runtime_store {
+                assert!(
+                    runtime_store
+                        .load_session_snapshot(
+                            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id)
+                        )
+                        .await
+                        .expect("runtime snapshot load should succeed")
+                        .is_none(),
+                    "store-only control mutations must not create runtime authority"
+                );
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_legacy_runtime_less_store_only_control_mutations_are_compatibility_only() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let session = Session::new();
-        let id = session.id().clone();
-        store
-            .save(&session)
-            .await
-            .expect("test should seed a legacy store-only session");
+    async fn test_machine_authorized_archive_routes_store_only_projection() {
+        for runtime_backed in [true, false] {
+            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
+            let service_runtime_store = runtime_store
+                .as_ref()
+                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
+            let service = PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                Arc::clone(&store),
+                service_runtime_store,
+                memory_blob_store(),
+            );
+            let session = Session::new();
+            let id = session.id().clone();
+            store
+                .save(&session)
+                .await
+                .expect("test should seed a store-only compatibility projection");
 
-        let append = service
-            .append_system_context(
-                &id,
-                AppendSystemContextRequest {
-                    text: "legacy compatibility append".to_string(),
-                    source: Some("legacy".to_string()),
-                    idempotency_key: Some("legacy-store-only-append".to_string()),
-                },
-            )
-            .await
-            .expect("runtime-less compatibility append should still be available");
-        assert_eq!(
-            append.status,
-            meerkat_core::AppendSystemContextStatus::Staged
-        );
-        let staged = service
-            .stage_tool_results(
-                &id,
-                StageToolResultsRequest {
-                    results: vec![ToolResult::new(
-                        "tool-call-1".to_string(),
-                        "legacy callback result".to_string(),
-                        false,
-                    )],
-                },
-            )
-            .await
-            .expect("runtime-less compatibility staging should still be available");
-        assert_eq!(staged.accepted_result_count, 1);
+            let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+            service
+                .archive_with_machine_authority(&id, machine.session_control_authority())
+                .await
+                .expect("machine-routed archive should own the store-only transition");
 
-        let raw = store
-            .load(&id)
-            .await
-            .expect("raw store load should succeed")
-            .expect("legacy store-only session should remain present");
-        let state = raw
-            .system_context_state()
-            .expect("legacy compatibility append writes only the store row");
-        assert_eq!(state.pending[0].text, "legacy compatibility append");
-        let deferred = raw
-            .deferred_turn_state()
-            .expect("legacy compatibility stage writes only the store row");
-        assert_eq!(deferred.pending_tool_results.len(), 1);
+            let raw = store
+                .load(&id)
+                .await
+                .expect("raw store load should succeed")
+                .expect("archived projection should remain present");
+            assert!(
+                metadata_marks_archived(raw.metadata()),
+                "machine-routed archive should persist archived lifecycle metadata"
+            );
+            assert!(
+                raw.system_context_state().is_none(),
+                "archive must not add control append state"
+            );
+            assert!(
+                raw.deferred_turn_state().is_none(),
+                "archive must not add deferred-turn control state"
+            );
+            if let Some(runtime_store) = runtime_store {
+                let archived = runtime_store
+                    .load_session_snapshot(
+                        &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                    )
+                    .await
+                    .expect("runtime snapshot load should succeed")
+                    .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
+                    .expect("machine-routed archive should write runtime authority");
+                assert!(
+                    metadata_marks_archived(archived.metadata()),
+                    "runtime-backed machine archive should persist archived runtime authority"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -9267,6 +9670,7 @@ mod tests {
         let exported = service.export_session_with_labels(&id).await.unwrap();
         let exported_state = exported
             .tool_visibility_state()
+            .expect("live visibility state should decode")
             .expect("live session should carry visibility state after staging");
         assert_eq!(exported_state.staged_filter, filter);
         assert_eq!(exported_state.active_filter, meerkat_core::ToolFilter::All);
@@ -9276,6 +9680,7 @@ mod tests {
         let persisted = store.load(&id).await.unwrap().unwrap();
         let persisted_state = persisted
             .tool_visibility_state()
+            .expect("persisted visibility state should decode")
             .expect("persisted session should carry visibility state after staging");
         assert_eq!(persisted_state, exported_state);
     }
@@ -9298,7 +9703,10 @@ mod tests {
 
         let baseline = service.export_session_with_labels(&id).await.unwrap();
         assert!(
-            baseline.tool_visibility_state().is_none(),
+            baseline
+                .tool_visibility_state()
+                .expect("baseline visibility state should decode")
+                .is_none(),
             "new sessions should not materialize visibility metadata before updates"
         );
 
@@ -9314,16 +9722,23 @@ mod tests {
         fail_store.set_fail_save(false);
 
         let exported = service.export_session_with_labels(&id).await.unwrap();
+        let exported_visibility_state = exported
+            .tool_visibility_state()
+            .expect("exported visibility state should decode");
+        let baseline_visibility_state = baseline
+            .tool_visibility_state()
+            .expect("baseline visibility state should decode");
         assert_eq!(
-            exported.tool_visibility_state(),
-            baseline.tool_visibility_state(),
+            exported_visibility_state, baseline_visibility_state,
             "live session should roll back to the pre-mutation visibility state"
         );
 
         let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
+        let persisted_visibility_state = persisted
+            .tool_visibility_state()
+            .expect("persisted visibility state should decode");
         assert_eq!(
-            persisted.tool_visibility_state(),
-            baseline.tool_visibility_state(),
+            persisted_visibility_state, baseline_visibility_state,
             "store should retain the pre-mutation visibility state after rollback"
         );
     }
@@ -9547,6 +9962,7 @@ mod tests {
             .expect("persisted session should exist");
         let visibility_state = persisted
             .tool_visibility_state()
+            .expect("persisted visibility state should decode")
             .expect("persistent dispatch should save session mutations");
         assert!(
             visibility_state

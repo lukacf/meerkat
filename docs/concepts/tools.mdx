@@ -102,8 +102,8 @@ MCP servers can be added, removed, or reloaded on a running session via the RPC 
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"mcp/add","params":{
-  "session_id":"...","server_name":"my-tools",
-  "server_config":{"transport":"stdio","command":"npx","args":["-y","@my/server"]},
+  "session_id":"...",
+  "server_config":{"name":"my-tools","command":"npx","args":["-y","@my/server"]},
   "persisted":false
 }}
 ```

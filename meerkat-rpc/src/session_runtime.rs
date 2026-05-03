@@ -71,6 +71,14 @@ use meerkat_core::ToolConfigChangeOperation;
 
 const SESSION_TRANSIENT_PENDING_ARCHIVE_KEY: &str = "session_transient_pending_archive";
 
+fn unknown_provider_message(provider: &str) -> String {
+    format!("unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)")
+}
+
+fn parse_provider_override(provider: &str) -> Result<meerkat_core::Provider, String> {
+    meerkat_core::Provider::parse_strict(provider).ok_or_else(|| unknown_provider_message(provider))
+}
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -150,6 +158,19 @@ struct ArchiveRuntimeCleanup {
 }
 
 impl ArchiveRuntimeCleanup {
+    async fn archive_service(
+        &self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        service
+            .archive_with_machine_authority(
+                session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+    }
+
     async fn run(&self, session_id: &SessionId) {
         self.runtime_adapter.unregister_session(session_id).await;
         if let Some(streams) = self.pending_session_event_streams.as_ref() {
@@ -242,7 +263,10 @@ fn realtime_projection_runtime_system_context(
 
 #[cfg(test)]
 fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToolVisibilityState {
-    session.tool_visibility_state().unwrap_or_default()
+    session
+        .tool_visibility_state()
+        .expect("exported visibility state should decode")
+        .unwrap_or_default()
 }
 
 struct RuntimePreAdmissionGuard {
@@ -449,7 +473,10 @@ async fn await_guarded_session_cleanup(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = match operation {
-            GuardedSessionCleanupOperation::Archive => service.archive(&session_id).await,
+            GuardedSessionCleanupOperation::Archive => match runtime_cleanup.as_ref() {
+                Some(cleanup) => cleanup.archive_service(&service, &session_id).await,
+                None => service.archive(&session_id).await,
+            },
             GuardedSessionCleanupOperation::DiscardLive => {
                 service.discard_live_session(&session_id).await
             }
@@ -485,7 +512,7 @@ async fn await_guarded_staged_archive(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = match service.archive(&session_id).await {
+        let result = match runtime_cleanup.archive_service(&service, &session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {
                 runtime_cleanup.run(&session_id).await;
                 #[cfg(test)]
@@ -532,7 +559,7 @@ async fn await_session_archive_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
+        let result = runtime_cleanup.archive_service(&service, &session_id).await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             runtime_cleanup.run(&session_id).await;
         }
@@ -655,6 +682,7 @@ impl PendingPromotionCleanup {
     async fn restore_after_materialized_failure(
         &mut self,
         service: &PersistentSessionService<FactoryAgentBuilder>,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         if let Err(error) = self
             .recover_materialized_staged_capacity_admission(service)
@@ -664,7 +692,10 @@ impl PendingPromotionCleanup {
             return Err(error);
         }
 
-        if let Err(error) = service.archive(&self.session_id).await {
+        if let Err(error) = service
+            .archive_with_machine_authority(&self.session_id, authority)
+            .await
+        {
             let _ = service.discard_live_session(&self.session_id).await;
             self.restore_now().await;
             return Err(error);
@@ -1263,7 +1294,10 @@ impl SessionService for RpcMobSessionService {
         if self.staged_sessions.contains(id).await {
             return Err(SessionError::Busy { id: id.clone() });
         }
-        let result = self.service.archive(id).await;
+        let result = self
+            .service
+            .archive_with_machine_authority(id, self.runtime_adapter.session_control_authority())
+            .await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             self.archive_runtime_cleanup().run(id).await;
         }
@@ -1548,6 +1582,16 @@ fn registered_model_provider_mismatch_reason(
     registry.provider_override_mismatch_reason(provider, model)
 }
 
+fn unsupported_model_capability_rpc_error(
+    evidence: meerkat_core::UnsupportedModelCapabilityEvidence,
+) -> RpcError {
+    RpcError {
+        code: error::INVALID_PARAMS,
+        message: evidence.to_string(),
+        data: Some(evidence.details()),
+    }
+}
+
 fn profile_to_capability_surface(
     profile: &meerkat_models::profile::ModelProfile,
 ) -> SessionLlmCapabilitySurface {
@@ -1715,7 +1759,8 @@ impl SessionRuntimeLlmReconfigureHost {
             .clone()
             .unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = request.provider.as_ref() {
-            meerkat_core::Provider::from_name(provider_name)
+            parse_provider_override(provider_name)
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
         } else {
             current.provider
         };
@@ -1796,7 +1841,14 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .export_live_session(session_id)
             .await
             .map_err(session_error_to_runtime_driver)?;
-        let current_visibility_state = session.tool_visibility_state().unwrap_or_default();
+        let current_visibility_state = session
+            .tool_visibility_state()
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to decode live session tool visibility state: {err}"
+                ))
+            })?
+            .unwrap_or_default();
         let base_tool_names = self
             .service
             .tool_scope_snapshot(session_id)
@@ -2193,7 +2245,7 @@ impl SessionRuntime {
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
             provider: overrides
                 .and_then(|ov| ov.provider.as_ref())
-                .map(|provider| meerkat_core::Provider::from_name(provider)),
+                .and_then(|provider| parse_provider_override(provider).ok()),
             provider_params,
             render_metadata: None,
             connection_ref,
@@ -2835,6 +2887,7 @@ impl SessionRuntime {
             }
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
+            | meerkat_runtime::CompletionOutcome::Cancelled
             | meerkat_runtime::CompletionOutcome::CallbackPending { .. } => false,
         }
     }
@@ -2847,6 +2900,7 @@ impl SessionRuntime {
             }
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
+            | meerkat_runtime::CompletionOutcome::Cancelled
             | meerkat_runtime::CompletionOutcome::CallbackPending { .. } => false,
         }
     }
@@ -3099,7 +3153,10 @@ impl SessionRuntime {
             let result = service.start_turn(&session_id, start_req).await;
             if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
                 let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(&service)
+                    .restore_after_materialized_failure(
+                        &service,
+                        runtime_adapter.session_control_authority(),
+                    )
                     .await;
                 promotion_cleanup.disarm();
                 let _ = result_tx.send(match restore_result {
@@ -3300,7 +3357,10 @@ impl SessionRuntime {
                 .await
             {
                 let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(&service)
+                    .restore_after_materialized_failure(
+                        &service,
+                        runtime_adapter.session_control_authority(),
+                    )
                     .await;
                 promotion_cleanup.disarm();
                 let _ = result_tx.send(match restore_result {
@@ -3615,11 +3675,15 @@ impl SessionRuntime {
 
         Ok(SurfaceSessionRecoveryOverrides {
             model: overrides.and_then(|ov| ov.model.clone()),
-            provider: overrides.and_then(|ov| {
-                ov.provider
-                    .as_ref()
-                    .map(|provider| meerkat_core::Provider::from_name(provider))
-            }),
+            provider: overrides
+                .and_then(|ov| ov.provider.as_ref())
+                .map(|provider| parse_provider_override(provider))
+                .transpose()
+                .map_err(|message| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                })?,
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
             clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
             connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
@@ -3815,12 +3879,24 @@ impl SessionRuntime {
     }
 
     async fn provider_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
-        self.model_registry()
-            .await
-            .ok()
-            .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
-            .map(|profile| profile.inline_video)
-            .unwrap_or(false)
+        self.require_inline_video_support(identity).await.is_ok()
+    }
+
+    async fn require_inline_video_support(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+        let Ok(registry) = self.model_registry().await else {
+            return Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::CapabilityRegistryUnavailable,
+                ),
+            );
+        };
+
+        registry.require_inline_video_for_provider(identity.provider, &identity.model)
     }
 
     async fn validate_prompt_video_input(
@@ -3839,16 +3915,10 @@ impl SessionRuntime {
             data: None,
         })?;
 
-        if meerkat_core::has_video(blocks) && !self.provider_supports_inline_video(identity).await {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!(
-                    "inline video input is not supported by model '{}' on provider '{}'",
-                    identity.model,
-                    identity.provider.as_str()
-                ),
-                data: None,
-            });
+        if meerkat_core::has_video(blocks)
+            && let Err(evidence) = self.require_inline_video_support(identity).await
+        {
+            return Err(unsupported_model_capability_rpc_error(evidence));
         }
 
         Ok(())
@@ -3885,7 +3955,11 @@ impl SessionRuntime {
         let registry = self.model_registry().await?;
         let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = ov.provider.as_ref() {
-            meerkat_core::Provider::from_name(provider_name)
+            parse_provider_override(provider_name).map_err(|message| RpcError {
+                code: error::INVALID_PARAMS,
+                message,
+                data: None,
+            })?
         } else {
             current.provider
         };
@@ -7283,10 +7357,9 @@ impl SessionRuntime {
     pub async fn mcp_stage_add(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        server_config: serde_json::Value,
+        server_config: McpServerConfig,
     ) -> Result<(), RpcError> {
-        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+        self.mcp_stage_add_with_persistence(session_id, server_config, false)
             .await
             .map(|_| ())
     }
@@ -7295,32 +7368,17 @@ impl SessionRuntime {
     pub async fn mcp_stage_add_with_persistence(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        mut server_config: serde_json::Value,
+        config: McpServerConfig,
         persisted: bool,
     ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
-        if server_name.trim().is_empty() {
+        if config.name.trim().is_empty() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: "server_name cannot be empty".to_string(),
                 data: None,
             });
         }
-
-        if let Some(obj) = server_config.as_object_mut() {
-            obj.insert(
-                "name".to_string(),
-                serde_json::Value::String(server_name.clone()),
-            );
-        }
-
-        let config: McpServerConfig =
-            serde_json::from_value(server_config).map_err(|e| RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!("invalid server_config: {e}"),
-                data: None,
-            })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
         let rollback = if persisted {
@@ -7670,10 +7728,10 @@ impl SessionRuntime {
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             actions,
@@ -7719,6 +7777,7 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
             meerkat_core::AgentError::Llm { .. } => error::PROVIDER_ERROR,
             meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,
             meerkat_core::AgentError::BuildError(_) => error::PROVIDER_ERROR,
+            meerkat_core::AgentError::Cancelled => error::REQUEST_CANCELLED,
             meerkat_core::AgentError::InternalError(_) => error::INTERNAL_ERROR,
             _ => error::INTERNAL_ERROR,
         },
@@ -7765,6 +7824,11 @@ fn completion_outcome_to_rpc_result(
                 "tool_name": tool_name,
                 "args": args,
             })),
+        }),
+        CompletionOutcome::Cancelled => Err(RpcError {
+            code: error::REQUEST_CANCELLED,
+            message: "request cancelled".to_string(),
+            data: None,
         }),
         CompletionOutcome::Abandoned(reason) => Err(RpcError {
             code: error::INTERNAL_ERROR,
@@ -10471,6 +10535,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_video_validation_returns_typed_unsupported_capability_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let identity = SessionLlmIdentity {
+            model: "gemini-3-flash-preview".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+
+        let err = runtime
+            .validate_prompt_video_input(&inline_video_prompt(), &identity)
+            .await
+            .expect_err("same model name under incompatible provider must fail closed");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        let data = err.data.expect("unsupported capability evidence data");
+        assert_eq!(
+            data["unsupported_capability"]["capability"],
+            serde_json::json!("inline_video")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["reason"],
+            serde_json::json!("provider_model_profile_missing")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["provider"],
+            serde_json::json!("openai")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["model"],
+            serde_json::json!("gemini-3-flash-preview")
+        );
+    }
+
+    #[tokio::test]
     async fn reconfigure_capability_lookup_rejects_provider_model_mismatch() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -10498,6 +10599,38 @@ mod tests {
         assert!(
             err.to_string().contains("anthropic") && err.to_string().contains("gpt-5.4"),
             "error should identify the rejected provider/model pair: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_rejects_unknown_provider_model_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let host = runtime.llm_reconfigure_host();
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let request = SessionLlmReconfigureRequest {
+            model: Some("unknown-model-xyz".to_string()),
+            provider: Some("provider-shaped-cache-key".to_string()),
+            provider_params: None,
+            clear_provider_params: false,
+            connection_ref: None,
+            clear_connection_ref: false,
+        };
+
+        let err = host
+            .resolve_target_session_llm_identity(&request, &current)
+            .await
+            .expect_err("unknown provider/model identity must fail closed");
+        assert!(
+            err.to_string().contains("unknown provider")
+                && err.to_string().contains("provider-shaped-cache-key"),
+            "error should reject the provider string before model fallback: {err}"
         );
     }
 
@@ -10691,7 +10824,7 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<serde_json::Value> {
+    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
         let path = mcp_test_server_path();
         if !path.exists() {
             eprintln!(
@@ -10699,12 +10832,12 @@ mod tests {
             );
             return None;
         }
-        Some(serde_json::json!({
-            "command": path.to_string_lossy().to_string(),
-            "args": [],
-            "env": {},
-            "name": server_name,
-        }))
+        Some(McpServerConfig::stdio(
+            server_name,
+            path.to_string_lossy().to_string(),
+            Vec::new(),
+            HashMap::new(),
+        ))
     }
 
     #[tokio::test]
@@ -15154,7 +15287,10 @@ mod tests {
             .expect("reserve recovery admission");
         runtime
             .service
-            .archive(&session_id)
+            .archive_with_machine_authority(
+                &session_id,
+                runtime.runtime_adapter.session_control_authority(),
+            )
             .await
             .expect("archive should win before recovered create");
         let result_rx = runtime.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
@@ -16537,12 +16673,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("staging should succeed");
@@ -16607,7 +16738,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "test-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16671,7 +16802,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "timeout-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16801,7 +16932,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "server-draining".to_string(), server1_config)
+            .mcp_stage_add(&session_id, server1_config)
             .await
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -16860,7 +16991,7 @@ mod tests {
         );
 
         runtime
-            .mcp_stage_add(&session_id, "server-staged".to_string(), server2_config)
+            .mcp_stage_add(&session_id, server2_config)
             .await
             .expect("stage second add");
 
@@ -16948,7 +17079,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "lossless-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -17004,12 +17135,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("stage broken add");
@@ -18639,6 +18765,27 @@ mod tests {
         assert_eq!(data["resumable"], true);
         assert_eq!(data["tool_name"], "external_mock");
         assert_eq!(data["args"], serde_json::json!({ "value": "browser" }));
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_surfaces_cancelled() {
+        let session_id = SessionId::new();
+        let err = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::Cancelled,
+            &session_id,
+        )
+        .expect_err("cancelled completion should map to an RPC error");
+
+        assert_eq!(err.code, error::REQUEST_CANCELLED);
+        assert_eq!(err.message, "request cancelled");
+    }
+
+    #[test]
+    fn session_error_to_rpc_surfaces_cancelled_as_request_cancelled() {
+        let session_err = SessionError::Agent(meerkat_core::AgentError::Cancelled);
+        let rpc_err = session_error_to_rpc(session_err);
+
+        assert_eq!(rpc_err.code, error::REQUEST_CANCELLED);
     }
 
     // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --

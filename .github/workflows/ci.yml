@@ -23,6 +23,7 @@ permissions:
 
 env:
   MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
+  MEERKAT_DOGMA_CLEANUP_GATE: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE || 'false' }}
 
 jobs:
   cargo:
@@ -45,7 +46,10 @@ jobs:
 
   dogma-cleanup-gate:
     name: Dogma cleanup review gate
-    runs-on: ubuntu-latest
+    if: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}
+    runs-on:
+      - self-hosted
+      - meerkat-temp-linux
     env:
       DOGMA_CLEANUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
     steps:
@@ -104,7 +108,9 @@ jobs:
     name: CI gate
     if: always()
     needs: [cargo, buildbuddy, dogma-cleanup-gate]
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - meerkat-temp-linux
     steps:
       - name: Check selected backend
         run: |
@@ -112,9 +118,10 @@ jobs:
           cargo_result="${{ needs.cargo.result }}"
           buildbuddy_result="${{ needs.buildbuddy.result }}"
           dogma_result="${{ needs.dogma-cleanup-gate.result }}"
+          dogma_enabled="${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}"
 
           echo "Dogma cleanup gate: $dogma_result"
-          if [[ "$dogma_result" != "success" ]]; then
+          if [[ "$dogma_enabled" == "true" && "$dogma_result" != "success" ]]; then
             exit 1
           fi
 

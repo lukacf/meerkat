@@ -193,8 +193,9 @@ async def test_python_retired_runtime_session_wrappers_fail_before_transport():
         lambda: client.runtime_reset("session-1"),
     ]
     for call in calls:
-        with pytest.raises(MeerkatError) as exc_info:
-            await call()
+        with pytest.warns(DeprecationWarning, match="Retired runtime session control methods"):
+            with pytest.raises(MeerkatError) as exc_info:
+                await call()
         assert exc_info.value.code == "METHOD_NOT_FOUND"
         assert "Retired runtime session control methods" in exc_info.value.message
 

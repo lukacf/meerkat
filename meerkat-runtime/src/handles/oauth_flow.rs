@@ -995,7 +995,7 @@ fn persist_registry_snapshot(
         Err(crate::store::RuntimeStoreError::NotFound(_))
             if policy.removal_mode == SnapshotRemovalMode::Claim =>
         {
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::RegistryProjectionMissing { operation })
         }
         Err(crate::store::RuntimeStoreError::Internal(detail))
             if policy.admission_capacity.is_some() && detail == DURABLE_OAUTH_CAPACITY_EXCEEDED =>
@@ -1195,6 +1195,10 @@ impl Default for RuntimeOAuthFlowHandle {
 }
 
 impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
+    fn device_flow_state_is_authmachine_owned(&self) -> bool {
+        true
+    }
+
     fn finish_device_poll(
         &self,
         target: &ConnectionRef,
@@ -1280,6 +1284,10 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
 }
 
 impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
+    fn device_flow_state_is_authmachine_owned(&self) -> bool {
+        true
+    }
+
     fn finish_device_poll(
         &self,
         target: &ConnectionRef,
@@ -1346,7 +1354,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
         persist_registry_payloads_claiming_removal(
             &self.registry,
             &self.store,
-            "persist_oauth_device_flow_payloads",
+            "consume_oauth_device_flow",
             &[],
             &removed,
         )
@@ -1354,6 +1362,10 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 }
 
 impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
+    fn terminal_flow_state_is_authmachine_owned(&self) -> bool {
+        true
+    }
+
     fn start(
         &self,
         target: ConnectionRef,
@@ -1435,21 +1447,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("verify_oauth_browser_flow")?;
         self.expire_pruned_flows();
-        if let Err(machine_err) = self.verify_browser(target, state, provider, redirect_uri) {
-            return match self.registry.verify(state, target, provider, redirect_uri) {
-                Err(OAuthFlowError::Missing) => {
-                    let _ = self.expire_browser(target, state);
-                    Err(OAuthFlowError::Missing)
-                }
-                _ => Err(machine_err),
-            };
-        }
+        self.verify_browser(target, state, provider, redirect_uri)?;
         match self.registry.verify(state, target, provider, redirect_uri) {
             Ok(record) => Ok(record),
-            Err(OAuthFlowError::Missing) => {
-                let _ = self.expire_browser(target, state);
-                Err(OAuthFlowError::Missing)
-            }
+            Err(OAuthFlowError::Missing) => Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify_oauth_browser_flow",
+            }),
             Err(err) => Err(err),
         }
     }
@@ -1467,28 +1470,25 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("consume_oauth_browser_flow")?;
         self.expire_pruned_flows();
-        if let Err(machine_err) = self.verify_browser(target, state, provider, redirect_uri) {
-            return match self.registry.verify(state, target, provider, redirect_uri) {
-                Err(OAuthFlowError::Missing) => {
-                    let _ = self.expire_browser(target, state);
-                    Err(OAuthFlowError::Missing)
-                }
-                _ => Err(machine_err),
-            };
-        }
+        self.verify_browser(target, state, provider, redirect_uri)?;
         let record = match self.registry.verify(state, target, provider, redirect_uri) {
             Ok(record) => record,
-            Err(err) => {
-                if matches!(err, OAuthFlowError::Missing) {
-                    let _ = self.expire_browser(target, state);
-                }
-                return Err(err);
+            Err(OAuthFlowError::Missing) => {
+                return Err(OAuthFlowError::RegistryProjectionMissing {
+                    operation: "consume_oauth_browser_flow",
+                });
             }
+            Err(err) => return Err(err),
         };
         self.consume_browser(target, state, provider, redirect_uri)?;
         if let Err(err) = self.registry.consume(state, target, provider, redirect_uri) {
             let _ = self.restore_browser_flow(state, &record);
-            return Err(err);
+            return Err(match err {
+                OAuthFlowError::Missing => OAuthFlowError::RegistryProjectionMissing {
+                    operation: "consume_oauth_browser_flow",
+                },
+                other => other,
+            });
         }
         let removed_browser = [browser_snapshot_key(target, state)];
         if let Err(err) = self.persist_registry_payloads_claiming_removal(
@@ -1496,7 +1496,10 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             &removed_browser,
             &[],
         ) {
-            if matches!(err, OAuthFlowError::Missing) {
+            if matches!(
+                err,
+                OAuthFlowError::Missing | OAuthFlowError::RegistryProjectionMissing { .. }
+            ) {
                 return Err(err);
             }
             let _ = self.restore_browser_flow(state, &record);
@@ -1519,30 +1522,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.sync_persisted_payloads("admit_oauth_device_flow")?;
         self.expire_pruned_flows();
         let machine_expires_at = expires_at_millis(expires_in)?;
-        if let Err(err) = self.admit_device(&target, &device_code, provider, machine_expires_at) {
-            match self
-                .registry
-                .verify_device_code(&device_code, &target, provider)
-            {
-                Err(OAuthFlowError::Missing) => {
-                    if self
-                        .lifecycle
-                        .expire_device_flow(&target, &device_code)
-                        .is_ok()
-                        && self
-                            .admit_device(&target, &device_code, provider, machine_expires_at)
-                            .is_ok()
-                    {
-                        // Recovered stale AuthMachine membership left behind after
-                        // registry-only cleanup; continue with payload insertion.
-                    } else {
-                        return Err(err);
-                    }
-                }
-                Ok(_) => return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted),
-                Err(_) => return Err(err),
-            }
-        }
+        self.admit_device(&target, &device_code, provider, machine_expires_at)?;
         let mut inserted = self.registry.admit_device_code_with_pruned(
             target.clone(),
             provider,
@@ -1605,27 +1585,15 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("verify_oauth_device_flow")?;
         self.expire_pruned_flows();
-        if let Err(machine_err) = self.verify_device(target, device_code, provider) {
-            return match self
-                .registry
-                .verify_device_code(device_code, target, provider)
-            {
-                Err(OAuthFlowError::Missing) => {
-                    let _ = self.lifecycle.expire_device_flow(target, device_code);
-                    Err(OAuthFlowError::Missing)
-                }
-                _ => Err(machine_err),
-            };
-        }
+        self.verify_device(target, device_code, provider)?;
         match self
             .registry
             .verify_device_code(device_code, target, provider)
         {
             Ok(record) => Ok(record),
-            Err(OAuthFlowError::Missing) => {
-                let _ = self.lifecycle.expire_device_flow(target, device_code);
-                Err(OAuthFlowError::Missing)
-            }
+            Err(OAuthFlowError::Missing) => Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify_oauth_device_flow",
+            }),
             Err(err) => Err(err),
         }
     }
@@ -1642,33 +1610,17 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.sync_persisted_payloads("begin_oauth_device_poll")?;
         self.expire_pruned_flows();
-        if let Err(machine_err) = self.begin_device_poll(target, device_code, provider) {
-            return match self
-                .registry
-                .begin_device_code_poll(device_code, target, provider)
-            {
-                Err(OAuthFlowError::DevicePollInProgress) => {
-                    Err(OAuthFlowError::DevicePollInProgress)
-                }
-                Err(OAuthFlowError::Missing) => {
-                    let _ = self.lifecycle.expire_device_flow(target, device_code);
-                    Err(OAuthFlowError::Missing)
-                }
-                Ok(poll) => {
-                    drop(poll);
-                    Err(machine_err)
-                }
-                Err(_) => Err(machine_err),
-            };
-        }
+        self.begin_device_poll(target, device_code, provider)?;
         let poll = match self
             .registry
             .begin_device_code_poll(device_code, target, provider)
         {
             Ok(poll) => poll,
             Err(OAuthFlowError::Missing) => {
-                let _ = self.lifecycle.expire_device_flow(target, device_code);
-                return Err(OAuthFlowError::Missing);
+                let _ = self.lifecycle.finish_device_poll(target, device_code);
+                return Err(OAuthFlowError::RegistryProjectionMissing {
+                    operation: "begin_oauth_device_poll",
+                });
             }
             Err(err) => {
                 let _ = self.lifecycle.finish_device_poll(target, device_code);
@@ -2012,6 +1964,92 @@ mod tests {
     }
 
     #[test]
+    fn missing_browser_projection_cannot_overwrite_authmachine_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+
+        authority
+            .registry
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("test removes only the local registry payload");
+
+        assert!(matches!(
+            authority.verify(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify_oauth_browser_flow"
+            })
+        ));
+        assert!(
+            lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "missing process-local registry payload must not expire canonical AuthMachine membership"
+        );
+
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "consume_oauth_browser_flow"
+            })
+        ));
+        assert!(
+            lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "terminal consume must fail closed instead of converting payload loss to not-found"
+        );
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired)
+        );
+    }
+
+    #[test]
+    fn missing_device_poll_projection_cannot_overwrite_authmachine_flow() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let device_code = "provider-device-code";
+
+        authority
+            .admit_device_code(
+                target.clone(),
+                provider,
+                device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("device flow admitted");
+        let poll = authority
+            .begin_device_code_poll(device_code, &target, provider)
+            .expect("device poll begins");
+        authority
+            .registry
+            .expire_device_code(device_code, &target, provider)
+            .expect("test removes only the local registry payload");
+
+        assert!(matches!(
+            poll.consume(),
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "consume_oauth_device_flow"
+            })
+        ));
+        assert!(
+            lifecycle.has_oauth_device_flow_for_test(&target, device_code),
+            "missing process-local poll payload must not expire canonical AuthMachine membership"
+        );
+    }
+
+    #[test]
     fn browser_admit_persistence_failure_rolls_back_unreturned_flow() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let store = Arc::new(FailingOAuthSnapshotStore::default());
@@ -2303,7 +2341,10 @@ mod tests {
         );
         assert!(matches!(
             restarted.consume(&consumed_state, &target, provider, redirect_uri),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
         ));
         restarted
             .consume(
@@ -2404,7 +2445,10 @@ mod tests {
         );
         assert!(matches!(
             restarted.verify_device_code(consumed_device_code, &target, provider),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_device_flow",
+                ..
+            })
         ));
         restarted
             .verify_device_code(replacement_device_code, &replacement_target, provider)
@@ -2485,7 +2529,10 @@ mod tests {
         );
         assert!(matches!(
             restarted.verify_device_code(device_code, &target, provider),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_device_flow",
+                ..
+            })
         ));
     }
 
@@ -2666,7 +2713,9 @@ mod tests {
             first_consume
                 .join()
                 .expect("first consume thread should not panic"),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "consume_oauth_browser_flow"
+            })
         ));
     }
 
@@ -2719,7 +2768,9 @@ mod tests {
             first_consume
                 .join()
                 .expect("first device consume thread should not panic"),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "consume_oauth_device_flow"
+            })
         ));
     }
 
@@ -3150,11 +3201,23 @@ mod tests {
         let device_after_release =
             restarted.verify_device_code(device_code, &target, device_provider);
         assert!(
-            matches!(browser_after_release, Err(OAuthFlowError::Missing)),
+            matches!(
+                browser_after_release,
+                Err(OAuthFlowError::LifecycleRejected {
+                    operation: "verify_oauth_browser_flow",
+                    ..
+                })
+            ),
             "release from a stale authority must prune durable browser flow, got {browser_after_release:?}"
         );
         assert!(
-            matches!(device_after_release, Err(OAuthFlowError::Missing)),
+            matches!(
+                device_after_release,
+                Err(OAuthFlowError::LifecycleRejected {
+                    operation: "verify_oauth_device_flow",
+                    ..
+                })
+            ),
             "release from a stale authority must prune durable device flow, got {device_after_release:?}"
         );
         drop(releasing_authority);
@@ -3280,7 +3343,7 @@ mod tests {
     }
 
     #[test]
-    fn device_admit_recovers_registry_pruned_stale_lifecycle_membership() {
+    fn device_admit_rejects_registry_pruned_canonical_membership() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority =
             RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
@@ -3303,16 +3366,39 @@ mod tests {
             .expect("test removes registry record without lifecycle cleanup");
         assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
 
-        authority
-            .admit_device_code(
+        assert!(matches!(
+            authority.admit_device_code(
                 target.clone(),
                 provider,
                 device_code.to_string(),
                 Duration::from_secs(60),
-            )
-            .expect("stale lifecycle membership is expired before readmit");
+            ),
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_device_flow",
+                ..
+            })
+        ));
 
-        assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
+        assert!(
+            lifecycle.has_oauth_device_flow_for_test(&target, device_code),
+            "registry-only loss must not expire canonical AuthMachine device membership"
+        );
+        assert!(matches!(
+            authority.verify_device_code(device_code, &target, provider),
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify_oauth_device_flow"
+            })
+        ));
+        assert!(matches!(
+            authority.begin_device_code_poll(device_code, &target, provider),
+            Err(OAuthFlowError::RegistryProjectionMissing {
+                operation: "begin_oauth_device_poll"
+            })
+        ));
+        assert!(
+            lifecycle.has_oauth_device_flow_for_test(&target, device_code),
+            "missing process-local device payload must fail closed without removing the flow"
+        );
     }
 
     #[test]
@@ -3339,7 +3425,13 @@ mod tests {
             Duration::from_secs(60),
         );
 
-        assert_eq!(duplicate, Err(OAuthFlowError::DeviceCodeAlreadyAdmitted));
+        assert!(matches!(
+            duplicate,
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_device_flow",
+                ..
+            })
+        ));
         assert!(lifecycle.has_oauth_device_flow_for_test(&target, device_code));
         authority
             .begin_device_code_poll(device_code, &target, provider)
@@ -3437,7 +3529,10 @@ mod tests {
         assert_eq!(flow.pkce_verifier, "new-verifier");
         assert!(matches!(
             authority.consume(&old_state, &target, provider, redirect_uri),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
         ));
     }
 

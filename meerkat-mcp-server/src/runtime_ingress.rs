@@ -194,6 +194,7 @@ fn completion_outcome_requires_mcp_runtime_cleanup(outcome: &CompletionOutcome) 
         }
         CompletionOutcome::Completed(_)
         | CompletionOutcome::CompletedWithoutResult
+        | CompletionOutcome::Cancelled
         | CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -205,6 +206,7 @@ fn completion_outcome_is_mcp_apply_failure(outcome: &CompletionOutcome) -> bool 
         }
         CompletionOutcome::Completed(_)
         | CompletionOutcome::CompletedWithoutResult
+        | CompletionOutcome::Cancelled
         | CompletionOutcome::CallbackPending { .. } => false,
     }
 }
@@ -1332,7 +1334,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             &primitive,
         ))
         .await
-        .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
+        .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

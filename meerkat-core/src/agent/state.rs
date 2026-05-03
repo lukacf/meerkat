@@ -5588,6 +5588,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_fatal_diagnostic_is_display_only_after_machine_terminalization() {
+        use crate::TurnExecutionInput;
+        use crate::turn_execution_authority::TurnFailureReason;
+
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let run_id = crate::lifecycle::RunId::new();
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+            })
+            .expect("start conversation run should apply");
+
+        agent.pending_fatal_diagnostic = Some(AgentError::HookDenied {
+            point: crate::hooks::HookPoint::RunCompleted,
+            reason_code: crate::hooks::HookReasonCode::PolicyViolation,
+            message: "misleading hook-denied display text".to_string(),
+            payload: None,
+        });
+        agent
+            .apply_turn_input(TurnExecutionInput::FatalFailure {
+                run_id,
+                reason: TurnFailureReason::with_cause(
+                    crate::TurnTerminalCauseKind::LlmFailure,
+                    crate::event::AgentErrorClass::Llm,
+                    "machine-owned LLM terminal cause",
+                ),
+            })
+            .expect("fatal failure with typed machine cause should apply");
+
+        let err = agent
+            .build_result(0, 0)
+            .await
+            .expect_err("fatal terminalization should return terminal failure");
+
+        match err {
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } => {
+                assert_eq!(outcome, crate::TurnTerminalOutcome::Failed);
+                assert_eq!(
+                    cause_kind,
+                    crate::TurnTerminalCauseKind::LlmFailure,
+                    "pending_fatal_diagnostic must not classify terminal cause"
+                );
+                assert!(
+                    message.contains("misleading hook-denied display text"),
+                    "pending_fatal_diagnostic should remain display text only: {message}"
+                );
+            }
+            other => panic!("expected terminal failure, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+        assert!(
+            agent.pending_fatal_diagnostic.is_none(),
+            "build_result should consume the display-only diagnostic"
+        );
+    }
+
+    #[tokio::test]
     async fn hard_failure_without_pending_diagnostic_uses_machine_terminal_cause() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.config.max_turns = Some(0);

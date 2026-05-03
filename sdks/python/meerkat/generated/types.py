@@ -1012,6 +1012,152 @@ class MobReconcileFailureWire:
 
 
 @dataclass
+class BridgeAck:
+    """Simple acknowledgment."""
+    ok: bool
+
+
+@dataclass
+class BridgeBindPayload:
+    """Bind a remote runtime to this supervisor."""
+    bootstrap_token: BridgeBootstrapToken
+    epoch: int
+    expected_address: str
+    expected_peer_id: str
+    protocol_version: BridgeProtocolVersion
+    supervisor: BridgePeerSpec
+
+
+@dataclass
+class BridgeBindResponse:
+    """Response to a bind command."""
+    address: str
+    capabilities: BridgeCapabilities
+    peer_id: str
+
+
+@dataclass
+class BridgeCapabilities:
+    """Capabilities advertised by a member runtime on bind."""
+    current_protocol_version: Optional[BridgeProtocolVersion] = None
+    default_protocol_version: Optional[BridgeProtocolVersion] = None
+    deliver_member_input: Optional[bool] = None
+    destroy_member: Optional[bool] = None
+    hard_cancel_member: Optional[bool] = None
+    interrupt_member: Optional[bool] = None
+    observe_member: Optional[bool] = None
+    retire_member: Optional[bool] = None
+    supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
+    unwire_member: Optional[bool] = None
+    wire_member: Optional[bool] = None
+
+
+@dataclass
+class BridgeDeliveryPayload:
+    """Deliver one logical input to a member."""
+    content: ContentInput
+    epoch: int
+    handling_mode: HandlingMode
+    input_id: str
+    protocol_version: BridgeProtocolVersion
+    supervisor: BridgePeerSpec
+
+
+@dataclass
+class BridgeDeliveryResponse:
+    """Full response to a delivery command."""
+    input_id: str
+    outcome: BridgeDeliveryOutcome
+    canonical_input_id: Optional[str] = None
+
+
+@dataclass
+class BridgeDestroyResponse:
+    """Response to a destroy command."""
+    inputs_abandoned: int
+
+
+@dataclass
+class BridgeHardCancelPayload:
+    """Explicit hard-cancel command payload.
+
+`InterruptMember` is the cooperative boundary-break path. This payload is
+intentionally separate so supervisors cannot accidentally collapse boundary
+cancellation and immediate user/session interrupt authority onto one wire
+command."""
+    epoch: int
+    protocol_version: BridgeProtocolVersion
+    reason: str
+    supervisor: BridgePeerSpec
+
+
+@dataclass
+class BridgeObservationResponse:
+    """Response to an observe command."""
+    observed_at: str
+    state: BridgeMemberRuntimeState
+    accepting_inputs: Optional[bool] = None
+    current_run_id: Optional[str] = None
+    last_error: Optional[str] = None
+    peer_connectivity: Optional[BridgePeerConnectivity] = None
+
+
+@dataclass
+class BridgePeerSpec:
+    """Minimal trusted peer identity for supervisor bridge wire messages.
+
+Mirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is
+self-contained in the contracts crate so neither sender nor receiver
+needs a cross-crate dependency for deserialization. Fields stay
+stringly at the wire boundary — `peer_id` is the canonical comms routing
+UUID, while raw Ed25519 public key material is carried only in `pubkey`.
+The typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the
+receiving side."""
+    address: str
+    name: str
+    peer_id: str
+    pubkey: Optional[list[int]] = None
+
+
+@dataclass
+class BridgePeerWiringPayload:
+    """Peer wiring command payload."""
+    epoch: int
+    peer_spec: BridgePeerSpec
+    protocol_version: BridgeProtocolVersion
+    supervisor: BridgePeerSpec
+
+
+@dataclass
+class BridgeRetireResponse:
+    """Response to a retire command."""
+    inputs_abandoned: int
+    inputs_pending_drain: int
+
+
+@dataclass
+class BridgeSupervisorPayload:
+    """Supervisor authority credentials included in every bridge command."""
+    epoch: int
+    protocol_version: BridgeProtocolVersion
+    supervisor: BridgePeerSpec
+
+
+@dataclass
+class CommsPeerLifecycleParams:
+    """Typed params for one-way peer lifecycle notifications.
+
+This is the public wire projection of the topology-update payloads that
+used to travel as arbitrary JSON. `peer_spec` is the canonical typed
+identity when the sender has it; `peer`, `role`, and `description` remain
+inert presentation metadata for older projections."""
+    peer: str
+    description: Optional[str] = None
+    peer_spec: Optional[BridgePeerSpec] = None
+    role: Optional[str] = None
+
+
+@dataclass
 class CommsPeersParams:
     """Request payload for `comms/peers`."""
     session_id: str
@@ -1851,7 +1997,7 @@ class WireRuntimeBindingSession(TypedDict, total=False):
 
 class WireRuntimeBindingExternal(TypedDict, total=False):
     address: Required[str]
-    bootstrap_token: NotRequired[str]
+    bootstrap_token: NotRequired[BridgeBootstrapToken]
     identity: Required[WireTrustedPeerIdentity]
     kind: Required[Literal['external']]
 
@@ -2378,72 +2524,280 @@ WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationP
 # Model recommendation tier.
 WireModelTier = Literal['recommended', 'supported']
 
-# Typed wire request for `comms/send`.
-#
-# Variants are serde-tagged on `kind` and validated structurally at the
-# deserialization boundary. Required fields per kind are enforced by the
-# type system; invalid discriminators (`source`, `stream`, `handling_mode`,
-# `status`) become serde deserialization errors rather than runtime
-# string-match failures.
-#
-# Cross-field invariants that cannot be expressed structurally (e.g.
-# `handling_mode` is forbidden on `Accepted` peer responses) are checked
-# in [`CommsCommandRequest::into_command`].
+# Request command carried inside public `comms/send` surfaces.
 class CommsCommandInput(TypedDict, total=False):
     allow_self_session: NotRequired[bool]
-    blocks: NotRequired[list[dict[str, Any]]]
+    blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['input']]
     source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
 
 class CommsCommandPeerMessage(TypedDict, total=False):
-    blocks: NotRequired[list[dict[str, Any]]]
+    blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     to: Required[PeerId]
 
 class CommsCommandPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
     lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
-    params: NotRequired[Any]
+    params: Required[CommsPeerLifecycleParams]
     to: Required[PeerId]
 
 class CommsCommandPeerRequest(TypedDict, total=False):
-    handling_mode: NotRequired[Literal['queue', 'steer']]
-    intent: Required[str]
+    handling_mode: NotRequired[HandlingMode]
+    intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
-    params: NotRequired[Any]
+    params: Required[CommsPeerRequestParams]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
     to: Required[PeerId]
 
 class CommsCommandPeerResponse(TypedDict, total=False):
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
-    result: NotRequired[Any]
+    result: NotRequired[CommsPeerResponseResult]
     status: Required[Literal['accepted', 'completed', 'failed']]
     to: Required[PeerId]
 
 CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
 
+# Canonical realm-local blob identifier.
+#
+# The identifier is content-addressed, but storage and GC semantics remain
+# realm-scoped.
+BlobId = str
+
+# One-time bootstrap proof exchanged between a mob supervisor and a
+# member runtime on initial bind.
+#
+# Transparent over the wire (`#[serde(transparent)]` — a bare JSON string),
+# but carries a redacting `Debug` impl and has no `Display` impl so the
+# raw secret cannot accidentally land in logs or panic messages. Treat it
+# like an API key: read `as_str()` only at the comms/transport boundary.
+BridgeBootstrapToken = str
+
+# A typed command sent from a supervisor to a member runtime.
+class BridgeCommandBindMember(TypedDict, total=False):
+    bootstrap_token: Required[BridgeBootstrapToken]
+    command: Required[Literal['bind_member']]
+    epoch: Required[int]
+    expected_address: Required[str]
+    expected_peer_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandAuthorizeSupervisor(TypedDict, total=False):
+    command: Required[Literal['authorize_supervisor']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandRevokeSupervisor(TypedDict, total=False):
+    command: Required[Literal['revoke_supervisor']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandDeliverMemberInput(TypedDict, total=False):
+    command: Required[Literal['deliver_member_input']]
+    content: Required[ContentInput]
+    epoch: Required[int]
+    handling_mode: Required[HandlingMode]
+    input_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandObserveMember(TypedDict, total=False):
+    command: Required[Literal['observe_member']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandInterruptMember(TypedDict, total=False):
+    command: Required[Literal['interrupt_member']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandHardCancelMember(TypedDict, total=False):
+    command: Required[Literal['hard_cancel_member']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    reason: Required[str]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandRetireMember(TypedDict, total=False):
+    command: Required[Literal['retire_member']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandDestroyMember(TypedDict, total=False):
+    command: Required[Literal['destroy_member']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandWireMember(TypedDict, total=False):
+    command: Required[Literal['wire_member']]
+    epoch: Required[int]
+    peer_spec: Required[BridgePeerSpec]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandUnwireMember(TypedDict, total=False):
+    command: Required[Literal['unwire_member']]
+    epoch: Required[int]
+    peer_spec: Required[BridgePeerSpec]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember
+
+# Outcome of a delivery attempt.
+class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
+    outcome: Required[Literal['accepted']]
+
+class BridgeDeliveryOutcomeDeduplicated(TypedDict, total=False):
+    existing_input_id: Required[str]
+    outcome: Required[Literal['deduplicated']]
+
+class BridgeDeliveryOutcomeRejected(TypedDict, total=False):
+    cause: Required[BridgeDeliveryRejectionCause]
+    outcome: Required[Literal['rejected']]
+    reason: Required[str]
+
+BridgeDeliveryOutcome = BridgeDeliveryOutcomeAccepted | BridgeDeliveryOutcomeDeduplicated | BridgeDeliveryOutcomeRejected
+
+# Typed vocabulary for why member input delivery was rejected.
+#
+# This mirrors the runtime accept-boundary rejection vocabulary at the
+# bridge wire boundary. Callers should branch on this typed cause and treat
+# the sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as
+# operator-facing presentation only.
+class BridgeDeliveryRejectionCauseNotReady(TypedDict, total=False):
+    kind: Required[Literal['not_ready']]
+    state: Required[BridgeMemberRuntimeState]
+
+class BridgeDeliveryRejectionCauseDurabilityViolation(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['durability_violation']]
+
+class BridgeDeliveryRejectionCausePeerHandlingModeInvalid(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['peer_handling_mode_invalid']]
+
+class BridgeDeliveryRejectionCauseInternal(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['internal']]
+
+BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal
+
+# Wire projection of a member's runtime state.
+BridgeMemberRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
+
+# Connectivity class observed for the bridged member runtime.
+BridgePeerConnectivity = Literal['reachable', 'unreachable', 'unknown']
+
+# A supported supervisor bridge wire protocol version.
+#
+# The JSON representation remains the historic integer so persisted records
+# and wire payloads do not change shape. Construction is intentionally routed
+# through this type so unsupported values fail at serde/TryFrom boundaries
+# instead of being carried deeper as raw integers.
+BridgeProtocolVersion = int
+
+# Typed vocabulary for why a bridge command was rejected.
+#
+# Callers branch on the typed `cause` to drive recovery logic; the
+# accompanying `reason` string is for operator diagnostics only and must
+# not be pattern-matched. Reserve `Internal` for true invariant
+# violations — ordinary validation failures get a specific cause.
+BridgeRejectionCause = Literal['not_bound', 'stale_supervisor', 'sender_mismatch', 'already_bound', 'invalid_bootstrap_token', 'unsupported_protocol_version', 'invalid_supervisor_spec', 'invalid_peer_spec', 'address_mismatch', 'unsupported', 'internal']
+
+# A typed reply from a member runtime back to the supervisor.
+class BridgeReplyBindMember(TypedDict, total=False):
+    address: Required[str]
+    capabilities: Required[BridgeCapabilities]
+    peer_id: Required[str]
+    result: Required[Literal['bind_member']]
+
+class BridgeReplyAck(TypedDict, total=False):
+    ok: Required[bool]
+    result: Required[Literal['ack']]
+
+class BridgeReplyObservation(TypedDict, total=False):
+    accepting_inputs: NotRequired[bool]
+    current_run_id: NotRequired[str]
+    last_error: NotRequired[str]
+    observed_at: Required[str]
+    peer_connectivity: NotRequired[BridgePeerConnectivity]
+    result: Required[Literal['observation']]
+    state: Required[BridgeMemberRuntimeState]
+
+class BridgeReplyDelivery(TypedDict, total=False):
+    canonical_input_id: NotRequired[str]
+    input_id: Required[str]
+    outcome: Required[BridgeDeliveryOutcome]
+    result: Required[Literal['delivery']]
+
+class BridgeReplyRetire(TypedDict, total=False):
+    inputs_abandoned: Required[int]
+    inputs_pending_drain: Required[int]
+    result: Required[Literal['retire']]
+
+class BridgeReplyDestroy(TypedDict, total=False):
+    inputs_abandoned: Required[int]
+    result: Required[Literal['destroy']]
+
+class BridgeReplyRejected(TypedDict, total=False):
+    cause: Required[BridgeRejectionCause]
+    reason: Required[str]
+    result: Required[Literal['rejected']]
+
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplyRejected
+
+# Comms/session-stream RPC contract for ContentBlock.
+class ContentBlockText(TypedDict, total=False):
+    text: Required[str]
+    type: Required[Literal['text']]
+
+class ContentBlockImage(TypedDict, total=False):
+    media_type: Required[str]
+    type: Required[Literal['image']]
+
+class ContentBlockVideo(TypedDict, total=False):
+    duration_ms: Required[int]
+    media_type: Required[str]
+    type: Required[Literal['video']]
+
+ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo
+
+# Input content that can be either a plain text string or multimodal content blocks.
+#
+# Deserializes from either `"text"` or `[{type: "text", text: "..."}, ...]`.
+# Provides `From<String>` and `From<&str>` for ergonomic construction.
+ContentInput = str | list[ContentBlock]
+
 # Request payload for `comms/send`.
 class CommsSendParamsInput(TypedDict, total=False):
     allow_self_session: NotRequired[bool]
-    blocks: NotRequired[list[dict[str, Any]]]
+    blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['input']]
     session_id: Required[str]
     source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
 
 class CommsSendParamsPeerMessage(TypedDict, total=False):
-    blocks: NotRequired[list[dict[str, Any]]]
+    blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     session_id: Required[str]
     to: Required[PeerId]
@@ -2451,24 +2805,24 @@ class CommsSendParamsPeerMessage(TypedDict, total=False):
 class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
     lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
-    params: NotRequired[Any]
+    params: Required[CommsPeerLifecycleParams]
     session_id: Required[str]
     to: Required[PeerId]
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
-    handling_mode: NotRequired[Literal['queue', 'steer']]
-    intent: Required[str]
+    handling_mode: NotRequired[HandlingMode]
+    intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
-    params: NotRequired[Any]
+    params: Required[CommsPeerRequestParams]
     session_id: Required[str]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
     to: Required[PeerId]
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
-    handling_mode: NotRequired[Literal['queue', 'steer']]
+    handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
-    result: NotRequired[Any]
+    result: NotRequired[CommsPeerResponseResult]
     session_id: Required[str]
     status: Required[Literal['accepted', 'completed', 'failed']]
     to: Required[PeerId]
@@ -2503,6 +2857,30 @@ class CommsSendResultPeerResponseSent(TypedDict, total=False):
     kind: Required[Literal['peer_response_sent']]
 
 CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent
+
+# Closed public request-intent contract for `peer_request`.
+#
+# Unknown strings fail during deserialization and cannot fall through to a
+# local match/default path.
+CommsPeerRequestIntent = Literal['supervisor.bridge']
+
+# Typed params for public `peer_request`.
+CommsPeerRequestParams = BridgeCommand
+
+# Typed result payload for public `peer_response`.
+#
+# Compatibility JSON is intentionally not accepted here. Callers that include
+# a `result` field must provide a typed bridge reply shape.
+CommsPeerResponseResult = BridgeReply
+
+# Handling mode for ordinary content-bearing work.
+#
+# `Queue` means outer-loop / next-turn handling and leaves the current run
+# untouched.
+# `Steer` means inner-loop handling and requests injection at the earliest
+# admissible cooperative boundary, while remaining ordinary work rather than
+# an out-of-band control-plane command.
+HandlingMode = Literal['queue', 'steer']
 
 # Canonical runtime identity for a peer.
 #

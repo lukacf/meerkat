@@ -520,7 +520,7 @@
           "FILE:@@//meerkat-openai/Cargo.toml 2642f3e4e48ededbd8534d30647fd940122c2d2e8f6c9e7fd7cd9a7d70e7383f",
           "FILE:@@//meerkat-runtime/Cargo.toml 8c3082b5c41848af6fa9496d9ca0d6dc75e6611d582699665b1e5ef40682e0f1",
           "FILE:@@//meerkat-store/Cargo.toml 2b3ae27974a8243443112bccae1a6b52e0e5cebfca95d11e029eb73a10482b2c",
-          "FILE:@@//meerkat-comms/Cargo.toml 7ff33a4e2e7700ef397dafaabbbbefd9d6862230013c7bd37fc0f1547ed78335",
+          "FILE:@@//meerkat-comms/Cargo.toml 9ae0ef50327bfd40d174bf6a3a539a835fc848b48f929a53f91ba6ed050f1510",
           "FILE:@@//meerkat-skills/Cargo.toml 80618ea6ddae2652e347da4d7f05f65a747b785cb52ef7ecbbc89cb7806424ca",
           "FILE:@@//meerkat-machine-kernels/Cargo.toml bcf1cc9902cf476fcc927e8447afa702e855ae5506f6b104be812d3bc05ec18d",
           "FILE:@@//meerkat-providers/Cargo.toml 915dd74bf31a725925a9866f771c48d51593d9dd720fb67ce41b6b4b8bce3783",

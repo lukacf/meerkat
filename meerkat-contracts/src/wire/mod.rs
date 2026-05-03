@@ -28,10 +28,12 @@ pub use approval::{
     ApprovalRequestParams, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
 };
 pub use comms::{
-    CommsCommandError, CommsCommandRequest, CommsPeerEntry, CommsPeersParams, CommsPeersResult,
-    CommsSendParams, CommsSendResult, HandlingMode as WireCommsHandlingMode,
-    InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode, PeerAddress,
-    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    CommsCommandError, CommsCommandProjectionError, CommsCommandRequest, CommsPeerEntry,
+    CommsPeerLifecycleParams, CommsPeerRequestIntent, CommsPeerRequestParams,
+    CommsPeerResponseResult, CommsPeersParams, CommsPeersResult, CommsSendParams, CommsSendResult,
+    HandlingMode as WireCommsHandlingMode, InputSource as WireCommsInputSource,
+    InputStreamMode as WireCommsInputStreamMode, PeerAddress, PeerCapabilitySet,
+    PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerReachability, PeerReachabilityReason, PeerSendability,
     PeerTransport, ResponseStatus as WireCommsResponseStatus,
 };

@@ -190,8 +190,9 @@ pub fn canonicalize_bridge_address(address: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// A typed command sent from a supervisor to a member runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum BridgeCommand {
     BindMember(BridgeBindPayload),
@@ -270,8 +271,9 @@ pub fn decode_bridge_command(
 // ---------------------------------------------------------------------------
 
 /// A typed reply from a member runtime back to the supervisor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum BridgeReply {
     BindMember(BridgeBindResponse),
@@ -368,6 +370,7 @@ pub fn decode_bridge_rejection_reply(
 /// accompanying `reason` string is for operator diagnostics only and must
 /// not be pattern-matched. Reserve `Internal` for true invariant
 /// violations — ordinary validation failures get a specific cause.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -404,6 +407,7 @@ pub enum BridgeRejectionCause {
 /// variant — not a decision for downstream helpers to make by pattern
 /// matching on a hardcoded cause set. Callers branch on the class to
 /// decide whether recovery by re-running `BindMember` is appropriate.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -442,6 +446,7 @@ impl BridgeRejectionCause {
 // ---------------------------------------------------------------------------
 
 /// Wire projection of a member's runtime state.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -482,7 +487,9 @@ impl std::fmt::Display for BridgeMemberRuntimeState {
 /// UUID, while raw Ed25519 public key material is carried only in `pubkey`.
 /// The typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the
 /// receiving side.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgePeerSpec {
     pub name: String,
     pub peer_id: String,
@@ -555,6 +562,7 @@ impl BridgePeerIdentity {
 }
 
 /// Connectivity class observed for the bridged member runtime.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -627,7 +635,9 @@ fn parse_peer_address(raw: &str) -> Result<PeerAddress, String> {
 // ---------------------------------------------------------------------------
 
 /// Supervisor authority credentials included in every bridge command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeSupervisorPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -640,7 +650,9 @@ pub struct BridgeSupervisorPayload {
 /// intentionally separate so supervisors cannot accidentally collapse boundary
 /// cancellation and immediate user/session interrupt authority onto one wire
 /// command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeHardCancelPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -710,7 +722,9 @@ impl std::fmt::Debug for BridgeBootstrapToken {
 // comms layer.
 
 /// Bind a remote runtime to this supervisor.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeBindPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -722,7 +736,9 @@ pub struct BridgeBindPayload {
 }
 
 /// Capabilities advertised by a member runtime on bind.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeCapabilities {
     /// Protocol version implemented by the responding member runtime.
     #[serde(default = "supervisor_bridge_current_protocol_version")]
@@ -774,7 +790,9 @@ impl Default for BridgeCapabilities {
 // ---------------------------------------------------------------------------
 
 /// Response to a bind command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeBindResponse {
     /// Canonical member `PeerId`; transport public-key bytes stay out of this field.
     pub peer_id: String,
@@ -783,13 +801,17 @@ pub struct BridgeBindResponse {
 }
 
 /// Simple acknowledgment.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeAck {
     pub ok: bool,
 }
 
 /// Deliver one logical input to a member.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeDeliveryPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -800,8 +822,9 @@ pub struct BridgeDeliveryPayload {
 }
 
 /// Outcome of a delivery attempt.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BridgeDeliveryOutcome {
     Accepted,
     Deduplicated {
@@ -819,8 +842,9 @@ pub enum BridgeDeliveryOutcome {
 /// bridge wire boundary. Callers should branch on this typed cause and treat
 /// the sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as
 /// operator-facing presentation only.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum BridgeDeliveryRejectionCause {
     /// Runtime was not in a state that accepts input.
@@ -849,7 +873,9 @@ impl std::fmt::Display for BridgeDeliveryRejectionCause {
 }
 
 /// Full response to a delivery command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeDeliveryResponse {
     pub input_id: String,
     pub canonical_input_id: Option<String>,
@@ -857,7 +883,9 @@ pub struct BridgeDeliveryResponse {
 }
 
 /// Peer wiring command payload.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgePeerWiringPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
@@ -866,20 +894,26 @@ pub struct BridgePeerWiringPayload {
 }
 
 /// Response to a retire command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeRetireResponse {
     pub inputs_abandoned: usize,
     pub inputs_pending_drain: usize,
 }
 
 /// Response to a destroy command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeDestroyResponse {
     pub inputs_abandoned: usize,
 }
 
 /// Response to an observe command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeObservationResponse {
     /// Bridged runtime state for the observed member.
     pub state: BridgeMemberRuntimeState,
@@ -1003,6 +1037,38 @@ mod tests {
         assert_eq!(
             value, reencoded,
             "BridgeCommand round-trip must preserve wire shape"
+        );
+    }
+
+    #[test]
+    fn bridge_command_unknown_top_level_field_fails_closed() {
+        let mut value =
+            serde_json::to_value(BridgeCommand::ObserveMember(sample_supervisor_payload()))
+                .expect("serialize command");
+        value["extra_behavior"] = json!(true);
+
+        let err = serde_json::from_value::<BridgeCommand>(value)
+            .expect_err("unknown command fields must fail at serde boundary");
+        let message = err.to_string();
+        assert!(
+            message.contains("extra_behavior") || message.contains("unknown field"),
+            "expected unknown field error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn bridge_command_unknown_nested_payload_field_fails_closed() {
+        let mut value =
+            serde_json::to_value(BridgeCommand::ObserveMember(sample_supervisor_payload()))
+                .expect("serialize command");
+        value["supervisor"]["extra_behavior"] = json!(true);
+
+        let err = serde_json::from_value::<BridgeCommand>(value)
+            .expect_err("unknown nested payload fields must fail at serde boundary");
+        let message = err.to_string();
+        assert!(
+            message.contains("extra_behavior") || message.contains("unknown field"),
+            "expected unknown field error, got: {message}"
         );
     }
 
@@ -1532,6 +1598,21 @@ mod tests {
         let value = serde_json::to_value(&reply).expect("serialize reply");
         assert_eq!(value, expected, "reply wire shape must be stable");
         let _decoded: BridgeReply = serde_json::from_value(value).expect("decode reply");
+    }
+
+    #[test]
+    fn bridge_reply_unknown_field_fails_closed() {
+        let err = serde_json::from_value::<BridgeReply>(json!({
+            "result": "ack",
+            "ok": true,
+            "extra_behavior": true,
+        }))
+        .expect_err("unknown reply fields must fail at serde boundary");
+        let message = err.to_string();
+        assert!(
+            message.contains("extra_behavior") || message.contains("unknown field"),
+            "expected unknown field error, got: {message}"
+        );
     }
 
     #[test]

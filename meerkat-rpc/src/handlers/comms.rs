@@ -163,9 +163,10 @@ pub async fn handle_peers(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_contracts::CommsCommandRequest;
     use meerkat_core::comms::{
-        CommsCommandRequest, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-        PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerSendability, PeerTransport,
+        PeerAddress, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+        PeerReachability, PeerSendability, PeerTransport,
     };
 
     #[test]
@@ -186,6 +187,33 @@ mod tests {
         assert!(
             err.to_string().contains("foobar") || err.to_string().contains("variant"),
             "expected unknown-variant serde error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_peer_request_unknown_intent_fails_at_serde_boundary() {
+        let json = format!(
+            r#"{{"session_id":"sid_1","kind":"peer_request","to":"{}","intent":"not.generated","params":{{}}}}"#,
+            uuid::Uuid::new_v4()
+        );
+        let err = serde_json::from_str::<CommsSendParams>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("not.generated") || err.to_string().contains("variant"),
+            "expected unknown-intent serde error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_peer_response_malformed_result_fails_at_serde_boundary() {
+        let json = format!(
+            r#"{{"session_id":"sid_1","kind":"peer_response","to":"{}","in_reply_to":"{}","status":"completed","result":{{"result":"ack","ok":"yes"}}}}"#,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        );
+        let err = serde_json::from_str::<CommsSendParams>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("ok") || err.to_string().contains("invalid type"),
+            "expected typed-result serde error, got: {err}"
         );
     }
 

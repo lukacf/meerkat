@@ -55,10 +55,10 @@ use meerkat::{
     schedule_tools_list,
 };
 use meerkat_contracts::{
-    ErrorCode, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
-    RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult, SessionLocator, SkillsParams,
-    WireError, format_session_ref,
+    CommsSendParams, CommsSendResult, ErrorCode, RealtimeCapabilitiesParams,
+    RealtimeCapabilitiesResult, RealtimeOpenInfo, RealtimeOpenRequest, RealtimeStatusParams,
+    RealtimeStatusResult, RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult,
+    SessionLocator, SkillsParams, WireError, format_session_ref,
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{
@@ -2574,31 +2574,7 @@ async fn mob_member_respawn(
 }
 
 /// Canonical comms send request body.
-///
-/// `command` carries the typed [`meerkat_core::comms::CommsCommandRequest`]
-/// enum (serde-tagged on `kind`). Wire shape is flat:
-/// `{"session_id": "...", "kind": "...", ...}`.
-#[derive(Debug, Deserialize)]
-pub struct CommsSendRequest {
-    pub session_id: String,
-    #[serde(flatten)]
-    pub command: meerkat_core::comms::CommsCommandRequest,
-}
-
-impl CommsSendRequest {
-    /// Recipient peer id for error normalization, if the command targets one.
-    ///
-    fn peer_label(&self) -> Option<String> {
-        use meerkat_core::comms::CommsCommandRequest;
-        match &self.command {
-            CommsCommandRequest::Input { .. } => None,
-            CommsCommandRequest::PeerMessage { to, .. }
-            | CommsCommandRequest::PeerLifecycle { to, .. }
-            | CommsCommandRequest::PeerRequest { to, .. }
-            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.to_string()),
-        }
-    }
-}
+pub type CommsSendRequest = CommsSendParams;
 
 /// Canonical comms peers request body.
 #[derive(Debug, Deserialize)]
@@ -2613,9 +2589,9 @@ fn is_transport_internal(message: &str) -> bool {
 /// POST /comms/send — dispatch a canonical comms command.
 async fn comms_send(
     State(state): State<AppState>,
-    Json(req): Json<CommsSendRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    Json(req): Json<CommsSendParams>,
+) -> Result<Json<CommsSendResult>, ApiError> {
+    let session_id = resolve_session_id_for_state(req.session_id(), &state)?;
 
     let comms = state
         .session_service
@@ -2629,56 +2605,13 @@ async fn comms_send(
 
     let peer_name = req.peer_label();
     let cmd = req
-        .command
+        .into_command()
         .into_command(&session_id)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     match comms.send(cmd).await {
-        Ok(receipt) => Ok(Json(comms_send_receipt_json(receipt))),
+        Ok(receipt) => Ok(Json(CommsSendResult::from(receipt))),
         Err(e) => Err(normalize_rest_comms_send_error(peer_name.as_deref(), &e)),
-    }
-}
-
-fn comms_send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value {
-    use meerkat_core::comms::SendReceipt;
-
-    match receipt {
-        SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "kind": "input_accepted",
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
-            "kind": "peer_message_sent",
-            "envelope_id": envelope_id.to_string(),
-            "acked": acked,
-        }),
-        SendReceipt::PeerLifecycleSent { envelope_id } => json!({
-            "kind": "peer_lifecycle_sent",
-            "envelope_id": envelope_id.to_string(),
-        }),
-        SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "kind": "peer_request_sent",
-            "envelope_id": envelope_id.to_string(),
-            "interaction_id": interaction_id.0.to_string(),
-            "request_id": envelope_id.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => json!({
-            "kind": "peer_response_sent",
-            "envelope_id": envelope_id.to_string(),
-            "in_reply_to": in_reply_to.0.to_string(),
-        }),
     }
 }
 
@@ -8151,15 +8084,18 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_comms_send_receipt_json_peer_request_uses_envelope_id_as_request_id() {
+    fn test_rest_comms_send_result_uses_contract_peer_request_projection() {
         let envelope_id = uuid::Uuid::new_v4();
         let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
 
-        let payload = comms_send_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved: true,
-        });
+        let payload = serde_json::to_value(CommsSendResult::from(
+            meerkat_core::comms::SendReceipt::PeerRequestSent {
+                envelope_id,
+                interaction_id,
+                stream_reserved: true,
+            },
+        ))
+        .unwrap();
 
         assert_eq!(
             payload["request_id"],
@@ -9416,12 +9352,15 @@ mod tests {
 
     #[test]
     fn test_comms_send_request_peer_request_invalid_stream_rejected_at_serde() {
-        let json = format!(
-            r#"{{"session_id":"sid_123","kind":"peer_request","to":"{}","intent":"ask","stream":"invalid"}}"#,
-            uuid::Uuid::new_v4()
-        );
-        let err = serde_json::from_str::<CommsSendRequest>(&json)
-            .expect_err("invalid stream must fail deserialization");
+        let err = serde_json::from_value::<CommsSendRequest>(json!({
+            "session_id": "sid_123",
+            "kind": "peer_request",
+            "to": uuid::Uuid::new_v4().to_string(),
+            "intent": "supervisor.bridge",
+            "params": rest_supervisor_bridge_params(),
+            "stream": "invalid"
+        }))
+        .expect_err("invalid stream must fail deserialization");
         assert!(
             err.to_string().contains("stream") || err.to_string().contains("invalid"),
             "expected serde error mentioning stream, got: {err}"
@@ -9452,6 +9391,87 @@ mod tests {
             err.to_string().contains("source") || err.to_string().contains("webhookd"),
             "expected serde error mentioning source, got: {err}"
         );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_rest_comms_send_request_unknown_intent_fails_closed() {
+        let err = serde_json::from_value::<CommsSendRequest>(json!({
+            "session_id": "sid_123",
+            "kind": "peer_request",
+            "to": uuid::Uuid::new_v4().to_string(),
+            "intent": "local.default",
+            "params": rest_supervisor_bridge_params()
+        }))
+        .expect_err("unknown intent must fail before REST can dispatch");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("local.default") || message.contains("variant"),
+            "expected unknown intent error, got: {message}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_rest_comms_send_request_malformed_params_fails_closed() {
+        let mut params = rest_supervisor_bridge_params();
+        params["extra_behavior"] = json!(true);
+
+        let err = serde_json::from_value::<CommsSendRequest>(json!({
+            "session_id": "sid_123",
+            "kind": "peer_request",
+            "to": uuid::Uuid::new_v4().to_string(),
+            "intent": "supervisor.bridge",
+            "params": params
+        }))
+        .expect_err("malformed bridge params must fail before REST can dispatch");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("extra_behavior") || message.contains("unknown field"),
+            "expected unknown params field error, got: {message}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_rest_comms_send_request_malformed_result_fails_closed() {
+        let err = serde_json::from_value::<CommsSendRequest>(json!({
+            "session_id": "sid_123",
+            "kind": "peer_response",
+            "to": uuid::Uuid::new_v4().to_string(),
+            "in_reply_to": uuid::Uuid::new_v4().to_string(),
+            "status": "completed",
+            "result": {
+                "result": "ack",
+                "ok": true,
+                "extra_behavior": true
+            }
+        }))
+        .expect_err("malformed bridge result must fail before REST can dispatch");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("extra_behavior") || message.contains("unknown field"),
+            "expected unknown result field error, got: {message}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    fn rest_supervisor_bridge_params() -> Value {
+        let pubkey = [7u8; 32];
+        json!({
+            "command": "observe_member",
+            "supervisor": {
+                "name": "supervisor",
+                "peer_id": meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+                "address": "inproc://supervisor",
+                "pubkey": pubkey,
+            },
+            "epoch": 1,
+            "protocol_version": 2,
+        })
     }
 
     #[cfg(not(feature = "comms"))]

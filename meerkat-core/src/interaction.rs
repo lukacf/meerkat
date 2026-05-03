@@ -171,9 +171,9 @@ impl SendResponseCallProjection {
 
     /// A concrete, schema-valid example argument object for a completed reply.
     ///
-    /// The model may replace `status` with `"failed"` and replace `result`
-    /// with a task-specific JSON payload, but the object shape itself is the
-    /// same shape accepted by the MCP `send_response` input schema.
+    /// The model may replace `status` with `"failed"`. Public result payloads
+    /// are typed by the comms contract, so the generic projection omits a
+    /// result body instead of advertising arbitrary JSON.
     pub fn completed_example_args(&self) -> Value {
         let mut args = serde_json::Map::new();
         args.insert(
@@ -194,7 +194,6 @@ impl SendResponseCallProjection {
             Self::STATUS_FIELD.to_string(),
             Value::String("completed".to_string()),
         );
-        args.insert(Self::RESULT_FIELD.to_string(), serde_json::json!({}));
         Value::Object(args)
     }
 
@@ -202,7 +201,7 @@ impl SendResponseCallProjection {
         let args = serde_json::to_string(&self.completed_example_args())
             .unwrap_or_else(|_| "{}".to_string());
         format!(
-            "Reply with {} with arguments {args}. Use status=\"failed\" instead of \"completed\" when the request cannot be fulfilled, and replace result with the JSON payload.",
+            "Reply with {} with arguments {args}. Use status=\"failed\" instead of \"completed\" when the request cannot be fulfilled, and include result only when the request contract provides a typed result payload.",
             Self::TOOL_NAME
         )
     }

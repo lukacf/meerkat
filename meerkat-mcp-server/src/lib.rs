@@ -1095,15 +1095,7 @@ pub struct MeerkatCommsPeersInput {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MeerkatCommsSendInput {
-    pub session_id: String,
-    /// Typed comms command — serde-tagged on `kind`. Invalid discriminators
-    /// (`source`, `stream`, `handling_mode`, `status`) become deserialization
-    /// errors here, never reach runtime.
-    #[serde(flatten)]
-    pub command: meerkat_core::comms::CommsCommandRequest,
-}
+pub type MeerkatCommsSendInput = meerkat_contracts::CommsSendParams;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BudgetLimitsInput {
@@ -2613,45 +2605,10 @@ async fn handle_meerkat_mob_event_stream_close(
 }
 
 #[cfg(feature = "comms")]
-fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value {
-    match receipt {
-        meerkat_core::comms::SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "kind": "input_accepted",
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
-            "kind": "peer_message_sent",
-            "envelope_id": envelope_id.to_string(),
-            "acked": acked,
-        }),
-        meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => json!({
-            "kind": "peer_lifecycle_sent",
-            "envelope_id": envelope_id.to_string(),
-        }),
-        meerkat_core::comms::SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "kind": "peer_request_sent",
-            "envelope_id": envelope_id.to_string(),
-            "interaction_id": interaction_id.0.to_string(),
-            "request_id": envelope_id.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        meerkat_core::comms::SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => json!({
-            "kind": "peer_response_sent",
-            "envelope_id": envelope_id.to_string(),
-            "in_reply_to": in_reply_to.0.to_string(),
-        }),
-    }
+fn comms_send_tool_payload(receipt: meerkat_core::comms::SendReceipt) -> Value {
+    wrap_tool_payload(json!({
+        "receipt": meerkat_contracts::CommsSendResult::from(receipt),
+    }))
 }
 
 #[cfg(feature = "comms")]
@@ -2659,7 +2616,7 @@ async fn handle_meerkat_comms_send(
     state: &MeerkatMcpState,
     input: MeerkatCommsSendInput,
 ) -> Result<Value, ToolCallError> {
-    let session_id = meerkat::SessionId::parse(&input.session_id)
+    let session_id = meerkat::SessionId::parse(input.session_id())
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
     let comms = state
         .service
@@ -2675,30 +2632,25 @@ async fn handle_meerkat_comms_send(
                 })),
             )
         })?;
-    let peer_name: Option<String> = match &input.command {
-        meerkat_core::comms::CommsCommandRequest::Input { .. } => None,
-        meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerLifecycle { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
-        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
-    };
-    let cmd = input.command.into_command(&session_id).map_err(|err| {
-        ToolCallError::new(
-            -32602,
-            "Invalid comms command",
-            Some(json!({
-                "code": "invalid_comms_command",
-                "message": err.to_string(),
-            })),
-        )
-    })?;
+    let peer_name = input.peer_label();
+    let cmd = input
+        .into_command()
+        .into_command(&session_id)
+        .map_err(|err| {
+            ToolCallError::new(
+                -32602,
+                "Invalid comms command",
+                Some(json!({
+                    "code": "invalid_comms_command",
+                    "message": err.to_string(),
+                })),
+            )
+        })?;
     let receipt = comms
         .send(cmd)
         .await
         .map_err(|e| normalize_mcp_comms_send_error(peer_name.as_deref(), &e))?;
-    Ok(wrap_tool_payload(
-        json!({ "receipt": build_comms_receipt_json(receipt) }),
-    ))
+    Ok(comms_send_tool_payload(receipt))
 }
 
 #[cfg(feature = "comms")]
@@ -3987,7 +3939,7 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_build_comms_receipt_json_peer_request_uses_envelope_id_as_request_id() {
+    fn test_comms_send_tool_payload_uses_typed_comms_result_contract() {
         let envelope_id = "550e8400-e29b-41d4-a716-446655440000"
             .parse()
             .expect("valid envelope uuid");
@@ -3997,18 +3949,21 @@ mod tests {
                 .expect("valid interaction uuid"),
         );
 
-        let payload = build_comms_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
+        let wrapped = comms_send_tool_payload(meerkat_core::comms::SendReceipt::PeerRequestSent {
             envelope_id,
             interaction_id,
             stream_reserved: true,
         });
+        let payload = unwrap_payload(wrapped);
+        let receipt = &payload["receipt"];
 
+        assert_eq!(receipt["kind"], serde_json::json!("peer_request_sent"));
         assert_eq!(
-            payload["request_id"],
+            receipt["request_id"],
             serde_json::json!(envelope_id.to_string())
         );
         assert_eq!(
-            payload["interaction_id"],
+            receipt["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
         );
     }
@@ -6277,7 +6232,7 @@ mod tests {
         let err = serde_json::from_value::<MeerkatCommsSendInput>(json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef",
             "kind": "peer_message",
-            "to": "alice",
+            "to": "550e8400-e29b-41d4-a716-446655440000",
             "body": "hi",
             "handling_mode": "invalid"
         }))
@@ -6285,6 +6240,44 @@ mod tests {
         assert!(
             err.to_string().contains("handling_mode") || err.to_string().contains("invalid"),
             "expected serde error mentioning handling_mode, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_send_input_unknown_intent_rejected_at_serde_boundary() {
+        let err = serde_json::from_value::<MeerkatCommsSendInput>(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "peer_request",
+            "to": "550e8400-e29b-41d4-a716-446655440000",
+            "intent": "not.generated",
+            "params": {}
+        }))
+        .expect_err("unknown comms intent must fail deserialization");
+        assert!(
+            err.to_string().contains("not.generated") || err.to_string().contains("variant"),
+            "expected serde error mentioning the unknown intent, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_send_input_malformed_result_rejected_at_serde_boundary() {
+        let err = serde_json::from_value::<MeerkatCommsSendInput>(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "peer_response",
+            "to": "550e8400-e29b-41d4-a716-446655440000",
+            "in_reply_to": "550e8400-e29b-41d4-a716-446655440001",
+            "status": "completed",
+            "result": {
+                "result": "ack",
+                "ok": "yes"
+            }
+        }))
+        .expect_err("malformed typed comms result must fail deserialization");
+        assert!(
+            err.to_string().contains("ok") || err.to_string().contains("invalid type"),
+            "expected serde error mentioning malformed result, got: {err}"
         );
     }
 }

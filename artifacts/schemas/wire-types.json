@@ -1,9 +1,384 @@
 {
-  "CommsCommandRequest": {
+  "BridgeAck": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Simple acknowledgment.",
+    "properties": {
+      "ok": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "ok"
+    ],
+    "title": "BridgeAck",
+    "type": "object"
+  },
+  "BridgeBindPayload": {
+    "$defs": {
+      "BridgeBootstrapToken": {
+        "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+        "type": "string"
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bind a remote runtime to this supervisor.",
+    "properties": {
+      "bootstrap_token": {
+        "$ref": "#/$defs/BridgeBootstrapToken"
+      },
+      "epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "expected_address": {
+        "type": "string"
+      },
+      "expected_peer_id": {
+        "description": "Expected canonical member `PeerId`; not an Ed25519 public-key string.",
+        "type": "string"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "supervisor": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      }
+    },
+    "required": [
+      "supervisor",
+      "epoch",
+      "protocol_version",
+      "expected_peer_id",
+      "expected_address",
+      "bootstrap_token"
+    ],
+    "title": "BridgeBindPayload",
+    "type": "object"
+  },
+  "BridgeBindResponse": {
+    "$defs": {
+      "BridgeCapabilities": {
+        "additionalProperties": false,
+        "description": "Capabilities advertised by a member runtime on bind.",
+        "properties": {
+          "current_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version implemented by the responding member runtime."
+          },
+          "default_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version new supervisors should use for fresh authority records."
+          },
+          "deliver_member_input": {
+            "default": false,
+            "type": "boolean"
+          },
+          "destroy_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hard_cancel_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "interrupt_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "observe_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "retire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supported_protocol_versions": {
+            "default": [
+              2
+            ],
+            "description": "Protocol versions accepted by the responding member runtime.",
+            "items": {
+              "$ref": "#/$defs/BridgeProtocolVersion"
+            },
+            "type": "array"
+          },
+          "unwire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "wire_member": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Response to a bind command.",
+    "properties": {
+      "address": {
+        "type": "string"
+      },
+      "capabilities": {
+        "$ref": "#/$defs/BridgeCapabilities"
+      },
+      "peer_id": {
+        "description": "Canonical member `PeerId`; transport public-key bytes stay out of this field.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "address",
+      "capabilities"
+    ],
+    "title": "BridgeBindResponse",
+    "type": "object"
+  },
+  "BridgeBootstrapToken": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+    "title": "BridgeBootstrapToken",
+    "type": "string"
+  },
+  "BridgeCapabilities": {
+    "$defs": {
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Capabilities advertised by a member runtime on bind.",
+    "properties": {
+      "current_protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion",
+        "default": 2,
+        "description": "Protocol version implemented by the responding member runtime."
+      },
+      "default_protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion",
+        "default": 2,
+        "description": "Protocol version new supervisors should use for fresh authority records."
+      },
+      "deliver_member_input": {
+        "default": false,
+        "type": "boolean"
+      },
+      "destroy_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "hard_cancel_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "interrupt_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "observe_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "retire_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "supported_protocol_versions": {
+        "default": [
+          2
+        ],
+        "description": "Protocol versions accepted by the responding member runtime.",
+        "items": {
+          "$ref": "#/$defs/BridgeProtocolVersion"
+        },
+        "type": "array"
+      },
+      "unwire_member": {
+        "default": false,
+        "type": "boolean"
+      },
+      "wire_member": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "title": "BridgeCapabilities",
+    "type": "object"
+  },
+  "BridgeCommand": {
     "$defs": {
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
+      },
+      "BridgeBootstrapToken": {
+        "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+        "type": "string"
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
       },
       "ContentBlock": {
         "oneOf": [
@@ -124,6 +499,3217 @@
           }
         ]
       },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A typed command sent from a supervisor to a member runtime.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Bind a remote runtime to this supervisor.",
+        "properties": {
+          "bootstrap_token": {
+            "$ref": "#/$defs/BridgeBootstrapToken"
+          },
+          "command": {
+            "const": "bind_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_address": {
+            "type": "string"
+          },
+          "expected_peer_id": {
+            "description": "Expected canonical member `PeerId`; not an Ed25519 public-key string.",
+            "type": "string"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "expected_peer_id",
+          "expected_address",
+          "bootstrap_token"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "authorize_supervisor",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "revoke_supervisor",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Deliver one logical input to a member.",
+        "properties": {
+          "command": {
+            "const": "deliver_member_input",
+            "type": "string"
+          },
+          "content": {
+            "$ref": "#/$defs/ContentInput"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "handling_mode": {
+            "$ref": "#/$defs/HandlingMode"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "input_id",
+          "content",
+          "handling_mode"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "observe_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "interrupt_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Explicit hard-cancel command payload.\n\n`InterruptMember` is the cooperative boundary-break path. This payload is\nintentionally separate so supervisors cannot accidentally collapse boundary\ncancellation and immediate user/session interrupt authority onto one wire\ncommand.",
+        "properties": {
+          "command": {
+            "const": "hard_cancel_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "retire_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Supervisor authority credentials included in every bridge command.",
+        "properties": {
+          "command": {
+            "const": "destroy_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Peer wiring command payload.",
+        "properties": {
+          "command": {
+            "const": "wire_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "peer_spec": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "peer_spec"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Peer wiring command payload.",
+        "properties": {
+          "command": {
+            "const": "unwire_member",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "peer_spec": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "peer_spec"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeCommand"
+  },
+  "BridgeDeliveryOutcome": {
+    "$defs": {
+      "BridgeDeliveryRejectionCause": {
+        "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Runtime was not in a state that accepts input.",
+            "properties": {
+              "kind": {
+                "const": "not_ready",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState"
+              }
+            },
+            "required": [
+              "kind",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Input failed durability validation.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "durability_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer input carried a forbidden handling mode.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "peer_handling_mode_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The bridge could not map the rejection to a known typed cause.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "internal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Outcome of a delivery attempt.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "const": "accepted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "existing_input_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "const": "deduplicated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "existing_input_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeDeliveryRejectionCause"
+          },
+          "outcome": {
+            "const": "rejected",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeDeliveryOutcome"
+  },
+  "BridgeDeliveryPayload": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Deliver one logical input to a member.",
+    "properties": {
+      "content": {
+        "$ref": "#/$defs/ContentInput"
+      },
+      "epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "handling_mode": {
+        "$ref": "#/$defs/HandlingMode"
+      },
+      "input_id": {
+        "type": "string"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "supervisor": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      }
+    },
+    "required": [
+      "supervisor",
+      "epoch",
+      "protocol_version",
+      "input_id",
+      "content",
+      "handling_mode"
+    ],
+    "title": "BridgeDeliveryPayload",
+    "type": "object"
+  },
+  "BridgeDeliveryRejectionCause": {
+    "$defs": {
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Runtime was not in a state that accepts input.",
+        "properties": {
+          "kind": {
+            "const": "not_ready",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/BridgeMemberRuntimeState"
+          }
+        },
+        "required": [
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Input failed durability validation.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "durability_violation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Peer input carried a forbidden handling mode.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_handling_mode_invalid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The bridge could not map the rejection to a known typed cause.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "internal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeDeliveryRejectionCause"
+  },
+  "BridgeDeliveryResponse": {
+    "$defs": {
+      "BridgeDeliveryOutcome": {
+        "description": "Outcome of a delivery attempt.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "accepted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "existing_input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "deduplicated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "existing_input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeDeliveryRejectionCause"
+              },
+              "outcome": {
+                "const": "rejected",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeDeliveryRejectionCause": {
+        "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Runtime was not in a state that accepts input.",
+            "properties": {
+              "kind": {
+                "const": "not_ready",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState"
+              }
+            },
+            "required": [
+              "kind",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Input failed durability validation.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "durability_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer input carried a forbidden handling mode.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "peer_handling_mode_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The bridge could not map the rejection to a known typed cause.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "internal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Full response to a delivery command.",
+    "properties": {
+      "canonical_input_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "input_id": {
+        "type": "string"
+      },
+      "outcome": {
+        "$ref": "#/$defs/BridgeDeliveryOutcome"
+      }
+    },
+    "required": [
+      "input_id",
+      "outcome"
+    ],
+    "title": "BridgeDeliveryResponse",
+    "type": "object"
+  },
+  "BridgeDestroyResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Response to a destroy command.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned"
+    ],
+    "title": "BridgeDestroyResponse",
+    "type": "object"
+  },
+  "BridgeHardCancelPayload": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Explicit hard-cancel command payload.\n\n`InterruptMember` is the cooperative boundary-break path. This payload is\nintentionally separate so supervisors cannot accidentally collapse boundary\ncancellation and immediate user/session interrupt authority onto one wire\ncommand.",
+    "properties": {
+      "epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "reason": {
+        "type": "string"
+      },
+      "supervisor": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      }
+    },
+    "required": [
+      "supervisor",
+      "epoch",
+      "protocol_version",
+      "reason"
+    ],
+    "title": "BridgeHardCancelPayload",
+    "type": "object"
+  },
+  "BridgeMemberRuntimeState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of a member's runtime state.",
+    "enum": [
+      "initializing",
+      "idle",
+      "attached",
+      "running",
+      "retired",
+      "stopped",
+      "destroyed"
+    ],
+    "title": "BridgeMemberRuntimeState",
+    "type": "string"
+  },
+  "BridgeObservationResponse": {
+    "$defs": {
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      },
+      "BridgePeerConnectivity": {
+        "description": "Connectivity class observed for the bridged member runtime.",
+        "enum": [
+          "reachable",
+          "unreachable",
+          "unknown"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Response to an observe command.",
+    "properties": {
+      "accepting_inputs": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "current_run_id": {
+        "description": "Current run identifier reported by the member runtime.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "last_error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "observed_at": {
+        "description": "ISO 8601 timestamp.",
+        "type": "string"
+      },
+      "peer_connectivity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgePeerConnectivity"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "state": {
+        "$ref": "#/$defs/BridgeMemberRuntimeState",
+        "description": "Bridged runtime state for the observed member."
+      }
+    },
+    "required": [
+      "state",
+      "observed_at"
+    ],
+    "title": "BridgeObservationResponse",
+    "type": "object"
+  },
+  "BridgePeerConnectivity": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Connectivity class observed for the bridged member runtime.",
+    "enum": [
+      "reachable",
+      "unreachable",
+      "unknown"
+    ],
+    "title": "BridgePeerConnectivity",
+    "type": "string"
+  },
+  "BridgePeerSpec": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+    "properties": {
+      "address": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "peer_id": {
+        "type": "string"
+      },
+      "pubkey": {
+        "default": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 32,
+        "minItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "name",
+      "peer_id",
+      "address"
+    ],
+    "title": "BridgePeerSpec",
+    "type": "object"
+  },
+  "BridgePeerWiringPayload": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Peer wiring command payload.",
+    "properties": {
+      "epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "peer_spec": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "supervisor": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      }
+    },
+    "required": [
+      "supervisor",
+      "epoch",
+      "protocol_version",
+      "peer_spec"
+    ],
+    "title": "BridgePeerWiringPayload",
+    "type": "object"
+  },
+  "BridgeProtocolVersion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+    "format": "uint32",
+    "minimum": 0,
+    "title": "BridgeProtocolVersion",
+    "type": "integer"
+  },
+  "BridgeRejectionCause": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.",
+    "oneOf": [
+      {
+        "const": "not_bound",
+        "description": "No supervisor is bound yet; caller must `bind_member` first.",
+        "type": "string"
+      },
+      {
+        "const": "stale_supervisor",
+        "description": "The request targets an older epoch than the bound authority.",
+        "type": "string"
+      },
+      {
+        "const": "sender_mismatch",
+        "description": "The authenticated sender does not match the authorized supervisor.",
+        "type": "string"
+      },
+      {
+        "const": "already_bound",
+        "description": "A different supervisor is already bound; rotation must go through\n`authorize_supervisor`, not `bind_member`.",
+        "type": "string"
+      },
+      {
+        "const": "invalid_bootstrap_token",
+        "description": "The bootstrap token did not match the runtime's expected value.",
+        "type": "string"
+      },
+      {
+        "const": "unsupported_protocol_version",
+        "description": "The wire protocol version is not supported by this runtime.",
+        "type": "string"
+      },
+      {
+        "const": "invalid_supervisor_spec",
+        "description": "The embedded supervisor peer spec failed validation.",
+        "type": "string"
+      },
+      {
+        "const": "invalid_peer_spec",
+        "description": "The embedded trusted-peer spec failed validation.",
+        "type": "string"
+      },
+      {
+        "const": "address_mismatch",
+        "description": "The `expected_address` in the bind payload does not match this\nruntime's advertised address.",
+        "type": "string"
+      },
+      {
+        "const": "unsupported",
+        "description": "The command variant is not currently handled by this runtime.",
+        "type": "string"
+      },
+      {
+        "const": "internal",
+        "description": "An unexpected invariant was violated while handling the command.",
+        "type": "string"
+      }
+    ],
+    "title": "BridgeRejectionCause"
+  },
+  "BridgeReply": {
+    "$defs": {
+      "BridgeCapabilities": {
+        "additionalProperties": false,
+        "description": "Capabilities advertised by a member runtime on bind.",
+        "properties": {
+          "current_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version implemented by the responding member runtime."
+          },
+          "default_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version new supervisors should use for fresh authority records."
+          },
+          "deliver_member_input": {
+            "default": false,
+            "type": "boolean"
+          },
+          "destroy_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hard_cancel_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "interrupt_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "observe_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "retire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supported_protocol_versions": {
+            "default": [
+              2
+            ],
+            "description": "Protocol versions accepted by the responding member runtime.",
+            "items": {
+              "$ref": "#/$defs/BridgeProtocolVersion"
+            },
+            "type": "array"
+          },
+          "unwire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "wire_member": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BridgeDeliveryOutcome": {
+        "description": "Outcome of a delivery attempt.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "accepted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "existing_input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "deduplicated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "existing_input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeDeliveryRejectionCause"
+              },
+              "outcome": {
+                "const": "rejected",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeDeliveryRejectionCause": {
+        "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Runtime was not in a state that accepts input.",
+            "properties": {
+              "kind": {
+                "const": "not_ready",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState"
+              }
+            },
+            "required": [
+              "kind",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Input failed durability validation.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "durability_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer input carried a forbidden handling mode.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "peer_handling_mode_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The bridge could not map the rejection to a known typed cause.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "internal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      },
+      "BridgePeerConnectivity": {
+        "description": "Connectivity class observed for the bridged member runtime.",
+        "enum": [
+          "reachable",
+          "unreachable",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "BridgeRejectionCause": {
+        "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.",
+        "oneOf": [
+          {
+            "const": "not_bound",
+            "description": "No supervisor is bound yet; caller must `bind_member` first.",
+            "type": "string"
+          },
+          {
+            "const": "stale_supervisor",
+            "description": "The request targets an older epoch than the bound authority.",
+            "type": "string"
+          },
+          {
+            "const": "sender_mismatch",
+            "description": "The authenticated sender does not match the authorized supervisor.",
+            "type": "string"
+          },
+          {
+            "const": "already_bound",
+            "description": "A different supervisor is already bound; rotation must go through\n`authorize_supervisor`, not `bind_member`.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_bootstrap_token",
+            "description": "The bootstrap token did not match the runtime's expected value.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The wire protocol version is not supported by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_supervisor_spec",
+            "description": "The embedded supervisor peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_peer_spec",
+            "description": "The embedded trusted-peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "address_mismatch",
+            "description": "The `expected_address` in the bind payload does not match this\nruntime's advertised address.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported",
+            "description": "The command variant is not currently handled by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "internal",
+            "description": "An unexpected invariant was violated while handling the command.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A typed reply from a member runtime back to the supervisor.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Response to a bind command.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/$defs/BridgeCapabilities"
+          },
+          "peer_id": {
+            "description": "Canonical member `PeerId`; transport public-key bytes stay out of this field.",
+            "type": "string"
+          },
+          "result": {
+            "const": "bind_member",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "peer_id",
+          "address",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Simple acknowledgment.",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "result": {
+            "const": "ack",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "ok"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Response to an observe command.",
+        "properties": {
+          "accepting_inputs": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "current_run_id": {
+            "description": "Current run identifier reported by the member runtime.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "description": "ISO 8601 timestamp.",
+            "type": "string"
+          },
+          "peer_connectivity": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgePeerConnectivity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "const": "observation",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/BridgeMemberRuntimeState",
+            "description": "Bridged runtime state for the observed member."
+          }
+        },
+        "required": [
+          "result",
+          "state",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Full response to a delivery command.",
+        "properties": {
+          "canonical_input_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/$defs/BridgeDeliveryOutcome"
+          },
+          "result": {
+            "const": "delivery",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "input_id",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Response to a retire command.",
+        "properties": {
+          "inputs_abandoned": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inputs_pending_drain": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "result": {
+            "const": "retire",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "inputs_abandoned",
+          "inputs_pending_drain"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Response to a destroy command.",
+        "properties": {
+          "inputs_abandoned": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "result": {
+            "const": "destroy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "inputs_abandoned"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeRejectionCause"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "result": {
+            "const": "rejected",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeReply"
+  },
+  "BridgeRetireResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Response to a retire command.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "inputs_pending_drain": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned",
+      "inputs_pending_drain"
+    ],
+    "title": "BridgeRetireResponse",
+    "type": "object"
+  },
+  "BridgeSupervisorPayload": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Supervisor authority credentials included in every bridge command.",
+    "properties": {
+      "epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "supervisor": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      }
+    },
+    "required": [
+      "supervisor",
+      "epoch",
+      "protocol_version"
+    ],
+    "title": "BridgeSupervisorPayload",
+    "type": "object"
+  },
+  "CommsCommandRequest": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BridgeBootstrapToken": {
+        "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+        "type": "string"
+      },
+      "BridgeCapabilities": {
+        "additionalProperties": false,
+        "description": "Capabilities advertised by a member runtime on bind.",
+        "properties": {
+          "current_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version implemented by the responding member runtime."
+          },
+          "default_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version new supervisors should use for fresh authority records."
+          },
+          "deliver_member_input": {
+            "default": false,
+            "type": "boolean"
+          },
+          "destroy_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hard_cancel_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "interrupt_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "observe_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "retire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supported_protocol_versions": {
+            "default": [
+              2
+            ],
+            "description": "Protocol versions accepted by the responding member runtime.",
+            "items": {
+              "$ref": "#/$defs/BridgeProtocolVersion"
+            },
+            "type": "array"
+          },
+          "unwire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "wire_member": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BridgeCommand": {
+        "description": "A typed command sent from a supervisor to a member runtime.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Bind a remote runtime to this supervisor.",
+            "properties": {
+              "bootstrap_token": {
+                "$ref": "#/$defs/BridgeBootstrapToken"
+              },
+              "command": {
+                "const": "bind_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_address": {
+                "type": "string"
+              },
+              "expected_peer_id": {
+                "description": "Expected canonical member `PeerId`; not an Ed25519 public-key string.",
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_peer_id",
+              "expected_address",
+              "bootstrap_token"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "authorize_supervisor",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "revoke_supervisor",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Deliver one logical input to a member.",
+            "properties": {
+              "command": {
+                "const": "deliver_member_input",
+                "type": "string"
+              },
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "handling_mode": {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "input_id",
+              "content",
+              "handling_mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "observe_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "interrupt_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Explicit hard-cancel command payload.\n\n`InterruptMember` is the cooperative boundary-break path. This payload is\nintentionally separate so supervisors cannot accidentally collapse boundary\ncancellation and immediate user/session interrupt authority onto one wire\ncommand.",
+            "properties": {
+              "command": {
+                "const": "hard_cancel_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "retire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "destroy_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer wiring command payload.",
+            "properties": {
+              "command": {
+                "const": "wire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "peer_spec": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "peer_spec"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer wiring command payload.",
+            "properties": {
+              "command": {
+                "const": "unwire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "peer_spec": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "peer_spec"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeDeliveryOutcome": {
+        "description": "Outcome of a delivery attempt.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "accepted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "existing_input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "deduplicated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "existing_input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeDeliveryRejectionCause"
+              },
+              "outcome": {
+                "const": "rejected",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeDeliveryRejectionCause": {
+        "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Runtime was not in a state that accepts input.",
+            "properties": {
+              "kind": {
+                "const": "not_ready",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState"
+              }
+            },
+            "required": [
+              "kind",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Input failed durability validation.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "durability_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer input carried a forbidden handling mode.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "peer_handling_mode_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The bridge could not map the rejection to a known typed cause.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "internal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      },
+      "BridgePeerConnectivity": {
+        "description": "Connectivity class observed for the bridged member runtime.",
+        "enum": [
+          "reachable",
+          "unreachable",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "BridgeRejectionCause": {
+        "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.",
+        "oneOf": [
+          {
+            "const": "not_bound",
+            "description": "No supervisor is bound yet; caller must `bind_member` first.",
+            "type": "string"
+          },
+          {
+            "const": "stale_supervisor",
+            "description": "The request targets an older epoch than the bound authority.",
+            "type": "string"
+          },
+          {
+            "const": "sender_mismatch",
+            "description": "The authenticated sender does not match the authorized supervisor.",
+            "type": "string"
+          },
+          {
+            "const": "already_bound",
+            "description": "A different supervisor is already bound; rotation must go through\n`authorize_supervisor`, not `bind_member`.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_bootstrap_token",
+            "description": "The bootstrap token did not match the runtime's expected value.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The wire protocol version is not supported by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_supervisor_spec",
+            "description": "The embedded supervisor peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_peer_spec",
+            "description": "The embedded trusted-peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "address_mismatch",
+            "description": "The `expected_address` in the bind payload does not match this\nruntime's advertised address.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported",
+            "description": "The command variant is not currently handled by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "internal",
+            "description": "An unexpected invariant was violated while handling the command.",
+            "type": "string"
+          }
+        ]
+      },
+      "BridgeReply": {
+        "description": "A typed reply from a member runtime back to the supervisor.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Response to a bind command.",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "capabilities": {
+                "$ref": "#/$defs/BridgeCapabilities"
+              },
+              "peer_id": {
+                "description": "Canonical member `PeerId`; transport public-key bytes stay out of this field.",
+                "type": "string"
+              },
+              "result": {
+                "const": "bind_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "peer_id",
+              "address",
+              "capabilities"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Simple acknowledgment.",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "result": {
+                "const": "ack",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "ok"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to an observe command.",
+            "properties": {
+              "accepting_inputs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "current_run_id": {
+                "description": "Current run identifier reported by the member runtime.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "observed_at": {
+                "description": "ISO 8601 timestamp.",
+                "type": "string"
+              },
+              "peer_connectivity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgePeerConnectivity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "const": "observation",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState",
+                "description": "Bridged runtime state for the observed member."
+              }
+            },
+            "required": [
+              "result",
+              "state",
+              "observed_at"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Full response to a delivery command.",
+            "properties": {
+              "canonical_input_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "$ref": "#/$defs/BridgeDeliveryOutcome"
+              },
+              "result": {
+                "const": "delivery",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "input_id",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to a retire command.",
+            "properties": {
+              "inputs_abandoned": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inputs_pending_drain": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "result": {
+                "const": "retire",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "inputs_abandoned",
+              "inputs_pending_drain"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to a destroy command.",
+            "properties": {
+              "inputs_abandoned": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "result": {
+                "const": "destroy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "inputs_abandoned"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeRejectionCause"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "result": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CommsPeerLifecycleParams": {
+        "additionalProperties": false,
+        "description": "Typed params for one-way peer lifecycle notifications.\n\nThis is the public wire projection of the topology-update payloads that\nused to travel as arbitrary JSON. `peer_spec` is the canonical typed\nidentity when the sender has it; `peer`, `role`, and `description` remain\ninert presentation metadata for older projections.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer": {
+            "type": "string"
+          },
+          "peer_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "peer"
+        ],
+        "type": "object"
+      },
+      "CommsPeerRequestIntent": {
+        "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
+        "enum": [
+          "supervisor.bridge"
+        ],
+        "type": "string"
+      },
+      "CommsPeerRequestParams": {
+        "$ref": "#/$defs/BridgeCommand",
+        "description": "Typed params for public `peer_request`."
+      },
+      "CommsPeerResponseResult": {
+        "$ref": "#/$defs/BridgeReply",
+        "description": "Typed result payload for public `peer_response`.\n\nCompatibility JSON is intentionally not accepted here. Callers that include\na `result` field must provide a typed bridge reply shape."
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
       "HandlingMode": {
         "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
         "enum": [
@@ -186,11 +3772,10 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Typed wire request for `comms/send`.\n\nVariants are serde-tagged on `kind` and validated structurally at the\ndeserialization boundary. Required fields per kind are enforced by the\ntype system; invalid discriminators (`source`, `stream`, `handling_mode`,\n`status`) become serde deserialization errors rather than runtime\nstring-match failures.\n\nCross-field invariants that cannot be expressed structurally (e.g.\n`handling_mode` is forbidden on `Accepted` peer responses) are checked\nin [`CommsCommandRequest::into_command`].",
+    "description": "Request command carried inside public `comms/send` surfaces.",
     "oneOf": [
       {
         "additionalProperties": false,
-        "description": "Inject input into the local session.",
         "properties": {
           "allow_self_session": {
             "type": [
@@ -253,7 +3838,6 @@
       },
       {
         "additionalProperties": false,
-        "description": "Send a one-way peer message.",
         "properties": {
           "blocks": {
             "items": {
@@ -294,7 +3878,6 @@
       },
       {
         "additionalProperties": false,
-        "description": "Send a one-way peer lifecycle notification.",
         "properties": {
           "kind": {
             "const": "peer_lifecycle",
@@ -304,7 +3887,7 @@
             "$ref": "#/$defs/PeerLifecycleKind"
           },
           "params": {
-            "default": null
+            "$ref": "#/$defs/CommsPeerLifecycleParams"
           },
           "to": {
             "$ref": "#/$defs/PeerId"
@@ -313,13 +3896,13 @@
         "required": [
           "kind",
           "to",
-          "lifecycle_kind"
+          "lifecycle_kind",
+          "params"
         ],
         "type": "object"
       },
       {
         "additionalProperties": false,
-        "description": "Send a request to a peer.",
         "properties": {
           "handling_mode": {
             "anyOf": [
@@ -332,14 +3915,14 @@
             ]
           },
           "intent": {
-            "type": "string"
+            "$ref": "#/$defs/CommsPeerRequestIntent"
           },
           "kind": {
             "const": "peer_request",
             "type": "string"
           },
           "params": {
-            "default": null
+            "$ref": "#/$defs/CommsPeerRequestParams"
           },
           "stream": {
             "anyOf": [
@@ -358,13 +3941,13 @@
         "required": [
           "kind",
           "to",
-          "intent"
+          "intent",
+          "params"
         ],
         "type": "object"
       },
       {
         "additionalProperties": false,
-        "description": "Send a response to a prior peer request.",
         "properties": {
           "handling_mode": {
             "anyOf": [
@@ -384,7 +3967,14 @@
             "type": "string"
           },
           "result": {
-            "default": null
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CommsPeerResponseResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "$ref": "#/$defs/ResponseStatus"
@@ -403,6 +3993,1189 @@
       }
     ],
     "title": "CommsCommandRequest"
+  },
+  "CommsPeerLifecycleParams": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Typed params for one-way peer lifecycle notifications.\n\nThis is the public wire projection of the topology-update payloads that\nused to travel as arbitrary JSON. `peer_spec` is the canonical typed\nidentity when the sender has it; `peer`, `role`, and `description` remain\ninert presentation metadata for older projections.",
+    "properties": {
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "peer": {
+        "type": "string"
+      },
+      "peer_spec": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "role": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "peer"
+    ],
+    "title": "CommsPeerLifecycleParams",
+    "type": "object"
+  },
+  "CommsPeerRequestIntent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
+    "enum": [
+      "supervisor.bridge"
+    ],
+    "title": "CommsPeerRequestIntent",
+    "type": "string"
+  },
+  "CommsPeerRequestParams": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BridgeBootstrapToken": {
+        "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+        "type": "string"
+      },
+      "BridgeCommand": {
+        "description": "A typed command sent from a supervisor to a member runtime.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Bind a remote runtime to this supervisor.",
+            "properties": {
+              "bootstrap_token": {
+                "$ref": "#/$defs/BridgeBootstrapToken"
+              },
+              "command": {
+                "const": "bind_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_address": {
+                "type": "string"
+              },
+              "expected_peer_id": {
+                "description": "Expected canonical member `PeerId`; not an Ed25519 public-key string.",
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_peer_id",
+              "expected_address",
+              "bootstrap_token"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "authorize_supervisor",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "revoke_supervisor",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Deliver one logical input to a member.",
+            "properties": {
+              "command": {
+                "const": "deliver_member_input",
+                "type": "string"
+              },
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "handling_mode": {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "input_id",
+              "content",
+              "handling_mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "observe_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "interrupt_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Explicit hard-cancel command payload.\n\n`InterruptMember` is the cooperative boundary-break path. This payload is\nintentionally separate so supervisors cannot accidentally collapse boundary\ncancellation and immediate user/session interrupt authority onto one wire\ncommand.",
+            "properties": {
+              "command": {
+                "const": "hard_cancel_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "retire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Supervisor authority credentials included in every bridge command.",
+            "properties": {
+              "command": {
+                "const": "destroy_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer wiring command payload.",
+            "properties": {
+              "command": {
+                "const": "wire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "peer_spec": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "peer_spec"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer wiring command payload.",
+            "properties": {
+              "command": {
+                "const": "unwire_member",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "peer_spec": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "peer_spec"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$ref": "#/$defs/BridgeCommand",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed params for public `peer_request`.",
+    "title": "CommsPeerRequestParams"
+  },
+  "CommsPeerResponseResult": {
+    "$defs": {
+      "BridgeCapabilities": {
+        "additionalProperties": false,
+        "description": "Capabilities advertised by a member runtime on bind.",
+        "properties": {
+          "current_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version implemented by the responding member runtime."
+          },
+          "default_protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion",
+            "default": 2,
+            "description": "Protocol version new supervisors should use for fresh authority records."
+          },
+          "deliver_member_input": {
+            "default": false,
+            "type": "boolean"
+          },
+          "destroy_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "hard_cancel_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "interrupt_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "observe_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "retire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supported_protocol_versions": {
+            "default": [
+              2
+            ],
+            "description": "Protocol versions accepted by the responding member runtime.",
+            "items": {
+              "$ref": "#/$defs/BridgeProtocolVersion"
+            },
+            "type": "array"
+          },
+          "unwire_member": {
+            "default": false,
+            "type": "boolean"
+          },
+          "wire_member": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BridgeDeliveryOutcome": {
+        "description": "Outcome of a delivery attempt.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "accepted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "existing_input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "deduplicated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "existing_input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeDeliveryRejectionCause"
+              },
+              "outcome": {
+                "const": "rejected",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeDeliveryRejectionCause": {
+        "description": "Typed vocabulary for why member input delivery was rejected.\n\nThis mirrors the runtime accept-boundary rejection vocabulary at the\nbridge wire boundary. Callers should branch on this typed cause and treat\nthe sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as\noperator-facing presentation only.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Runtime was not in a state that accepts input.",
+            "properties": {
+              "kind": {
+                "const": "not_ready",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState"
+              }
+            },
+            "required": [
+              "kind",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Input failed durability validation.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "durability_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Peer input carried a forbidden handling mode.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "peer_handling_mode_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The bridge could not map the rejection to a known typed cause.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "internal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeMemberRuntimeState": {
+        "description": "Wire projection of a member's runtime state.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      },
+      "BridgePeerConnectivity": {
+        "description": "Connectivity class observed for the bridged member runtime.",
+        "enum": [
+          "reachable",
+          "unreachable",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "BridgeRejectionCause": {
+        "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.",
+        "oneOf": [
+          {
+            "const": "not_bound",
+            "description": "No supervisor is bound yet; caller must `bind_member` first.",
+            "type": "string"
+          },
+          {
+            "const": "stale_supervisor",
+            "description": "The request targets an older epoch than the bound authority.",
+            "type": "string"
+          },
+          {
+            "const": "sender_mismatch",
+            "description": "The authenticated sender does not match the authorized supervisor.",
+            "type": "string"
+          },
+          {
+            "const": "already_bound",
+            "description": "A different supervisor is already bound; rotation must go through\n`authorize_supervisor`, not `bind_member`.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_bootstrap_token",
+            "description": "The bootstrap token did not match the runtime's expected value.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The wire protocol version is not supported by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_supervisor_spec",
+            "description": "The embedded supervisor peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_peer_spec",
+            "description": "The embedded trusted-peer spec failed validation.",
+            "type": "string"
+          },
+          {
+            "const": "address_mismatch",
+            "description": "The `expected_address` in the bind payload does not match this\nruntime's advertised address.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported",
+            "description": "The command variant is not currently handled by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "internal",
+            "description": "An unexpected invariant was violated while handling the command.",
+            "type": "string"
+          }
+        ]
+      },
+      "BridgeReply": {
+        "description": "A typed reply from a member runtime back to the supervisor.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Response to a bind command.",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "capabilities": {
+                "$ref": "#/$defs/BridgeCapabilities"
+              },
+              "peer_id": {
+                "description": "Canonical member `PeerId`; transport public-key bytes stay out of this field.",
+                "type": "string"
+              },
+              "result": {
+                "const": "bind_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "peer_id",
+              "address",
+              "capabilities"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Simple acknowledgment.",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "result": {
+                "const": "ack",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "ok"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to an observe command.",
+            "properties": {
+              "accepting_inputs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "current_run_id": {
+                "description": "Current run identifier reported by the member runtime.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "observed_at": {
+                "description": "ISO 8601 timestamp.",
+                "type": "string"
+              },
+              "peer_connectivity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgePeerConnectivity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "const": "observation",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeMemberRuntimeState",
+                "description": "Bridged runtime state for the observed member."
+              }
+            },
+            "required": [
+              "result",
+              "state",
+              "observed_at"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Full response to a delivery command.",
+            "properties": {
+              "canonical_input_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "input_id": {
+                "type": "string"
+              },
+              "outcome": {
+                "$ref": "#/$defs/BridgeDeliveryOutcome"
+              },
+              "result": {
+                "const": "delivery",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "input_id",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to a retire command.",
+            "properties": {
+              "inputs_abandoned": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inputs_pending_drain": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "result": {
+                "const": "retire",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "inputs_abandoned",
+              "inputs_pending_drain"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to a destroy command.",
+            "properties": {
+              "inputs_abandoned": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "result": {
+                "const": "destroy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "inputs_abandoned"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause": {
+                "$ref": "#/$defs/BridgeRejectionCause"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "result": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "cause",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$ref": "#/$defs/BridgeReply",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed result payload for public `peer_response`.\n\nCompatibility JSON is intentionally not accepted here. Callers that include\na `result` field must provide a typed bridge reply shape.",
+    "title": "CommsPeerResponseResult"
   },
   "CommsPeersResult": {
     "$defs": {
@@ -607,6 +5380,7 @@
     "description": "Response payload for `comms/send`.",
     "oneOf": [
       {
+        "additionalProperties": false,
         "properties": {
           "interaction_id": {
             "type": "string"
@@ -627,6 +5401,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "acked": {
             "type": "boolean"
@@ -647,6 +5422,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "envelope_id": {
             "type": "string"
@@ -663,6 +5439,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "envelope_id": {
             "type": "string"
@@ -691,6 +5468,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "envelope_id": {
             "type": "string"

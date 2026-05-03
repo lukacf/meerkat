@@ -183,7 +183,33 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SkillEntry": schema_for!(crate::wire::SkillEntry),
         "SkillListResponse": schema_for!(crate::wire::SkillListResponse),
         "SkillInspectResponse": schema_for!(crate::wire::SkillInspectResponse),
+        "BridgeAck": schema_for!(crate::wire::BridgeAck),
+        "BridgeBindPayload": schema_for!(crate::wire::BridgeBindPayload),
+        "BridgeBindResponse": schema_for!(crate::wire::BridgeBindResponse),
+        "BridgeBootstrapToken": schema_for!(crate::wire::supervisor_bridge::BridgeBootstrapToken),
+        "BridgeCapabilities": schema_for!(crate::wire::BridgeCapabilities),
+        "BridgeCommand": schema_for!(crate::wire::BridgeCommand),
+        "BridgeDeliveryOutcome": schema_for!(crate::wire::BridgeDeliveryOutcome),
+        "BridgeDeliveryPayload": schema_for!(crate::wire::BridgeDeliveryPayload),
+        "BridgeDeliveryRejectionCause": schema_for!(crate::wire::BridgeDeliveryRejectionCause),
+        "BridgeDeliveryResponse": schema_for!(crate::wire::BridgeDeliveryResponse),
+        "BridgeDestroyResponse": schema_for!(crate::wire::BridgeDestroyResponse),
+        "BridgeHardCancelPayload": schema_for!(crate::wire::BridgeHardCancelPayload),
+        "BridgeMemberRuntimeState": schema_for!(crate::wire::BridgeMemberRuntimeState),
+        "BridgeObservationResponse": schema_for!(crate::wire::BridgeObservationResponse),
+        "BridgePeerConnectivity": schema_for!(crate::wire::BridgePeerConnectivity),
+        "BridgePeerSpec": schema_for!(crate::wire::BridgePeerSpec),
+        "BridgePeerWiringPayload": schema_for!(crate::wire::BridgePeerWiringPayload),
+        "BridgeProtocolVersion": schema_for!(crate::wire::BridgeProtocolVersion),
+        "BridgeRejectionCause": schema_for!(crate::wire::supervisor_bridge::BridgeRejectionCause),
+        "BridgeReply": schema_for!(crate::wire::BridgeReply),
+        "BridgeRetireResponse": schema_for!(crate::wire::BridgeRetireResponse),
+        "BridgeSupervisorPayload": schema_for!(crate::wire::BridgeSupervisorPayload),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
+        "CommsPeerLifecycleParams": schema_for!(crate::wire::CommsPeerLifecycleParams),
+        "CommsPeerRequestIntent": schema_for!(crate::wire::CommsPeerRequestIntent),
+        "CommsPeerRequestParams": schema_for!(crate::wire::CommsPeerRequestParams),
+        "CommsPeerResponseResult": schema_for!(crate::wire::CommsPeerResponseResult),
         "CommsSendResult": schema_for!(crate::wire::CommsSendResult),
         "PeerId": schema_for!(crate::wire::PeerId),
         "PeerName": schema_for!(crate::wire::WireCommsPeerName),
@@ -731,16 +757,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ),
         );
         components.insert(
-            "RestCommsSendRequest".to_string(),
-            object_schema(
-                vec![
-                    ("session_id", string_schema()),
-                    ("command", schema_ref("CommsCommandRequest")),
-                ],
-                vec!["session_id", "command"],
-            ),
-        );
-        components.insert(
             "RestAuthBindingRequest".to_string(),
             object_schema(
                 vec![
@@ -942,7 +958,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 RestOperationContract::json("ScheduleOccurrencesResult")
             }
             ("/comms/send", "post") => {
-                RestOperationContract::with_json_request("RestCommsSendRequest", "JsonValue")
+                RestOperationContract::with_json_request("CommsSendParams", "CommsSendResult")
             }
             ("/comms/peers", "get") => RestOperationContract::json("CommsPeersResult"),
             ("/config", "get") => RestOperationContract::json("ConfigEnvelope"),

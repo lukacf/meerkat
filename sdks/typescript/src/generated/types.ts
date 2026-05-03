@@ -749,6 +749,106 @@ export interface MobReconcileFailureWire {
   stage: WireMobReconcileStage;
 }
 
+export interface BridgeAck {
+  ok: boolean;
+}
+
+export interface BridgeBindPayload {
+  bootstrap_token: BridgeBootstrapToken;
+  epoch: number;
+  expected_address: string;
+  expected_peer_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeBindResponse {
+  address: string;
+  capabilities: BridgeCapabilities;
+  peer_id: string;
+}
+
+export interface BridgeCapabilities {
+  current_protocol_version?: BridgeProtocolVersion;
+  default_protocol_version?: BridgeProtocolVersion;
+  deliver_member_input?: boolean;
+  destroy_member?: boolean;
+  hard_cancel_member?: boolean;
+  interrupt_member?: boolean;
+  observe_member?: boolean;
+  retire_member?: boolean;
+  supported_protocol_versions?: BridgeProtocolVersion[];
+  unwire_member?: boolean;
+  wire_member?: boolean;
+}
+
+export interface BridgeDeliveryPayload {
+  content: ContentInput;
+  epoch: number;
+  handling_mode: HandlingMode;
+  input_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeDeliveryResponse {
+  canonical_input_id?: string;
+  input_id: string;
+  outcome: BridgeDeliveryOutcome;
+}
+
+export interface BridgeDestroyResponse {
+  inputs_abandoned: number;
+}
+
+export interface BridgeHardCancelPayload {
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  reason: string;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeObservationResponse {
+  accepting_inputs?: boolean;
+  current_run_id?: string;
+  last_error?: string;
+  observed_at: string;
+  peer_connectivity?: BridgePeerConnectivity;
+  state: BridgeMemberRuntimeState;
+}
+
+export interface BridgePeerSpec {
+  address: string;
+  name: string;
+  peer_id: string;
+  pubkey?: number[];
+}
+
+export interface BridgePeerWiringPayload {
+  epoch: number;
+  peer_spec: BridgePeerSpec;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeRetireResponse {
+  inputs_abandoned: number;
+  inputs_pending_drain: number;
+}
+
+export interface BridgeSupervisorPayload {
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface CommsPeerLifecycleParams {
+  description?: string;
+  peer: string;
+  peer_spec?: BridgePeerSpec;
+  role?: string;
+}
+
 export interface CommsPeersParams {
   session_id: string;
 }
@@ -892,7 +992,7 @@ export interface WireRuntimeBindingSession {
 
 export interface WireRuntimeBindingExternal {
   address: string;
-  bootstrap_token?: string;
+  bootstrap_token?: BridgeBootstrapToken;
   identity: WireTrustedPeerIdentity;
   kind: "external";
 }
@@ -1350,18 +1450,18 @@ export type WireModelTier = "recommended" | "supported";
 
 export interface CommsCommandInput {
   allow_self_session?: boolean;
-  blocks?: Record<string, unknown>[];
+  blocks?: ContentBlock[];
   body: string;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   kind: "input";
   source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
   stream?: "none" | "reserve_interaction";
 }
 
 export interface CommsCommandPeerMessage {
-  blocks?: Record<string, unknown>[];
+  blocks?: ContentBlock[];
   body: string;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   kind: "peer_message";
   to: PeerId;
 }
@@ -1369,35 +1469,242 @@ export interface CommsCommandPeerMessage {
 export interface CommsCommandPeerLifecycle {
   kind: "peer_lifecycle";
   lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
-  params?: unknown;
+  params: CommsPeerLifecycleParams;
   to: PeerId;
 }
 
 export interface CommsCommandPeerRequest {
-  handling_mode?: "queue" | "steer";
-  intent: string;
+  handling_mode?: HandlingMode;
+  intent: CommsPeerRequestIntent;
   kind: "peer_request";
-  params?: unknown;
+  params: CommsPeerRequestParams;
   stream?: "none" | "reserve_interaction";
   to: PeerId;
 }
 
 export interface CommsCommandPeerResponse {
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
-  result?: unknown;
+  result?: CommsPeerResponseResult;
   status: "accepted" | "completed" | "failed";
   to: PeerId;
 }
 
 export type CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse;
 
+export type BlobId = string;
+
+export type BridgeBootstrapToken = string;
+
+export interface BridgeCommandBindMember {
+  bootstrap_token: BridgeBootstrapToken;
+  command: "bind_member";
+  epoch: number;
+  expected_address: string;
+  expected_peer_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandAuthorizeSupervisor {
+  command: "authorize_supervisor";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandRevokeSupervisor {
+  command: "revoke_supervisor";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandDeliverMemberInput {
+  command: "deliver_member_input";
+  content: ContentInput;
+  epoch: number;
+  handling_mode: HandlingMode;
+  input_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandObserveMember {
+  command: "observe_member";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandInterruptMember {
+  command: "interrupt_member";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandHardCancelMember {
+  command: "hard_cancel_member";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  reason: string;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandRetireMember {
+  command: "retire_member";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandDestroyMember {
+  command: "destroy_member";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandWireMember {
+  command: "wire_member";
+  epoch: number;
+  peer_spec: BridgePeerSpec;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandUnwireMember {
+  command: "unwire_member";
+  epoch: number;
+  peer_spec: BridgePeerSpec;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember;
+
+export interface BridgeDeliveryOutcomeAccepted {
+  outcome: "accepted";
+}
+
+export interface BridgeDeliveryOutcomeDeduplicated {
+  existing_input_id: string;
+  outcome: "deduplicated";
+}
+
+export interface BridgeDeliveryOutcomeRejected {
+  cause: BridgeDeliveryRejectionCause;
+  outcome: "rejected";
+  reason: string;
+}
+
+export type BridgeDeliveryOutcome = BridgeDeliveryOutcomeAccepted | BridgeDeliveryOutcomeDeduplicated | BridgeDeliveryOutcomeRejected;
+
+export interface BridgeDeliveryRejectionCauseNotReady {
+  kind: "not_ready";
+  state: BridgeMemberRuntimeState;
+}
+
+export interface BridgeDeliveryRejectionCauseDurabilityViolation {
+  detail: string;
+  kind: "durability_violation";
+}
+
+export interface BridgeDeliveryRejectionCausePeerHandlingModeInvalid {
+  detail: string;
+  kind: "peer_handling_mode_invalid";
+}
+
+export interface BridgeDeliveryRejectionCauseInternal {
+  detail: string;
+  kind: "internal";
+}
+
+export type BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal;
+
+export type BridgeMemberRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
+
+export type BridgePeerConnectivity = "reachable" | "unreachable" | "unknown";
+
+export type BridgeProtocolVersion = number;
+
+export type BridgeRejectionCause = "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal";
+
+export interface BridgeReplyBindMember {
+  address: string;
+  capabilities: BridgeCapabilities;
+  peer_id: string;
+  result: "bind_member";
+}
+
+export interface BridgeReplyAck {
+  ok: boolean;
+  result: "ack";
+}
+
+export interface BridgeReplyObservation {
+  accepting_inputs?: boolean;
+  current_run_id?: string;
+  last_error?: string;
+  observed_at: string;
+  peer_connectivity?: BridgePeerConnectivity;
+  result: "observation";
+  state: BridgeMemberRuntimeState;
+}
+
+export interface BridgeReplyDelivery {
+  canonical_input_id?: string;
+  input_id: string;
+  outcome: BridgeDeliveryOutcome;
+  result: "delivery";
+}
+
+export interface BridgeReplyRetire {
+  inputs_abandoned: number;
+  inputs_pending_drain: number;
+  result: "retire";
+}
+
+export interface BridgeReplyDestroy {
+  inputs_abandoned: number;
+  result: "destroy";
+}
+
+export interface BridgeReplyRejected {
+  cause: BridgeRejectionCause;
+  reason: string;
+  result: "rejected";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplyRejected;
+
+export interface ContentBlockText {
+  text: string;
+  type: "text";
+}
+
+export interface ContentBlockImage {
+  media_type: string;
+  type: "image";
+}
+
+export interface ContentBlockVideo {
+  duration_ms: number;
+  media_type: string;
+  type: "video";
+}
+
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo;
+
+export type ContentInput = string | ContentBlock[];
+
 export interface CommsSendParamsInput {
   allow_self_session?: boolean;
-  blocks?: Record<string, unknown>[];
+  blocks?: ContentBlock[];
   body: string;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   kind: "input";
   session_id: string;
   source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
@@ -1405,9 +1712,9 @@ export interface CommsSendParamsInput {
 }
 
 export interface CommsSendParamsPeerMessage {
-  blocks?: Record<string, unknown>[];
+  blocks?: ContentBlock[];
   body: string;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   kind: "peer_message";
   session_id: string;
   to: PeerId;
@@ -1416,26 +1723,26 @@ export interface CommsSendParamsPeerMessage {
 export interface CommsSendParamsPeerLifecycle {
   kind: "peer_lifecycle";
   lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
-  params?: unknown;
+  params: CommsPeerLifecycleParams;
   session_id: string;
   to: PeerId;
 }
 
 export interface CommsSendParamsPeerRequest {
-  handling_mode?: "queue" | "steer";
-  intent: string;
+  handling_mode?: HandlingMode;
+  intent: CommsPeerRequestIntent;
   kind: "peer_request";
-  params?: unknown;
+  params: CommsPeerRequestParams;
   session_id: string;
   stream?: "none" | "reserve_interaction";
   to: PeerId;
 }
 
 export interface CommsSendParamsPeerResponse {
-  handling_mode?: "queue" | "steer";
+  handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
-  result?: unknown;
+  result?: CommsPeerResponseResult;
   session_id: string;
   status: "accepted" | "completed" | "failed";
   to: PeerId;
@@ -1475,6 +1782,14 @@ export interface CommsSendResultPeerResponseSent {
 }
 
 export type CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent;
+
+export type CommsPeerRequestIntent = "supervisor.bridge";
+
+export type CommsPeerRequestParams = BridgeCommand;
+
+export type CommsPeerResponseResult = BridgeReply;
+
+export type HandlingMode = "queue" | "steer";
 
 export type PeerId = string;
 

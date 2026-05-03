@@ -3,12 +3,9 @@
 //! Exposes agent-facing comms tools: `send_message`, `send_request`,
 //! `send_response`, and `peers`.
 //!
-//! The tool inputs deserialize into typed per-tool input structs; from
-//! there they are assembled directly into [`CommsCommand`] domain
-//! envelopes and dispatched through the runtime. There is no wire-layer
-//! [`CommsCommandRequest`] variant for peer traffic after Wave-B: the
-//! agent-facing MCP surface is internal, so typed enums (`HandlingMode`,
-//! `ResponseStatus`) remain the only serde-gated boundary.
+//! The tool inputs deserialize into typed per-tool input structs; peer
+//! request/response traffic then projects through the generated comms
+//! contract before it becomes a [`CommsCommand`] domain envelope.
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;
@@ -20,7 +17,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
 use crate::{Router, TrustedPeers};
-use meerkat_contracts::CommsPeersResult;
+use meerkat_contracts::{
+    CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
+    CommsSendResult,
+};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
@@ -71,7 +71,7 @@ pub struct SendMessageInput {
 
 /// Send a structured request to a peer and expect a correlated response.
 ///
-/// Example: `{"peer_id": "<peer-id-from-peers>", "intent": "review", "params": {"file": "main.rs"}, "handling_mode": "steer"}`
+/// Example: `{"peer_id": "<peer-id-from-peers>", "intent": "supervisor.bridge", "params": {"command": "observe_member", ...}, "handling_mode": "steer"}`
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendRequestInput {
     /// Canonical peer ID from the `peers` tool
@@ -79,18 +79,17 @@ pub struct SendRequestInput {
     /// Optional display name retained only for diagnostics
     #[serde(default)]
     pub display_name: Option<String>,
-    /// Request intent (e.g. "review", "analyze")
-    pub intent: String,
+    /// Request intent
+    pub intent: CommsPeerRequestIntent,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
     pub handling_mode: HandlingMode,
-    /// Request parameters (optional, defaults to {})
-    #[serde(default)]
-    pub params: Option<Value>,
+    /// Request parameters
+    pub params: CommsPeerRequestParams,
 }
 
 /// Send a response to a previous peer request.
 ///
-/// Example: `{"peer_id": "<peer-id-from-peers>", "in_reply_to": "<request-id>", "status": "completed", "result": {"answer": 42}}`
+/// Example: `{"peer_id": "<peer-id-from-peers>", "in_reply_to": "<request-id>", "status": "completed", "result": {"result": "ack", "ok": true}}`
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendResponseInput {
     /// Canonical peer ID from the `peers` tool
@@ -104,7 +103,7 @@ pub struct SendResponseInput {
     pub status: ResponseStatus,
     /// Response result data (optional)
     #[serde(default)]
-    pub result: Option<Value>,
+    pub result: Option<CommsPeerResponseResult>,
     /// Handling mode override for terminal responses: "steer" or "queue" (optional)
     #[serde(default)]
     pub handling_mode: Option<HandlingMode>,
@@ -164,12 +163,12 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "send_request",
-            "description": "Send a structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request when you need the peer to perform work and return a structured result. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n\nExample — structured request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"analyzer\", \"intent\": \"review\", \"params\": {\"file\": \"main.rs\", \"focus\": \"error handling\"}, \"handling_mode\": \"steer\"}\n  The peer receives this, performs the review, and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"issues\": [...]}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message.",
+            "description": "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for generated comms request contracts such as supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n\nExample — supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"steer\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message.",
             "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
-            "description": "Send a response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a send_request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later.\n- \"completed\": The request succeeded. Include the result in the result field.\n- \"failed\": The request could not be fulfilled. Include error details in the result field.\n\nhandling_mode (optional): Override how the requester processes this response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.\n\nExamples:\n1. Completed response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"answer\": 42}}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"report\": \"done\"}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"error\": \"file not found\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error.",
+            "description": "Send a typed response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a generated comms request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later.\n- \"completed\": The request succeeded. Include a typed result when the request contract requires one.\n- \"failed\": The request could not be fulfilled. Include a typed rejection result when the request contract requires one.\n\nhandling_mode (optional): Override how the requester processes this response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.\n\nExamples:\n1. Completed response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"result\": \"rejected\", \"cause\": \"unsupported\", \"reason\": \"unsupported command\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error.",
             "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
@@ -207,13 +206,14 @@ pub async fn handle_tools_call(
             let input: SendRequestInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
-            let command = CommsCommand::PeerRequest {
-                to,
+            let typed_request = meerkat_contracts::CommsCommandRequest::PeerRequest {
+                to: input.peer_id,
                 intent: input.intent,
-                params: input.params.unwrap_or_else(|| json!({})),
-                handling_mode: input.handling_mode,
-                stream: InputStreamMode::ReserveInteraction,
+                params: input.params,
+                handling_mode: Some(input.handling_mode),
+                stream: Some(InputStreamMode::ReserveInteraction),
             };
+            let command = project_peer_request_command(typed_request, to)?;
             dispatch(ctx, command).await
         }
         "send_response" => {
@@ -228,13 +228,14 @@ pub async fn handle_tools_call(
             if matches!(input.status, ResponseStatus::Accepted) && input.handling_mode.is_some() {
                 return Err("handling_mode is forbidden on accepted peer responses".to_string());
             }
-            let command = CommsCommand::PeerResponse {
-                to,
+            let typed_request = meerkat_contracts::CommsCommandRequest::PeerResponse {
+                to: input.peer_id,
                 in_reply_to: InteractionId(in_reply_to_uuid),
                 status: input.status,
-                result: input.result.unwrap_or_else(|| json!({})),
+                result: input.result,
                 handling_mode: input.handling_mode,
             };
+            let command = project_peer_response_command(typed_request, to)?;
             dispatch(ctx, command).await
         }
         "peers" => {
@@ -244,6 +245,62 @@ pub async fn handle_tools_call(
         }
         _ => Err(format!("Unknown tool: {name}")),
     }
+}
+
+fn project_peer_request_command(
+    request: meerkat_contracts::CommsCommandRequest,
+    to: PeerRoute,
+) -> Result<CommsCommand, String> {
+    // Compatibility JSON is produced only after the generated comms contract
+    // has accepted the typed intent and params.
+    let core_request = request
+        .into_core_request()
+        .map_err(|err| format!("Invalid arguments: {err}"))?;
+    let meerkat_core::comms::CommsCommandRequest::PeerRequest {
+        intent,
+        params,
+        handling_mode,
+        stream,
+        ..
+    } = core_request
+    else {
+        return Err("Invalid arguments: expected peer_request comms command".to_string());
+    };
+    Ok(CommsCommand::PeerRequest {
+        to,
+        intent,
+        params,
+        handling_mode: handling_mode.unwrap_or_default(),
+        stream: stream.unwrap_or(InputStreamMode::None),
+    })
+}
+
+fn project_peer_response_command(
+    request: meerkat_contracts::CommsCommandRequest,
+    to: PeerRoute,
+) -> Result<CommsCommand, String> {
+    // Compatibility JSON is produced only after the generated comms contract
+    // has accepted the typed result payload.
+    let core_request = request
+        .into_core_request()
+        .map_err(|err| format!("Invalid arguments: {err}"))?;
+    let meerkat_core::comms::CommsCommandRequest::PeerResponse {
+        in_reply_to,
+        status,
+        result,
+        handling_mode,
+        ..
+    } = core_request
+    else {
+        return Err("Invalid arguments: expected peer_response comms command".to_string());
+    };
+    Ok(CommsCommand::PeerResponse {
+        to,
+        in_reply_to,
+        status,
+        result,
+        handling_mode,
+    })
 }
 
 fn peer_name(value: &str, field: &str) -> Result<PeerName, String> {
@@ -365,48 +422,8 @@ fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
     json!({
         "status": "sent",
         "kind": kind,
-        "receipt": receipt_to_json(receipt),
+        "receipt": CommsSendResult::from(receipt),
     })
-}
-
-fn receipt_to_json(receipt: SendReceipt) -> Value {
-    match receipt {
-        SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "type": "input_accepted",
-            "interaction_id": interaction_id.0,
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
-            "type": "peer_message_sent",
-            "envelope_id": envelope_id,
-            "acked": acked,
-        }),
-        SendReceipt::PeerLifecycleSent { envelope_id } => json!({
-            "type": "peer_lifecycle_sent",
-            "envelope_id": envelope_id,
-        }),
-        SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => json!({
-            "type": "peer_request_sent",
-            "envelope_id": envelope_id,
-            "interaction_id": interaction_id.0,
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => json!({
-            "type": "peer_response_sent",
-            "envelope_id": envelope_id,
-            "in_reply_to": in_reply_to.0,
-        }),
-    }
 }
 
 /// Validate a canonical [`PeerId`] against the runtime-facing trust set.
@@ -562,6 +579,10 @@ fn peer_sendability_tool_name(kind: PeerSendability) -> &'static str {
 mod tests {
     use super::*;
     use crate::{PubKey, TrustedPeer};
+    use meerkat_contracts::wire::supervisor_bridge::{
+        BridgeAck, BridgeCommand, BridgePeerSpec, BridgeReply, BridgeSupervisorPayload,
+        supervisor_bridge_current_protocol_version,
+    };
     use meerkat_core::comms::{
         PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerReachability, PeerSendability,
         PeerTransport,
@@ -589,6 +610,31 @@ mod tests {
             .expect("projection JSON argument object must end before the sentence");
         serde_json::from_str(&text[json_start..=json_end])
             .expect("projection argument object must parse as JSON")
+    }
+
+    fn bridge_peer_spec() -> BridgePeerSpec {
+        BridgePeerSpec {
+            name: "supervisor".to_string(),
+            peer_id: PeerId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("valid peer id")
+                .to_string(),
+            address: "inproc://supervisor".to_string(),
+            pubkey: [7u8; 32],
+        }
+    }
+
+    fn bridge_command_json() -> Value {
+        serde_json::to_value(BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: bridge_peer_spec(),
+            epoch: 1,
+            protocol_version: supervisor_bridge_current_protocol_version(),
+        }))
+        .expect("bridge command should serialize")
+    }
+
+    fn bridge_reply_json() -> Value {
+        serde_json::to_value(BridgeReply::Ack(BridgeAck { ok: true }))
+            .expect("bridge reply should serialize")
     }
 
     struct RecordingRuntime {
@@ -748,6 +794,7 @@ mod tests {
         assert!(required_names.contains(&"peer_id"));
         assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"intent"));
+        assert!(required_names.contains(&"params"));
     }
 
     #[test]
@@ -797,6 +844,7 @@ mod tests {
         );
         assert_eq!(parsed.in_reply_to, request_id.to_string());
         assert_eq!(parsed.status, ResponseStatus::Completed);
+        assert!(parsed.result.is_none());
         assert!(
             !args
                 .as_object()
@@ -818,8 +866,7 @@ mod tests {
             "ping",
             &json!({}),
         );
-        let mut args = extract_projection_send_response_args(&projection);
-        args["result"] = json!({"pong": true});
+        let args = extract_projection_send_response_args(&projection);
 
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
             peers: vec![TrustedPeer {
@@ -869,7 +916,7 @@ mod tests {
         );
         assert_eq!(in_reply_to.0, request_id);
         assert_eq!(*status, ResponseStatus::Completed);
-        assert_eq!(result["pong"], true);
+        assert_eq!(*result, Value::Null);
     }
 
     #[test]
@@ -881,7 +928,7 @@ mod tests {
             "peer_id": peer_id,
             "in_reply_to": request_id.to_string(),
             "status": "completed",
-            "result": {"ok": true},
+            "result": bridge_reply_json(),
             "handling_mode": "steer"
         }))
         .expect("valid completed terminal response should deserialize");
@@ -890,7 +937,14 @@ mod tests {
         assert_eq!(input.in_reply_to, request_id.to_string());
         assert_eq!(input.status, ResponseStatus::Completed);
         assert_eq!(input.handling_mode, Some(HandlingMode::Steer));
-        assert_eq!(input.result, Some(json!({"ok": true})));
+        assert_eq!(
+            input
+                .result
+                .map(serde_json::to_value)
+                .transpose()
+                .expect("typed result should serialize"),
+            Some(bridge_reply_json())
+        );
     }
 
     #[tokio::test]
@@ -1163,8 +1217,8 @@ mod tests {
             "send_request",
             &json!({
                 "peer_id": peer_id,
-                "intent": "review",
-                "params": {"file": "main.rs"},
+                "intent": "supervisor.bridge",
+                "params": bridge_command_json(),
                 "handling_mode": "steer"
             }),
         )
@@ -1191,7 +1245,7 @@ mod tests {
                 "peer_id": peer_id,
                 "in_reply_to": request_id.to_string(),
                 "status": "completed",
-                "result": {"ok": true}
+                "result": bridge_reply_json()
             }),
         )
         .await
@@ -1206,6 +1260,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_request_unknown_intent_fails_at_typed_boundary() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "review",
+                "params": bridge_command_json(),
+                "handling_mode": "queue"
+            }),
+        )
+        .await
+        .expect_err("unknown public comms intent must fail before dispatch");
+
+        assert!(
+            error.contains("Invalid arguments") && error.contains("review"),
+            "expected typed intent serde error, got: {error}"
+        );
+        assert_eq!(runtime.sent_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_send_request_malformed_params_fail_at_typed_boundary() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "supervisor.bridge",
+                "params": {"file": "main.rs"},
+                "handling_mode": "queue"
+            }),
+        )
+        .await
+        .expect_err("malformed public comms request params must fail before dispatch");
+
+        assert!(
+            error.contains("Invalid arguments") && error.contains("command"),
+            "expected typed params serde error, got: {error}"
+        );
+        assert_eq!(runtime.sent_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_send_response_malformed_result_fails_at_typed_boundary() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let request_id = uuid::Uuid::from_u128(4);
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": {"ok": true}
+            }),
+        )
+        .await
+        .expect_err("malformed public comms response result must fail before dispatch");
+
+        assert!(
+            error.contains("Invalid arguments") && error.contains("result"),
+            "expected typed result serde error, got: {error}"
+        );
+        assert_eq!(runtime.sent_len(), 0);
+    }
+
+    #[tokio::test]
     async fn test_runtime_bound_send_request_returns_typed_receipt() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
@@ -1217,8 +1353,8 @@ mod tests {
             "send_request",
             &json!({
                 "peer_id": peer_id,
-                "intent": "review",
-                "params": {"file": "main.rs"},
+                "intent": "supervisor.bridge",
+                "params": bridge_command_json(),
                 "handling_mode": "queue"
             }),
         )
@@ -1228,7 +1364,7 @@ mod tests {
         assert_eq!(runtime.sent_len(), 1);
         assert_eq!(result["status"], "sent");
         assert_eq!(result["kind"], "peer_request");
-        assert_eq!(result["receipt"]["type"], "peer_request_sent");
+        assert_eq!(result["receipt"]["kind"], "peer_request_sent");
         assert_eq!(
             result["receipt"]["envelope_id"],
             uuid::Uuid::from_u128(1).to_string()
@@ -1238,6 +1374,12 @@ mod tests {
             uuid::Uuid::from_u128(2).to_string()
         );
         assert_eq!(result["receipt"]["stream_reserved"], true);
+        let sent = runtime.sent.lock();
+        let [CommsCommand::PeerRequest { intent, params, .. }] = sent.as_slice() else {
+            panic!("expected one peer request command, got {sent:?}");
+        };
+        assert_eq!(intent, meerkat_core::comms::SUPERVISOR_BRIDGE_INTENT);
+        assert_eq!(params, &bridge_command_json());
     }
 
     #[tokio::test]
@@ -1255,7 +1397,7 @@ mod tests {
                 "peer_id": peer_id,
                 "in_reply_to": request_id.to_string(),
                 "status": "completed",
-                "result": {"ok": true}
+                "result": bridge_reply_json()
             }),
         )
         .await
@@ -1264,11 +1406,16 @@ mod tests {
         assert_eq!(runtime.sent_len(), 1);
         assert_eq!(result["status"], "sent");
         assert_eq!(result["kind"], "peer_response");
-        assert_eq!(result["receipt"]["type"], "peer_response_sent");
+        assert_eq!(result["receipt"]["kind"], "peer_response_sent");
         assert_eq!(
             result["receipt"]["envelope_id"],
             uuid::Uuid::from_u128(3).to_string()
         );
         assert_eq!(result["receipt"]["in_reply_to"], request_id.to_string());
+        let sent = runtime.sent.lock();
+        let [CommsCommand::PeerResponse { result, .. }] = sent.as_slice() else {
+            panic!("expected one peer response command, got {sent:?}");
+        };
+        assert_eq!(result, &bridge_reply_json());
     }
 }

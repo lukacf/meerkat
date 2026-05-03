@@ -202,6 +202,9 @@ from .errors import (
 
 # Typed event hierarchy — every event variant is a frozen dataclass
 from .events import (
+    AgentErrorClass,
+    AgentErrorReason,
+    AgentErrorReport,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionCompleted,
@@ -210,6 +213,7 @@ from .events import (
     DeferredCatalogDeltaToolConfigChangeStatus,
     Event,
     ExternalToolDeltaToolConfigChangeStatus,
+    HookId,
     HookCompleted,
     HookDenied,
     HookFailed,
@@ -417,6 +421,9 @@ __all__ = [
     "SessionNotFoundError",
     "SkillNotFoundError",
     # Events (base + all variants)
+    "AgentErrorClass",
+    "AgentErrorReason",
+    "AgentErrorReport",
     "Event",
     "RunStarted",
     "ScopedEvent",
@@ -436,6 +443,7 @@ __all__ = [
     "CompactionFailed",
     "BudgetWarning",
     "Retrying",
+    "HookId",
     "HookStarted",
     "HookCompleted",
     "HookFailed",

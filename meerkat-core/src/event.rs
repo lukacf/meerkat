@@ -5,7 +5,7 @@
 use crate::error::{
     AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
 };
-use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::hooks::{HookId, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
@@ -138,15 +138,17 @@ pub enum AgentErrorReason {
         duration_ms: u64,
     },
     HookDenied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_id: Option<HookId>,
         point: HookPoint,
         reason_code: HookReasonCode,
     },
     HookTimeout {
-        hook_id: String,
+        hook_id: HookId,
         timeout_ms: u64,
     },
     HookExecutionFailed {
-        hook_id: String,
+        hook_id: HookId,
         reason: String,
     },
     HookConfigInvalid {
@@ -203,8 +205,12 @@ impl AgentErrorReason {
         match error {
             AgentError::Llm { reason, .. } => Some(Self::from_llm_reason(reason)),
             AgentError::HookDenied {
-                point, reason_code, ..
+                hook_id,
+                point,
+                reason_code,
+                ..
             } => Some(Self::HookDenied {
+                hook_id: Some(hook_id.clone()),
                 point: *point,
                 reason_code: *reason_code,
             }),
@@ -1069,25 +1075,25 @@ pub enum AgentEvent {
 
     // === Hook Lifecycle ===
     /// Hook invocation started.
-    HookStarted { hook_id: String, point: HookPoint },
+    HookStarted { hook_id: HookId, point: HookPoint },
 
     /// Hook invocation completed.
     HookCompleted {
-        hook_id: String,
+        hook_id: HookId,
         point: HookPoint,
         duration_ms: u64,
     },
 
     /// Hook invocation failed.
     HookFailed {
-        hook_id: String,
+        hook_id: HookId,
         point: HookPoint,
         error: String,
     },
 
     /// Hook denied an action.
     HookDenied {
-        hook_id: String,
+        hook_id: HookId,
         point: HookPoint,
         reason_code: HookReasonCode,
         message: String,
@@ -1097,14 +1103,14 @@ pub enum AgentEvent {
 
     /// A rewrite patch was applied synchronously.
     HookRewriteApplied {
-        hook_id: String,
+        hook_id: HookId,
         point: HookPoint,
         patch: HookPatch,
     },
 
     /// A background patch was published for downstream surfaces.
     HookPatchPublished {
-        hook_id: String,
+        hook_id: HookId,
         point: HookPoint,
         envelope: HookPatchEnvelope,
     },
@@ -2288,7 +2294,9 @@ mod tests {
 
     #[test]
     fn agent_error_report_carries_typed_hook_reason() {
+        let hook_id = HookId::new("guard-pre-tool");
         let error = crate::error::AgentError::HookDenied {
+            hook_id: hook_id.clone(),
             point: HookPoint::RunStarted,
             reason_code: HookReasonCode::PolicyViolation,
             message: "blocked".to_string(),
@@ -2299,6 +2307,7 @@ mod tests {
         assert_eq!(
             report.reason,
             Some(AgentErrorReason::HookDenied {
+                hook_id: Some(hook_id),
                 point: HookPoint::RunStarted,
                 reason_code: HookReasonCode::PolicyViolation,
             })
@@ -2357,39 +2366,39 @@ mod tests {
                 }),
             },
             AgentEvent::HookStarted {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
             },
             AgentEvent::HookCompleted {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 duration_ms: 1,
             },
             AgentEvent::HookFailed {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 error: "failed".to_string(),
             },
             AgentEvent::HookDenied {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 reason_code: HookReasonCode::PolicyViolation,
                 message: "nope".to_string(),
                 payload: None,
             },
             AgentEvent::HookRewriteApplied {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 patch: HookPatch::AssistantText {
                     text: "patched".to_string(),
                 },
             },
             AgentEvent::HookPatchPublished {
-                hook_id: "hook-1".to_string(),
+                hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 envelope: HookPatchEnvelope {
                     revision: crate::hooks::HookRevision(1),
-                    hook_id: crate::hooks::HookId("hook-1".to_string()),
+                    hook_id: HookId::new("hook-1"),
                     point: HookPoint::RunStarted,
                     patch: HookPatch::AssistantText {
                         text: "patched".to_string(),

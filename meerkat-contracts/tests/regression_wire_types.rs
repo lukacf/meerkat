@@ -16,8 +16,8 @@ use meerkat_contracts::{
     WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
-    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookPatch, HookPoint,
-    HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
+    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
+    HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
     ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
 };
 
@@ -362,28 +362,28 @@ fn agent_event_all_variants_roundtrip() {
             error_report: None,
         },
         AgentEvent::HookStarted {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PreLlmRequest,
         },
         AgentEvent::HookCompleted {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PostLlmResponse,
             duration_ms: 42,
         },
         AgentEvent::HookFailed {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::RunStarted,
             error: "hook error".to_string(),
         },
         AgentEvent::HookDenied {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PreToolExecution,
             reason_code: HookReasonCode::PolicyViolation,
             message: "denied".to_string(),
             payload: None,
         },
         AgentEvent::HookRewriteApplied {
-            hook_id: "h1".to_string(),
+            hook_id: HookId::new("h1"),
             point: HookPoint::PostLlmResponse,
             patch: HookPatch::AssistantText {
                 text: "rewritten".to_string(),
@@ -599,35 +599,35 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             error_report: None,
         },
         AgentEvent::HookStarted {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
         },
         AgentEvent::HookCompleted {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             duration_ms: 1,
         },
         AgentEvent::HookFailed {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             error: "boom".to_string(),
         },
         AgentEvent::HookDenied {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             reason_code: HookReasonCode::RuntimeError,
             message: "denied".to_string(),
             payload: None,
         },
         AgentEvent::HookRewriteApplied {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             patch: HookPatch::AssistantText {
                 text: "patched".to_string(),
             },
         },
         AgentEvent::HookPatchPublished {
-            hook_id: "hook-1".to_string(),
+            hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             envelope: serde_json::from_value(serde_json::json!({
                 "revision": 1,

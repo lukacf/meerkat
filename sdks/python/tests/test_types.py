@@ -66,6 +66,7 @@ from meerkat.events import (
     HookDenied,
     Retrying,
     RunCompleted,
+    RunFailed,
     RunStarted,
     SkillResolutionFailed,
     SkillResolutionFailureReason,
@@ -1219,6 +1220,97 @@ def test_parse_run_completed():
     assert event.session_id == "abc-123"
     assert event.result == "Done!"
     assert event.usage.input_tokens == 100
+
+
+def test_parse_run_failed_preserves_hook_denied_error_report():
+    raw = {
+        "type": "run_failed",
+        "session_id": "session-1",
+        "error_class": "hook",
+        "error": "denied",
+        "error_report": {
+            "class": "hook",
+            "message": "denied",
+            "reason": {
+                "reason_type": "hook_denied",
+                "hook_id": "policy-gate",
+                "point": "pre_tool_execution",
+                "reason_code": "policy",
+            },
+        },
+    }
+
+    event = parse_event(raw)
+
+    assert isinstance(event, RunFailed)
+    assert event.error_report is not None
+    assert event.error_report["class"] == "hook"
+    assert event.error_report["reason"]["reason_type"] == "hook_denied"
+    assert event.error_report["reason"]["hook_id"] == "policy-gate"
+
+
+def test_parse_run_failed_does_not_promote_string_only_hook_id_mirrors():
+    raw = {
+        "type": "run_failed",
+        "session_id": "session-1",
+        "error_class": "hook",
+        "error": "denied",
+        "error_report": {
+            "class": "hook",
+            "message": "denied",
+            "reason": {
+                "reason_type": "hook_denied",
+                "hook_id_string": "legacy-policy-gate",
+                "point": "pre_tool_execution",
+                "reason_code": "policy",
+            },
+        },
+    }
+
+    event = parse_event(raw)
+
+    assert isinstance(event, RunFailed)
+    assert event.error_report is not None
+    reason = event.error_report["reason"]
+    assert "hook_id" not in reason
+    assert "hook_id_string" not in reason
+
+    malformed = parse_event({
+        "type": "run_failed",
+        "session_id": "session-1",
+        "error_class": "hook",
+        "error": "denied",
+        "error_report": {
+            "class": "hook",
+            "message": "denied",
+            "reason": {
+                "reason_type": "hook_denied",
+                "hook_id": {"value": "policy-gate"},
+                "point": "pre_tool_execution",
+                "reason_code": "policy",
+            },
+        },
+    })
+    assert isinstance(malformed, UnknownEvent)
+    assert malformed.type == "malformed_event"
+
+    timeout_string_mirror = parse_event({
+        "type": "run_failed",
+        "session_id": "session-1",
+        "error_class": "hook",
+        "error": "timeout",
+        "error_report": {
+            "class": "hook",
+            "message": "timeout",
+            "reason": {
+                "reason_type": "hook_timeout",
+                "hook_id_string": "legacy-policy-gate",
+                "timeout_ms": 100,
+            },
+        },
+    })
+    assert isinstance(timeout_string_mirror, UnknownEvent)
+    assert timeout_string_mirror.type == "malformed_event"
 
 
 def test_parse_tool_execution_completed():

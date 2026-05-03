@@ -201,6 +201,9 @@ from .errors import (
 
 # Typed event hierarchy — every event variant is a frozen dataclass
 from .events import (
+    AgentErrorClass,
+    AgentErrorReason,
+    AgentErrorReport,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionCompleted,
@@ -416,6 +419,9 @@ __all__ = [
     "SessionNotFoundError",
     "SkillNotFoundError",
     # Events (base + all variants)
+    "AgentErrorClass",
+    "AgentErrorReason",
+    "AgentErrorReport",
     "Event",
     "RunStarted",
     "ScopedEvent",

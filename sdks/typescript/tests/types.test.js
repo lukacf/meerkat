@@ -216,6 +216,99 @@ describe("Typed Events", () => {
     }
   });
 
+  it("preserves hook-denied error_report on run_failed", () => {
+    const event = parseEvent({
+      type: "run_failed",
+      session_id: "session-1",
+      error_class: "hook",
+      error: "denied",
+      error_report: {
+        class: "hook",
+        message: "denied",
+        reason: {
+          reason_type: "hook_denied",
+          hook_id: "policy-gate",
+          point: "pre_tool_execution",
+          reason_code: "policy",
+        },
+      },
+    });
+
+    assert.equal(event.type, "run_failed");
+    if (event.type === "run_failed") {
+      assert.equal(event.errorReport?.class, "hook");
+      assert.equal(event.errorReport?.reason?.reason_type, "hook_denied");
+      assert.equal(event.errorReport?.reason?.hook_id, "policy-gate");
+    }
+  });
+
+  it("does not promote string-only hook id mirrors on run_failed error_report", () => {
+    const stringOnly = parseEvent({
+      type: "run_failed",
+      session_id: "session-1",
+      error_class: "hook",
+      error: "denied",
+      error_report: {
+        class: "hook",
+        message: "denied",
+        reason: {
+          reason_type: "hook_denied",
+          hook_id_string: "legacy-policy-gate",
+          point: "pre_tool_execution",
+          reason_code: "policy",
+        },
+      },
+    });
+
+    assert.equal(stringOnly.type, "run_failed");
+    if (stringOnly.type === "run_failed") {
+      assert.equal(stringOnly.errorReport?.reason?.hook_id, undefined);
+      assert.equal(
+        Object.hasOwn(stringOnly.errorReport?.reason ?? {}, "hook_id_string"),
+        false,
+      );
+    }
+
+    const malformedHookId = parseEvent({
+      type: "run_failed",
+      session_id: "session-1",
+      error_class: "hook",
+      error: "denied",
+      error_report: {
+        class: "hook",
+        message: "denied",
+        reason: {
+          reason_type: "hook_denied",
+          hook_id: { value: "policy-gate" },
+          point: "pre_tool_execution",
+          reason_code: "policy",
+        },
+      },
+    });
+
+    assert.equal(malformedHookId.type, "malformed_event");
+    assert.equal(malformedHookId.rawType, "run_failed");
+
+    const timeoutStringMirror = parseEvent({
+      type: "run_failed",
+      session_id: "session-1",
+      error_class: "hook",
+      error: "timeout",
+      error_report: {
+        class: "hook",
+        message: "timeout",
+        reason: {
+          reason_type: "hook_timeout",
+          hook_id_string: "legacy-policy-gate",
+          timeout_ms: 100,
+        },
+      },
+    });
+
+    assert.equal(timeoutStringMirror.type, "malformed_event");
+    assert.equal(timeoutStringMirror.rawType, "run_failed");
+  });
+
   it("should parse tool_call_requested", () => {
     const event = parseEvent({
       type: "tool_call_requested",

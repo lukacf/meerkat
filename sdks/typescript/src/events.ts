@@ -66,6 +66,22 @@ export type HookPoint =
 /** Stable identifier for a configured hook. */
 export type HookId = string;
 
+/** Machine-readable agent error class. */
+export type AgentErrorClass = string;
+
+/** Structured agent error reason payload. */
+export type AgentErrorReason = Record<string, unknown> & {
+  readonly reason_type: string;
+  readonly hook_id?: HookId | null;
+};
+
+/** Structured terminal error report emitted with failed runs. */
+export interface AgentErrorReport {
+  readonly class: AgentErrorClass;
+  readonly message: string;
+  readonly reason?: AgentErrorReason | null;
+}
+
 // ---------------------------------------------------------------------------
 // Scoped streaming attribution
 // ---------------------------------------------------------------------------
@@ -110,6 +126,7 @@ export interface RunFailedEvent {
   readonly sessionId: string;
   readonly errorClass: string;
   readonly error: string;
+  readonly errorReport?: AgentErrorReport | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +563,78 @@ function parseUsage(raw: unknown): Usage {
   };
 }
 
+function hasOwn(raw: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(raw, field);
+}
+
+function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report.reason must be object");
+  }
+
+  const reasonType = requireStringField(raw, "reason_type");
+  if (!["hook_denied", "hook_timeout", "hook_execution_failed"].includes(reasonType)) {
+    return { ...raw, reason_type: reasonType } as AgentErrorReason;
+  }
+
+  const reason: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key !== "hook_id" && key !== "hook_id_string") {
+      reason[key] = value;
+    }
+  }
+  reason.reason_type = reasonType;
+
+  if (reasonType === "hook_denied") {
+    reason.point = requireStringField(raw, "point");
+    reason.reason_code = requireStringField(raw, "reason_code");
+  } else {
+    reason.hook_id = requireStringField(raw, "hook_id");
+  }
+
+  if (reasonType === "hook_timeout") {
+    reason.timeout_ms = requireNumberField(raw, "timeout_ms");
+  }
+  if (reasonType === "hook_execution_failed") {
+    reason.reason = requireStringField(raw, "reason");
+  }
+
+  if (reasonType === "hook_denied" && hasOwn(raw, "hook_id")) {
+    const hookId = raw.hook_id;
+    if (hookId !== null && typeof hookId !== "string") {
+      throw new Error("error_report.reason.hook_id must be string or null");
+    }
+    reason.hook_id = hookId;
+  }
+
+  return reason as AgentErrorReason;
+}
+
+function parseAgentErrorReport(raw: unknown): AgentErrorReport | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report must be object");
+  }
+
+  const report: AgentErrorReport = {
+    class: requireStringField(raw, "class"),
+    message: requireStringField(raw, "message"),
+    ...(hasOwn(raw, "reason") ? { reason: parseAgentErrorReason(raw.reason) ?? null } : {}),
+  };
+  return report;
+}
+
 function parseContentInput(raw: unknown): ContentInput {
   if (Array.isArray(raw)) return raw as ContentInput;
   return String(raw ?? "");
@@ -781,7 +870,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "run_completed":
       return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
     case "run_failed":
-      return { type, sessionId: requireStringField(raw, "session_id"), errorClass: requireStringField(raw, "error_class"), error: requireStringField(raw, "error") };
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        errorClass: requireStringField(raw, "error_class"),
+        error: requireStringField(raw, "error"),
+        ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
+      };
 
     // Turn / LLM
     case "turn_started":

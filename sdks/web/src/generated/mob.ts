@@ -8,6 +8,10 @@ export interface MobStatusResult {
   status: string;
 }
 
+export interface MobListResult {
+  mobs: MobStatusResult[];
+}
+
 export interface MobRespawnResult {
   failed_peer_ids?: string[];
   receipt: Record<string, unknown>;

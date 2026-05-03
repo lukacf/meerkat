@@ -1477,6 +1477,11 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
 
     append_alias("WireMobMemberStatus")
     append_interface("MobStatusResult")
+    lines.append("export interface MobListResult {")
+    lines.append("  mobs: MobStatusResult[];")
+    lines.append("}")
+    lines.append("")
+    emitted.add("MobListResult")
     append_interface("MobRespawnResult")
     append_interface("MobEventsResult")
     append_interface("MobMemberStatusResult")

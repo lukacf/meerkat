@@ -439,7 +439,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({ mob_id: mobId, status: "running" });
     },
     async mob_list() {
-      return JSON.stringify([]);
+      return JSON.stringify({ mobs: [] });
     },
     async mob_lifecycle(mobId, action) {
       calls.push(["lifecycle", mobId, action]);
@@ -500,7 +500,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     },
     async mob_member_status(_mobId, agentIdentity) {
       return JSON.stringify({
-        status: "running",
+        status: "active",
         agent_runtime_id: { identity: agentIdentity, generation: 1 },
         fence_token: 1,
         tokens_used: 7,

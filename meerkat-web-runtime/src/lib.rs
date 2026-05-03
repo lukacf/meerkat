@@ -1592,21 +1592,21 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 
 /// List all mobs.
 ///
-/// Returns JSON array of `{ mob_id, status, state }`.
+/// Returns a generated `MobListResult` JSON envelope.
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mobs = mob_state.mob_list().await;
-    let result: Vec<serde_json::Value> = mobs
+    let rows: Vec<serde_json::Value> = mobs
         .into_iter()
         .map(|(id, state)| {
             serde_json::json!({
                 "mob_id": id.to_string(),
                 "status": state.as_str(),
-                "state": state.as_str(),
             })
         })
         .collect();
+    let result = serde_json::json!({ "mobs": rows });
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }

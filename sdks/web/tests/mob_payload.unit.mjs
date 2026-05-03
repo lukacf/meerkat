@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { MeerkatRuntime } from '../dist/index.js';
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
@@ -76,6 +77,24 @@ function makeDirectSession(pollEvents) {
     () => undefined,
     pollEvents,
     async () => '{}',
+  );
+}
+
+async function runtimeWithMobList(payload) {
+  return MeerkatRuntime.init(
+    {
+      async default() {},
+      runtime_version() {
+        return '0.6.0';
+      },
+      init_runtime_from_config() {
+        return JSON.stringify({ status: 'initialized' });
+      },
+      async mob_list() {
+        return JSON.stringify(payload);
+      },
+    },
+    {},
   );
 }
 

@@ -677,4 +677,115 @@ impl MeerkatMachine {
             (false, false) => Ok(None),
         }
     }
+
+    /// Resolve the machine-owned realtime bootstrap gate for a session.
+    /// Unknown or unresolved capability state fails closed: bootstrap callers
+    /// must not infer eligibility from attachment-status availability.
+    pub(super) async fn realtime_bootstrap_eligibility(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeBootstrapEligibility, RuntimeDriverError>
+    {
+        let (cached_identity, cached_surface, cached_status) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.current_llm_identity.clone(),
+                entry.current_capability_surface.clone(),
+                entry.capability_surface_status,
+            )
+        };
+
+        let (identity, surface) = match (cached_identity, cached_surface, cached_status) {
+            (Some(identity), Some(surface), SessionLlmCapabilitySurfaceStatus::Resolved) => {
+                (identity, surface)
+            }
+            _ => {
+                let host = match self.llm_reconfigure_host() {
+                    Ok(host) => host,
+                    Err(err) => {
+                        let denial = RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "realtime bootstrap eligibility is unresolved for session {session_id}: {err}"
+                            ),
+                        };
+                        return self
+                            .realtime_status_eligibility_or(session_id, denial)
+                            .await;
+                    }
+                };
+                let hydrated = match host.hydrate_session_llm_state(session_id).await {
+                    Ok(hydrated) => hydrated,
+                    Err(err) => {
+                        return self.realtime_status_eligibility_or(session_id, err).await;
+                    }
+                };
+                self.cache_hydrated_session_llm_state(session_id, &hydrated)
+                    .await?;
+                match (
+                    hydrated.current_identity,
+                    hydrated.current_capability_surface,
+                    hydrated.capability_surface_status,
+                ) {
+                    (identity, Some(surface), SessionLlmCapabilitySurfaceStatus::Resolved) => {
+                        (identity, surface)
+                    }
+                    (identity, _, _) => {
+                        let denial = RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "realtime bootstrap eligibility is unresolved for provider '{:?}' model '{}'",
+                                identity.provider, identity.model
+                            ),
+                        };
+                        return self
+                            .realtime_status_eligibility_or(session_id, denial)
+                            .await;
+                    }
+                }
+            }
+        };
+
+        if !surface.realtime {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "session model '{}' does not support realtime; reconfigure to a realtime-capable model before opening realtime",
+                    identity.model
+                ),
+            });
+        }
+
+        let status =
+            <Self as SessionServiceRuntimeExt>::realtime_channel_status(self, session_id).await?;
+        Ok(crate::meerkat_machine_types::RealtimeBootstrapEligibility::eligible(status))
+    }
+
+    async fn realtime_status_eligibility_or(
+        &self,
+        session_id: &SessionId,
+        denial: RuntimeDriverError,
+    ) -> Result<crate::meerkat_machine_types::RealtimeBootstrapEligibility, RuntimeDriverError>
+    {
+        let Ok(status) =
+            <Self as SessionServiceRuntimeExt>::realtime_channel_status(self, session_id).await
+        else {
+            return Err(denial);
+        };
+        if matches!(
+            status.state,
+            meerkat_contracts::RealtimeChannelState::Opening
+                | meerkat_contracts::RealtimeChannelState::Ready
+                | meerkat_contracts::RealtimeChannelState::Interrupted
+                | meerkat_contracts::RealtimeChannelState::Reconnecting
+                | meerkat_contracts::RealtimeChannelState::Error
+        ) {
+            return Ok(
+                crate::meerkat_machine_types::RealtimeBootstrapEligibility::eligible(status),
+            );
+        }
+        Err(denial)
+    }
 }

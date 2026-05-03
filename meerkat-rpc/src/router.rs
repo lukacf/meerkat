@@ -2873,7 +2873,7 @@ mod tests {
 
     async fn test_router_with_v9_runtime_and_realtime_ws_host()
     -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
-        let (router, notif_rx) = test_router_with_v9_runtime().await;
+        let (router, notif_rx) = test_router().await;
         let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(
             "ws://127.0.0.1:4900/realtime/ws",
         ));
@@ -6102,13 +6102,14 @@ mod tests {
 
     #[tokio::test]
     async fn realtime_capabilities_returns_conservative_phase_one_metadata() {
-        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let (router, _notif_rx) = test_router().await;
         let create_resp = router
             .dispatch(make_request(
                 "session/create",
                 serde_json::json!({
                     "prompt": "realtime caps",
-                    "initial_turn": "deferred"
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
                 }),
             ))
             .await
@@ -6143,13 +6144,14 @@ mod tests {
 
     #[tokio::test]
     async fn realtime_open_info_reports_transport_unavailable_until_ws_host_lands() {
-        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let (router, _notif_rx) = test_router().await;
         let create_resp = router
             .dispatch(make_request(
                 "session/create",
                 serde_json::json!({
                     "prompt": "realtime open-info",
-                    "initial_turn": "deferred"
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
                 }),
             ))
             .await
@@ -6177,6 +6179,119 @@ mod tests {
         assert_eq!(
             error_code(&response),
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_fails_closed_when_machine_bootstrap_eligibility_is_missing() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(
+            "ws://127.0.0.1:4900/realtime/ws",
+        ));
+        let router = router.with_realtime_ws_host(host);
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info missing machine eligibility",
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert!(
+            response.result.is_none(),
+            "missing machine eligibility must not mint open_info: {response:?}"
+        );
+        assert!(
+            error_message(&response).contains("realtime bootstrap eligibility denied"),
+            "unexpected error message: {}",
+            error_message(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_rejects_attachment_status_availability_without_realtime_model() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info attachment status only",
+                    "model": "claude-sonnet-4-5",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
+            .await
+            .expect("session should register before attachment-status projection");
+        router
+            .runtime_adapter()
+            .realtime_attachment_status(&parsed_session_id)
+            .await
+            .expect("attachment-status availability is not realtime eligibility");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert!(
+            response.result.is_none(),
+            "attachment-status availability alone must not mint open_info: {response:?}"
+        );
+        assert!(
+            error_message(&response).contains("does not support realtime"),
+            "unexpected error message: {}",
+            error_message(&response)
         );
     }
 
@@ -6254,7 +6369,8 @@ mod tests {
                 "session/create",
                 serde_json::json!({
                     "prompt": "realtime open-info wired",
-                    "initial_turn": "deferred"
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
                 }),
             ))
             .await

@@ -204,6 +204,14 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn realtime_bootstrap_eligibility(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeBootstrapEligibility, RuntimeDriverError>
+    {
+        MeerkatMachine::realtime_bootstrap_eligibility(self, session_id).await
+    }
+
     async fn configure_model_routing_baseline(
         &self,
         session_id: &SessionId,

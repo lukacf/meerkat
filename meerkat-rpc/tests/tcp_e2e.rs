@@ -362,7 +362,11 @@ async fn tcp_e2e_realtime_ws_host_coexists_with_tcp_rpc() {
         &json!({
             "jsonrpc":"2.0",
             "method":"session/create",
-            "params":{"prompt":"realtime open-info e2e","initial_turn":"deferred"},
+            "params":{
+                "model":"gpt-realtime",
+                "prompt":"realtime open-info e2e",
+                "initial_turn":"deferred"
+            },
             "id":2
         }),
     )
@@ -466,7 +470,11 @@ async fn tcp_e2e_realtime_session_targets_accept_env_default_openai_credentials(
         &json!({
             "jsonrpc":"2.0",
             "method":"session/create",
-            "params":{"prompt":"realtime capabilities e2e","initial_turn":"deferred"},
+            "params":{
+                "model":"gpt-realtime",
+                "prompt":"realtime capabilities e2e",
+                "initial_turn":"deferred"
+            },
             "id":2
         }),
     )

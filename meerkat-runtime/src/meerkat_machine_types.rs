@@ -149,6 +149,25 @@ pub struct RealtimeAttachmentSignalAuthority {
     pub authority_epoch: u64,
 }
 
+/// Machine-owned proof that a session is currently eligible for realtime
+/// bootstrap. Surfaces can inspect the projected channel status, but only the
+/// runtime can construct this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeBootstrapEligibility {
+    status: RealtimeChannelStatus,
+}
+
+impl RealtimeBootstrapEligibility {
+    pub(crate) fn eligible(status: RealtimeChannelStatus) -> Self {
+        Self { status }
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &RealtimeChannelStatus {
+        &self.status
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {

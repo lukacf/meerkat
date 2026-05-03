@@ -745,7 +745,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::{SinkExt, StreamExt, stream};
-    use meerkat::AgentFactory;
+    use meerkat::{AgentBuildConfig, AgentFactory};
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_contracts::{
         RealtimeCapabilities, RealtimeChannelOpenFrame, RealtimeChannelRole, RealtimeChannelTarget,
@@ -757,7 +757,9 @@ mod tests {
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+    use meerkat_core::session::ToolCategoryOverride;
     use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
+    use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
     use tokio::net::TcpStream;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -850,13 +852,69 @@ mod tests {
         }
     }
 
-    async fn register_live_session(runtime: &Arc<SessionRuntime>, session_id: &str) {
-        let session_id =
-            meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
+    async fn create_registered_realtime_session(
+        runtime: &Arc<SessionRuntime>,
+    ) -> meerkat_core::SessionId {
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    override_builtins: ToolCategoryOverride::Enable,
+                    ..AgentBuildConfig::new("gpt-realtime")
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("session should create");
         runtime
             .runtime_adapter()
-            .register_session_with_executor(session_id, Box::new(NeverAppliedExecutor))
+            .register_session_with_executor(session_id.clone(), Box::new(NeverAppliedExecutor))
             .await;
+        session_id
+    }
+
+    fn realtime_capabilities() -> RealtimeCapabilities {
+        RealtimeCapabilities {
+            input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+            output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+            turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+            interrupt_supported: true,
+            transcript_supported: true,
+            tool_lifecycle_events_supported: false,
+            video_supported: false,
+            audio_input_format: None,
+            audio_output_format: None,
+        }
+    }
+
+    async fn issue_open_info(
+        host: &crate::realtime_ws::RealtimeWsHost,
+        runtime: &Arc<SessionRuntime>,
+        session_id: &meerkat_core::SessionId,
+        role: RealtimeChannelRole,
+    ) -> meerkat_contracts::RealtimeOpenInfo {
+        let eligibility = runtime
+            .runtime_adapter()
+            .realtime_bootstrap_eligibility(session_id)
+            .await
+            .expect("session should be machine-eligible for realtime bootstrap");
+        host.issue_open_info(
+            RealtimeOpenRequest {
+                target: RealtimeChannelTarget::SessionTarget {
+                    session_id: session_id.to_string(),
+                },
+                role,
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+                reconnect_policy: None,
+                channel_config: None,
+            },
+            crate::realtime_ws::RealtimeOpenGrant::from_machine_eligibility(
+                eligibility,
+                realtime_capabilities(),
+            ),
+            None,
+        )
+        .await
     }
 
     /// Send a single JSONL line over a TCP stream.
@@ -1285,7 +1343,7 @@ mod tests {
     async fn realtime_ws_listener_accepts_channel_open_and_coexists_with_tcp_initialize() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
-        register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;
+        let session_id = create_registered_realtime_session(&runtime).await;
 
         let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let tcp_addr = tcp_listener.local_addr().unwrap();
@@ -1295,31 +1353,13 @@ mod tests {
             "ws://{ws_addr}{}",
             crate::REALTIME_WS_PATH
         )));
-        let open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
+        let open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
 
         let tcp_rt = Arc::clone(&runtime);
         let tcp_cs = Arc::clone(&config_store);
@@ -1407,6 +1447,7 @@ mod tests {
     async fn realtime_ws_listener_rejects_unsupported_protocol_version() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
+        let session_id = create_registered_realtime_session(&runtime).await;
 
         let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ws_addr = ws_listener.local_addr().unwrap();
@@ -1414,31 +1455,13 @@ mod tests {
             "ws://{ws_addr}{}",
             crate::REALTIME_WS_PATH
         )));
-        let open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
+        let open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
 
         let ws_rt = Arc::clone(&runtime);
         let ws_cs = Arc::clone(&config_store);
@@ -1494,7 +1517,7 @@ mod tests {
     async fn realtime_ws_listener_rejects_second_primary_for_same_target() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
-        register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;
+        let session_id = create_registered_realtime_session(&runtime).await;
 
         let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ws_addr = ws_listener.local_addr().unwrap();
@@ -1502,56 +1525,20 @@ mod tests {
             "ws://{ws_addr}{}",
             crate::REALTIME_WS_PATH
         )));
-        let first_open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
-        let second_open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
+        let first_open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
+        let second_open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
 
         let ws_rt = Arc::clone(&runtime);
         let ws_cs = Arc::clone(&config_store);
@@ -1633,7 +1620,7 @@ mod tests {
     async fn realtime_ws_listener_enforces_observer_read_only_frames() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
-        register_live_session(&runtime, "fedcba98-7654-3210-fedc-ba9876543210").await;
+        let session_id = create_registered_realtime_session(&runtime).await;
 
         let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ws_addr = ws_listener.local_addr().unwrap();
@@ -1641,31 +1628,13 @@ mod tests {
             "ws://{ws_addr}{}",
             crate::REALTIME_WS_PATH
         )));
-        let open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "fedcba98-7654-3210-fedc-ba9876543210".to_string(),
-                    },
-                    role: RealtimeChannelRole::Observer,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
+        let open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Observer,
+        )
+        .await;
 
         let ws_rt = Arc::clone(&runtime);
         let ws_cs = Arc::clone(&config_store);
@@ -1743,7 +1712,7 @@ mod tests {
     async fn realtime_ws_listener_releases_primary_slot_after_close() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
-        register_live_session(&runtime, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").await;
+        let session_id = create_registered_realtime_session(&runtime).await;
 
         let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ws_addr = ws_listener.local_addr().unwrap();
@@ -1751,56 +1720,20 @@ mod tests {
             "ws://{ws_addr}{}",
             crate::REALTIME_WS_PATH
         )));
-        let first_open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
-        let second_open_info = host
-            .issue_open_info(
-                RealtimeOpenRequest {
-                    target: RealtimeChannelTarget::SessionTarget {
-                        session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-                    },
-                    role: RealtimeChannelRole::Primary,
-                    turning_mode: RealtimeTurningMode::ProviderManaged,
-                    reconnect_policy: None,
-                    channel_config: None,
-                },
-                RealtimeCapabilities {
-                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
-                    interrupt_supported: true,
-                    transcript_supported: true,
-                    tool_lifecycle_events_supported: false,
-                    video_supported: false,
-                    audio_input_format: None,
-                    audio_output_format: None,
-                },
-                None,
-            )
-            .await;
+        let first_open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
+        let second_open_info = issue_open_info(
+            host.as_ref(),
+            &runtime,
+            &session_id,
+            RealtimeChannelRole::Primary,
+        )
+        .await;
 
         let ws_rt = Arc::clone(&runtime);
         let ws_cs = Arc::clone(&config_store);

@@ -27,7 +27,7 @@ pub mod session_runtime;
 pub mod transport;
 
 pub use realtime_ws::{
-    REALTIME_WS_PATH, RealtimeOpenError, RealtimeWsHost, serve_realtime_ws,
+    REALTIME_WS_PATH, RealtimeOpenError, RealtimeOpenGrant, RealtimeWsHost, serve_realtime_ws,
     serve_realtime_ws_listener,
 };
 pub use server::{

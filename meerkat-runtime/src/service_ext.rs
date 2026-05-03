@@ -13,7 +13,8 @@ use crate::input::Input;
 use crate::input_state::StoredInputState;
 use crate::meerkat_machine_types::{
     ImageOperationRoutingRequest, ImageOperationRoutingResult, RealtimeAttachmentStatus,
-    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SwitchTurnRequest,
+    RealtimeBootstrapEligibility, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SwitchTurnRequest,
 };
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
@@ -71,6 +72,18 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError>;
+
+    /// Machine-owned realtime bootstrap eligibility. `realtime/open_info`,
+    /// `realtime/capabilities`, and websocket `channel.open` use this instead
+    /// of inferring eligibility from attachment-status availability.
+    async fn realtime_bootstrap_eligibility(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<RealtimeBootstrapEligibility, RuntimeDriverError> {
+        Err(RuntimeDriverError::Internal(
+            "realtime bootstrap eligibility is not implemented by this runtime adapter".into(),
+        ))
+    }
 
     /// Retire a session's runtime.
     async fn retire_runtime(

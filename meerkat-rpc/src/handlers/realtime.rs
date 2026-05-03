@@ -4,8 +4,7 @@ use serde_json::value::RawValue;
 
 use meerkat_contracts::{
     ErrorCode, RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeOpenRequest, RealtimeStatusParams,
-    RealtimeStatusResult,
+    RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
 };
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 
@@ -31,6 +30,23 @@ fn conservative_phase_one_capabilities() -> RealtimeCapabilities {
         audio_input_format: None,
         audio_output_format: None,
     }
+}
+
+async fn require_realtime_bootstrap_eligibility(
+    id: Option<RpcId>,
+    adapter: &dyn SessionServiceRuntimeExt,
+    session_id: &meerkat_core::types::SessionId,
+) -> Result<meerkat_runtime::RealtimeBootstrapEligibility, RpcResponse> {
+    adapter
+        .realtime_bootstrap_eligibility(session_id)
+        .await
+        .map_err(|err| {
+            RpcResponse::error(
+                id,
+                ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+                format!("realtime bootstrap eligibility denied: {err}"),
+            )
+        })
 }
 
 /// W3-H: resolve a RealtimeChannelTarget to a concrete bridge session id.
@@ -87,9 +103,11 @@ pub async fn handle_realtime_capabilities(
         Ok(sid) => sid,
         Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
     };
-    if let Err(err) = adapter.realtime_attachment_status(&session_id).await {
-        return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string());
-    }
+    let _eligibility =
+        match require_realtime_bootstrap_eligibility(id.clone(), adapter, &session_id).await {
+            Ok(eligibility) => eligibility,
+            Err(response) => return response,
+        };
 
     let capabilities = realtime_ws_host
         .and_then(crate::realtime_ws::RealtimeWsHost::session_factory_capabilities)
@@ -149,9 +167,11 @@ pub async fn handle_realtime_open_info(
         Ok(sid) => sid,
         Err(err) => return RpcResponse::error(id, error::INVALID_PARAMS, err),
     };
-    if let Err(err) = adapter.realtime_attachment_status(&session_id).await {
-        return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string());
-    }
+    let eligibility =
+        match require_realtime_bootstrap_eligibility(id.clone(), adapter, &session_id).await {
+            Ok(eligibility) => eligibility,
+            Err(response) => return response,
+        };
 
     let capabilities = realtime_ws_host
         .and_then(crate::realtime_ws::RealtimeWsHost::session_factory_capabilities)
@@ -179,7 +199,38 @@ pub async fn handle_realtime_open_info(
     };
 
     let open_info = realtime_ws_host
-        .issue_open_info(params, capabilities, realm_id.map(ToString::to_string))
+        .issue_open_info(
+            params,
+            crate::realtime_ws::RealtimeOpenGrant::from_machine_eligibility(
+                eligibility,
+                capabilities,
+            ),
+            realm_id.map(ToString::to_string),
+        )
         .await;
     RpcResponse::success(id, open_info)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bootstrap_handlers_do_not_use_attachment_status_as_eligibility() {
+        let source = include_str!("realtime.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source should precede tests");
+        assert!(
+            !production_source.contains("realtime_attachment_status"),
+            "realtime/capabilities and realtime/open_info must not gate bootstrap on attachment-status availability"
+        );
+        assert!(
+            production_source.contains("realtime_bootstrap_eligibility"),
+            "bootstrap handlers must read machine-owned realtime eligibility"
+        );
+        assert!(
+            production_source.contains("RealtimeOpenGrant::from_machine_eligibility"),
+            "open_info token minting must require a machine eligibility grant"
+        );
+    }
 }

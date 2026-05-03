@@ -45,7 +45,9 @@ use meerkat_core::session::ToolCategoryOverride;
 use meerkat_core::{Config, MemoryConfigStore, SessionHistoryQuery, StopReason};
 use meerkat_rpc::session_executor::SessionRuntimeExecutor;
 use meerkat_rpc::session_runtime::SessionRuntime;
-use meerkat_rpc::{REALTIME_WS_PATH, RealtimeWsHost, serve_realtime_ws_listener};
+use meerkat_rpc::{
+    REALTIME_WS_PATH, RealtimeOpenGrant, RealtimeWsHost, serve_realtime_ws_listener,
+};
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use meerkat_runtime::{Input, PromptInput};
 use tokio::sync::Notify;
@@ -270,16 +272,40 @@ impl CoreExecutor for NeverAppliedExecutor {
     }
 }
 
-async fn register_live_session(runtime: &Arc<SessionRuntime>, session_id: &str) {
-    register_live_session_with_executor(runtime, session_id, Box::new(NeverAppliedExecutor)).await;
+async fn create_realtime_session(runtime: &Arc<SessionRuntime>) -> meerkat_core::SessionId {
+    runtime
+        .create_session(
+            AgentBuildConfig {
+                override_builtins: ToolCategoryOverride::Enable,
+                ..AgentBuildConfig::new("gpt-realtime")
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("session should create")
+}
+
+async fn create_registered_realtime_session(
+    runtime: &Arc<SessionRuntime>,
+) -> meerkat_core::SessionId {
+    create_registered_realtime_session_with_executor(runtime, Box::new(NeverAppliedExecutor)).await
+}
+
+async fn create_registered_realtime_session_with_executor(
+    runtime: &Arc<SessionRuntime>,
+    executor: Box<dyn CoreExecutor>,
+) -> meerkat_core::SessionId {
+    let session_id = create_realtime_session(runtime).await;
+    register_live_session_with_executor(runtime, session_id.clone(), executor).await;
+    session_id
 }
 
 async fn register_live_session_with_executor(
     runtime: &Arc<SessionRuntime>,
-    session_id: &str,
+    session_id: meerkat_core::SessionId,
     executor: Box<dyn CoreExecutor>,
 ) {
-    let session_id = meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
     runtime
         .runtime_adapter()
         .register_session_with_executor(session_id, executor)
@@ -288,20 +314,29 @@ async fn register_live_session_with_executor(
 
 async fn issue_open_info(
     host: &RealtimeWsHost,
+    runtime: &Arc<SessionRuntime>,
     session_id: &str,
     role: RealtimeChannelRole,
     turning_mode: RealtimeTurningMode,
 ) -> RealtimeOpenInfo {
-    issue_open_info_with_policy(host, session_id, role, turning_mode, None).await
+    issue_open_info_with_policy(host, runtime, session_id, role, turning_mode, None).await
 }
 
 async fn issue_open_info_with_policy(
     host: &RealtimeWsHost,
+    runtime: &Arc<SessionRuntime>,
     session_id: &str,
     role: RealtimeChannelRole,
     turning_mode: RealtimeTurningMode,
     reconnect_policy: Option<RealtimeReconnectPolicy>,
 ) -> RealtimeOpenInfo {
+    let parsed_session_id =
+        meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
+    let eligibility = runtime
+        .runtime_adapter()
+        .realtime_bootstrap_eligibility(&parsed_session_id)
+        .await
+        .expect("session should be machine-eligible for realtime bootstrap");
     host.issue_open_info(
         RealtimeOpenRequest {
             target: RealtimeChannelTarget::SessionTarget {
@@ -312,10 +347,13 @@ async fn issue_open_info_with_policy(
             reconnect_policy,
             channel_config: None,
         },
-        conservative_capabilities(vec![
-            RealtimeTurningMode::ProviderManaged,
-            RealtimeTurningMode::ExplicitCommit,
-        ]),
+        RealtimeOpenGrant::from_machine_eligibility(
+            eligibility,
+            conservative_capabilities(vec![
+                RealtimeTurningMode::ProviderManaged,
+                RealtimeTurningMode::ExplicitCommit,
+            ]),
+        ),
         None,
     )
     .await
@@ -420,17 +458,7 @@ async fn read_history(
 }
 
 async fn create_materialized_session(runtime: &Arc<SessionRuntime>) -> meerkat_core::SessionId {
-    let session_id = runtime
-        .create_session(
-            AgentBuildConfig {
-                override_builtins: ToolCategoryOverride::Enable,
-                ..AgentBuildConfig::new("gpt-realtime")
-            },
-            None,
-            None,
-        )
-        .await
-        .expect("session should create");
+    let session_id = create_realtime_session(runtime).await;
     runtime
         .runtime_adapter()
         .register_session_with_executor(
@@ -473,6 +501,7 @@ async fn channel_open_attaches_runtime_and_reports_opening_status() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -527,6 +556,52 @@ async fn channel_open_attaches_runtime_and_reports_opening_status() {
 }
 
 #[tokio::test]
+async fn channel_open_fails_closed_without_machine_bootstrap_eligibility_on_ws_runtime() {
+    let (_mint_temp, mint_runtime, _mint_config_store) = build_test_runtime();
+    let session_id = create_materialized_session(&mint_runtime).await;
+    let session_id_text = session_id.to_string();
+    let (_serve_temp, serve_runtime, config_store) = build_test_runtime();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
+    let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
+    let open_info = issue_open_info(
+        host.as_ref(),
+        &mint_runtime,
+        &session_id_text,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    let server_host = Arc::clone(&host);
+    let server_runtime = Arc::clone(&serve_runtime);
+    let server = tokio::spawn(async move {
+        serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
+    });
+
+    let mut ws_stream = connect_and_open(
+        &ws_url,
+        &open_info,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    let error = assert_error_frame(
+        read_server_frame(&mut ws_stream).await,
+        RealtimeErrorCode::RuntimeNotReady,
+    );
+    assert!(
+        error
+            .message
+            .contains("realtime bootstrap eligibility denied"),
+        "unexpected channel.open error: {error:?}"
+    );
+
+    let _ = ws_stream.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn provider_managed_text_input_emits_transcript_events_and_commits_history() {
     let (_temp, runtime, config_store) = build_test_runtime();
     let session_id = create_materialized_session(&runtime).await;
@@ -538,6 +613,7 @@ async fn provider_managed_text_input_emits_transcript_events_and_commits_history
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -620,15 +696,16 @@ async fn provider_managed_text_input_emits_transcript_events_and_commits_history
 #[tokio::test]
 async fn channel_commit_turn_is_rejected_for_provider_managed_channels() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    register_live_session(&runtime, session_id).await;
+    let session_id = create_registered_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        session_id,
+        &runtime,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -675,6 +752,7 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ExplicitCommit,
@@ -807,6 +885,13 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
 #[tokio::test]
 async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
     let (_temp, runtime, config_store) = build_test_runtime();
+    let session_id = create_registered_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
+    let eligibility = runtime
+        .runtime_adapter()
+        .realtime_bootstrap_eligibility(&session_id)
+        .await
+        .expect("session should be machine-eligible for realtime bootstrap");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
@@ -815,14 +900,17 @@ async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
         .issue_open_info(
             RealtimeOpenRequest {
                 target: RealtimeChannelTarget::SessionTarget {
-                    session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                    session_id: session_id_text,
                 },
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ExplicitCommit,
                 reconnect_policy: None,
                 channel_config: None,
             },
-            conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+            RealtimeOpenGrant::from_machine_eligibility(
+                eligibility,
+                conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+            ),
             None,
         )
         .await;
@@ -867,6 +955,7 @@ async fn observer_channels_receive_primary_events_and_remain_read_only() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let primary_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ExplicitCommit,
@@ -874,6 +963,7 @@ async fn observer_channels_receive_primary_events_and_remain_read_only() {
     .await;
     let observer_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Observer,
         RealtimeTurningMode::ExplicitCommit,
@@ -980,6 +1070,7 @@ async fn explicit_commit_disconnect_discards_uncommitted_transcript() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ExplicitCommit,
@@ -1111,6 +1202,7 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
         Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -1298,6 +1390,7 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -1454,6 +1547,7 @@ async fn provider_interrupted_event_is_forwarded_as_public_channel_event() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -1582,6 +1676,7 @@ async fn cancelled_provider_turn_does_not_surface_public_completion_or_commit_pa
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -1756,6 +1851,7 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -1984,6 +2080,7 @@ async fn product_session_disconnect_reopens_via_session_factory() {
         Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
     let open_info = issue_open_info_with_policy(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -2161,6 +2258,7 @@ async fn product_session_tool_call_routes_through_session_service_and_continues_
         Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -2267,6 +2365,7 @@ async fn product_session_tool_call_failures_emit_failed_event_and_submit_provide
         Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -2327,15 +2426,16 @@ async fn product_session_tool_call_failures_emit_failed_event_and_submit_provide
 #[tokio::test]
 async fn client_cannot_submit_tool_results_directly_over_realtime_protocol() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    register_live_session(&runtime, session_id).await;
+    let session_id = create_registered_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        session_id,
+        &runtime,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -2442,7 +2542,8 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
     }
 
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
+    let session_id = create_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
     let apply_started = Arc::new(Notify::new());
     let apply_finished = Arc::new(Notify::new());
     let allow_finish = Arc::new(Notify::new());
@@ -2450,7 +2551,7 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
     runtime
         .runtime_adapter()
         .register_session_with_executor(
-            meerkat_core::SessionId::parse(session_id).expect("session_id should parse"),
+            session_id.clone(),
             Box::new(BlockingExecutor {
                 apply_started: Arc::clone(&apply_started),
                 apply_finished: Arc::clone(&apply_finished),
@@ -2465,7 +2566,8 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        session_id,
+        &runtime,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -2476,12 +2578,10 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
         serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
     });
 
-    let session_id_value =
-        meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
     let (_outcome, completion_handle) = runtime
         .runtime_adapter()
         .accept_input_with_completion(
-            &session_id_value,
+            &session_id,
             Input::Prompt(PromptInput::new("interrupt me", None)),
         )
         .await
@@ -2551,6 +2651,7 @@ async fn reattach_required_primary_channel_retries_and_returns_to_opening_status
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info_with_policy(
         host.as_ref(),
+        &runtime,
         &session_id,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
@@ -2669,6 +2770,7 @@ async fn observer_status_poll_preserves_machine_owned_reconnect_progress() {
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
+        &runtime,
         &session_id,
         RealtimeChannelRole::Observer,
         RealtimeTurningMode::ProviderManaged,
@@ -2746,14 +2848,16 @@ async fn observer_status_poll_preserves_machine_owned_reconnect_progress() {
 #[tokio::test]
 async fn second_channel_open_frame_yields_unexpected_channel_open() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;
+    let session_id = create_registered_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        "01234567-89ab-cdef-0123-456789abcdef",
+        &runtime,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -2799,15 +2903,16 @@ async fn second_channel_open_frame_yields_unexpected_channel_open() {
 #[tokio::test]
 async fn channel_close_detaches_runtime_binding_and_yields_channel_closed() {
     let (_temp, runtime, config_store) = build_test_runtime();
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    register_live_session(&runtime, session_id).await;
+    let session_id = create_registered_realtime_session(&runtime).await;
+    let session_id_text = session_id.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
     let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
     let open_info = issue_open_info(
         host.as_ref(),
-        session_id,
+        &runtime,
+        &session_id_text,
         RealtimeChannelRole::Primary,
         RealtimeTurningMode::ProviderManaged,
     )
@@ -2845,7 +2950,7 @@ async fn channel_close_detaches_runtime_binding_and_yields_channel_closed() {
     let runtime_status =
         <meerkat_runtime::MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
             runtime.runtime_adapter().as_ref(),
-            &meerkat_core::SessionId::parse(session_id).expect("session_id should parse"),
+            &session_id,
         )
         .await
         .expect("registered session should expose runtime live status");

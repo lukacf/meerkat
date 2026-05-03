@@ -5725,13 +5725,22 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            filter_witnesses: [(
-                "active_secret".to_string(),
-                meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:active_secret".to_string()),
-                    last_seen_provenance: None,
-                },
-            )]
+            filter_witnesses: [
+                (
+                    "active_secret".to_string(),
+                    meerkat_core::ToolVisibilityWitness {
+                        stable_owner_key: Some("owner:active_secret".to_string()),
+                        last_seen_provenance: None,
+                    },
+                ),
+                (
+                    "staged_visible".to_string(),
+                    meerkat_core::ToolVisibilityWitness {
+                        stable_owner_key: Some("owner:staged_visible".to_string()),
+                        last_seen_provenance: None,
+                    },
+                ),
+            ]
             .into_iter()
             .collect(),
             ..Default::default()

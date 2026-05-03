@@ -697,11 +697,53 @@ pub struct MobSpawnManySpawnedResult {
     pub member_ref: WireMemberRef,
 }
 
+/// Typed failure cause for one failed `mob/spawn_many` member row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MobSpawnManyFailureCause {
+    ProfileNotFound,
+    MemberNotFound,
+    MemberAlreadyExists,
+    NotExternallyAddressable,
+    InvalidTransition,
+    WiringError,
+    BridgeCommandRejected,
+    MemberRestoreFailed,
+    KickoffWaitTimedOut,
+    ReadyWaitTimedOut,
+    DefinitionError,
+    FlowNotFound,
+    FlowFailed,
+    RunNotFound,
+    RunCanceled,
+    FlowTurnTimedOut,
+    FrameDepthLimitExceeded,
+    FrameAtomicPersistenceUnavailable,
+    SpecRevisionConflict,
+    SchemaValidation,
+    InsufficientTargets,
+    TopologyViolation,
+    BridgeDeliveryRejected,
+    SupervisorEscalation,
+    UnsupportedForMode,
+    ResetBarrier,
+    StorageError,
+    SessionError,
+    CommsError,
+    CallbackPending,
+    StaleFenceToken,
+    StaleEventCursor,
+    WorkNotFound,
+    Internal,
+}
+
 /// Failed per-member `mob/spawn_many` result payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobSpawnManyFailedResult {
+    pub cause: MobSpawnManyFailureCause,
     pub message: String,
 }
 
@@ -755,10 +797,11 @@ impl MobSpawnManyResultEntry {
         }
     }
 
-    pub fn failed(message: impl Into<String>) -> Self {
+    pub fn failed(cause: MobSpawnManyFailureCause, message: impl Into<String>) -> Self {
         Self {
             status: MobSpawnManyResultStatus::Failed,
             result: MobSpawnManyResultPayload::Failed(MobSpawnManyFailedResult {
+                cause,
                 message: message.into(),
             }),
         }
@@ -2089,6 +2132,21 @@ mod tests {
         let round_trip: MobSpawnManyResultEntry =
             serde_json::from_value(json).expect("deserialize typed spawn_many row");
         assert_eq!(round_trip, entry);
+
+        let failed = MobSpawnManyResultEntry::failed(
+            MobSpawnManyFailureCause::ProfileNotFound,
+            "profile missing",
+        );
+        let json = serde_json::to_value(&failed).expect("serialize typed failed spawn_many row");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["result"]["cause"], "profile_not_found");
+        assert_eq!(json["result"]["message"], "profile missing");
+        assert!(json.get("ok").is_none());
+        assert!(json.get("error").is_none());
+
+        let round_trip: MobSpawnManyResultEntry =
+            serde_json::from_value(json).expect("deserialize typed failed spawn_many row");
+        assert_eq!(round_trip, failed);
     }
 
     #[test]
@@ -2133,6 +2191,7 @@ mod tests {
         let mismatched = serde_json::json!({
             "status": "spawned",
             "result": {
+                "cause": "profile_not_found",
                 "message": "profile missing"
             }
         });
@@ -2141,6 +2200,35 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("status spawned requires spawned result"),
+            "unexpected error: {err}"
+        );
+
+        let message_only_failure = serde_json::json!({
+            "status": "failed",
+            "result": {
+                "message": "profile missing"
+            }
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(message_only_failure)
+            .expect_err("string-only failure result must fail closed");
+        assert!(
+            err.to_string().contains("data did not match any variant")
+                || err.to_string().contains("missing field `cause`"),
+            "unexpected error: {err}"
+        );
+
+        let unknown_failure_cause = serde_json::json!({
+            "status": "failed",
+            "result": {
+                "cause": "future_failure",
+                "message": "future failure"
+            }
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(unknown_failure_cause)
+            .expect_err("unknown failure cause must fail closed");
+        assert!(
+            err.to_string().contains("data did not match any variant")
+                || err.to_string().contains("unknown variant"),
             "unexpected error: {err}"
         );
     }

@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 
 ContentBlock = dict[str, Any]
 ContentInput = str | list[ContentBlock]
+HookId = str
+AgentErrorClass = str
+AgentErrorReason = dict[str, Any]
+AgentErrorReport = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +95,7 @@ class RunFailed(Event):
     session_id: str = ""
     error_class: str = ""
     error: str = ""
+    error_report: AgentErrorReport | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +248,7 @@ class Retrying(Event):
 class HookStarted(Event):
     """A hook invocation started."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
 
 
@@ -251,7 +256,7 @@ class HookStarted(Event):
 class HookCompleted(Event):
     """A hook invocation completed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     duration_ms: int = 0
 
@@ -260,7 +265,7 @@ class HookCompleted(Event):
 class HookFailed(Event):
     """A hook invocation failed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     error: str = ""
 
@@ -269,7 +274,7 @@ class HookFailed(Event):
 class HookDenied(Event):
     """A hook denied the current operation."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     reason_code: str = ""
     message: str = ""
@@ -280,7 +285,7 @@ class HookDenied(Event):
 class HookRewriteApplied(Event):
     """A hook rewrote part of the request or response."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     patch: dict[str, Any] = field(default_factory=dict)
 
@@ -289,7 +294,7 @@ class HookRewriteApplied(Event):
 class HookPatchPublished(Event):
     """A hook patch envelope was published."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     envelope: dict[str, Any] = field(default_factory=dict)
 
@@ -302,7 +307,7 @@ class HookPatchPublished(Event):
 class SkillsResolved(Event):
     """Skills were resolved for this turn."""
 
-    skills: list[str] = field(default_factory=list)
+    skills: list[SkillKey] = field(default_factory=list)
     injection_bytes: int = 0
 
 
@@ -542,6 +547,88 @@ def _parse_usage(raw: dict[str, Any] | None) -> Usage:
     )
 
 
+def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("error_report.reason must be object")
+
+    reason_type = raw.get("reason_type")
+    if not isinstance(reason_type, str):
+        raise ValueError("error_report.reason.reason_type must be string")
+
+    if reason_type not in {
+        "hook_denied",
+        "hook_timeout",
+        "hook_execution_failed",
+    }:
+        reason = dict(raw)
+        reason["reason_type"] = reason_type
+        return reason
+
+    reason = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"hook_id", "hook_id_string"}
+    }
+    reason["reason_type"] = reason_type
+
+    if reason_type == "hook_denied":
+        point = raw.get("point")
+        reason_code = raw.get("reason_code")
+        if not isinstance(point, str):
+            raise ValueError("error_report.reason.point must be string")
+        if not isinstance(reason_code, str):
+            raise ValueError("error_report.reason.reason_code must be string")
+        reason["point"] = point
+        reason["reason_code"] = reason_code
+        hook_id = raw.get("hook_id")
+        if "hook_id" in raw:
+            if hook_id is not None and not isinstance(hook_id, str):
+                raise ValueError("error_report.reason.hook_id must be string or null")
+            reason["hook_id"] = hook_id
+    else:
+        hook_id = raw.get("hook_id")
+        if not isinstance(hook_id, str):
+            raise ValueError("error_report.reason.hook_id must be string")
+        reason["hook_id"] = hook_id
+
+    if reason_type == "hook_timeout":
+        timeout_ms = raw.get("timeout_ms")
+        if not _is_number(timeout_ms):
+            raise ValueError("error_report.reason.timeout_ms must be number")
+        reason["timeout_ms"] = timeout_ms
+    if reason_type == "hook_execution_failed":
+        reason_text = raw.get("reason")
+        if not isinstance(reason_text, str):
+            raise ValueError("error_report.reason.reason must be string")
+        reason["reason"] = reason_text
+
+    return reason
+
+
+def _parse_agent_error_report(raw: Any) -> AgentErrorReport | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("error_report must be object")
+
+    error_class = raw.get("class")
+    message = raw.get("message")
+    if not isinstance(error_class, str):
+        raise ValueError("error_report.class must be string")
+    if not isinstance(message, str):
+        raise ValueError("error_report.message must be string")
+
+    report: AgentErrorReport = {
+        "class": error_class,
+        "message": message,
+    }
+    if "reason" in raw:
+        report["reason"] = _parse_agent_error_reason(raw.get("reason"))
+    return report
+
+
 def _parse_tool_config_change_status(raw: Any) -> ToolConfigChangeStatus | None:
     if not isinstance(raw, dict):
         return None
@@ -584,10 +671,29 @@ def _parse_skill_key(raw: Any) -> SkillKey | None:
 
     from .types import SkillKey
 
+    source_uuid = raw.get("source_uuid", raw.get("sourceUuid"))
+    skill_name = raw.get("skill_name", raw.get("skillName"))
+    if not isinstance(source_uuid, str) or source_uuid == "":
+        return None
+    if not isinstance(skill_name, str) or skill_name == "":
+        return None
+
     return SkillKey(
-        source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
-        skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
+        source_uuid=source_uuid,
+        skill_name=skill_name,
     )
+
+
+def _parse_skill_key_list(raw: Any) -> list[SkillKey]:
+    if not isinstance(raw, list):
+        raise ValueError("skills must be SkillKey list")
+    skills: list[SkillKey] = []
+    for index, item in enumerate(raw):
+        skill_key = _parse_skill_key(item)
+        if skill_key is None:
+            raise ValueError(f"skills[{index}] must be SkillKey")
+        skills.append(skill_key)
+    return skills
 
 
 def _parse_optional_str(raw: Any) -> str | None:
@@ -634,11 +740,20 @@ def _parse_skill_resolution_failure_reason(
         "unknown",
     }
     normalized_reason_type = reason_type if reason_type in known_reason_types else "unknown"
+    key = _parse_skill_key(raw.get("key"))
+    if reason_type == "not_found" and key is None:
+        return None
+    if reason_type == "capability_unavailable":
+        capability = raw.get("capability")
+        if key is None or not isinstance(capability, str) or capability == "":
+            return None
+    else:
+        capability = raw.get("capability", "")
 
     return SkillResolutionFailureReason(
         reason_type=normalized_reason_type,
-        key=_parse_skill_key(raw.get("key")),
-        capability=str(raw.get("capability", "")),
+        key=key,
+        capability=capability if isinstance(capability, str) else "",
         message=str(raw.get("message", fallback_message)),
         source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
         skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
@@ -796,6 +911,8 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_calls",
     }:
         raise ValueError("budget_type must be known")
+    if event_type == "run_failed" and "error_report" in raw:
+        _parse_agent_error_report(raw.get("error_report"))
 
     for field_name in required.get(event_type, ()):
         if field_name == "usage":
@@ -804,9 +921,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
             if "prompt" not in raw:
                 raise ValueError("prompt is required")
         elif field_name == "skills":
-            skills = raw.get("skills")
-            if not isinstance(skills, list) or not all(isinstance(skill, str) for skill in skills):
-                raise ValueError("skills must be string list")
+            _parse_skill_key_list(raw.get("skills"))
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
@@ -866,6 +981,8 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
             elif f == "duration_ms" and cls is ToolExecutionCompleted:
                 kwargs["duration_ms"] = _parse_optional_int(raw.get("duration_ms"))
+            elif f == "skills" and cls is SkillsResolved:
+                kwargs["skills"] = _parse_skill_key_list(raw.get("skills"))
             elif f == "skill_key" and cls is SkillResolutionFailed:
                 kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
             elif f == "reason" and cls is SkillResolutionFailed:
@@ -873,6 +990,11 @@ def parse_event(raw: dict[str, Any]) -> Event:
                     raw.get("reason"),
                     raw["error"],
                 )
+            elif f == "error_report" and cls is RunFailed:
+                if "error_report" in raw:
+                    kwargs["error_report"] = _parse_agent_error_report(
+                        raw.get("error_report")
+                    )
             elif f == "payload" and cls is ToolConfigChanged:
                 payload_raw = raw["payload"]
                 assert isinstance(payload_raw, dict)

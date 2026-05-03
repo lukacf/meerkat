@@ -27,6 +27,7 @@ import platform
 import shutil
 import tarfile
 import tempfile
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -37,6 +38,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    McpServerConfig,
     MobDefinitionInput,
     MobSpawnManyFailedResult,
     MobSpawnManyResult,
@@ -100,6 +102,7 @@ from .types import (
     ScheduleToolsResult,
     ScheduleToolCall,
     EventEnvelope,
+    EventSourceIdentity,
     McpLiveOpResponse,
     RunResult,
     SchemaWarning,
@@ -121,6 +124,42 @@ from .types import (
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+_MOB_SPAWN_MANY_FAILURE_CAUSES = {
+    "profile_not_found",
+    "member_not_found",
+    "member_already_exists",
+    "not_externally_addressable",
+    "invalid_transition",
+    "wiring_error",
+    "bridge_command_rejected",
+    "member_restore_failed",
+    "kickoff_wait_timed_out",
+    "ready_wait_timed_out",
+    "definition_error",
+    "flow_not_found",
+    "flow_failed",
+    "run_not_found",
+    "run_canceled",
+    "flow_turn_timed_out",
+    "frame_depth_limit_exceeded",
+    "frame_atomic_persistence_unavailable",
+    "spec_revision_conflict",
+    "schema_validation",
+    "insufficient_targets",
+    "topology_violation",
+    "bridge_delivery_rejected",
+    "supervisor_escalation",
+    "unsupported_for_mode",
+    "reset_barrier",
+    "storage_error",
+    "session_error",
+    "comms_error",
+    "callback_pending",
+    "stale_fence_token",
+    "stale_event_cursor",
+    "work_not_found",
+    "internal",
+}
 
 RenderClass = Literal[
     "user_prompt",
@@ -992,8 +1031,7 @@ class MeerkatClient:
     async def mcp_add(
         self,
         session_id: str,
-        server_name: str,
-        server_config: dict[str, Any],
+        server_config: McpServerConfig,
         *,
         persisted: bool = False,
     ) -> McpLiveOpResponse:
@@ -1001,7 +1039,6 @@ class MeerkatClient:
             "mcp/add",
             {
                 "session_id": session_id,
-                "server_name": server_name,
                 "server_config": server_config,
                 "persisted": persisted,
             },
@@ -1375,10 +1412,16 @@ class MeerkatClient:
                 )
                 continue
 
-            if set(payload.keys()) - {"message"}:
+            if set(payload.keys()) - {"cause", "message"}:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: failed result has unknown fields",
+                )
+            cause = payload.get("cause")
+            if not isinstance(cause, str) or cause not in _MOB_SPAWN_MANY_FAILURE_CAUSES:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: failed result has invalid cause",
                 )
             message = payload.get("message")
             if not isinstance(message, str) or not message:
@@ -1389,7 +1432,7 @@ class MeerkatClient:
             normalized.append(
                 MobSpawnManyResultEntry(
                     status="failed",
-                    result=MobSpawnManyFailedResult(message=message),
+                    result=MobSpawnManyFailedResult(cause=cause, message=message),
                 )
             )
         return MobSpawnManyResult(results=normalized)
@@ -2027,11 +2070,49 @@ class MeerkatClient:
         payload = raw.get("payload", {})
         return EventEnvelope(
             event_id=str(raw.get("event_id", "")),
+            source=MeerkatClient._parse_event_source_identity(raw.get("source")),
             source_id=str(raw.get("source_id", "")),
             seq=int(raw.get("seq", 0)),
             timestamp_ms=int(raw.get("timestamp_ms", 0)),
             payload=parse_event(payload if isinstance(payload, dict) else {}),
         )
+
+    @staticmethod
+    def _parse_event_source_identity(raw: Any) -> EventSourceIdentity | None:
+        if not isinstance(raw, dict):
+            return None
+        source_type = raw.get("type")
+        if source_type == "session":
+            session_id = raw.get("session_id", raw.get("sessionId"))
+            return (
+                EventSourceIdentity(type="session", session_id=session_id)
+                if isinstance(session_id, str)
+                else None
+            )
+        if source_type == "runtime":
+            runtime_id = raw.get("runtime_id", raw.get("runtimeId"))
+            return (
+                EventSourceIdentity(type="runtime", runtime_id=runtime_id)
+                if isinstance(runtime_id, str)
+                else None
+            )
+        if source_type == "interaction":
+            interaction_id = raw.get("interaction_id", raw.get("interactionId"))
+            return (
+                EventSourceIdentity(type="interaction", interaction_id=interaction_id)
+                if isinstance(interaction_id, str)
+                else None
+            )
+        if source_type == "callback":
+            return EventSourceIdentity(type="callback")
+        if source_type == "external":
+            source_id = raw.get("source_id", raw.get("sourceId"))
+            return (
+                EventSourceIdentity(type="external", source_id=source_id)
+                if isinstance(source_id, str)
+                else None
+            )
+        return None
 
     @staticmethod
     def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:
@@ -2231,24 +2312,38 @@ class MeerkatClient:
             "Retired runtime session control methods are no longer supported by the public RPC surface.",
         )
 
+    @staticmethod
+    def _warn_retired_runtime_session_control() -> None:
+        warnings.warn(
+            "Retired runtime session control methods are deprecated and always fail before transport.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     async def runtime_status(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submit(
         self, session_id: str, input: dict[str, Any] | ContentInput
     ) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submission(self, session_id: str, input_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_submissions(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_retire(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_reset(self, session_id: str) -> None:
+        self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
     async def runtime_realtime_attachment_status(

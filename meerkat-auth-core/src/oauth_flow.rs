@@ -420,6 +420,8 @@ struct OAuthDevicePollLeaseState {
 pub enum OAuthFlowError {
     #[error("oauth state is missing or expired")]
     Missing,
+    #[error("oauth registry projection payload missing after AuthMachine accepted {operation}")]
+    RegistryProjectionMissing { operation: &'static str },
     #[error("oauth state provider mismatch: expected {expected}, got {actual}")]
     ProviderMismatch {
         expected: OAuthProviderIdentity,
@@ -455,6 +457,10 @@ pub enum OAuthFlowError {
 }
 
 pub trait OAuthDevicePollLifecycle: Send + Sync {
+    fn device_flow_state_is_authmachine_owned(&self) -> bool {
+        false
+    }
+
     fn finish_device_poll(
         &self,
         target: &ConnectionRef,
@@ -535,6 +541,21 @@ impl OAuthDevicePollLease {
         }
     }
 
+    pub fn terminal_flow_state_is_authmachine_owned(&self) -> bool {
+        self.lifecycle
+            .as_ref()
+            .map(|lifecycle| lifecycle.device_flow_state_is_authmachine_owned())
+            .unwrap_or(false)
+    }
+
+    fn local_missing_error(&self, operation: &'static str) -> OAuthFlowError {
+        if self.terminal_flow_state_is_authmachine_owned() {
+            OAuthFlowError::RegistryProjectionMissing { operation }
+        } else {
+            OAuthFlowError::Missing
+        }
+    }
+
     pub fn with_lifecycle(mut self, lifecycle: Arc<dyn OAuthDevicePollLifecycle>) -> Self {
         self.lifecycle = Some(lifecycle);
         self
@@ -561,10 +582,13 @@ impl OAuthDevicePollLease {
             )
             .map(|_| ())
         };
-        if matches!(verify_result, Err(OAuthFlowError::Missing))
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+        if matches!(verify_result, Err(OAuthFlowError::Missing)) {
+            if self.terminal_flow_state_is_authmachine_owned()
+                && let Some(lifecycle) = &self.lifecycle
+            {
+                let _ = lifecycle.finish_device_poll(&self.target, &self.device_code);
+            }
+            return Err(self.local_missing_error("finish_oauth_device_poll"));
         }
         verify_result?;
 
@@ -583,17 +607,19 @@ impl OAuthDevicePollLease {
             prune_expired_device_locked(&mut flows);
             result
         };
-        if result.is_ok() {
-            self.active = false;
-            if let Some(lifecycle) = &self.lifecycle {
-                lifecycle.device_flow_payloads_changed()?;
+        match result {
+            Ok(()) => {
+                self.active = false;
+                if let Some(lifecycle) = &self.lifecycle {
+                    lifecycle.device_flow_payloads_changed()?;
+                }
+                Ok(())
             }
-        } else if matches!(result, Err(OAuthFlowError::Missing))
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+            Err(OAuthFlowError::Missing) => {
+                Err(self.local_missing_error("finish_oauth_device_poll"))
+            }
+            Err(err) => Err(err),
         }
-        result
     }
 
     pub fn verify(&self) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
@@ -606,10 +632,8 @@ impl OAuthDevicePollLease {
             self.lease_id,
         );
         prune_expired_device_locked(&mut flows);
-        if matches!(result, Err(OAuthFlowError::Missing))
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+        if matches!(result, Err(OAuthFlowError::Missing)) {
+            return Err(self.local_missing_error("verify_oauth_device_poll"));
         }
         result
     }
@@ -629,12 +653,18 @@ impl OAuthDevicePollLease {
                 self.lease_id,
             )
         };
-        if matches!(verified, Err(OAuthFlowError::Missing))
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
-        }
-        let verified = verified?;
+        let verified = match verified {
+            Ok(verified) => verified,
+            Err(OAuthFlowError::Missing) => {
+                if self.terminal_flow_state_is_authmachine_owned()
+                    && let Some(lifecycle) = &self.lifecycle
+                {
+                    let _ = lifecycle.finish_device_poll(&self.target, &self.device_code);
+                }
+                return Err(self.local_missing_error("consume_oauth_device_flow"));
+            }
+            Err(err) => return Err(err),
+        };
 
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.consume_device_flow(&self.target, &self.device_code, self.provider)?;
@@ -657,7 +687,10 @@ impl OAuthDevicePollLease {
                 if let Some(lifecycle) = &self.lifecycle
                     && let Err(err) = lifecycle.device_flow_payload_removed(&record)
                 {
-                    if matches!(err, OAuthFlowError::Missing) {
+                    if matches!(
+                        err,
+                        OAuthFlowError::Missing | OAuthFlowError::RegistryProjectionMissing { .. }
+                    ) {
                         return Err(err);
                     }
                     let _ = lifecycle.restore_device_flow(&verified);
@@ -674,6 +707,11 @@ impl OAuthDevicePollLease {
                 Ok(record)
             }
             Err(err) => {
+                if matches!(err, OAuthFlowError::Missing)
+                    && self.terminal_flow_state_is_authmachine_owned()
+                {
+                    return Err(self.local_missing_error("consume_oauth_device_flow"));
+                }
                 if let Some(lifecycle) = &self.lifecycle {
                     let _ = lifecycle.restore_device_flow(&verified);
                     if matches!(err, OAuthFlowError::Missing) {
@@ -702,7 +740,11 @@ impl Drop for OAuthDevicePollLease {
         prune_expired_device_locked(&mut flows);
         if let Some(lifecycle) = &self.lifecycle {
             if matches!(result, Err(OAuthFlowError::Missing)) {
-                let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+                if lifecycle.device_flow_state_is_authmachine_owned() {
+                    let _ = lifecycle.finish_device_poll(&self.target, &self.device_code);
+                } else {
+                    let _ = lifecycle.expire_device_flow(&self.target, &self.device_code);
+                }
             } else {
                 let _ = lifecycle.finish_device_poll(&self.target, &self.device_code);
             }
@@ -711,6 +753,10 @@ impl Drop for OAuthDevicePollLease {
 }
 
 pub trait OAuthFlowAuthority: Send + Sync {
+    fn terminal_flow_state_is_authmachine_owned(&self) -> bool {
+        false
+    }
+
     fn start(
         &self,
         target: ConnectionRef,

@@ -3906,6 +3906,7 @@ args = [{}]
         assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
+        assert!(method_names.contains(&"session/realtime_attachment_status"));
         assert!(method_names.contains(&"turn/start"));
         assert!(method_names.contains(&"approval/request"));
         assert!(method_names.contains(&"approval/list"));
@@ -3915,6 +3916,19 @@ args = [{}]
             !method_names.contains(&"session/destroy"),
             "generic session/destroy must not appear until it has member-aware mob semantics"
         );
+        for retired in [
+            "runtime/session_status",
+            "runtime/session_submit",
+            "runtime/session_submission",
+            "runtime/session_submissions",
+            "runtime/session_retire",
+            "runtime/session_reset",
+        ] {
+            assert!(
+                !method_names.contains(&retired),
+                "retired runtime/session control noun must not be advertised: {retired}"
+            );
+        }
         #[cfg(feature = "mob")]
         {
             assert!(!method_names.contains(&"mob/prefabs"));
@@ -5378,8 +5392,8 @@ args = [{}]
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
         let session_id = SessionId::new();
-        let envelope = EventEnvelope::new(
-            session_id.to_string(),
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
             1,
             None,
             AgentEvent::TextDelta {
@@ -5410,8 +5424,8 @@ args = [{}]
         let sink = NotificationSink::new(tx);
         let session_id = SessionId::new();
         let stream_id = Uuid::new_v4();
-        let envelope = EventEnvelope::new(
-            session_id.to_string(),
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
             1,
             None,
             AgentEvent::TextDelta {

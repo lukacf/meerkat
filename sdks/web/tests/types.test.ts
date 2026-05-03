@@ -33,6 +33,8 @@ import type {
   MemberDeliveryReceipt,
   MobMemberSnapshot,
   MobHelperResult,
+  FlowStatus,
+  EventEnvelope,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
 
@@ -138,6 +140,35 @@ const appendSystemContextOptions: AppendSystemContextOptions = {
   text: 'Coordinate with the orchestrator.',
   source: 'mob',
   idempotencyKey: 'ctx-1',
+};
+
+const typedEventEnvelope: EventEnvelope = {
+  event_id: '00000000-0000-0000-0000-000000000001',
+  source: {
+    type: 'session',
+    session_id: '00000000-0000-4000-8000-000000000001',
+  },
+  source_id: 'session:not-a-uuid',
+  seq: 1,
+  timestamp_ms: 1710000000000,
+  payload: {
+    type: 'text_delta',
+    delta: 'hi',
+  },
+};
+if (typedEventEnvelope.source.type === 'session') {
+  typedEventEnvelope.source.session_id;
+}
+// @ts-expect-error source_id alone is only an inert compatibility projection.
+const sourceIdOnlyEventEnvelope: EventEnvelope = {
+  event_id: '00000000-0000-0000-0000-000000000001',
+  source_id: 'session:00000000-0000-4000-8000-000000000001',
+  seq: 1,
+  timestamp_ms: 1710000000000,
+  payload: {
+    type: 'text_delta',
+    delta: 'hi',
+  },
 };
 
 const appendSystemContextResult: AppendSystemContextResult = {
@@ -295,6 +326,21 @@ function handleEvent(event: AgentEvent): string {
   }
 }
 
+const typedSkillsResolved: AgentEvent = {
+  type: 'skills_resolved',
+  skills: [
+    {
+      source_uuid: '00000000-0000-4b11-8111-000000000001',
+      skill_name: 'email-extractor',
+    },
+  ],
+  injection_bytes: 128,
+};
+handleEvent(typedSkillsResolved);
+
+// @ts-expect-error Legacy string-only skills_resolved payloads are not semantic AgentEvent data.
+const legacyStringSkillsResolved: AgentEvent = { type: 'skills_resolved', skills: ['legacy/ref'], injection_bytes: 128 };
+
 // ─── ToolCallback ───────────────────────────────────────────────
 
 const myTool: ToolCallback = async (args: string) => {
@@ -319,6 +365,7 @@ const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'Review the draft and suggest one improvement.',
   { connectionRef: { realm: 'default', binding: 'anthropic' } },
 );
+const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();
 const mobSubscription = mob.subscribeEvents();
 
@@ -350,6 +397,8 @@ void mobAppendSystemContextResult;
 void mobDef;
 void spawnSpec;
 void handleEvent;
+void typedSkillsResolved;
+void legacyStringSkillsResolved;
 void myTool;
 void actions;
 void memberSendResult;
@@ -357,5 +406,6 @@ void memberStatusResult;
 void helperResult;
 void helperWithConnectionResult;
 void forkedHelperResult;
+void flowStatusResult;
 void memberSubscription;
 void mobSubscription;

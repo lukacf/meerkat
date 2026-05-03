@@ -63,6 +63,25 @@ export type HookPoint =
   | "post_tool_execution"
   | "turn_boundary";
 
+/** Stable identifier for a configured hook. */
+export type HookId = string;
+
+/** Machine-readable agent error class. */
+export type AgentErrorClass = string;
+
+/** Structured agent error reason payload. */
+export type AgentErrorReason = Record<string, unknown> & {
+  readonly reason_type: string;
+  readonly hook_id?: HookId | null;
+};
+
+/** Structured terminal error report emitted with failed runs. */
+export interface AgentErrorReport {
+  readonly class: AgentErrorClass;
+  readonly message: string;
+  readonly reason?: AgentErrorReason | null;
+}
+
 // ---------------------------------------------------------------------------
 // Scoped streaming attribution
 // ---------------------------------------------------------------------------
@@ -107,6 +126,7 @@ export interface RunFailedEvent {
   readonly sessionId: string;
   readonly errorClass: string;
   readonly error: string;
+  readonly errorReport?: AgentErrorReport | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,27 +249,27 @@ export interface RetryingEvent {
 
 export interface HookStartedEvent {
   readonly type: "hook_started";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
 }
 
 export interface HookCompletedEvent {
   readonly type: "hook_completed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly durationMs: number;
 }
 
 export interface HookFailedEvent {
   readonly type: "hook_failed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly error: string;
 }
 
 export interface HookDeniedEvent {
   readonly type: "hook_denied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly reasonCode: string;
   readonly message: string;
@@ -258,14 +278,14 @@ export interface HookDeniedEvent {
 
 export interface HookRewriteAppliedEvent {
   readonly type: "hook_rewrite_applied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly patch: Record<string, unknown>;
 }
 
 export interface HookPatchPublishedEvent {
   readonly type: "hook_patch_published";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly envelope: Record<string, unknown>;
 }
@@ -276,7 +296,7 @@ export interface HookPatchPublishedEvent {
 
 export interface SkillsResolvedEvent {
   readonly type: "skills_resolved";
-  readonly skills: readonly string[];
+  readonly skills: readonly SkillKey[];
   readonly injectionBytes: number;
 }
 
@@ -543,6 +563,78 @@ function parseUsage(raw: unknown): Usage {
   };
 }
 
+function hasOwn(raw: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(raw, field);
+}
+
+function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report.reason must be object");
+  }
+
+  const reasonType = requireStringField(raw, "reason_type");
+  if (!["hook_denied", "hook_timeout", "hook_execution_failed"].includes(reasonType)) {
+    return { ...raw, reason_type: reasonType } as AgentErrorReason;
+  }
+
+  const reason: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key !== "hook_id" && key !== "hook_id_string") {
+      reason[key] = value;
+    }
+  }
+  reason.reason_type = reasonType;
+
+  if (reasonType === "hook_denied") {
+    reason.point = requireStringField(raw, "point");
+    reason.reason_code = requireStringField(raw, "reason_code");
+  } else {
+    reason.hook_id = requireStringField(raw, "hook_id");
+  }
+
+  if (reasonType === "hook_timeout") {
+    reason.timeout_ms = requireNumberField(raw, "timeout_ms");
+  }
+  if (reasonType === "hook_execution_failed") {
+    reason.reason = requireStringField(raw, "reason");
+  }
+
+  if (reasonType === "hook_denied" && hasOwn(raw, "hook_id")) {
+    const hookId = raw.hook_id;
+    if (hookId !== null && typeof hookId !== "string") {
+      throw new Error("error_report.reason.hook_id must be string or null");
+    }
+    reason.hook_id = hookId;
+  }
+
+  return reason as AgentErrorReason;
+}
+
+function parseAgentErrorReport(raw: unknown): AgentErrorReport | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report must be object");
+  }
+
+  const report: AgentErrorReport = {
+    class: requireStringField(raw, "class"),
+    message: requireStringField(raw, "message"),
+    ...(hasOwn(raw, "reason") ? { reason: parseAgentErrorReason(raw.reason) ?? null } : {}),
+  };
+  return report;
+}
+
 function parseContentInput(raw: unknown): ContentInput {
   if (Array.isArray(raw)) return raw as ContentInput;
   return String(raw ?? "");
@@ -596,18 +688,37 @@ function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | und
 }
 
 function parseSkillKey(raw: unknown): SkillKey | undefined {
-  if (raw == null || typeof raw !== "object") {
+  if (!isPlainRecord(raw)) {
     return undefined;
   }
-  const value = raw as Record<string, unknown>;
+  const value = raw;
+  const sourceUuid = value.source_uuid ?? value.sourceUuid;
+  const skillName = value.skill_name ?? value.skillName;
+  if (typeof sourceUuid !== "string" || sourceUuid.length === 0) {
+    return undefined;
+  }
+  if (typeof skillName !== "string" || skillName.length === 0) {
+    return undefined;
+  }
   return {
-    sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
-    skillName: String(value.skill_name ?? value.skillName ?? ""),
+    sourceUuid,
+    skillName,
   };
 }
 
-function emptySkillKey(): SkillKey {
-  return { sourceUuid: "", skillName: "" };
+function requireSkillKey(raw: unknown, field: string): SkillKey {
+  const skillKey = parseSkillKey(raw);
+  if (!skillKey) {
+    throw new Error(`${field} must be SkillKey`);
+  }
+  return skillKey;
+}
+
+function requireSkillKeyArray(raw: unknown): readonly SkillKey[] {
+  if (!Array.isArray(raw)) {
+    throw new Error("skills must be SkillKey array");
+  }
+  return raw.map((skill, index) => requireSkillKey(skill, `skills[${index}]`));
 }
 
 const STOP_REASONS = new Set<StopReason>([
@@ -660,14 +771,21 @@ function parseSkillResolutionFailureReason(
   }
   const reasonType = reasonTypeRaw;
   switch (reasonType) {
-    case "not_found":
-      return { reasonType, key: parseSkillKey(value.key) ?? emptySkillKey() };
-    case "capability_unavailable":
+    case "not_found": {
+      const key = parseSkillKey(value.key);
+      return key ? { reasonType, key } : undefined;
+    }
+    case "capability_unavailable": {
+      const key = parseSkillKey(value.key);
+      if (!key || typeof value.capability !== "string" || value.capability.length === 0) {
+        return undefined;
+      }
       return {
         reasonType,
-        key: parseSkillKey(value.key) ?? emptySkillKey(),
-        capability: String(value.capability ?? ""),
+        key,
+        capability: value.capability,
       };
+    }
     case "load":
     case "parse":
       return { reasonType, message: String(value.message ?? "") };
@@ -778,7 +896,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "run_completed":
       return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
     case "run_failed":
-      return { type, sessionId: requireStringField(raw, "session_id"), errorClass: requireStringField(raw, "error_class"), error: requireStringField(raw, "error") };
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        errorClass: requireStringField(raw, "error_class"),
+        error: requireStringField(raw, "error"),
+        ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
+      };
 
     // Turn / LLM
     case "turn_started":
@@ -860,10 +984,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Skills
     case "skills_resolved":
-      if (!Array.isArray(raw.skills) || !raw.skills.every((skill) => typeof skill === "string")) {
-        throw new Error("skills must be string array");
-      }
-      return { type, skills: raw.skills, injectionBytes: requireNumberField(raw, "injection_bytes") };
+      return {
+        type,
+        skills: requireSkillKeyArray(raw.skills),
+        injectionBytes: requireNumberField(raw, "injection_bytes"),
+      };
     case "skill_resolution_failed": {
       const reference = requireStringField(raw, "reference");
       const error = requireStringField(raw, "error");

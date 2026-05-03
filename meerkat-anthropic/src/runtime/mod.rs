@@ -368,12 +368,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             persisted
                         }
                         AnthropicAuthMethod::ClaudeAiOauth => {
-                            use chrono::{Duration, Utc};
-                            let fresh = persisted
-                                .expires_at
-                                .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
                             if lifecycle == ManagedStoreLifecycle::Authorized
-                                && fresh
                                 && persisted.primary_secret.is_some()
                                 && !env.force_refresh
                             {

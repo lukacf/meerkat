@@ -187,6 +187,8 @@ fn write_deferred_turn_state(
 fn rollback_tool_visibility_state_snapshot(
     session: &Session,
 ) -> Result<Option<meerkat_core::SessionToolVisibilityState>, SessionError> {
+    // This production rollback path must not promote legacy tool_scope_* metadata
+    // into canonical runtime-backed visibility authority.
     session.try_tool_visibility_state().map_err(|err| {
         SessionError::Agent(AgentError::InternalError(format!(
             "invalid canonical tool visibility state: {err}"

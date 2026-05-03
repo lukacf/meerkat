@@ -86,6 +86,8 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
     #[error("runtime-backed agent build requires a canonical tool visibility owner")]
     MissingToolVisibilityOwner,
+    #[error("runtime-backed agent build received legacy inherited tool visibility metadata")]
+    LegacyInheritedToolFilterMetadata,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
     #[error("failed to restore canonical tool visibility state: {message}")]
@@ -546,6 +548,18 @@ impl AgentBuilder {
                 });
             }
         };
+        if runtime_tool_visibility_owner_required
+            && agent
+                .session
+                .metadata()
+                .contains_key(INHERITED_TOOL_FILTER_METADATA_KEY)
+        {
+            tracing::error!(
+                metadata_key = INHERITED_TOOL_FILTER_METADATA_KEY,
+                "runtime-backed agent build rejected legacy inherited tool visibility metadata"
+            );
+            return Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata);
+        }
 
         if !has_canonical_visibility_state && !runtime_tool_visibility_owner_required {
             if let Some(raw_filter) = agent
@@ -1503,6 +1517,71 @@ mod tests {
         let state = owner.visibility_state().unwrap();
         assert_eq!(state.active_filter, ToolFilter::All);
         assert_eq!(state.staged_filter, ToolFilter::All);
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_rejects_legacy_inherited_visibility_metadata() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            INHERITED_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("legacy inherited filter should serialize"),
+        );
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata)
+        ));
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            SessionToolVisibilityState::default(),
+            "failed legacy inherited metadata restore must leave owner visibility unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_restores_canonical_inherited_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let inherited_filter = ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(SessionToolVisibilityState {
+                inherited_base_filter: inherited_filter.clone(),
+                ..Default::default()
+            })
+            .expect("visibility state should serialize");
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            owner.visibility_state().unwrap().inherited_base_filter,
+            inherited_filter,
+            "canonical inherited metadata should restore through the visibility owner"
+        );
     }
 
     #[tokio::test]

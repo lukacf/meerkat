@@ -399,7 +399,7 @@ pub struct AgentBuildConfig {
     ///
     /// These are set on the session's internal metadata map before the core
     /// `AgentBuilder` factory-policy seam runs, so they are available for
-    /// early-stage recovery (e.g. inherited tool filter).
+    /// early-stage recovery (e.g. canonical inherited visibility state).
     /// Entries here take precedence over any resumed session metadata for the same key.
     pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -3078,8 +3078,8 @@ impl AgentFactory {
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let mut session = build_config.resume_session.clone().unwrap_or_default();
-        // Inject pre-resolved metadata entries (e.g. inherited tool filter from
-        // spawn tooling) before the builder reads metadata for early-stage recovery.
+        // Inject pre-resolved metadata entries before the builder reads metadata
+        // for early-stage recovery, such as canonical inherited visibility state.
         for (key, value) in &build_config.initial_metadata_entries {
             session.set_metadata(key, value.clone());
         }

@@ -11,7 +11,9 @@ use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
 use meerkat_core::PeerMeta;
 use meerkat_core::RealmId;
+use meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY;
 use meerkat_core::Session;
+use meerkat_core::SessionToolVisibilityState;
 use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
@@ -57,9 +59,8 @@ pub struct BuildAgentConfigParams<'a> {
     pub mob_tool_access_context: MobToolAccessContext,
     /// Pre-resolved inherited tool filter from spawn tooling.
     ///
-    /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the session
-    /// so the factory-backed core build recovers it as a base filter on
-    /// ToolScope.
+    /// When set, stored in canonical session tool-visibility state so the
+    /// runtime-backed core build restores it through the machine owner.
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
 }
 
@@ -188,15 +189,17 @@ pub async fn build_agent_config(
         });
     }
 
-    // Inherited tool filter: inject into session metadata so the factory-backed
-    // core build recovers it as a base filter on ToolScope.
+    // Inherited tool filter: inject canonical visibility metadata so the
+    // factory-backed core build restores it through the runtime owner.
     if let Some(filter) = inherited_tool_filter
-        && let Ok(value) = serde_json::to_value(&filter)
+        && let Ok(value) = serde_json::to_value(SessionToolVisibilityState {
+            inherited_base_filter: filter,
+            ..Default::default()
+        })
     {
-        config.initial_metadata_entries.insert(
-            meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY.to_string(),
-            value,
-        );
+        config
+            .initial_metadata_entries
+            .insert(SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(), value);
     }
 
     Ok(config)
@@ -645,6 +648,51 @@ mod tests {
         assert_eq!(
             config.override_mob,
             meerkat_core::ToolCategoryOverride::Disable
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_routes_inherited_filter_through_canonical_visibility_state() {
+        let def = sample_definition();
+        let profile = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let inherited_filter =
+            meerkat_core::tool_scope::ToolFilter::Deny(["shell".to_string()].into_iter().collect());
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &MeerkatId::from("lead-1"),
+            profile,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: Some(inherited_filter.clone()),
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert!(
+            !config
+                .initial_metadata_entries
+                .contains_key(meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY),
+            "mob build must not write legacy inherited visibility metadata"
+        );
+        let visibility_state = config
+            .initial_metadata_entries
+            .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY)
+            .and_then(|value| {
+                serde_json::from_value::<meerkat_core::SessionToolVisibilityState>(value.clone())
+                    .ok()
+            })
+            .expect("canonical visibility metadata should be present");
+        assert_eq!(
+            visibility_state.inherited_base_filter, inherited_filter,
+            "inherited mob filter should flow through canonical visibility state"
         );
     }
 

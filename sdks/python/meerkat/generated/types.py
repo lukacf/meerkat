@@ -1088,12 +1088,6 @@ class SessionStreamCloseResult:
 
 
 @dataclass
-class RuntimeStateParams:
-    """Request payload for runtime-backed session status projections."""
-    session_id: str
-
-
-@dataclass
 class RuntimeRealtimeAttachmentStatusParams:
     """Request payload for `session/realtime_attachment_status`."""
     session_id: str
@@ -1119,43 +1113,6 @@ class RealtimeStatusParams:
 class RealtimeCapabilitiesParams:
     """Request payload for `realtime/capabilities`."""
     target: RealtimeChannelTarget
-
-
-@dataclass
-class RuntimeAcceptParams:
-    """Request payload for runtime-backed input submission.
-
-The runtime input body is owned by `meerkat-runtime`; contracts cannot
-depend on the runtime crate without inverting the dependency graph. The
-envelope is canonical here and the runtime crate remains the typed
-authority over the `input` discriminator and variant body."""
-    input: Any
-    session_id: str
-
-
-@dataclass
-class RuntimeRetireParams:
-    """Request payload for runtime retirement."""
-    session_id: str
-
-
-@dataclass
-class RuntimeResetParams:
-    """Request payload for runtime reset."""
-    session_id: str
-
-
-@dataclass
-class InputStateParams:
-    """Request payload for runtime input-state lookup."""
-    input_id: str
-    session_id: str
-
-
-@dataclass
-class InputListParams:
-    """Request payload for runtime input-state listing."""
-    session_id: str
 
 
 @dataclass
@@ -1443,19 +1400,6 @@ class RuntimeAcceptResult:
 
 
 @dataclass
-class RuntimeRetireResult:
-    """Response payload for runtime retirement."""
-    inputs_abandoned: int
-    inputs_pending_drain: Optional[int] = None
-
-
-@dataclass
-class RuntimeResetResult:
-    """Response payload for runtime reset."""
-    inputs_abandoned: int
-
-
-@dataclass
 class WireInputStateHistoryEntry:
     """Input transition history entry for RPC-facing snapshots."""
     from_: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
@@ -1485,12 +1429,6 @@ fields with typed projections so the wire carries no untyped carriers."""
     reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
     recovery_count: Optional[int] = None
     terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
-
-
-@dataclass
-class InputListResult:
-    """Response payload for runtime input-state listing."""
-    inputs: list[dict[str, Any]]
 
 
 @dataclass
@@ -2605,6 +2543,3 @@ PeerReachability = Literal['unknown', 'reachable', 'unreachable']
 
 # Comms/session-stream RPC contract for PeerReachabilityReason.
 PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']
-
-# Response payload for runtime input-state lookup.
-InputStateResult = Optional[WireInputState]

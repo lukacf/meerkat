@@ -1004,6 +1004,37 @@ async fn direct_destroy_persists_destroyed_runtime_state() {
 }
 
 #[tokio::test]
+async fn direct_destroy_rejects_before_persisting_when_dsl_guard_rejects() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(
+        rid.clone(),
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    );
+    driver.contract_force_runtime_authority(RuntimeState::Initializing, None, None);
+
+    let error = driver
+        .destroy()
+        .await
+        .expect_err("destroy without bound runtime identity must surface the DSL rejection");
+    assert!(
+        error.to_string().contains("DSL authority (Destroy)"),
+        "unexpected error: {error}",
+    );
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Initializing,
+        "failed destroy must not override DSL lifecycle authority",
+    );
+    assert_ne!(
+        store.load_runtime_state(&rid).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "failed destroy must not persist shell-projected destroyed state",
+    );
+}
+
+#[tokio::test]
 async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");

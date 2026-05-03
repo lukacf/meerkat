@@ -165,6 +165,13 @@ run_logged() {
       status="$?"
       set -e
     done
+    if [[ "${status}" == "38" ]] &&
+      grep -Fq 'Build completed successfully' "${log}" &&
+      grep -Fq 'Build Event Protocol upload failed' "${log}"; then
+      printf 'warning: treating BuildBuddy BES upload failure as non-blocking after successful build/test for %s\n' \
+        "${name}" | tee -a "${log}"
+      status=0
+    fi
   fi
   end="$(date +%s)"
   printf '%s\t%s\t%s\t%s\t' "${name}" "${status}" "$((end - start))" "${log}" >>"${summary_path}"

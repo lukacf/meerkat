@@ -26,8 +26,10 @@ runs:
       env:
         MEERKAT_BUILDBUDDY_CI_MODE: ${{ inputs.mode }}
         MEERKAT_BUILDBUDDY_LOG_ROOT: ${{ runner.temp }}/buildbuddy-logs
+        MEERKAT_BUILDBUDDY_REPOSITORY_CACHE: ${{ runner.temp }}/buildbuddy-repository-cache
       run: |
         mkdir -p "${MEERKAT_BUILDBUDDY_LOG_ROOT}"
+        mkdir -p "${MEERKAT_BUILDBUDDY_REPOSITORY_CACHE}"
         scripts/buildbuddy-ci-lane "${{ inputs.lane }}"
 
     - name: Upload BuildBuddy logs

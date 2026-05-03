@@ -8040,7 +8040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_live_runtime_list_status_and_resume_ignore_stale_raw_store_metadata() {
+    async fn test_live_runtime_list_status_and_resume_fail_closed_on_stale_raw_store_metadata() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -8133,19 +8133,42 @@ mod tests {
             !resume_source.metadata().contains_key(SESSION_LABELS_KEY),
             "resume source must not inherit raw store metadata"
         );
-        let resumed = restarted
+        let resume_error = restarted
             .create_session(resume_request(resume_source))
             .await
-            .expect("resume should materialize runtime truth");
-        assert_eq!(resumed.session_id, result.session_id);
-        let resumed_live = restarted
-            .export_live_session(&result.session_id)
+            .expect_err(
+                "resume must fail closed when projection refresh would shrink stale raw state",
+            );
+        assert!(
+            matches!(resume_error, SessionError::Store(_)),
+            "stale projection refresh failure should surface as a store error, got {resume_error:?}"
+        );
+        assert!(
+            !restarted
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after failed resume"),
+            "failed projection refresh must discard the materialized live session"
+        );
+        let authoritative_after_failure = restarted
+            .load_authoritative_session(&result.session_id)
             .await
-            .expect("resumed live session should export");
+            .expect("authoritative load should still succeed after failed resume")
+            .expect("runtime authority should remain present after failed resume");
         assert_eq!(
-            resumed_live.messages().len(),
+            authoritative_after_failure.messages().len(),
             live.messages().len(),
-            "resumed live session must preserve runtime-authoritative metadata"
+            "failed projection refresh must not replace runtime-authoritative metadata"
+        );
+        let raw_after_failure = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should still succeed")
+            .expect("stale projection should remain present after failed resume");
+        assert_eq!(
+            raw_after_failure.messages().len(),
+            live.messages().len() + 1,
+            "failed projection refresh must not silently rewrite stale raw projection state"
         );
     }
 

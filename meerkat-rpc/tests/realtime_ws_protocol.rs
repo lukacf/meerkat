@@ -332,7 +332,7 @@ async fn connect_and_open(
         .send(WsMessage::Text(
             serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                 RealtimeChannelOpenFrame {
-                    protocol_version: info.default_protocol_version.clone(),
+                    protocol_version: info.default_protocol_version,
                     open_token: info.open_token.clone(),
                     role,
                     turning_mode,
@@ -836,7 +836,7 @@ async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
         .send(WsMessage::Text(
             serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                 RealtimeChannelOpenFrame {
-                    protocol_version: open_info.default_protocol_version.clone(),
+                    protocol_version: open_info.default_protocol_version,
                     open_token: open_info.open_token.clone(),
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ExplicitCommit,
@@ -2776,7 +2776,7 @@ async fn second_channel_open_frame_yields_unexpected_channel_open() {
         .send(WsMessage::Text(
             serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                 RealtimeChannelOpenFrame {
-                    protocol_version: open_info.default_protocol_version.clone(),
+                    protocol_version: open_info.default_protocol_version,
                     open_token: open_info.open_token.clone(),
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,

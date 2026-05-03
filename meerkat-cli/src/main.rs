@@ -920,7 +920,7 @@ async fn handle_realtime_command(
                 let open_info: meerkat_contracts::RealtimeOpenInfo =
                     serde_json::from_value(open_info_value)?;
                 let open_frame = meerkat_contracts::RealtimeChannelOpenFrame {
-                    protocol_version: open_info.default_protocol_version.clone(),
+                    protocol_version: open_info.default_protocol_version,
                     open_token: open_info.open_token.clone(),
                     role: meerkat_contracts::RealtimeChannelRole::Primary,
                     turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
@@ -13349,10 +13349,8 @@ default_model = "gemma"
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let ws_url = format!("ws://{addr}/realtime/ws");
-        let protocol_version = meerkat_contracts::RealtimeProtocolVersion::CURRENT
-            .as_str()
-            .to_string();
-        let server_protocol_version = protocol_version.clone();
+        let protocol_version = meerkat_contracts::RealtimeProtocolVersion::CURRENT;
+        let server_protocol_version = protocol_version;
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -13369,7 +13367,7 @@ default_model = "gemma"
                 open_frame,
                 meerkat_contracts::RealtimeClientFrame::ChannelOpen(
                     meerkat_contracts::RealtimeChannelOpenFrame {
-                        protocol_version: server_protocol_version.clone(),
+                        protocol_version: server_protocol_version,
                         open_token: "token-1".to_string(),
                         role: meerkat_contracts::RealtimeChannelRole::Primary,
                         turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
@@ -13507,8 +13505,8 @@ default_model = "gemma"
             target: meerkat_contracts::RealtimeChannelTarget::SessionTarget {
                 session_id: "session-1".to_string(),
             },
-            supported_protocol_versions: vec![protocol_version.clone()],
-            default_protocol_version: protocol_version.clone(),
+            supported_protocol_versions: vec![protocol_version],
+            default_protocol_version: protocol_version,
             capabilities: meerkat_contracts::RealtimeCapabilities {
                 input_kinds: vec![meerkat_contracts::RealtimeInputKind::Text],
                 output_kinds: vec![meerkat_contracts::RealtimeOutputKind::Text],

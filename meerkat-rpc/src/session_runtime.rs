@@ -1582,6 +1582,16 @@ fn registered_model_provider_mismatch_reason(
     registry.provider_override_mismatch_reason(provider, model)
 }
 
+fn unsupported_model_capability_rpc_error(
+    evidence: meerkat_core::UnsupportedModelCapabilityEvidence,
+) -> RpcError {
+    RpcError {
+        code: error::INVALID_PARAMS,
+        message: evidence.to_string(),
+        data: Some(evidence.details()),
+    }
+}
+
 fn profile_to_capability_surface(
     profile: &meerkat_models::profile::ModelProfile,
 ) -> SessionLlmCapabilitySurface {
@@ -3869,12 +3879,24 @@ impl SessionRuntime {
     }
 
     async fn provider_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
-        self.model_registry()
-            .await
-            .ok()
-            .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
-            .map(|profile| profile.inline_video)
-            .unwrap_or(false)
+        self.require_inline_video_support(identity).await.is_ok()
+    }
+
+    async fn require_inline_video_support(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+        let Ok(registry) = self.model_registry().await else {
+            return Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::CapabilityRegistryUnavailable,
+                ),
+            );
+        };
+
+        registry.require_inline_video_for_provider(identity.provider, &identity.model)
     }
 
     async fn validate_prompt_video_input(
@@ -3893,16 +3915,10 @@ impl SessionRuntime {
             data: None,
         })?;
 
-        if meerkat_core::has_video(blocks) && !self.provider_supports_inline_video(identity).await {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!(
-                    "inline video input is not supported by model '{}' on provider '{}'",
-                    identity.model,
-                    identity.provider.as_str()
-                ),
-                data: None,
-            });
+        if meerkat_core::has_video(blocks)
+            && let Err(evidence) = self.require_inline_video_support(identity).await
+        {
+            return Err(unsupported_model_capability_rpc_error(evidence));
         }
 
         Ok(())
@@ -7341,10 +7357,9 @@ impl SessionRuntime {
     pub async fn mcp_stage_add(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        server_config: serde_json::Value,
+        server_config: McpServerConfig,
     ) -> Result<(), RpcError> {
-        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+        self.mcp_stage_add_with_persistence(session_id, server_config, false)
             .await
             .map(|_| ())
     }
@@ -7353,32 +7368,17 @@ impl SessionRuntime {
     pub async fn mcp_stage_add_with_persistence(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        mut server_config: serde_json::Value,
+        config: McpServerConfig,
         persisted: bool,
     ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
-        if server_name.trim().is_empty() {
+        if config.name.trim().is_empty() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: "server_name cannot be empty".to_string(),
                 data: None,
             });
         }
-
-        if let Some(obj) = server_config.as_object_mut() {
-            obj.insert(
-                "name".to_string(),
-                serde_json::Value::String(server_name.clone()),
-            );
-        }
-
-        let config: McpServerConfig =
-            serde_json::from_value(server_config).map_err(|e| RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!("invalid server_config: {e}"),
-                data: None,
-            })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
         let rollback = if persisted {
@@ -7728,10 +7728,10 @@ impl SessionRuntime {
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             actions,
@@ -10535,6 +10535,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_video_validation_returns_typed_unsupported_capability_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let identity = SessionLlmIdentity {
+            model: "gemini-3-flash-preview".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+
+        let err = runtime
+            .validate_prompt_video_input(&inline_video_prompt(), &identity)
+            .await
+            .expect_err("same model name under incompatible provider must fail closed");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        let data = err.data.expect("unsupported capability evidence data");
+        assert_eq!(
+            data["unsupported_capability"]["capability"],
+            serde_json::json!("inline_video")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["reason"],
+            serde_json::json!("provider_model_profile_missing")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["provider"],
+            serde_json::json!("openai")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["model"],
+            serde_json::json!("gemini-3-flash-preview")
+        );
+    }
+
+    #[tokio::test]
     async fn reconfigure_capability_lookup_rejects_provider_model_mismatch() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -10787,7 +10824,7 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<serde_json::Value> {
+    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
         let path = mcp_test_server_path();
         if !path.exists() {
             eprintln!(
@@ -10795,12 +10832,12 @@ mod tests {
             );
             return None;
         }
-        Some(serde_json::json!({
-            "command": path.to_string_lossy().to_string(),
-            "args": [],
-            "env": {},
-            "name": server_name,
-        }))
+        Some(McpServerConfig::stdio(
+            server_name,
+            path.to_string_lossy().to_string(),
+            Vec::new(),
+            HashMap::new(),
+        ))
     }
 
     #[tokio::test]
@@ -16636,12 +16673,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("staging should succeed");
@@ -16706,7 +16738,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "test-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16770,7 +16802,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "timeout-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16900,7 +16932,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "server-draining".to_string(), server1_config)
+            .mcp_stage_add(&session_id, server1_config)
             .await
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -16959,7 +16991,7 @@ mod tests {
         );
 
         runtime
-            .mcp_stage_add(&session_id, "server-staged".to_string(), server2_config)
+            .mcp_stage_add(&session_id, server2_config)
             .await
             .expect("stage second add");
 
@@ -17047,7 +17079,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "lossless-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -17103,12 +17135,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("stage broken add");

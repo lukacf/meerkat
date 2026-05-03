@@ -187,8 +187,10 @@ fn write_deferred_turn_state(
 fn rollback_tool_visibility_state_snapshot(
     session: &Session,
 ) -> Option<meerkat_core::SessionToolVisibilityState> {
-    if let Some(state) = session.tool_visibility_state() {
-        return Some(state);
+    match session.tool_visibility_state() {
+        Ok(Some(state)) => return Some(state),
+        Ok(None) => {}
+        Err(_) => return None,
     }
 
     let mut state = meerkat_core::SessionToolVisibilityState::default();
@@ -3559,7 +3561,14 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let mut state = session.tool_visibility_state().unwrap_or_default();
+            let mut state = session
+                .tool_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to decode dummy visibility state: {err}"
+                    ))
+                })?
+                .unwrap_or_default();
             state.staged_filter = filter;
             state.staged_revision = state.staged_revision.max(state.active_revision) + 1;
             session.set_tool_visibility_state(state).map_err(|err| {
@@ -4428,7 +4437,14 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let mut state = session.tool_visibility_state().unwrap_or_default();
+            let mut state = session
+                .tool_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to decode dummy visibility state: {err}"
+                    ))
+                })?
+                .unwrap_or_default();
             let requested_name = format!("requested:{}", call.name);
             state
                 .staged_requested_deferred_names
@@ -9267,6 +9283,7 @@ mod tests {
         let exported = service.export_session_with_labels(&id).await.unwrap();
         let exported_state = exported
             .tool_visibility_state()
+            .expect("live visibility state should decode")
             .expect("live session should carry visibility state after staging");
         assert_eq!(exported_state.staged_filter, filter);
         assert_eq!(exported_state.active_filter, meerkat_core::ToolFilter::All);
@@ -9276,6 +9293,7 @@ mod tests {
         let persisted = store.load(&id).await.unwrap().unwrap();
         let persisted_state = persisted
             .tool_visibility_state()
+            .expect("persisted visibility state should decode")
             .expect("persisted session should carry visibility state after staging");
         assert_eq!(persisted_state, exported_state);
     }
@@ -9298,7 +9316,10 @@ mod tests {
 
         let baseline = service.export_session_with_labels(&id).await.unwrap();
         assert!(
-            baseline.tool_visibility_state().is_none(),
+            baseline
+                .tool_visibility_state()
+                .expect("baseline visibility state should decode")
+                .is_none(),
             "new sessions should not materialize visibility metadata before updates"
         );
 
@@ -9314,16 +9335,23 @@ mod tests {
         fail_store.set_fail_save(false);
 
         let exported = service.export_session_with_labels(&id).await.unwrap();
+        let exported_visibility_state = exported
+            .tool_visibility_state()
+            .expect("exported visibility state should decode");
+        let baseline_visibility_state = baseline
+            .tool_visibility_state()
+            .expect("baseline visibility state should decode");
         assert_eq!(
-            exported.tool_visibility_state(),
-            baseline.tool_visibility_state(),
+            exported_visibility_state, baseline_visibility_state,
             "live session should roll back to the pre-mutation visibility state"
         );
 
         let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
+        let persisted_visibility_state = persisted
+            .tool_visibility_state()
+            .expect("persisted visibility state should decode");
         assert_eq!(
-            persisted.tool_visibility_state(),
-            baseline.tool_visibility_state(),
+            persisted_visibility_state, baseline_visibility_state,
             "store should retain the pre-mutation visibility state after rollback"
         );
     }
@@ -9547,6 +9575,7 @@ mod tests {
             .expect("persisted session should exist");
         let visibility_state = persisted
             .tool_visibility_state()
+            .expect("persisted visibility state should decode")
             .expect("persistent dispatch should save session mutations");
         assert!(
             visibility_state

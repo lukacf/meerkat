@@ -3190,7 +3190,14 @@ impl AgentFactory {
                 meerkat_core::capability_base_filter_for_image_tool_results(
                     profile.image_tool_results,
                 );
-            let mut visibility_state = session.tool_visibility_state().unwrap_or_default();
+            let mut visibility_state = session
+                .tool_visibility_state()
+                .map_err(|err| {
+                    BuildAgentError::Config(format!(
+                        "failed to decode canonical tool visibility state: {err}"
+                    ))
+                })?
+                .unwrap_or_default();
             if visibility_state.capability_base_filter != capability_base_filter
                 || has_canonical_visibility_state
             {

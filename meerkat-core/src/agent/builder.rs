@@ -74,7 +74,7 @@ pub struct AgentBuilder {
 
 /// Error returned when the canonical factory has not composed the policy state
 /// required before crossing into core agent construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBuildPolicyError {
     #[error("factory policy build requires an explicit session")]
     MissingSession,
@@ -86,6 +86,10 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
+    #[error("failed to restore canonical tool visibility state: {message}")]
+    ToolVisibilityRestore { message: String },
+    #[error("failed to persist canonical tool visibility state during restore: {message}")]
+    ToolVisibilityPersist { message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -142,7 +146,7 @@ pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     Box::pin(async move {
         validate_factory_bridge_token(factory_bridge_token)?;
         builder.validate_factory_policy()?;
-        Ok(builder.build_inner(client, tools, store).await)
+        builder.build_inner(client, tools, store).await
     })
 }
 
@@ -316,12 +320,32 @@ impl AgentBuilder {
     /// primitive themselves. Production-facing Meerkat surfaces route through
     /// `AgentFactory::build_agent`.
     #[cfg(test)]
+    #[allow(clippy::panic)]
     pub async fn build_standalone<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,
         store: Arc<S>,
     ) -> Agent<C, T, S>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        match self.try_build_standalone(client, tools, store).await {
+            Ok(agent) => agent,
+            Err(err) => panic!("standalone agent build failed: {err}"),
+        }
+    }
+
+    /// Build a standalone low-level agent and surface core build failures.
+    #[cfg(test)]
+    pub async fn try_build_standalone<C, T, S>(
+        self,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
     where
         C: AgentLlmClient + ?Sized,
         T: AgentToolDispatcher + ?Sized,
@@ -354,7 +378,7 @@ impl AgentBuilder {
         client: Arc<C>,
         tools: Arc<T>,
         store: Arc<S>,
-    ) -> Agent<C, T, S>
+    ) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
     where
         C: AgentLlmClient + ?Sized,
         T: AgentToolDispatcher + ?Sized,
@@ -484,11 +508,21 @@ impl AgentBuilder {
             last_pending_catalog_sources: Default::default(),
         };
 
-        let mut visibility_state = agent.session.tool_visibility_state().unwrap_or_default();
         let has_canonical_visibility_state = agent
             .session
             .metadata()
             .contains_key(SESSION_TOOL_VISIBILITY_STATE_KEY);
+        let mut visibility_state = match agent.session.tool_visibility_state() {
+            Ok(Some(state)) => state,
+            Ok(None) => SessionToolVisibilityState::default(),
+            Err(err) => {
+                return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                    message: format!(
+                        "failed to decode canonical session metadata `{SESSION_TOOL_VISIBILITY_STATE_KEY}`: {err}"
+                    ),
+                });
+            }
+        };
 
         if !has_canonical_visibility_state {
             if let Some(raw_filter) = agent
@@ -503,10 +537,11 @@ impl AgentBuilder {
                         visibility_state.staged_filter = filter;
                     }
                     Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "failed to parse persisted tool scope filter; ignoring"
-                        );
+                        return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                            message: format!(
+                                "failed to decode legacy session metadata `{EXTERNAL_TOOL_FILTER_METADATA_KEY}`: {err}"
+                            ),
+                        });
                     }
                 }
             }
@@ -522,10 +557,11 @@ impl AgentBuilder {
                         visibility_state.inherited_base_filter = filter;
                     }
                     Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "failed to parse inherited tool scope filter; ignoring"
-                        );
+                        return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                            message: format!(
+                                "failed to decode legacy session metadata `{INHERITED_TOOL_FILTER_METADATA_KEY}`: {err}"
+                            ),
+                        });
                     }
                 }
             }
@@ -538,26 +574,24 @@ impl AgentBuilder {
                 .tool_scope
                 .set_visibility_state(visibility_state.clone())
             {
-                tracing::warn!(
-                    error = %err,
-                    "failed to apply canonical tool visibility state; ignoring"
-                );
-            } else if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
-                tracing::warn!(
-                    error = %err,
-                    "failed to persist canonical tool visibility state during restore"
-                );
-            } else {
-                agent
-                    .session
-                    .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
-                agent
-                    .session
-                    .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
+                return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                    message: err.to_string(),
+                });
             }
+            if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
+                return Err(AgentBuildPolicyError::ToolVisibilityPersist {
+                    message: err.to_string(),
+                });
+            }
+            agent
+                .session
+                .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
+            agent
+                .session
+                .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
         }
 
-        agent
+        Ok(agent)
     }
 
     /// Set the session checkpointer for keep-alive persistence.
@@ -747,7 +781,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
     struct MockClient;
@@ -811,6 +845,179 @@ mod tests {
         }
         async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
             Ok(None)
+        }
+    }
+
+    struct RestoreFailingVisibilityOwner {
+        fallback_state: LocalToolVisibilityOwner,
+        replace_calls: AtomicUsize,
+    }
+
+    impl RestoreFailingVisibilityOwner {
+        fn new() -> Self {
+            Self {
+                fallback_state: LocalToolVisibilityOwner::new(),
+                replace_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn replace_calls(&self) -> usize {
+            self.replace_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ToolVisibilityOwner for RestoreFailingVisibilityOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.fallback_state.visibility_state()
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: SessionToolVisibilityState,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.replace_calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::ToolScopeApplyError::Owner {
+                message: "restore fixture rejected canonical visibility state".to_string(),
+            })
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            filter: ToolFilter,
+            witnesses: BTreeMap<String, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.fallback_state
+                .stage_persistent_filter(filter, witnesses)
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            names: std::collections::BTreeSet<String>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.fallback_state.stage_requested_deferred_names(names)
+        }
+
+        fn request_deferred_tools(
+            &self,
+            authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.fallback_state.request_deferred_tools(authorities)
+        }
+
+        fn replace_deferred_tool_authority_catalog(
+            &self,
+            catalog: BTreeMap<String, crate::ToolVisibilityWitness>,
+        ) {
+            self.fallback_state
+                .replace_deferred_tool_authority_catalog(catalog);
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.fallback_state.boundary_applied()
+        }
+    }
+
+    struct RestoreFailureCatalogDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+    }
+
+    impl RestoreFailureCatalogDispatcher {
+        fn new() -> Self {
+            let visible = Arc::new(ToolDef::new(
+                "visible",
+                "visible session tool",
+                serde_json::json!({ "type": "object" }),
+            ));
+            let secret = Arc::new(ToolDef::new(
+                "secret",
+                "policy-hidden session tool",
+                serde_json::json!({ "type": "object" }),
+            ));
+            let deferred_a = Arc::new(
+                ToolDef::new(
+                    "deferred_a",
+                    "deferred session tool",
+                    serde_json::json!({ "type": "object" }),
+                )
+                .with_provenance(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "restore-fixture".into(),
+                }),
+            );
+            let deferred_b = Arc::new(
+                ToolDef::new(
+                    "deferred_b",
+                    "second deferred session tool",
+                    serde_json::json!({ "type": "object" }),
+                )
+                .with_provenance(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "restore-fixture".into(),
+                }),
+            );
+            let control = Arc::new(ToolDef::new(
+                "tool_catalog_load",
+                "deferred catalog control tool",
+                serde_json::json!({ "type": "object" }),
+            ));
+
+            Self {
+                tools: vec![
+                    Arc::clone(&visible),
+                    Arc::clone(&secret),
+                    Arc::clone(&deferred_a),
+                    Arc::clone(&deferred_b),
+                    Arc::clone(&control),
+                ]
+                .into(),
+                catalog: vec![
+                    crate::ToolCatalogEntry::session_inline(visible, true),
+                    crate::ToolCatalogEntry::session_inline(secret, true),
+                    crate::ToolCatalogEntry::session_deferred(
+                        deferred_a,
+                        true,
+                        "callback:restore-fixture".to_string(),
+                    ),
+                    crate::ToolCatalogEntry::session_deferred(
+                        deferred_b,
+                        true,
+                        "callback:restore-fixture".to_string(),
+                    ),
+                    crate::ToolCatalogEntry::control_inline(control, true),
+                ]
+                .into(),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for RestoreFailureCatalogDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::access_denied(call.name))
         }
     }
 
@@ -916,6 +1123,130 @@ mod tests {
             realm: RealmId::parse("dev").expect("valid realm fixture"),
             binding: BindingId::parse(binding).expect("valid binding fixture"),
             profile: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_fails_closed_when_canonical_visibility_restore_fails() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(RestoreFailureCatalogDispatcher::new());
+        let store = Arc::new(MockStore);
+        let visibility_owner = Arc::new(RestoreFailingVisibilityOwner::new());
+        let mut session = Session::new();
+        let hidden_filter = match serde_json::to_value(ToolFilter::Deny(
+            ["secret".to_string()].into_iter().collect(),
+        )) {
+            Ok(value) => value,
+            Err(err) => panic!("filter should serialize: {err}"),
+        };
+        session.set_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY, hidden_filter);
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_tool_visibility_owner(visibility_owner.clone())
+            .try_build_standalone(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("restore fixture rejected"),
+                    "restore error should preserve owner failure details: {message}"
+                );
+            }
+            Ok(agent) => {
+                let visible_names = agent
+                    .tool_scope()
+                    .visible_tool_names()
+                    .unwrap_or_else(|_| Default::default());
+                panic!(
+                    "builder must not complete after canonical restore failure; visible names from stale/default authority: {visible_names:?}"
+                );
+            }
+            Err(err) => panic!("unexpected build error: {err}"),
+        }
+        assert_eq!(
+            visibility_owner.replace_calls(),
+            1,
+            "builder should attempt the canonical restore once, then fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_fails_closed_when_canonical_visibility_metadata_is_malformed() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(RestoreFailureCatalogDispatcher::new());
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!({
+                "active_filter": {
+                    "unexpected_filter_kind": ["secret"]
+                }
+            }),
+        );
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .try_build_standalone(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("failed to decode canonical session metadata"),
+                    "restore error should identify malformed canonical metadata: {message}"
+                );
+            }
+            Ok(agent) => {
+                let visible_names = agent
+                    .tool_scope()
+                    .visible_tool_names()
+                    .unwrap_or_else(|_| Default::default());
+                panic!(
+                    "builder must not complete with default visibility after malformed canonical metadata; visible names: {visible_names:?}"
+                );
+            }
+            Err(err) => panic!("unexpected build error: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_fails_closed_when_legacy_visibility_filter_metadata_is_malformed() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(RestoreFailureCatalogDispatcher::new());
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::json!({
+                "unexpected_filter_kind": ["secret"]
+            }),
+        );
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .try_build_standalone(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("failed to decode legacy session metadata"),
+                    "restore error should identify malformed legacy visibility metadata: {message}"
+                );
+            }
+            Ok(agent) => {
+                let visible_names = agent
+                    .tool_scope()
+                    .visible_tool_names()
+                    .unwrap_or_else(|_| Default::default());
+                panic!(
+                    "builder must not complete with default visibility after malformed legacy visibility metadata; visible names: {visible_names:?}"
+                );
+            }
+            Err(err) => panic!("unexpected build error: {err}"),
         }
     }
 

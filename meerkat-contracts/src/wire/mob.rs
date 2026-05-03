@@ -2044,6 +2044,37 @@ mod tests {
     }
 
     #[test]
+    fn mob_lifecycle_params_reject_unknown_action_string() {
+        let err = serde_json::from_value::<MobLifecycleParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "action": "explode"
+        }))
+        .expect_err("unknown lifecycle actions must fail at the typed wire boundary");
+
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mob_lifecycle_result_round_trips_typed_action() {
+        let result = MobLifecycleResult {
+            mob_id: "mob-1".into(),
+            action: WireMobLifecycleAction::Complete,
+            ok: true,
+            destroy_report: None,
+        };
+
+        let json = serde_json::to_value(&result).expect("serialize lifecycle result");
+        assert_eq!(json["action"], "complete");
+
+        let round_trip: MobLifecycleResult =
+            serde_json::from_value(json).expect("deserialize lifecycle result");
+        assert_eq!(round_trip.action, WireMobLifecycleAction::Complete);
+    }
+
+    #[test]
     fn mob_spawn_many_result_entry_uses_typed_status_result_envelope() {
         let member_ref = WireMemberRef::encode("mob-1", "worker-1");
         let entry = MobSpawnManyResultEntry::spawned("worker-1", member_ref.clone());

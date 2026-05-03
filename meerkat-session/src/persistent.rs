@@ -1393,13 +1393,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "runtime snapshot persistence failed: {err}"
                     )))
                 })?;
-            if let Err(error) = self.store.save(&session).await {
+            self.store.save(&session).await.map_err(|error| {
                 tracing::warn!(
                     session_id = %session.id(),
                     error = %error,
                     "failed to update session-store projection after runtime authority commit"
                 );
-            }
+                SessionError::Store(Box::new(error))
+            })?;
         } else {
             self.store
                 .save(&session)
@@ -6850,6 +6851,90 @@ mod tests {
                 .iter()
                 .any(|summary| summary.session_id == result.session_id),
             "runtime-backed sessions should remain listable through the session-store projection after the live handle is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_projection_save_failure_fails_closed_and_list_uses_authority() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+        let raw_before = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+        let raw_message_count = raw_before.messages().len();
+
+        fail_store.set_fail_save(true);
+        let error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request("runtime authority commits before projection failure"),
+            )
+            .await
+            .expect_err("projection save failure after runtime authority commit must fail closed");
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "projection failure should surface as a store error, got {error:?}"
+        );
+
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should still contain the committed turn");
+        assert!(
+            authoritative.messages().len() > raw_message_count,
+            "runtime authority should be ahead of the stale session-store projection"
+        );
+        let raw_after = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed after failure")
+            .expect("stale projection should remain present");
+        assert_eq!(
+            raw_after.messages().len(),
+            raw_message_count,
+            "failed projection update must not be silently refreshed"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("test should be able to force list through the durable projection");
+        let listed = service
+            .list(SessionQuery::default())
+            .await
+            .expect("list should not fail while authoritative runtime snapshot exists");
+        let summary = listed
+            .iter()
+            .find(|summary| summary.session_id == result.session_id)
+            .expect("stale projection row should only identify the authoritative session");
+        assert_eq!(
+            summary.message_count,
+            authoritative.messages().len(),
+            "list() must report runtime authority, not stale SessionStore projection metadata"
+        );
+        assert_ne!(
+            summary.message_count,
+            raw_after.messages().len(),
+            "list() must not present stale projection state as fresh canonical state"
         );
     }
 

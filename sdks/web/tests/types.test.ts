@@ -33,6 +33,7 @@ import type {
   MemberDeliveryReceipt,
   MobMemberSnapshot,
   MobHelperResult,
+  FlowStatus,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
 
@@ -319,6 +320,7 @@ const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'Review the draft and suggest one improvement.',
   { connectionRef: { realm: 'default', binding: 'anthropic' } },
 );
+const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();
 const mobSubscription = mob.subscribeEvents();
 
@@ -357,5 +359,6 @@ void memberStatusResult;
 void helperResult;
 void helperWithConnectionResult;
 void forkedHelperResult;
+void flowStatusResult;
 void memberSubscription;
 void mobSubscription;

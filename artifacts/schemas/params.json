@@ -739,38 +739,6 @@
     "title": "DeviceStartParams",
     "type": "object"
   },
-  "InputListParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submissions`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "InputListParams",
-    "type": "object"
-  },
-  "InputStateParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submission`.",
-    "properties": {
-      "input_id": {
-        "type": "string"
-      },
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id",
-      "input_id"
-    ],
-    "title": "InputStateParams",
-    "type": "object"
-  },
   "ListSchedulesParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
@@ -8279,22 +8247,6 @@
     "title": "RealtimeStatusParams",
     "type": "object"
   },
-  "RuntimeAcceptParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submit`.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
-    "properties": {
-      "input": true,
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id",
-      "input"
-    ],
-    "title": "RuntimeAcceptParams",
-    "type": "object"
-  },
   "RuntimeRealtimeAttachmentStatusParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `session/realtime_attachment_status`.",
@@ -8307,48 +8259,6 @@
       "session_id"
     ],
     "title": "RuntimeRealtimeAttachmentStatusParams",
-    "type": "object"
-  },
-  "RuntimeResetParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_reset`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeResetParams",
-    "type": "object"
-  },
-  "RuntimeRetireParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_retire`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeRetireParams",
-    "type": "object"
-  },
-  "RuntimeStateParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_status`.",
-    "properties": {
-      "session_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "session_id"
-    ],
-    "title": "RuntimeStateParams",
     "type": "object"
   },
   "ScheduleIdParams": {

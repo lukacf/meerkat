@@ -436,10 +436,10 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return "mob-web-parity";
     },
     async mob_status(mobId) {
-      return JSON.stringify({ mob_id: mobId, state: "running" });
+      return JSON.stringify({ mob_id: mobId, status: "running" });
     },
     async mob_list() {
-      return JSON.stringify([]);
+      return JSON.stringify({ mobs: [] });
     },
     async mob_lifecycle(mobId, action) {
       calls.push(["lifecycle", mobId, action]);
@@ -493,6 +493,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_member_send(_mobId, agentIdentity, requestJson) {
       calls.push(["member_send", agentIdentity, JSON.parse(requestJson)]);
       return JSON.stringify({
+        mob_id: _mobId,
         agent_identity: agentIdentity,
         member_ref: `ref-${agentIdentity}`,
         handling_mode: "queue",
@@ -500,7 +501,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     },
     async mob_member_status(_mobId, agentIdentity) {
       return JSON.stringify({
-        status: "running",
+        status: "active",
         agent_runtime_id: { identity: agentIdentity, generation: 1 },
         fence_token: 1,
         tokens_used: 7,
@@ -511,7 +512,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({
         status: "completed",
         receipt: {
-          agent_identity: agentIdentity,
+          identity: agentIdentity,
           member_ref: `ref-${agentIdentity}`,
         },
       });
@@ -541,7 +542,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return "run-1";
     },
     async mob_flow_status() {
-      return JSON.stringify({ run_id: "run-1", status: "running" });
+      return JSON.stringify({ run: { run_id: "run-1", status: "running" } });
     },
     async mob_cancel_flow(mobId, runId) {
       calls.push(["cancel_flow", mobId, runId]);
@@ -633,7 +634,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       JSON.stringify({
         status: "topology_restore_failed",
         receipt: {
-          agent_identity: agentIdentity,
+          identity: agentIdentity,
           member_ref: `ref-${agentIdentity}`,
         },
         failed_peer_ids: ["peer-a", "peer-b"],

@@ -1546,6 +1546,8 @@ pub enum RuntimeApplyFailureCause {
     PrimitiveRejected,
     RuntimeContextApply,
     RuntimeTurn,
+    HookDenied,
+    HookRuntimeFailure,
     ExecutorStopped,
     ExecutorControlFailed,
     ExecutorInternal,
@@ -1561,6 +1563,10 @@ impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFa
                 Self::RuntimeContextApply
             }
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::RuntimeTurn => Self::RuntimeTurn,
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::HookDenied => Self::HookDenied,
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::HookRuntimeFailure => {
+                Self::HookRuntimeFailure
+            }
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::ExecutorStopped => {
                 Self::ExecutorStopped
             }

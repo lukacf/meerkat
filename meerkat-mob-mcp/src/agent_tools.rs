@@ -62,7 +62,7 @@ const TOOL_MOB_PROFILE_LIST_SOURCES: &str = "mob_profile_list_sources";
 #[derive(Debug, Clone)]
 pub struct ResolvedSpawnTooling {
     /// Inherited tool filter for the child session (from overlays or inherit mode).
-    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
     /// Override profile resolved from `SpawnTooling::Profile` source.
     /// When set, the spawn path uses this profile instead of the definition's.
     pub override_profile: Option<meerkat_mob::Profile>,
@@ -353,23 +353,24 @@ impl AgentMobToolSurface {
                         .cloned()
                         .collect::<std::collections::HashSet<String>>()
                 });
-                let filter = snapshot.with_overlays(allow_set.as_ref(), deny_set.as_ref());
+                let filter =
+                    snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref());
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter: Some(filter),
                     override_profile: None,
                 })
             }
             meerkat_mob::SpawnTooling::Minimal => {
-                match &self.snapshot_context {
-                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(_) => {}
+                let provider = match &self.snapshot_context {
+                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
                     meerkat_core::service::MobToolSnapshotContext::Standalone => {
                         return Err(ToolError::execution_failed(
                             "Minimal tooling requires a parent tool scope (ParentOwned context), \
                              but this agent is running in Standalone mode",
                         ));
                     }
-                }
-                let comms_tools = [
+                };
+                let comms_tools: std::collections::HashSet<String> = [
                     "send",
                     "send_message",
                     "send_request",
@@ -377,11 +378,14 @@ impl AgentMobToolSurface {
                     "peers",
                 ]
                 .into_iter()
+                .map(String::from)
                 .collect();
+                let tools = provider.snapshot_visible_tools();
+                let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
                 Ok(ResolvedSpawnTooling {
-                    inherited_tool_filter: Some(meerkat_core::tool_scope::ToolFilter::Allow(
-                        comms_tools,
-                    )),
+                    inherited_tool_filter: Some(
+                        snapshot.with_witnessed_overlays(Some(&comms_tools), None),
+                    ),
                     override_profile: None,
                 })
             }
@@ -448,7 +452,7 @@ impl AgentMobToolSurface {
                             .cloned()
                             .collect::<std::collections::HashSet<String>>()
                     });
-                    Some(snapshot.with_overlays(allow_set.as_ref(), deny_set.as_ref()))
+                    Some(snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref()))
                 };
 
                 Ok(ResolvedSpawnTooling {
@@ -3768,7 +3772,10 @@ mod tests {
                     name: (*name).into(),
                     description: format!("{name} tool"),
                     input_schema: json!({"type": "object"}),
-                    provenance: None,
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Callback,
+                        source_id: format!("parent-{name}").into(),
+                    }),
                 })
             })
             .collect()
@@ -3803,6 +3810,26 @@ mod tests {
         )
     }
 
+    fn inherited_allow_names(resolved: ResolvedSpawnTooling) -> meerkat_core::types::ToolNameSet {
+        let authority = resolved
+            .inherited_tool_filter
+            .expect("expected inherited tool filter authority");
+        let names = match authority.filter {
+            meerkat_core::tool_scope::ToolFilter::Allow(names) => names,
+            other => panic!("expected Allow, got {other:?}"),
+        };
+        for name in &names {
+            assert!(
+                authority
+                    .witnesses
+                    .get(name.as_str())
+                    .is_some_and(|witness| witness.has_identity_witness()),
+                "inherited filter should carry witness for {name}"
+            );
+        }
+        names
+    }
+
     #[tokio::test]
     async fn test_resolve_spawn_tooling_inherit_parent_captures_all_visible() {
         let surface = surface_with_parent_tools();
@@ -3811,15 +3838,11 @@ mod tests {
             deny_overlay: None,
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        match resolved.inherited_tool_filter {
-            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
-                assert_eq!(names.len(), 8, "should inherit all 8 parent tools");
-                assert!(names.contains("send"));
-                assert!(names.contains("read_file"));
-                assert!(names.contains("bash"));
-            }
-            other => panic!("expected Some(Allow), got {other:?}"),
-        }
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 8, "should inherit all 8 parent tools");
+        assert!(names.contains("send"));
+        assert!(names.contains("read_file"));
+        assert!(names.contains("bash"));
     }
 
     #[tokio::test]
@@ -3830,16 +3853,12 @@ mod tests {
             deny_overlay: Some(vec!["bash".to_string(), "write_file".to_string()]),
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        match resolved.inherited_tool_filter {
-            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
-                assert_eq!(names.len(), 6);
-                assert!(!names.contains("bash"));
-                assert!(!names.contains("write_file"));
-                assert!(names.contains("read_file"));
-                assert!(names.contains("send"));
-            }
-            other => panic!("expected Some(Allow), got {other:?}"),
-        }
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 6);
+        assert!(!names.contains("bash"));
+        assert!(!names.contains("write_file"));
+        assert!(names.contains("read_file"));
+        assert!(names.contains("send"));
     }
 
     #[tokio::test]
@@ -3850,14 +3869,10 @@ mod tests {
             deny_overlay: None,
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        match resolved.inherited_tool_filter {
-            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
-                assert_eq!(names.len(), 2);
-                assert!(names.contains("send"));
-                assert!(names.contains("read_file"));
-            }
-            other => panic!("expected Some(Allow), got {other:?}"),
-        }
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 2);
+        assert!(names.contains("send"));
+        assert!(names.contains("read_file"));
     }
 
     #[tokio::test]
@@ -3879,19 +3894,15 @@ mod tests {
         let surface = surface_with_parent_tools();
         let tooling = meerkat_mob::SpawnTooling::Minimal;
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        match resolved.inherited_tool_filter {
-            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
-                assert_eq!(names.len(), 5);
-                assert!(names.contains("send"));
-                assert!(names.contains("send_message"));
-                assert!(names.contains("send_request"));
-                assert!(names.contains("send_response"));
-                assert!(names.contains("peers"));
-                assert!(!names.contains("bash"));
-                assert!(!names.contains("read_file"));
-            }
-            other => panic!("expected Some(Allow), got {other:?}"),
-        }
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 5);
+        assert!(names.contains("send"));
+        assert!(names.contains("send_message"));
+        assert!(names.contains("send_request"));
+        assert!(names.contains("send_response"));
+        assert!(names.contains("peers"));
+        assert!(!names.contains("bash"));
+        assert!(!names.contains("read_file"));
     }
 
     #[tokio::test]
@@ -3948,13 +3959,9 @@ mod tests {
             deny_overlay: Some(vec!["bash".to_string()]),
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        match resolved.inherited_tool_filter {
-            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
-                assert!(!names.contains("bash"));
-                assert!(names.contains("read_file"));
-            }
-            other => panic!("expected Some(Allow), got {other:?}"),
-        }
+        let names = inherited_allow_names(resolved);
+        assert!(!names.contains("bash"));
+        assert!(names.contains("read_file"));
     }
 
     #[tokio::test]

@@ -11,18 +11,17 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreApplyOutput, CoreExecutor,
+    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
 
-use crate::error;
-use crate::protocol::RpcError;
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use crate::{error, protocol::RpcError};
 #[cfg(feature = "mob")]
 use meerkat_mob::MobSessionService;
 
@@ -35,14 +34,6 @@ pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_service: Arc<dyn SessionService>,
     session_id: SessionId,
-}
-
-fn rpc_error_to_core_executor_error(err: RpcError) -> CoreExecutorError {
-    if err.code == error::REQUEST_CANCELLED {
-        CoreExecutorError::cancelled()
-    } else {
-        CoreExecutorError::apply_failed_runtime_turn(err.message)
-    }
 }
 
 #[cfg(feature = "mob")]
@@ -193,6 +184,30 @@ fn pending_system_context_appends_from_primitive(
         .collect()
 }
 
+fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
+    if err.code == error::REQUEST_CANCELLED {
+        return CoreExecutorError::cancelled();
+    }
+
+    let kind = err
+        .data
+        .as_ref()
+        .and_then(|data| data.get("core_apply_failure_cause"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(CoreApplyFailureCauseKind::from_wire_str)
+        .or((err.code == error::HOOK_DENIED).then_some(CoreApplyFailureCauseKind::HookDenied));
+    let message = err.message;
+    let cause = match kind {
+        Some(CoreApplyFailureCauseKind::HookDenied) => CoreApplyFailureCause::hook_denied(message),
+        Some(CoreApplyFailureCauseKind::HookRuntimeFailure) => {
+            CoreApplyFailureCause::hook_runtime_failure(message)
+        }
+        Some(kind) => CoreApplyFailureCause::new(kind, message),
+        None => CoreApplyFailureCause::runtime_turn(message),
+    };
+    CoreExecutorError::apply_failed(cause)
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -294,9 +309,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
         match result {
             Ok(output) => Ok(output),
-            Err(rpc_err) => Err(CoreExecutorError::apply_failed_runtime_turn(
-                rpc_err.message,
-            )),
+            Err(rpc_err) => Err(core_executor_error_from_rpc(rpc_err)),
         }
     }
 
@@ -431,7 +444,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         Some(pre_admission),
                     )
                     .await
-                    .map_err(rpc_error_to_core_executor_error)
+                    .map_err(core_executor_error_from_rpc)
             }
             (_, pre_admission) => {
                 drop(pre_admission);
@@ -455,7 +468,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         primitive.contributing_input_ids().to_vec(),
                     )
                     .await
-                    .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
+                    .map_err(CoreExecutorError::apply_failed_from_session_error)
             }
         };
 

@@ -235,7 +235,10 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         .to_string();
     assert_eq!(before["handle"], handle);
     assert_ne!(session_id, handle.to_string());
-    assert_eq!(before["run_counter"], 0);
+    assert!(
+        before.get("run_counter").is_none(),
+        "browser-local run_counter must not be present before turns"
+    );
 
     let turn = parse_js_result(
         start_turn(handle, "Use the echo_browser tool, then answer.")
@@ -266,11 +269,65 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         serde_json::from_str(&get_session_state(handle).expect("session state after turn"))
             .expect("state json");
     assert_eq!(after["session_id"], session_id);
-    assert_eq!(after["run_counter"], 1);
+    assert!(
+        after["message_count"].as_u64().unwrap_or_default()
+            > before["message_count"].as_u64().unwrap_or_default()
+    );
+    assert!(
+        after.get("run_counter").is_none(),
+        "browser-local run_counter must not be fabricated by the wasm handle map"
+    );
 
     clear_tool_callbacks();
     destroy_session(handle).expect("destroy session");
-    assert!(get_session_state(handle).is_err());
+    let archived: Value =
+        serde_json::from_str(&get_session_state(handle).expect("canonical archived state"))
+            .expect("archived state json");
+    assert_eq!(archived["session_id"], session_id);
+    assert_eq!(archived["is_active"], false);
+
+    let stale_control = start_turn(handle, "stale handles must not restart archived sessions")
+        .await
+        .expect_err("stale handle control must fail through canonical session authority");
+    assert_eq!(parse_js_error(stale_control)["code"], "SESSION_NOT_FOUND");
+
+    let stale_append = append_system_context(
+        handle,
+        &json!({
+            "text": "stale direct handle must not stage context",
+            "source": "browser_contract",
+            "idempotency_key": "stale-direct-handle"
+        })
+        .to_string(),
+    )
+    .await
+    .expect_err("stale handle mutation must fail through canonical session authority");
+    assert_eq!(parse_js_error(stale_append)["code"], "SESSION_NOT_FOUND");
+}
+
+#[wasm_bindgen_test]
+fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references() {
+    let init = parse_js_result(
+        init_runtime_from_config(
+            &json!({
+                "anthropic_api_key": "sk-test",
+                "model": "claude-sonnet-4-5"
+            })
+            .to_string(),
+        )
+        .expect("init runtime"),
+    );
+    assert_eq!(init["status"], "initialized");
+
+    let bogus_handle = u32::MAX - 7;
+
+    for error in [
+        get_session_state(bogus_handle).expect_err("state must reject an unknown local handle"),
+        poll_events(bogus_handle).expect_err("poll must reject an unknown local handle"),
+        destroy_session(bogus_handle).expect_err("destroy must reject an unknown local handle"),
+    ] {
+        assert_eq!(parse_js_error(error)["code"], "invalid_session_handle");
+    }
 }
 
 #[wasm_bindgen_test]

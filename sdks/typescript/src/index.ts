@@ -278,6 +278,7 @@ export type {
   AgentErrorReason,
   AgentErrorReport,
   StopReason,
+  ToolCallArguments,
   BudgetType,
   HookId,
   HookPoint,

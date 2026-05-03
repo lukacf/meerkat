@@ -265,6 +265,26 @@ impl DeferredToolLoadAuthority {
     }
 }
 
+/// Durable tool-filter intent paired with the witnesses that made the names
+/// authoritative at capture time.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WitnessedToolFilter {
+    pub filter: ToolFilter,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub witnesses: BTreeMap<String, ToolVisibilityWitness>,
+}
+
+impl WitnessedToolFilter {
+    pub fn new(filter: ToolFilter, witnesses: BTreeMap<String, ToolVisibilityWitness>) -> Self {
+        Self { filter, witnesses }
+    }
+
+    pub fn into_parts(self) -> (ToolFilter, BTreeMap<String, ToolVisibilityWitness>) {
+        (self.filter, self.witnesses)
+    }
+}
+
 /// Canonical durable session-local tool visibility intent.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1005,6 +1025,14 @@ impl Session {
 
     /// Load durable tool-visibility control state from the session metadata map.
     pub fn tool_visibility_state(
+        &self,
+    ) -> Result<Option<SessionToolVisibilityState>, serde_json::Error> {
+        self.try_tool_visibility_state()
+    }
+
+    /// Load durable tool-visibility control state while distinguishing absent
+    /// metadata from malformed canonical metadata.
+    pub fn try_tool_visibility_state(
         &self,
     ) -> Result<Option<SessionToolVisibilityState>, serde_json::Error> {
         self.metadata

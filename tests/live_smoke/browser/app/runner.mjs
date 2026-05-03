@@ -99,16 +99,21 @@ async function scenarioRawSession001({ wasm }) {
 
   const state = JSON.parse(wasm.get_session_state(handle));
   assert(state.model === 'claude-sonnet-4-5', `unexpected session model: ${JSON.stringify(state)}`);
-  assert(state.run_counter >= 1, `expected run_counter >= 1, got ${JSON.stringify(state)}`);
+  assert(!Object.hasOwn(state, 'run_counter'), `run_counter must not be browser-local state: ${JSON.stringify(state)}`);
+  assert(state.message_count >= 1, `expected canonical message_count >= 1, got ${JSON.stringify(state)}`);
 
   wasm.destroy_session(handle);
-  let destroyed = false;
+  const archived = JSON.parse(wasm.get_session_state(handle));
+  assert(archived.session_id === state.session_id, `destroyed handle must resolve canonical session id: ${JSON.stringify(archived)}`);
+  assert(archived.is_active === false, `destroyed handle must report canonical inactive state: ${JSON.stringify(archived)}`);
+
+  let canonicalNotFound = false;
   try {
-    wasm.get_session_state(handle);
-  } catch (_error) {
-    destroyed = true;
+    await wasm.start_turn(handle, 'stale browser handle must not control archived session', '{}');
+  } catch (error) {
+    canonicalNotFound = String(error).includes('SESSION_NOT_FOUND');
   }
-  assert(destroyed, 'expected get_session_state() to fail after destroy_session()');
+  assert(canonicalNotFound, 'expected stale start_turn() to fail through canonical session authority');
 }
 
 async function scenarioRawRecall002({ wasm }) {

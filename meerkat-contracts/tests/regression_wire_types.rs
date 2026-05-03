@@ -19,8 +19,13 @@ use meerkat_contracts::{
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
     HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    ToolCallArguments, ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
+    Usage,
 };
+
+fn tool_args(value: serde_json::Value) -> ToolCallArguments {
+    ToolCallArguments::from_value(value).expect("test tool args must be an object")
+}
 
 // ---------------------------------------------------------------------------
 // 1. WireRunResult required fields
@@ -406,7 +411,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolCallRequested {
             id: "tc1".to_string(),
             name: "read_file".to_string(),
-            args: serde_json::json!({"path": "/tmp"}),
+            args: tool_args(serde_json::json!({"path": "/tmp"})),
         },
         AgentEvent::ToolResultReceived {
             id: "tc1".to_string(),
@@ -658,7 +663,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolCallRequested {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            args: serde_json::json!({}),
+            args: tool_args(serde_json::json!({})),
         },
         AgentEvent::ToolResultReceived {
             id: "tool-1".to_string(),

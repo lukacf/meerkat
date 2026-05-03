@@ -191,6 +191,15 @@ describe("Typed Events", () => {
         },
         reason: "malformed operation/status semantics must not become an empty typed payload",
       },
+      {
+        raw: {
+          type: "tool_call_requested",
+          id: "t1",
+          name: "search",
+          args: "{\"query\":\"rust\"}",
+        },
+        reason: "tool-call args string JSON must not become semantic args",
+      },
     ];
 
     for (const { raw, reason } of cases) {

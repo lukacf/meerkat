@@ -15,6 +15,7 @@ use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolP
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY,
     LocalToolVisibilityOwner, ToolFilter, ToolScope, ToolVisibilityOwner,
+    validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
@@ -84,6 +85,12 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
+    #[error("runtime-backed agent build requires a canonical tool visibility owner")]
+    MissingToolVisibilityOwner,
+    #[error("runtime-backed agent build received legacy inherited tool visibility metadata")]
+    LegacyInheritedToolFilterMetadata,
+    #[error("runtime-backed agent build received inherited tool visibility without witnesses")]
+    MissingInheritedToolVisibilityWitnesses,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
     #[error("failed to restore canonical tool visibility state: {message}")]
@@ -369,7 +376,20 @@ impl AgentBuilder {
         if self.turn_state_handle.is_none() {
             return Err(AgentBuildPolicyError::MissingTurnStateHandle);
         }
+        if self.requires_explicit_runtime_tool_visibility_owner()
+            && self.tool_visibility_owner.is_none()
+        {
+            return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
+        }
         Ok(())
+    }
+
+    fn requires_explicit_runtime_tool_visibility_owner(&self) -> bool {
+        // Session-owned runtime builds always carry one of these markers. The
+        // standalone test seam may still use local visibility, but a
+        // runtime-backed build must pass its machine-owned visibility owner
+        // explicitly instead of receiving a hidden local fallback.
+        self.runtime_execution_kind_required || self.epoch_cursor_state.is_some()
     }
 
     #[allow(dead_code)]
@@ -384,6 +404,15 @@ impl AgentBuilder {
         T: AgentToolDispatcher + ?Sized,
         S: AgentSessionStore + ?Sized,
     {
+        let runtime_tool_visibility_owner_required =
+            self.requires_explicit_runtime_tool_visibility_owner();
+        let tool_visibility_owner = match self.tool_visibility_owner.clone() {
+            Some(owner) => owner,
+            None if runtime_tool_visibility_owner_required => {
+                return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
+            }
+            None => Arc::new(LocalToolVisibilityOwner::new()),
+        };
         let mut session = self.session.unwrap_or_default();
         let system_context_state = Arc::new(std::sync::Mutex::new(
             session.system_context_state().unwrap_or_default(),
@@ -443,8 +472,7 @@ impl AgentBuilder {
             tools.tools(),
             control_tool_names,
             deferred_tool_names,
-            self.tool_visibility_owner
-                .unwrap_or_else(|| Arc::new(LocalToolVisibilityOwner::new())),
+            tool_visibility_owner,
         );
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
@@ -523,8 +551,32 @@ impl AgentBuilder {
                 });
             }
         };
+        if runtime_tool_visibility_owner_required
+            && agent
+                .session
+                .metadata()
+                .contains_key(INHERITED_TOOL_FILTER_METADATA_KEY)
+        {
+            tracing::error!(
+                metadata_key = INHERITED_TOOL_FILTER_METADATA_KEY,
+                "runtime-backed agent build rejected legacy inherited tool visibility metadata"
+            );
+            return Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata);
+        }
+        if runtime_tool_visibility_owner_required
+            && let Err(err) = validate_inherited_filter_witnesses(
+                &visibility_state.inherited_base_filter,
+                &visibility_state.filter_witnesses,
+            )
+        {
+            tracing::error!(
+                error = %err,
+                "runtime-backed agent build rejected inherited tool visibility without witnesses"
+            );
+            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
+        }
 
-        if !has_canonical_visibility_state {
+        if !has_canonical_visibility_state && !runtime_tool_visibility_owner_required {
             if let Some(raw_filter) = agent
                 .session
                 .metadata()
@@ -578,17 +630,19 @@ impl AgentBuilder {
                     message: err.to_string(),
                 });
             }
-            if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
-                return Err(AgentBuildPolicyError::ToolVisibilityPersist {
-                    message: err.to_string(),
-                });
+            if !runtime_tool_visibility_owner_required {
+                if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
+                    return Err(AgentBuildPolicyError::ToolVisibilityPersist {
+                        message: err.to_string(),
+                    });
+                }
+                agent
+                    .session
+                    .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
+                agent
+                    .session
+                    .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
             }
-            agent
-                .session
-                .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
-            agent
-                .session
-                .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
         }
 
         Ok(agent)
@@ -779,7 +833,7 @@ mod tests {
     };
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
@@ -848,6 +902,10 @@ mod tests {
         }
     }
 
+    fn explicit_test_visibility_owner() -> Arc<dyn ToolVisibilityOwner> {
+        Arc::new(LocalToolVisibilityOwner::new())
+    }
+
     struct RestoreFailingVisibilityOwner {
         fallback_state: LocalToolVisibilityOwner,
         replace_calls: AtomicUsize,
@@ -894,7 +952,7 @@ mod tests {
 
         fn stage_requested_deferred_names(
             &self,
-            names: std::collections::BTreeSet<String>,
+            names: BTreeSet<String>,
         ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
             self.fallback_state.stage_requested_deferred_names(names)
         }
@@ -1384,6 +1442,255 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backed_builder_requires_explicit_visibility_owner() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let result = AgentBuilder::new()
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::MissingToolVisibilityOwner)
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_restore_failure_returns_error_and_keeps_owner_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(SessionToolVisibilityState {
+                active_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+                staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+                active_revision: 7,
+                staged_revision: 7,
+                ..Default::default()
+            })
+            .expect("visibility state should serialize");
+        let owner = Arc::new(RestoreFailingVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("restore fixture rejected"),
+                    "restore error should preserve owner failure details: {message}"
+                );
+            }
+            Ok(_) => panic!("runtime-backed builder must fail when visibility restore fails"),
+            Err(err) => panic!("unexpected build error: {err}"),
+        }
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            SessionToolVisibilityState::default(),
+            "failed runtime restore must leave the owner state unchanged"
+        );
+        assert_eq!(
+            owner.replace_calls(),
+            1,
+            "builder should attempt the runtime restore once, then fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_rejects_malformed_canonical_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!("not-a-visibility-state"),
+        );
+        let original_state = SessionToolVisibilityState {
+            active_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+            staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+            active_revision: 3,
+            staged_revision: 3,
+            ..Default::default()
+        };
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        owner
+            .replace_visibility_state(original_state.clone())
+            .expect("test owner should accept initial state");
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("failed to decode canonical session metadata"),
+                    "restore error should identify malformed canonical metadata: {message}"
+                );
+            }
+            Ok(_) => panic!("runtime-backed builder must reject malformed canonical visibility"),
+            Err(err) => panic!("unexpected build error: {err}"),
+        }
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            original_state,
+            "failed malformed restore must not install default visibility"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_ignores_legacy_local_visibility_metadata() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("legacy filter should serialize"),
+        );
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
+        let state = owner.visibility_state().unwrap();
+        assert_eq!(state.active_filter, ToolFilter::All);
+        assert_eq!(state.staged_filter, ToolFilter::All);
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_rejects_legacy_inherited_visibility_metadata() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            INHERITED_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("legacy inherited filter should serialize"),
+        );
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata)
+        ));
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            SessionToolVisibilityState::default(),
+            "failed legacy inherited metadata restore must leave owner visibility unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_rejects_name_only_canonical_inherited_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(SessionToolVisibilityState {
+                inherited_base_filter: ToolFilter::Allow(
+                    ["secret".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            })
+            .expect("visibility state should serialize");
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses)
+        ));
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            SessionToolVisibilityState::default(),
+            "failed name-only inherited restore must leave owner visibility unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_builder_restores_canonical_inherited_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let inherited_filter = ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(SessionToolVisibilityState {
+                inherited_base_filter: inherited_filter.clone(),
+                filter_witnesses: [(
+                    "secret".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("test-owner:secret".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .expect("visibility state should serialize");
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            owner.visibility_state().unwrap().inherited_base_filter,
+            inherited_filter,
+            "canonical inherited metadata should restore through the visibility owner"
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_backed_builder_does_not_seed_execution_kind() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
@@ -1393,6 +1700,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1411,6 +1719,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1440,6 +1749,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1465,6 +1775,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1496,6 +1807,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;

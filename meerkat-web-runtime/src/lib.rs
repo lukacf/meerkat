@@ -264,9 +264,6 @@ type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
 struct RuntimeHandleSession {
     session_id: meerkat_core::SessionId,
     mob_id: String,
-    model: String,
-    keep_alive: bool,
-    run_counter: u64,
     event_rx: WasmSessionEventReceiver,
 }
 
@@ -576,6 +573,13 @@ fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
             &format!("system-context idempotency conflict for key '{key}'"),
         ),
     }
+}
+
+fn err_invalid_session_handle(handle: u32) -> JsValue {
+    err_js(
+        "invalid_session_handle",
+        &format!("unknown browser session handle: {handle}"),
+    )
 }
 
 async fn resolve_mob_member_bridge_session_id(
@@ -1231,7 +1235,6 @@ fn create_runtime_backed_session(
     mob_id: String,
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
-    let keep_alive = config.comms_name.is_some() && config.keep_alive;
     let model = config.model.clone();
     let request = build_session_request_with_connection_ref(
         config.connection_ref.as_ref(),
@@ -1260,9 +1263,6 @@ fn create_runtime_backed_session(
             RuntimeHandleSession {
                 session_id,
                 mob_id,
-                model: config.model,
-                keep_alive,
-                run_counter: 0,
                 event_rx,
             },
         );
@@ -1343,7 +1343,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
         let session = state
             .sessions
             .get(&handle)
-            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
         Ok((state.session_service.clone(), session.session_id.clone()))
     })?;
     let status = session_service
@@ -1378,18 +1378,12 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 /// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
 pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
-    let (session_service, session_id, run_id, _keep_alive) = with_runtime_state_mut(|state| {
+    let (session_service, session_id) = with_runtime_state(|state| {
         let session = state
             .sessions
-            .get_mut(&handle)
-            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
-        session.run_counter = session.run_counter.saturating_add(1);
-        Ok((
-            state.session_service.clone(),
-            session.session_id.clone(),
-            session.run_counter,
-            session.keep_alive,
-        ))
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        Ok((state.session_service.clone(), session.session_id.clone()))
     })?;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
@@ -1418,7 +1412,6 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     match run_result {
         Ok(result) => {
             let result_json = serde_json::json!({
-                "run_id": run_id,
                 "text": result.text,
                 "usage": {
                     "input_tokens": result.usage.input_tokens,
@@ -1434,7 +1427,6 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
         Err(meerkat_core::SessionError::Agent(err)) => {
             let error_msg = format!("{err}");
             let result_json = serde_json::json!({
-                "run_id": run_id,
                 "text": "",
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
                 "session_id": session_id.to_string(),
@@ -1450,17 +1442,15 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
 /// Get current session state.
 #[wasm_bindgen]
 pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
-    let (session_service, session_id, mob_id, model, run_counter) = with_runtime_state(|state| {
+    let (session_service, session_id, mob_id) = with_runtime_state(|state| {
         let session = state
             .sessions
             .get(&handle)
-            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
         Ok((
             state.session_service.clone(),
             session.session_id.clone(),
             session.mob_id.clone(),
-            session.model.clone(),
-            session.run_counter,
         ))
     })?;
     let view =
@@ -1469,9 +1459,8 @@ pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
         "handle": handle,
         "session_id": session_id.to_string(),
         "mob_id": mob_id,
-        "model": model,
+        "model": view.state.model,
         "usage": view.billing.usage,
-        "run_counter": run_counter,
         "message_count": view.state.message_count,
         "is_active": view.state.is_active,
         "last_assistant_text": view.state.last_assistant_text,
@@ -1513,14 +1502,10 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
         let session = state
             .sessions
             .get(&handle)
-            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
         Ok((state.session_service.clone(), session.session_id.clone()))
     })?;
-    futures::executor::block_on(session_service.archive(&session_id)).map_err(err_session)?;
-    with_runtime_state_mut(|state| {
-        state.sessions.remove(&handle);
-        Ok(())
-    })
+    futures::executor::block_on(session_service.archive(&session_id)).map_err(err_session)
 }
 
 /// Drain and return all pending agent events from the last turn(s).
@@ -1533,7 +1518,7 @@ pub fn poll_events(handle: u32) -> Result<String, JsValue> {
         let session = state
             .sessions
             .get_mut(&handle)
-            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
         let mut events = Vec::new();
         loop {
             match session.event_rx.try_recv() {
@@ -3027,7 +3012,7 @@ capabilities = [{capability_values}]
 
     #[cfg(target_arch = "wasm32")]
     #[test]
-    fn destroy_session_export_removes_local_handle() {
+    fn destroy_session_export_keeps_handle_as_canonical_projection() {
         init_test_runtime();
         let handle = create_session_simple(
             &json!({
@@ -3044,7 +3029,11 @@ capabilities = [{capability_values}]
         assert!(before["session_id"].as_str().is_some());
 
         destroy_session(handle).expect("destroy session");
-        assert!(get_session_state(handle).is_err());
+        let after = get_session_state(handle).expect("canonical archived state after destroy");
+        let after: serde_json::Value = serde_json::from_str(&after).expect("state json");
+        assert_eq!(after["handle"], handle);
+        assert_eq!(after["session_id"], before["session_id"]);
+        assert_eq!(after["is_active"], false);
     }
 
     #[test]

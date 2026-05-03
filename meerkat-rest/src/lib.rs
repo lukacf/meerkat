@@ -768,7 +768,15 @@ fn spawn_rest_runtime_pre_admission_rekey_and_cleanup(
         )
         .await;
         let outcome = handle.wait().await;
-        cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await;
+        if let Err(error) =
+            cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await
+        {
+            tracing::error!(
+                session_id = %session_id,
+                error = %error,
+                "REST runtime completion cleanup failed after background waiter completion"
+            );
+        }
         discard_rest_runtime_pre_admission(
             &state.runtime_pre_admissions,
             &session_id,
@@ -790,8 +798,12 @@ fn wrap_rest_runtime_completion_cleanup(
     handle: meerkat_runtime::completion::CompletionHandle,
 ) -> meerkat_runtime::completion::CompletionHandle {
     handle.with_outcome_cleanup(move |outcome| async move {
-        cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await;
-        outcome
+        match cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await {
+            Ok(()) => outcome,
+            Err(error) => meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                format!("REST runtime completion cleanup failed: {error}"),
+            ),
+        }
     })
 }
 
@@ -830,32 +842,33 @@ async fn cleanup_rest_runtime_after_completion_outcome(
     state: &AppState,
     session_id: &SessionId,
     outcome: &meerkat_runtime::completion::CompletionOutcome,
-) {
+) -> Result<(), SessionError> {
     let archived_now = state
         .session_service
         .load_authoritative_session(session_id)
-        .await
-        .ok()
-        .flatten()
+        .await?
         .as_ref()
         .is_some_and(session_metadata_marks_archived);
     if archived_now {
-        let _ = state.session_service.discard_live_session(session_id).await;
-        cleanup_archived_session_runtime(state, session_id).await;
-        return;
+        match state.session_service.discard_live_session(session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        cleanup_archived_session_runtime(state, session_id).await?;
+        return Ok(());
     }
 
-    let live_present = state
-        .session_service
-        .has_live_session(session_id)
-        .await
-        .unwrap_or(false);
+    let live_present = state.session_service.has_live_session(session_id).await?;
     if completion_outcome_requires_rest_runtime_cleanup(outcome)
         || (!live_present && completion_outcome_is_rest_apply_failure(outcome))
     {
-        let _ = state.session_service.discard_live_session(session_id).await;
-        cleanup_archived_session_runtime(state, session_id).await;
+        match state.session_service.discard_live_session(session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        cleanup_archived_session_runtime(state, session_id).await?;
     }
+    Ok(())
 }
 
 async fn rekey_rest_runtime_pre_admission(
@@ -1525,7 +1538,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await
-            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -2930,7 +2943,13 @@ async fn admit_runtime_input_via_webhook(
                 .await
             {
                 Ok(Some(session)) if session_metadata_marks_archived(&session) => {
-                    cleanup_archived_session_runtime(state, session_id).await;
+                    if let Err(error) = cleanup_archived_session_runtime(state, session_id).await {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("failed to clean up archived session runtime: {error}")})),
+                        )
+                            .into_response());
+                    }
                     return Err((
                         StatusCode::NOT_FOUND,
                         Json(json!({"error": format!("session not found: {session_id}")})),
@@ -2966,7 +2985,15 @@ async fn admit_runtime_input_via_webhook(
                         .await
                     {
                         Ok(Some(session)) if session_metadata_marks_archived(&session) => {
-                            cleanup_archived_session_runtime(state, session_id).await;
+                            if let Err(error) =
+                                cleanup_archived_session_runtime(state, session_id).await
+                            {
+                                return Err((
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({"error": format!("failed to clean up archived session runtime: {error}")})),
+                                )
+                                    .into_response());
+                            }
                             return Err((
                                 StatusCode::NOT_FOUND,
                                 Json(json!({"error": format!("session not found: {session_id}")})),
@@ -3026,7 +3053,13 @@ async fn admit_runtime_input_via_webhook(
                     if let Some(registration) = pre_admission_registration.take() {
                         registration.disarm();
                     }
-                    cleanup_archived_session_runtime(state, session_id).await;
+                    if let Err(error) = cleanup_archived_session_runtime(state, session_id).await {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("failed to clean up archived session runtime: {error}")})),
+                        )
+                            .into_response());
+                    }
                     return Err((
                         StatusCode::NOT_FOUND,
                         Json(json!({"error": format!("session not found: {session_id}")})),
@@ -3558,6 +3591,49 @@ fn completion_outcome_to_api_result(
     }
 }
 
+fn missing_runtime_terminal_evidence_error(
+    request_kind: &'static str,
+    outcome: &meerkat_runtime::AcceptOutcome,
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    session_created: bool,
+) -> ApiError {
+    ApiError::InternalWithData {
+        message: format!(
+            "runtime accepted REST {request_kind} input without completion terminal evidence"
+        ),
+        code: "MISSING_RUNTIME_TERMINAL_EVIDENCE".to_string(),
+        details: json!({
+            "session_id": session_id.to_string(),
+            "session_ref": format_session_ref(realm, session_id),
+            "session_created": session_created,
+            "resumable": true,
+            "accept_outcome": format!("{outcome:?}"),
+            "authority": "runtime/session",
+        }),
+    }
+}
+
+async fn completion_handle_to_api_result(
+    request_kind: &'static str,
+    outcome: &meerkat_runtime::AcceptOutcome,
+    handle: Option<meerkat_runtime::completion::CompletionHandle>,
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    session_created: bool,
+) -> Result<meerkat_core::types::RunResult, ApiError> {
+    let Some(handle) = handle else {
+        return Err(missing_runtime_terminal_evidence_error(
+            request_kind,
+            outcome,
+            session_id,
+            realm,
+            session_created,
+        ));
+    };
+    completion_outcome_to_api_result(handle.wait().await, session_id, realm, session_created)
+}
+
 fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
     let locator = SessionLocator::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
@@ -3919,7 +3995,13 @@ async fn create_session_inner(
             let sid = cleanup_session_id.clone();
             async move {
                 let _ = state.session_service.archive(&sid).await;
-                cleanup_archived_session_runtime(&state, &sid).await;
+                if let Err(error) = cleanup_archived_session_runtime(&state, &sid).await {
+                    tracing::error!(
+                        session_id = %sid,
+                        error = %error,
+                        "REST unpublished create cleanup failed"
+                    );
+                }
             }
         }));
 
@@ -3954,7 +4036,13 @@ async fn create_session_inner(
         match resolve_validation_identity(&state.config_runtime, &model, req.provider).await {
             Ok(identity) => identity,
             Err(err) => {
-                cleanup_archived_session_runtime(state, &session_id).await;
+                if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
+                        format!("failed to clean up REST runtime after validation error: {error}"),
+                    )));
+                }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -4042,7 +4130,13 @@ async fn create_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
-                cleanup_archived_session_runtime(state, &session_id).await;
+                if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(
+                        format!("failed to clean up REST runtime after validation error: {error}"),
+                    )));
+                }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
@@ -4052,7 +4146,13 @@ async fn create_session_inner(
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
     {
-        cleanup_archived_session_runtime(state, &session_id).await;
+        if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                "failed to clean up REST runtime after validation error: {error}"
+            ))));
+        }
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
         return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(err)));
@@ -4068,7 +4168,13 @@ async fn create_session_inner(
     {
         Ok(result) => result,
         Err(err) => {
-            cleanup_archived_session_runtime(state, &session_id).await;
+            if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "failed to clean up REST runtime after session creation error: {error}"
+                ))));
+            }
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(create_session_error_to_api(err)));
@@ -4135,22 +4241,18 @@ async fn create_session_inner(
         }
     };
 
-    let result = match handle {
-        Some(handle) => {
-            let handle =
-                wrap_rest_runtime_completion_cleanup(state.clone(), session_id.clone(), handle);
-            completion_outcome_to_api_result(handle.wait().await, &session_id, &state.realm, true)
-        }
-        None => {
-            let existing_id = match &outcome {
-                meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                    existing_id.to_string()
-                }
-                _ => String::new(),
-            };
-            Err(ApiError::DuplicateInput { existing_id })
-        }
-    };
+    let handle = handle.map(|handle| {
+        wrap_rest_runtime_completion_cleanup(state.clone(), session_id.clone(), handle)
+    });
+    let result = completion_handle_to_api_result(
+        "create",
+        &outcome,
+        handle,
+        &session_id,
+        &state.realm,
+        true,
+    )
+    .await;
 
     // Drop the sender so the forwarder sees channel closure and can drain.
     drop(caller_event_tx);
@@ -4972,7 +5074,7 @@ async fn continue_session_inner(
                 details: None,
             }));
         }
-        let (_outcome, handle) = match adapter
+        let (outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
             .await
         {
@@ -4989,42 +5091,44 @@ async fn continue_session_inner(
         };
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
-        match handle {
-            Some(handle) => {
-                let cleanup_state = state.clone();
-                let cleanup_session_id = session_id.clone();
-                let cleanup_requested = Arc::clone(&rebuild_unpublished_cleanup_requested);
-                let handle = handle.with_outcome_cleanup(move |outcome| async move {
-                    if cleanup_requested.load(std::sync::atomic::Ordering::Acquire) {
-                        discard_rebuilt_rest_session(
-                            &cleanup_state,
-                            &cleanup_session_id,
-                            runtime_was_registered,
-                        )
-                        .await;
-                    }
-                    cleanup_rest_runtime_after_completion_outcome(
+        let handle = handle.map(|handle| {
+            let cleanup_state = state.clone();
+            let cleanup_session_id = session_id.clone();
+            let cleanup_requested = Arc::clone(&rebuild_unpublished_cleanup_requested);
+            handle.with_outcome_cleanup(move |outcome| async move {
+                if cleanup_requested.load(std::sync::atomic::Ordering::Acquire) {
+                    discard_rebuilt_rest_session(
                         &cleanup_state,
                         &cleanup_session_id,
-                        &outcome,
+                        runtime_was_registered,
                     )
                     .await;
-                    outcome
-                });
-                completion_outcome_to_api_result(
-                    handle.wait().await,
-                    &session_id,
-                    &state.realm,
-                    false,
+                }
+                match cleanup_rest_runtime_after_completion_outcome(
+                    &cleanup_state,
+                    &cleanup_session_id,
+                    &outcome,
                 )
-            }
-            None => {
-                discard_rebuilt_rest_session(state, &session_id, runtime_was_registered).await;
-                Err(ApiError::DuplicateInput {
-                    existing_id: String::new(),
-                })
-            }
-        }
+                .await
+                {
+                    Ok(()) => outcome,
+                    Err(error) => {
+                        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(format!(
+                            "REST runtime completion cleanup failed: {error}"
+                        ))
+                    }
+                }
+            })
+        });
+        completion_handle_to_api_result(
+            "continue_rebuild",
+            &outcome,
+            handle,
+            &session_id,
+            &state.realm,
+            false,
+        )
+        .await
     } else {
         let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
@@ -5402,13 +5506,20 @@ async fn continue_session_inner(
                         &accepted_input_id,
                     )
                     .await;
-                    cleanup_rest_runtime_after_completion_outcome(
+                    match cleanup_rest_runtime_after_completion_outcome(
                         &cleanup_state,
                         &cleanup_session_id,
                         &outcome,
                     )
-                    .await;
-                    outcome
+                    .await
+                    {
+                        Ok(()) => outcome,
+                        Err(error) => {
+                            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                                format!("REST runtime completion cleanup failed: {error}"),
+                            )
+                        }
+                    }
                 }))
             }
             (handle, _) => handle,
@@ -5416,21 +5527,15 @@ async fn continue_session_inner(
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
 
-        match handle {
-            Some(handle) => {
-                let completion = handle.wait().await;
-                completion_outcome_to_api_result(completion, &session_id, &state.realm, false)
-            }
-            None => {
-                let existing_id = match &outcome {
-                    meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                        existing_id.to_string()
-                    }
-                    _ => String::new(),
-                };
-                Err(ApiError::DuplicateInput { existing_id })
-            }
-        }
+        completion_handle_to_api_result(
+            "continue",
+            &outcome,
+            handle,
+            &session_id,
+            &state.realm,
+            false,
+        )
+        .await
     };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
@@ -5457,11 +5562,23 @@ async fn continue_session_inner(
                 .as_ref()
                 .is_some_and(session_metadata_marks_archived);
             if runtime_failure_requires_cleanup || archived_now {
-                let _ = state
-                    .session_service
-                    .discard_live_session(&session_id)
-                    .await;
-                cleanup_archived_session_runtime(state, &session_id).await;
+                let cleanup_result = async {
+                    match state
+                        .session_service
+                        .discard_live_session(&session_id)
+                        .await
+                    {
+                        Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
+                    cleanup_archived_session_runtime(state, &session_id).await
+                }
+                .await;
+                if let Err(cleanup_error) = cleanup_result {
+                    return RequestTerminal::Publish(Err(ApiError::Internal(format!(
+                        "REST runtime cleanup failed after terminal error: {cleanup_error}"
+                    ))));
+                }
             }
             // Session exists for continue — this is a Published error.
             RequestTerminal::Publish(Err(err))
@@ -5694,7 +5811,13 @@ async fn resolve_mcp_adapter(
         .await
     {
         Ok(Some(session)) if session_metadata_marks_archived(&session) => {
-            cleanup_archived_session_runtime(state, session_id).await;
+            cleanup_archived_session_runtime(state, session_id)
+                .await
+                .map_err(|error| {
+                    ApiError::Internal(format!(
+                        "failed to clean up archived session runtime: {error}"
+                    ))
+                })?;
             return Err(ApiError::NotFound(format!(
                 "Session not found: {session_id}"
             )));
@@ -5883,17 +6006,26 @@ async fn cleanup_mcp_session(state: &AppState, session_id: &SessionId) {
     }
 }
 
-async fn cleanup_archived_session_runtime(state: &AppState, session_id: &SessionId) {
+async fn cleanup_archived_session_runtime(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
     #[cfg(feature = "mob")]
-    let _ = state
+    state
         .mob_state
         .destroy_bridge_session_mobs(&session_id.to_string())
-        .await;
+        .await
+        .map_err(|error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to destroy bridge session mobs during REST runtime cleanup: {error}"
+            )))
+        })?;
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
     state.runtime_adapter.abort_comms_drain(session_id).await;
     state.runtime_adapter.unregister_session(session_id).await;
+    Ok(())
 }
 
 async fn archive_session_with_runtime_cleanup(
@@ -5905,9 +6037,12 @@ async fn archive_session_with_runtime_cleanup(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = service.archive(&session_id).await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            cleanup_archived_session_runtime(&state, &session_id).await;
-        }
+        let result = match result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {
+                cleanup_archived_session_runtime(&state, &session_id).await
+            }
+            Err(error) => Err(error),
+        };
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {
@@ -6250,7 +6385,7 @@ mod tests {
 
     struct BlockingMockLlmClient {
         calls: Arc<AtomicUsize>,
-        release: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
     }
 
     struct ErrorLlmClient;
@@ -6293,7 +6428,11 @@ mod tests {
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
                 calls.fetch_add(1, AtomicOrdering::SeqCst);
-                release.notified().await;
+                let permit = release
+                    .acquire()
+                    .await
+                    .expect("blocking mock release semaphore should stay open");
+                drop(permit);
                 yield Ok(LlmEvent::TextDelta {
                     delta: "ok".to_string(),
                     meta: None,
@@ -6970,7 +7109,7 @@ mod tests {
             .await
             .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
             release: Arc::clone(&release),
@@ -7043,8 +7182,8 @@ mod tests {
         });
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
-        release.notify_waiters();
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), running_turn)
+        release.add_permits(1);
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
             .expect("running turn task should not panic");
@@ -7062,7 +7201,7 @@ mod tests {
             );
         assert_eq!(admitted.0, StatusCode::ACCEPTED);
 
-        release.notify_waiters();
+        release.add_permits(1);
     }
 
     #[tokio::test]
@@ -7231,7 +7370,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 1).await;
         let calls = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
             release: Arc::clone(&release),
@@ -7274,7 +7413,7 @@ mod tests {
             .expect_err("aborted REST continue task should report cancellation");
         assert!(aborted.is_cancelled());
 
-        release.notify_waiters();
+        release.add_permits(1);
         let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if state
@@ -7414,7 +7553,7 @@ mod tests {
         );
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
             release: Arc::clone(&release),
@@ -7476,7 +7615,7 @@ mod tests {
         let mut continue_task = continue_task;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                release.notify_waiters();
+                release.add_permits(1);
                 tokio::select! {
                     result = &mut continue_task => break result,
                     () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
@@ -11050,6 +11189,83 @@ mod tests {
                 Err(ApiError::RequestCancelled { details: None })
             ));
             assert_eq!(executor.phase("rest-cancel-before-publish"), None);
+        }
+
+        #[tokio::test]
+        async fn test_unpublished_success_after_cancel_returns_request_cancelled() {
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let ctx = executor.begin_request("rest-cancel-before-success", noop_request_action());
+            let realm = meerkat_core::RealmId::parse("rest-cancel").unwrap();
+            let response = run_result_to_response(
+                meerkat_core::types::RunResult {
+                    text: "must not leak".to_string(),
+                    session_id: SessionId::new(),
+                    usage: meerkat_core::types::Usage::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+                &realm,
+            );
+
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+
+            let result = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestTerminal::RespondWithoutPublish(Ok(Json(response))),
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(ApiError::RequestCancelled { details: None })
+            ));
+            assert_eq!(executor.phase("rest-cancel-before-success"), None);
+        }
+
+        #[tokio::test]
+        async fn test_missing_runtime_terminal_evidence_fails_closed() {
+            let session_id = SessionId::new();
+            let input_id = meerkat_core::lifecycle::InputId::new();
+            let existing_id = meerkat_core::lifecycle::InputId::new();
+            let realm = meerkat_core::RealmId::parse("rest-missing-terminal").unwrap();
+            let outcome = meerkat_runtime::AcceptOutcome::Deduplicated {
+                input_id,
+                existing_id,
+            };
+
+            let result = completion_handle_to_api_result(
+                "continue",
+                &outcome,
+                None,
+                &session_id,
+                &realm,
+                false,
+            )
+            .await;
+
+            match result {
+                Err(ApiError::InternalWithData {
+                    message,
+                    code,
+                    details,
+                }) => {
+                    assert_eq!(code, "MISSING_RUNTIME_TERMINAL_EVIDENCE");
+                    assert!(
+                        message.contains("without completion terminal evidence"),
+                        "unexpected message: {message}"
+                    );
+                    assert_eq!(details["authority"], "runtime/session");
+                    assert_eq!(details["session_created"], false);
+                }
+                other => panic!("expected typed missing terminal evidence error, got {other:?}"),
+            }
         }
 
         #[derive(Clone)]

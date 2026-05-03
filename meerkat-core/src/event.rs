@@ -16,7 +16,9 @@ use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use std::cmp::Ordering;
+use std::fmt;
 
 /// Canonical typed source identity for streamed agent events.
 ///
@@ -191,6 +193,94 @@ impl BackgroundJobTerminalStatus {
             | OperationStatus::Running
             | OperationStatus::Retiring => None,
         }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ToolCallArguments(
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
+    )]
+    Value,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallArgumentsError {
+    message: String,
+}
+
+impl ToolCallArgumentsError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ToolCallArgumentsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for ToolCallArgumentsError {}
+
+impl ToolCallArguments {
+    pub fn from_value(value: Value) -> Result<Self, ToolCallArgumentsError> {
+        if value.is_object() {
+            Ok(Self(value))
+        } else {
+            Err(ToolCallArgumentsError::new(format!(
+                "tool call arguments must be a JSON object, got {}",
+                value_kind(&value)
+            )))
+        }
+    }
+
+    pub fn from_raw_json(raw: &RawValue) -> Result<Self, ToolCallArgumentsError> {
+        let value = serde_json::from_str(raw.get()).map_err(|error| {
+            ToolCallArgumentsError::new(format!("tool call arguments must be valid JSON: {error}"))
+        })?;
+        Self::from_value(value)
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCallArguments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::from_value(Value::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<Value> for ToolCallArguments {
+    type Error = ToolCallArgumentsError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        Self::from_value(value)
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -1261,7 +1351,7 @@ pub enum AgentEvent {
     ToolCallRequested {
         id: String,
         name: String,
-        args: Value,
+        args: ToolCallArguments,
     },
 
     /// Tool result received (injected into conversation)
@@ -1679,6 +1769,38 @@ mod tests {
         }
     }
 
+    fn tool_args(value: Value) -> ToolCallArguments {
+        ToolCallArguments::from_value(value).expect("test tool args must be an object")
+    }
+
+    #[test]
+    fn tool_call_arguments_reject_string_projection() {
+        let err = ToolCallArguments::from_value(serde_json::json!("{\"path\":"))
+            .expect_err("provider argument strings must not become semantic tool-call args");
+
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tool_call_requested_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "type": "tool_call_requested",
+            "id": "tc_1",
+            "name": "search",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<AgentEvent>(value)
+            .expect_err("event surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn tool_config_change_status_mirrors_legacy_status_text() {
         assert_eq!(
@@ -2039,7 +2161,7 @@ mod tests {
             AgentEvent::ToolCallRequested {
                 id: "tc_1".to_string(),
                 name: "read_file".to_string(),
-                args: serde_json::json!({"path": "/tmp/test"}),
+                args: tool_args(serde_json::json!({"path": "/tmp/test"})),
             },
             AgentEvent::ToolResultReceived {
                 id: "tc_1".to_string(),
@@ -2548,7 +2670,7 @@ mod tests {
             AgentEvent::ToolCallRequested {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
-                args: serde_json::json!({}),
+                args: tool_args(serde_json::json!({})),
             },
             AgentEvent::ToolResultReceived {
                 id: "tool-1".to_string(),

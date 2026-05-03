@@ -12,6 +12,7 @@ import type {
   RunFailedEvent,
   SpawnManySpec,
   SpawnSpec,
+  ToolCallRequestedEvent,
 } from "../src/index.js";
 import type {
   MobSpawnParams as PublicMobSpawnParams,
@@ -286,6 +287,25 @@ void publicMobTurnStartClient.mobTurnStart(
   publicMobTurnStartOptions,
 );
 void publicMobTurnStartOptions;
+
+const toolCallRequestedEvent: ToolCallRequestedEvent = {
+  type: "tool_call_requested",
+  id: "tool-1",
+  name: "search",
+  args: { query: "rust" },
+};
+
+void toolCallRequestedEvent;
+
+const toolCallRequestedWithStringArgs: ToolCallRequestedEvent = {
+  type: "tool_call_requested",
+  id: "tool-2",
+  name: "search",
+  // @ts-expect-error tool-call args are projected as object-only semantic data.
+  args: "{\"query\":\"rust\"}",
+};
+
+void toolCallRequestedWithStringArgs;
 void publicMobTurnStartOptionsWithUnknown;
 void generatedMobTurnStartOptionCoverage;
 

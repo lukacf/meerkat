@@ -2373,9 +2373,8 @@ mod tests {
     #[tokio::test]
     async fn rest_test_auth_binding_publishes_resolved_lease_to_auth_machine() {
         use meerkat_providers::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
 
         struct ResolvingOpenAiRuntime {
@@ -2389,28 +2388,6 @@ mod tests {
                 Provider::OpenAI
             }
 
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
-            }
-
             async fn resolve_binding(
                 &self,
                 binding: &ValidatedBinding,
@@ -2422,8 +2399,8 @@ mod tests {
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-rest-test".to_string(),
                         meerkat_core::AuthMetadata::default(),

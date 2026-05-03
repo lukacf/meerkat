@@ -108,7 +108,7 @@ export type HookPatch = {
   patch_type: "assistant_text";
   text: string;
 } | {
-  args: unknown;
+  args: ToolCallArguments;
   patch_type: "tool_args";
 } | {
   content: string;
@@ -221,6 +221,8 @@ export type SkillResolutionFailureReason = {
 export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+
+export type ToolCallArguments = Record<string, unknown>;
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
 
@@ -356,7 +358,7 @@ export interface TextCompleteEvent {
 }
 
 export interface ToolCallRequestedEvent {
-  args: unknown;
+  args: ToolCallArguments;
   id: string;
   name: string;
   type: "tool_call_requested";

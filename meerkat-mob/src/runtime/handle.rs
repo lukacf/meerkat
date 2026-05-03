@@ -647,7 +647,7 @@ pub struct HelperOptions {
     /// Explicit auth binding used for the helper member's agent build.
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
     /// Pre-resolved inherited tool filter from scheduled or agent-owned tooling resolution.
-    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
     /// Override profile resolved from scheduled or agent-owned tooling resolution.
     pub override_profile: Option<crate::profile::Profile>,
     /// Model override resolved from scheduled helper tooling.
@@ -936,10 +936,10 @@ pub struct SpawnMemberSpec {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Pre-resolved inherited tool filter from spawn tooling resolution.
     ///
-    /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the child
-    /// session metadata so the factory-backed core build recovers it as a base
-    /// filter.
-    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    /// When set, stored in canonical session visibility metadata with filter
+    /// witnesses so the runtime-backed core build restores it as witnessed
+    /// machine-owned visibility.
+    pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
     /// Override profile resolved from `SpawnTooling::Profile` source.
     ///
     /// When set, the spawn path uses this profile instead of looking up by

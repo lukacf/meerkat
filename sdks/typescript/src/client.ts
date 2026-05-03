@@ -1053,6 +1053,19 @@ export class MeerkatClient {
         );
       }
       const record = entry as Record<string, unknown>;
+      const entryKeys = Object.keys(record);
+      if (
+        entryKeys.some((key) => key !== "status" && key !== "result") ||
+        "ok" in record ||
+        "error" in record ||
+        "agent_identity" in record ||
+        "member_ref" in record
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: legacy result carrier fields are not allowed",
+        );
+      }
       const status = record.status;
       const rawResult = record.result;
       if (status !== "spawned" && status !== "failed") {
@@ -1069,6 +1082,12 @@ export class MeerkatClient {
       }
       const resultRecord = rawResult as Record<string, unknown>;
       if (status === "spawned") {
+        if (Object.keys(resultRecord).some((key) => key !== "agent_identity" && key !== "member_ref")) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            "Invalid mob/spawn_many response: spawned result has unknown fields",
+          );
+        }
         const agentIdentity = resultRecord.agent_identity;
         const memberRef = resultRecord.member_ref;
         if (typeof agentIdentity !== "string" || agentIdentity.length === 0) {
@@ -1090,6 +1109,12 @@ export class MeerkatClient {
             member_ref: memberRef,
           },
         };
+      }
+      if (Object.keys(resultRecord).some((key) => key !== "message")) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: failed result has unknown fields",
+        );
       }
       const message = resultRecord.message;
       if (typeof message !== "string" || message.length === 0) {

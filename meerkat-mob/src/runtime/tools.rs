@@ -499,6 +499,23 @@ impl MobOperatorToolDispatcher {
         }))
     }
 
+    async fn spawn_many_result_entry_for_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_contracts::MobSpawnManyResultEntry, MobError> {
+        let entry = self.handle.get_member(identity).await.ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawn succeeded but roster entry missing for '{identity}'"
+            ))
+        })?;
+        let agent_identity = entry.agent_identity;
+        let member_ref = Self::member_ref_payload(&self.handle.definition().id, &agent_identity);
+        Ok(meerkat_contracts::MobSpawnManyResultEntry::spawned(
+            agent_identity.to_string(),
+            member_ref,
+        ))
+    }
+
     async fn record_successful_operator_action(&self, tool_name: &str) {
         if let Err(error) = self
             .handle
@@ -786,18 +803,18 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
                             match result {
                                 Ok(_receipt) => {
-                                    let mut payload = self
-                                        .spawn_result_payload_for_identity(&identity)
+                                    let entry = self
+                                        .spawn_many_result_entry_for_identity(&identity)
                                         .await
                                         .map_err(|error| Self::map_mob_error(call, error))?;
-                                    payload["ok"] = json!(true);
-                                    results.push(payload);
+                                    results.push(json!(entry));
                                 }
                                 Err(error) => {
-                                    results.push(json!({
-                                        "ok": false,
-                                        "error": error.to_string(),
-                                    }));
+                                    results.push(json!(
+                                        meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                            error.to_string()
+                                        )
+                                    ));
                                 }
                             }
                         }
@@ -811,17 +828,20 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .into_iter()
                             .map(|result| match result {
                                 Ok(spawn_result) => {
-                                    let mut payload = Self::spawn_result_payload(
-                                        &self.handle.definition().id,
-                                        &spawn_result,
-                                    );
-                                    payload["ok"] = json!(true);
-                                    payload
+                                    let identity = spawn_result.agent_identity.to_string();
+                                    json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
+                                        identity.clone(),
+                                        Self::member_ref_payload(
+                                            &self.handle.definition().id,
+                                            &spawn_result.agent_identity,
+                                        ),
+                                    ))
                                 }
-                                Err(error) => json!({
-                                    "ok": false,
-                                    "error": error.to_string(),
-                                }),
+                                Err(error) => {
+                                    json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                        error.to_string()
+                                    ))
+                                }
                             })
                             .collect::<Vec<_>>();
                         (results, Vec::new())

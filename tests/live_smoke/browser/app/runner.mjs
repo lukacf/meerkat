@@ -230,7 +230,12 @@ async function scenarioRawMob004({ wasm }) {
       ]),
     ),
   );
-  assert(Array.isArray(spawn) && spawn[0]?.status === 'ok', `spawn failed: ${JSON.stringify(spawn)}`);
+  assert(
+    Array.isArray(spawn) &&
+      spawn[0]?.status === 'spawned' &&
+      typeof spawn[0]?.result?.member_ref === 'string',
+    `spawn failed: ${JSON.stringify(spawn)}`,
+  );
 
   const initialMembers = JSON.parse(await wasm.mob_list_members(mobId));
   assert(initialMembers.length === 1, `expected one member after spawn: ${JSON.stringify(initialMembers)}`);

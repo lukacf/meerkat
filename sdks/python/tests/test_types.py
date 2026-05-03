@@ -333,6 +333,50 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
         },
         {"results": [{"status": "spawned", "result": {"agent_identity": "worker-1"}}]},
         {"results": [{"status": "failed", "result": {"message": ""}}]},
+        {
+            "results": [
+                {
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": "ref-worker-1",
+                    },
+                    "ok": True,
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {"message": "profile missing"},
+                    "error": "legacy profile missing",
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": "ref-worker-1",
+                        "ok": True,
+                    },
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {
+                        "message": "profile missing",
+                        "error": "legacy profile missing",
+                    },
+                }
+            ]
+        },
         {},
     ]
 

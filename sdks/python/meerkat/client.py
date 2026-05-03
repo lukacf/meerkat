@@ -1326,6 +1326,14 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: malformed result entry",
                 )
+            entry_keys = set(entry.keys())
+            if entry_keys - {"status", "result"} or any(
+                key in entry for key in ("ok", "error", "agent_identity", "member_ref")
+            ):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: legacy result carrier fields are not allowed",
+                )
             status = entry.get("status")
             payload = entry.get("result")
             if status not in ("spawned", "failed"):
@@ -1339,6 +1347,11 @@ class MeerkatClient:
                     "Invalid mob/spawn_many response: missing result payload",
                 )
             if status == "spawned":
+                if set(payload.keys()) - {"agent_identity", "member_ref"}:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        "Invalid mob/spawn_many response: spawned result has unknown fields",
+                    )
                 agent_identity = payload.get("agent_identity")
                 member_ref = payload.get("member_ref")
                 if not isinstance(agent_identity, str) or not agent_identity:
@@ -1362,6 +1375,11 @@ class MeerkatClient:
                 )
                 continue
 
+            if set(payload.keys()) - {"message"}:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: failed result has unknown fields",
+                )
             message = payload.get("message")
             if not isinstance(message, str) or not message:
                 raise MeerkatError(

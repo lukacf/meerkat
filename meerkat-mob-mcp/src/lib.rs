@@ -2737,52 +2737,32 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         Ok(s)
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;
-                // Single-spec fast path returns flat result; multi-spec returns results array.
-                if specs.len() == 1 {
-                    // SAFETY: len checked above
-                    let Some(spec) = specs.into_iter().next() else {
-                        unreachable!()
-                    };
-                    let spawn_result = self
-                        .state
-                        .mob_spawn_spec(&MobId::from(args.mob_id), spec)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?;
-                    encode(
-                        call,
-                        json!({
-                            "ok": true,
-                            "agent_identity": spawn_result.agent_identity,
-                        }),
-                    )
-                } else {
-                    let mob_id = MobId::from(args.mob_id);
-                    let results = self
-                        .state
-                        .mob_spawn_many(&mob_id, specs)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?;
-                    let results = results
-                        .into_iter()
-                        .map(
-                            |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
-                                match result {
-                                    Ok(spawn_result) => {
-                                        let identity = spawn_result.agent_identity.to_string();
-                                        json!(MobSpawnManyResultEntry::spawned(
-                                            identity.clone(),
-                                            WireMemberRef::encode(mob_id.as_str(), &identity),
-                                        ))
-                                    }
-                                    Err(error) => {
-                                        json!(MobSpawnManyResultEntry::failed(error.to_string()))
-                                    }
+                let mob_id = MobId::from(args.mob_id);
+                let results = self
+                    .state
+                    .mob_spawn_many(&mob_id, specs)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                let results = results
+                    .into_iter()
+                    .map(
+                        |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
+                            match result {
+                                Ok(spawn_result) => {
+                                    let identity = spawn_result.agent_identity.to_string();
+                                    json!(MobSpawnManyResultEntry::spawned(
+                                        identity.clone(),
+                                        WireMemberRef::encode(mob_id.as_str(), &identity),
+                                    ))
                                 }
-                            },
-                        )
-                        .collect::<Vec<_>>();
-                    encode(call, json!({"results": results}))
-                }
+                                Err(error) => {
+                                    json!(MobSpawnManyResultEntry::failed(error.to_string()))
+                                }
+                            }
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                encode(call, json!({"results": results}))
             }
             "mob_retire_member" => {
                 let args: RetireArgs = call
@@ -4656,7 +4636,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(spawned["agent_identity"], "w-ext");
+        let row = &spawned["results"].as_array().expect("typed spawn results")[0];
+        assert_eq!(row["status"], "spawned");
+        assert_eq!(row["result"]["agent_identity"], "w-ext");
+        assert!(row["result"]["member_ref"].is_string());
+        assert!(row.get("ok").is_none());
     }
 
     #[tokio::test]

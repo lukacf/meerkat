@@ -186,8 +186,12 @@ fn write_deferred_turn_state(
 
 fn rollback_tool_visibility_state_snapshot(
     session: &Session,
-) -> Option<meerkat_core::SessionToolVisibilityState> {
-    session.tool_visibility_state().ok().flatten()
+) -> Result<Option<meerkat_core::SessionToolVisibilityState>, SessionError> {
+    session.try_tool_visibility_state().map_err(|err| {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "invalid canonical tool visibility state: {err}"
+        )))
+    })
 }
 
 fn control_error_into_session_error(err: SessionControlError) -> SessionError {
@@ -2304,7 +2308,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let previous_visibility_state = self
             .export_session_with_labels(id)
             .await
-            .map(|session| rollback_tool_visibility_state_snapshot(&session))?;
+            .and_then(|session| rollback_tool_visibility_state_snapshot(&session))?;
 
         self.inner.set_session_tool_filter(id, filter).await?;
 
@@ -9410,7 +9414,8 @@ mod tests {
             .unwrap(),
         );
 
-        let snapshot = rollback_tool_visibility_state_snapshot(&session);
+        let snapshot = rollback_tool_visibility_state_snapshot(&session)
+            .expect("legacy-only metadata should not fail canonical visibility parsing");
 
         assert_eq!(
             snapshot, None,
@@ -9493,6 +9498,81 @@ mod tests {
             persisted.tool_visibility_state(),
             None,
             "store should retain no canonical visibility state after failed rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_session_tool_filter_rollback_rejects_malformed_canonical_visibility_state() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let service =
+            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
+
+        let mut request = create_request_with_metadata("hello", InitialTurnPolicy::RunImmediately);
+        let malformed_visibility_state = serde_json::json!("not-a-visibility-state");
+        let session = request
+            .build
+            .as_mut()
+            .and_then(|build| build.resume_session.as_mut())
+            .expect("request should carry a resumable session");
+        session.set_metadata(
+            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+            malformed_visibility_state.clone(),
+        );
+
+        let created = service
+            .create_session(request)
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        let baseline = service.export_session_with_labels(&id).await.unwrap();
+        assert!(
+            baseline.try_tool_visibility_state().is_err(),
+            "fixture should carry malformed canonical visibility metadata"
+        );
+        assert_eq!(
+            baseline
+                .metadata()
+                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            Some(&malformed_visibility_state),
+            "fixture should retain the raw malformed canonical metadata"
+        );
+
+        let filter =
+            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
+
+        fail_store.set_fail_save(true);
+        let result = service.set_session_tool_filter(&id, filter).await;
+        let err = result
+            .expect_err("malformed canonical visibility should fail before staging or rollback");
+        assert!(
+            err.to_string()
+                .contains("invalid canonical tool visibility state"),
+            "unexpected error: {err}"
+        );
+        fail_store.set_fail_save(false);
+
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        assert_eq!(
+            exported
+                .metadata()
+                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            Some(&malformed_visibility_state),
+            "failed mutation must preserve malformed canonical visibility metadata"
+        );
+        assert!(
+            exported.try_tool_visibility_state().is_err(),
+            "failed mutation must not replace malformed canonical visibility with default state"
+        );
+
+        let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted
+                .metadata()
+                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            Some(&malformed_visibility_state),
+            "store should retain the raw malformed canonical metadata after failed mutation"
         );
     }
 

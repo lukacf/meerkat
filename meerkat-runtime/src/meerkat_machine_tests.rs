@@ -1210,6 +1210,83 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
 }
 
 #[tokio::test]
+async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
+    struct TypedMachineFailureExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for TypedMachineFailureExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::terminal_failure(
+                meerkat_core::TurnTerminalOutcome::Failed,
+                meerkat_core::TurnTerminalCauseKind::LlmFailure,
+                "provider auth denied",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(TypedMachineFailureExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed machine failure"))
+        .await
+        .expect("input should be accepted");
+
+    let (terminal_cause_kind, runtime_apply_failure_cause, runtime_apply_failure_message) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let observed = {
+                    let sessions = adapter.sessions.read().await;
+                    let entry = sessions.get(&session_id).expect("session should exist");
+                    let authority = entry
+                        .dsl_authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        authority.state.terminal_cause_kind,
+                        authority.state.last_runtime_apply_failure_cause,
+                        authority.state.last_runtime_apply_failure_message.clone(),
+                    )
+                };
+                if observed.0.is_some() {
+                    break observed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime loop should terminalize the typed machine failure");
+
+    assert_eq!(
+        terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::LlmFailure)
+    );
+    assert_eq!(runtime_apply_failure_cause, None);
+    assert_eq!(runtime_apply_failure_message, None);
+}
+
+#[tokio::test]
 async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

@@ -6,7 +6,9 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
-use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyFailureCause, CoreApplyTerminal, CoreExecutorError,
+};
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::turn_execution_authority::ContentShape as TurnContentShape;
@@ -869,16 +871,30 @@ async fn process_queue(
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
-                        let failure = e.apply_failure_cause();
+                        let terminal_failure = match &e {
+                            CoreExecutorError::TerminalFailure {
+                                cause_kind,
+                                message,
+                                ..
+                            } => Some(crate::meerkat_machine_types::MeerkatMachineRunFailure::new(
+                                *cause_kind,
+                                message.clone(),
+                            )),
+                            _ => None,
+                        };
                         drop(d);
                         // RunFailed rolls back Staged → Queued and returns to Idle
-                        if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
-                            driver,
-                            run_id,
-                            failure.clone(),
-                        )
-                        .await
-                        {
+                        let fail_result = if let Some(failure) = terminal_failure {
+                            crate::meerkat_machine::fail_machine_run(driver, run_id, failure).await
+                        } else {
+                            crate::meerkat_machine::fail_runtime_loop_run(
+                                driver,
+                                run_id,
+                                e.apply_failure_cause(),
+                            )
+                            .await
+                        };
+                        if let Err(err) = fail_result {
                             tracing::error!(error = %err, "failed to record run-failed event");
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use meerkat_core::error::AgentError;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle,
@@ -392,6 +393,24 @@ fn start_turn_request_from_primitive(
     })
 }
 
+fn core_executor_error_from_runtime_turn_error(error: SessionError) -> CoreExecutorError {
+    match error {
+        SessionError::Agent(AgentError::TerminalFailure {
+            outcome,
+            cause_kind,
+            message,
+        }) if cause_kind.is_specific_failure_cause() => {
+            CoreExecutorError::terminal_failure(outcome, cause_kind, message)
+        }
+        SessionError::Agent(AgentError::TerminalFailure { cause_kind, .. }) => {
+            CoreExecutorError::Internal(format!(
+                "runtime turn returned unknown machine terminal cause: {cause_kind:?}"
+            ))
+        }
+        error => CoreExecutorError::apply_failed_runtime_turn(error.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for PersistentRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -520,7 +539,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
+            .map_err(core_executor_error_from_runtime_turn_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -577,13 +596,7 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, TestClient};
     use meerkat_core::SessionBuildOptions;
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
-    #[cfg(all(
-        feature = "openai",
-        feature = "openai-realtime",
-        not(target_arch = "wasm32")
-    ))]
-    use meerkat_llm_core::LlmError;
-    use meerkat_llm_core::LlmStream;
+    use meerkat_llm_core::{LlmError, LlmStream};
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",
@@ -724,6 +737,23 @@ mod tests {
         build_test_service_with_runtime(temp, None).await
     }
 
+    async fn build_test_service_with_llm(
+        temp: &TempDir,
+        llm_client: Arc<dyn LlmClient>,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
+        let persistence = build_default_persistence(temp.path().join("sessions"))
+            .await
+            .expect("build default persistence");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(llm_client);
+        let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
+        (Arc::new(service), runtime_adapter)
+    }
+
     async fn build_test_service_with_capacity(
         temp: &TempDir,
         active_session_capacity: usize,
@@ -796,6 +826,27 @@ mod tests {
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    struct TerminalLlmFailureClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for TerminalLlmFailureClient {
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(futures::stream::once(async {
+                Err(LlmError::AuthenticationFailed {
+                    message: "provider auth denied".to_string(),
+                })
+            }))
+        }
+
+        fn provider(&self) -> &'static str {
+            "terminal-failure-test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
     }
@@ -1299,6 +1350,116 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_preserves_typed_terminal_failure_cause() {
+        use futures::StreamExt;
+        use meerkat_core::event::AgentEvent;
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) =
+            build_test_service_with_llm(&temp, Arc::new(TerminalLlmFailureClient)).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+        let mut events = service
+            .subscribe_session_events(&result.session_id)
+            .await
+            .expect("subscribe_session_events");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let error = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "trigger terminal LLM failure".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect_err("terminal LLM failure should surface as typed executor failure");
+
+        match error {
+            CoreExecutorError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } => {
+                assert_eq!(outcome, meerkat_core::TurnTerminalOutcome::Failed);
+                assert_eq!(cause_kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
+                assert!(
+                    message.contains("provider auth denied"),
+                    "unexpected terminal message: {message}"
+                );
+            }
+            other => panic!("expected typed terminal failure, got {other:?}"),
+        }
+
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = events.next().await.expect("run_failed event should exist");
+                if matches!(event.payload, AgentEvent::RunFailed { .. }) {
+                    break event.payload;
+                }
+            }
+        })
+        .await
+        .expect("run_failed timeout");
+
+        match failed {
+            AgentEvent::RunFailed {
+                error_report: Some(report),
+                ..
+            } => {
+                assert_eq!(report.class, meerkat_core::event::AgentErrorClass::Llm);
+                assert_eq!(
+                    report.reason,
+                    Some(meerkat_core::event::AgentErrorReason::TurnTerminalCause {
+                        outcome: meerkat_core::TurnTerminalOutcome::Failed,
+                        cause_kind: meerkat_core::TurnTerminalCauseKind::LlmFailure,
+                    })
+                );
+            }
+            other => panic!("expected run_failed with typed report, got {other:?}"),
+        }
+
+        match service.discard_live_session(&result.session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => panic!("discard live session failed: {error}"),
+        }
         adapter.unregister_session(&result.session_id).await;
     }
 

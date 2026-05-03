@@ -253,10 +253,12 @@ impl AgentErrorReason {
                 outcome,
                 cause_kind,
                 ..
-            } => Some(Self::TurnTerminalCause {
-                outcome: *outcome,
-                cause_kind: *cause_kind,
-            }),
+            } => cause_kind
+                .is_specific_failure_cause()
+                .then_some(Self::TurnTerminalCause {
+                    outcome: *outcome,
+                    cause_kind: *cause_kind,
+                }),
             _ => None,
         }
     }
@@ -293,7 +295,13 @@ impl From<&AgentError> for AgentErrorClass {
             | AgentError::HookTimeout { .. }
             | AgentError::HookExecutionFailed { .. }
             | AgentError::HookConfigInvalid { .. } => Self::Hook,
-            AgentError::TerminalFailure { cause_kind, .. } => cause_kind.agent_error_class(),
+            AgentError::TerminalFailure { cause_kind, .. } => {
+                if cause_kind.is_specific_failure_cause() {
+                    cause_kind.agent_error_class()
+                } else {
+                    Self::Internal
+                }
+            }
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
         }
     }
@@ -2345,6 +2353,21 @@ mod tests {
                 }),
             })
         );
+    }
+
+    #[test]
+    fn agent_error_report_fails_closed_for_unknown_terminal_cause() {
+        let error = crate::error::AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::Unknown,
+            message: "display text must not publish terminal cause".to_string(),
+        };
+
+        let report = AgentErrorReport::from_agent_error(&error);
+
+        assert_eq!(report.class, AgentErrorClass::Internal);
+        assert_eq!(report.reason, None);
+        assert_eq!(report.message, error.to_string());
     }
 
     #[test]

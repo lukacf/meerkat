@@ -842,6 +842,15 @@ export interface BridgeSupervisorPayload {
   supervisor: BridgePeerSpec;
 }
 
+export interface CommsChecksumTokenParams {
+  subject: string;
+}
+
+export interface CommsChecksumTokenResult {
+  request_intent: CommsChecksumTokenResultIntent;
+  token: string;
+}
+
 export interface CommsPeerLifecycleParams {
   description?: string;
   peer: string;
@@ -1783,11 +1792,13 @@ export interface CommsSendResultPeerResponseSent {
 
 export type CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent;
 
-export type CommsPeerRequestIntent = "supervisor.bridge";
+export type CommsChecksumTokenResultIntent = "checksum_token";
 
-export type CommsPeerRequestParams = BridgeCommand;
+export type CommsPeerRequestIntent = "supervisor.bridge" | "checksum_token";
 
-export type CommsPeerResponseResult = BridgeReply;
+export type CommsPeerRequestParams = BridgeCommand | CommsChecksumTokenParams;
+
+export type CommsPeerResponseResult = BridgeReply | CommsChecksumTokenResult;
 
 export type HandlingMode = "queue" | "steer";
 

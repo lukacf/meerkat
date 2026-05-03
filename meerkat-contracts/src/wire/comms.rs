@@ -54,25 +54,73 @@ impl CommsPeerLifecycleParams {
 pub enum CommsPeerRequestIntent {
     #[serde(rename = "supervisor.bridge")]
     SupervisorBridge,
+    #[serde(rename = "checksum_token")]
+    ChecksumToken,
 }
 
 impl CommsPeerRequestIntent {
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
+            Self::ChecksumToken => "checksum_token",
         }
     }
+}
+
+/// Typed params for the actionable checksum-token request used by peer
+/// request/response terminal-flow fixtures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommsChecksumTokenParams {
+    pub subject: String,
+}
+
+/// Closed discriminator carried in [`CommsChecksumTokenResult`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CommsChecksumTokenResultIntent {
+    #[serde(rename = "checksum_token")]
+    ChecksumToken,
+}
+
+/// Typed result for a checksum-token peer response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommsChecksumTokenResult {
+    pub request_intent: CommsChecksumTokenResultIntent,
+    pub token: String,
 }
 
 /// Typed params for public `peer_request`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(transparent)]
-pub struct CommsPeerRequestParams(pub BridgeCommand);
+#[serde(untagged)]
+pub enum CommsPeerRequestParams {
+    SupervisorBridge(BridgeCommand),
+    ChecksumToken(CommsChecksumTokenParams),
+}
 
 impl CommsPeerRequestParams {
+    fn matches_intent(&self, intent: &CommsPeerRequestIntent) -> bool {
+        matches!(
+            (intent, self),
+            (
+                CommsPeerRequestIntent::SupervisorBridge,
+                Self::SupervisorBridge(_)
+            ) | (
+                CommsPeerRequestIntent::ChecksumToken,
+                Self::ChecksumToken(_)
+            )
+        )
+    }
+
     fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self.0)
+        match self {
+            Self::SupervisorBridge(params) => serde_json::to_value(params),
+            Self::ChecksumToken(params) => serde_json::to_value(params),
+        }
     }
 }
 
@@ -82,18 +130,24 @@ impl CommsPeerRequestParams {
 /// a `result` field must provide a typed bridge reply shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(transparent)]
-pub struct CommsPeerResponseResult(pub BridgeReply);
+#[serde(untagged)]
+pub enum CommsPeerResponseResult {
+    SupervisorBridge(BridgeReply),
+    ChecksumToken(CommsChecksumTokenResult),
+}
 
 impl CommsPeerResponseResult {
     fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self.0)
+        match self {
+            Self::SupervisorBridge(result) => serde_json::to_value(result),
+            Self::ChecksumToken(result) => serde_json::to_value(result),
+        }
     }
 }
 
 impl From<BridgeReply> for CommsPeerResponseResult {
     fn from(reply: BridgeReply) -> Self {
-        Self(reply)
+        Self::SupervisorBridge(reply)
     }
 }
 
@@ -103,6 +157,8 @@ impl From<BridgeReply> for CommsPeerResponseResult {
 pub enum CommsCommandProjectionError {
     #[error(transparent)]
     Command(#[from] CommsCommandError),
+    #[error("peer_request params do not match typed intent {intent}")]
+    IntentParamsMismatch { intent: &'static str },
     #[error("failed to project typed comms {field} to compatibility JSON: {source}")]
     CompatibilityJson {
         field: &'static str,
@@ -226,15 +282,25 @@ impl CommsCommandRequest {
                 params,
                 handling_mode,
                 stream,
-            } => meerkat_core::comms::CommsCommandRequest::PeerRequest {
-                to,
-                intent: intent.as_str().to_string(),
-                params: params.into_json_value().map_err(|source| {
-                    CommsCommandProjectionError::compatibility_json("peer_request.params", source)
-                })?,
-                handling_mode,
-                stream,
-            },
+            } => {
+                if !params.matches_intent(&intent) {
+                    return Err(CommsCommandProjectionError::IntentParamsMismatch {
+                        intent: intent.as_str(),
+                    });
+                }
+                meerkat_core::comms::CommsCommandRequest::PeerRequest {
+                    to,
+                    intent: intent.as_str().to_string(),
+                    params: params.into_json_value().map_err(|source| {
+                        CommsCommandProjectionError::compatibility_json(
+                            "peer_request.params",
+                            source,
+                        )
+                    })?,
+                    handling_mode,
+                    stream,
+                }
+            }
             Self::PeerResponse {
                 to,
                 in_reply_to,
@@ -583,7 +649,9 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains("invalid type") || message.contains("params"),
+            message.contains("invalid type")
+                || message.contains("params")
+                || message.contains("did not match any variant"),
             "expected typed params error, got: {message}"
         );
     }
@@ -605,7 +673,9 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains("ok") || message.contains("invalid type"),
+            message.contains("ok")
+                || message.contains("invalid type")
+                || message.contains("did not match any variant"),
             "expected typed result error, got: {message}"
         );
     }
@@ -666,6 +736,67 @@ mod tests {
     }
 
     #[test]
+    fn public_checksum_token_request_projects_typed_intent_and_params_to_core() {
+        let params = serde_json::from_value::<CommsSendParams>(json!({
+            "session_id": "sid_1",
+            "kind": "peer_request",
+            "to": peer_id().to_string(),
+            "intent": "checksum_token",
+            "params": {
+                "subject": "alpha beta gamma"
+            },
+            "handling_mode": "steer",
+            "stream": "reserve_interaction"
+        }))
+        .expect("typed checksum token request should deserialize");
+
+        let session_id = meerkat_core::types::SessionId::new();
+        let command = params
+            .into_command()
+            .into_command(&session_id)
+            .expect("typed checksum token request should project to core command");
+
+        let meerkat_core::comms::CommsCommand::PeerRequest {
+            intent,
+            params,
+            handling_mode,
+            stream,
+            ..
+        } = command
+        else {
+            panic!("expected core peer request");
+        };
+
+        assert_eq!(intent, "checksum_token");
+        assert_eq!(params["subject"], "alpha beta gamma");
+        assert_eq!(handling_mode, HandlingMode::Steer);
+        assert_eq!(stream, InputStreamMode::ReserveInteraction);
+    }
+
+    #[test]
+    fn public_peer_request_rejects_intent_params_mismatch_before_dispatch() {
+        let params = serde_json::from_value::<CommsSendParams>(json!({
+            "session_id": "sid_1",
+            "kind": "peer_request",
+            "to": peer_id().to_string(),
+            "intent": "checksum_token",
+            "params": supervisor_bridge_params()
+        }))
+        .expect("mismatched typed params can deserialize but must not project");
+
+        let session_id = meerkat_core::types::SessionId::new();
+        let err = params
+            .into_command()
+            .into_command(&session_id)
+            .expect_err("intent/params mismatch must not become a core command");
+
+        assert!(
+            err.to_string().contains("checksum_token"),
+            "expected mismatch error to name intent, got: {err}"
+        );
+    }
+
+    #[test]
     fn public_peer_response_result_projects_typed_bridge_reply_to_core() {
         let params = serde_json::from_value::<CommsSendParams>(json!({
             "session_id": "sid_1",
@@ -692,5 +823,34 @@ mod tests {
 
         assert_eq!(result["result"], "ack");
         assert_eq!(result["ok"], true);
+    }
+
+    #[test]
+    fn public_peer_response_result_projects_typed_checksum_token_to_core() {
+        let params = serde_json::from_value::<CommsSendParams>(json!({
+            "session_id": "sid_1",
+            "kind": "peer_response",
+            "to": peer_id().to_string(),
+            "in_reply_to": uuid::Uuid::new_v4().to_string(),
+            "status": "completed",
+            "result": {
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            }
+        }))
+        .expect("typed checksum token reply should deserialize");
+
+        let session_id = meerkat_core::types::SessionId::new();
+        let command = params
+            .into_command()
+            .into_command(&session_id)
+            .expect("typed checksum token reply should project to core command");
+
+        let meerkat_core::comms::CommsCommand::PeerResponse { result, .. } = command else {
+            panic!("expected core peer response");
+        };
+
+        assert_eq!(result["request_intent"], "checksum_token");
+        assert_eq!(result["token"], "birch seventeen");
     }
 }

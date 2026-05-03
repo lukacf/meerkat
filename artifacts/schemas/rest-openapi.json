@@ -1652,6 +1652,45 @@
         "title": "CatalogModelEntry",
         "type": "object"
       },
+      "CommsChecksumTokenParams": {
+        "additionalProperties": false,
+        "description": "Typed params for the actionable checksum-token request used by peer\nrequest/response terminal-flow fixtures.",
+        "properties": {
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "title": "CommsChecksumTokenParams",
+        "type": "object"
+      },
+      "CommsChecksumTokenResult": {
+        "additionalProperties": false,
+        "description": "Typed result for a checksum-token peer response.",
+        "properties": {
+          "request_intent": {
+            "$ref": "#/components/schemas/CommsChecksumTokenResultIntent"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_intent",
+          "token"
+        ],
+        "title": "CommsChecksumTokenResult",
+        "type": "object"
+      },
+      "CommsChecksumTokenResultIntent": {
+        "description": "Closed discriminator carried in [`CommsChecksumTokenResult`].",
+        "enum": [
+          "checksum_token"
+        ],
+        "type": "string"
+      },
       "CommsCommandRequest": {
         "description": "Request command carried inside public `comms/send` surfaces.",
         "oneOf": [
@@ -1944,16 +1983,31 @@
       "CommsPeerRequestIntent": {
         "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
         "enum": [
-          "supervisor.bridge"
+          "supervisor.bridge",
+          "checksum_token"
         ],
         "type": "string"
       },
       "CommsPeerRequestParams": {
-        "$ref": "#/components/schemas/BridgeCommand",
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BridgeCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CommsChecksumTokenParams"
+          }
+        ],
         "description": "Typed params for public `peer_request`."
       },
       "CommsPeerResponseResult": {
-        "$ref": "#/components/schemas/BridgeReply",
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BridgeReply"
+          },
+          {
+            "$ref": "#/components/schemas/CommsChecksumTokenResult"
+          }
+        ],
         "description": "Typed result payload for public `peer_response`.\n\nCompatibility JSON is intentionally not accepted here. Callers that include\na `result` field must provide a typed bridge reply shape."
       },
       "CommsPeersParams": {

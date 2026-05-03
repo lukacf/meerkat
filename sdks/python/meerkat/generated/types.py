@@ -1144,6 +1144,20 @@ class BridgeSupervisorPayload:
 
 
 @dataclass
+class CommsChecksumTokenParams:
+    """Typed params for the actionable checksum-token request used by peer
+request/response terminal-flow fixtures."""
+    subject: str
+
+
+@dataclass
+class CommsChecksumTokenResult:
+    """Typed result for a checksum-token peer response."""
+    request_intent: CommsChecksumTokenResultIntent
+    token: str
+
+
+@dataclass
 class CommsPeerLifecycleParams:
     """Typed params for one-way peer lifecycle notifications.
 
@@ -2858,20 +2872,23 @@ class CommsSendResultPeerResponseSent(TypedDict, total=False):
 
 CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent
 
+# Closed discriminator carried in [`CommsChecksumTokenResult`].
+CommsChecksumTokenResultIntent = Literal['checksum_token']
+
 # Closed public request-intent contract for `peer_request`.
 #
 # Unknown strings fail during deserialization and cannot fall through to a
 # local match/default path.
-CommsPeerRequestIntent = Literal['supervisor.bridge']
+CommsPeerRequestIntent = Literal['supervisor.bridge', 'checksum_token']
 
 # Typed params for public `peer_request`.
-CommsPeerRequestParams = BridgeCommand
+CommsPeerRequestParams = BridgeCommand | CommsChecksumTokenParams
 
 # Typed result payload for public `peer_response`.
 #
 # Compatibility JSON is intentionally not accepted here. Callers that include
 # a `result` field must provide a typed bridge reply shape.
-CommsPeerResponseResult = BridgeReply
+CommsPeerResponseResult = BridgeReply | CommsChecksumTokenResult
 
 # Handling mode for ordinary content-bearing work.
 #

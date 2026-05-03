@@ -997,6 +997,43 @@
           }
         ]
       },
+      "CommsChecksumTokenParams": {
+        "additionalProperties": false,
+        "description": "Typed params for the actionable checksum-token request used by peer\nrequest/response terminal-flow fixtures.",
+        "properties": {
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "CommsChecksumTokenResult": {
+        "additionalProperties": false,
+        "description": "Typed result for a checksum-token peer response.",
+        "properties": {
+          "request_intent": {
+            "$ref": "#/$defs/CommsChecksumTokenResultIntent"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_intent",
+          "token"
+        ],
+        "type": "object"
+      },
+      "CommsChecksumTokenResultIntent": {
+        "description": "Closed discriminator carried in [`CommsChecksumTokenResult`].",
+        "enum": [
+          "checksum_token"
+        ],
+        "type": "string"
+      },
       "CommsPeerLifecycleParams": {
         "additionalProperties": false,
         "description": "Typed params for one-way peer lifecycle notifications.\n\nThis is the public wire projection of the topology-update payloads that\nused to travel as arbitrary JSON. `peer_spec` is the canonical typed\nidentity when the sender has it; `peer`, `role`, and `description` remain\ninert presentation metadata for older projections.",
@@ -1035,16 +1072,31 @@
       "CommsPeerRequestIntent": {
         "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
         "enum": [
-          "supervisor.bridge"
+          "supervisor.bridge",
+          "checksum_token"
         ],
         "type": "string"
       },
       "CommsPeerRequestParams": {
-        "$ref": "#/$defs/BridgeCommand",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeCommand"
+          },
+          {
+            "$ref": "#/$defs/CommsChecksumTokenParams"
+          }
+        ],
         "description": "Typed params for public `peer_request`."
       },
       "CommsPeerResponseResult": {
-        "$ref": "#/$defs/BridgeReply",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeReply"
+          },
+          {
+            "$ref": "#/$defs/CommsChecksumTokenResult"
+          }
+        ],
         "description": "Typed result payload for public `peer_response`.\n\nCompatibility JSON is intentionally not accepted here. Callers that include\na `result` field must provide a typed bridge reply shape."
       },
       "ContentBlock": {

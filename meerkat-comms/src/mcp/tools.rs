@@ -1307,7 +1307,8 @@ mod tests {
         .expect_err("malformed public comms request params must fail before dispatch");
 
         assert!(
-            error.contains("Invalid arguments") && error.contains("command"),
+            error.contains("Invalid arguments")
+                && (error.contains("command") || error.contains("did not match any variant")),
             "expected typed params serde error, got: {error}"
         );
         assert_eq!(runtime.sent_len(), 0);
@@ -1335,7 +1336,8 @@ mod tests {
         .expect_err("malformed public comms response result must fail before dispatch");
 
         assert!(
-            error.contains("Invalid arguments") && error.contains("result"),
+            error.contains("Invalid arguments")
+                && (error.contains("result") || error.contains("did not match any variant")),
             "expected typed result serde error, got: {error}"
         );
         assert_eq!(runtime.sent_len(), 0);

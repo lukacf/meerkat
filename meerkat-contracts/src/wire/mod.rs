@@ -28,6 +28,7 @@ pub use approval::{
     ApprovalRequestParams, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
 };
 pub use comms::{
+    CommsChecksumTokenParams, CommsChecksumTokenResult, CommsChecksumTokenResultIntent,
     CommsCommandError, CommsCommandProjectionError, CommsCommandRequest, CommsPeerEntry,
     CommsPeerLifecycleParams, CommsPeerRequestIntent, CommsPeerRequestParams,
     CommsPeerResponseResult, CommsPeersParams, CommsPeersResult, CommsSendParams, CommsSendResult,

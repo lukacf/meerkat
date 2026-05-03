@@ -893,6 +893,33 @@ describe("Typed Events", () => {
     assert.equal(envelope.timestampMs, undefined);
     assert.equal(envelope.payload, undefined);
   });
+
+  it("should use typed event source without trusting legacy source id", () => {
+    const envelope = MeerkatClient.parseAgentEventEnvelope({
+      source: {
+        type: "session",
+        session_id: "00000000-0000-4000-8000-000000000001",
+      },
+      source_id: "session:not-a-uuid",
+      payload: { type: "text_delta", delta: "hi" },
+    });
+
+    assert.deepEqual(envelope.source, {
+      type: "session",
+      sessionId: "00000000-0000-4000-8000-000000000001",
+    });
+    assert.equal(envelope.sourceId, "session:not-a-uuid");
+  });
+
+  it("should not classify source from legacy session strings", () => {
+    const envelope = MeerkatClient.parseAgentEventEnvelope({
+      source_id: "session:00000000-0000-4000-8000-000000000001",
+      payload: { type: "text_delta", delta: "hi" },
+    });
+
+    assert.equal(envelope.source, undefined);
+    assert.equal(envelope.sourceId, "session:00000000-0000-4000-8000-000000000001");
+  });
 });
 
 describe("Session wrappers", () => {

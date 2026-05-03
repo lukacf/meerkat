@@ -1101,6 +1101,36 @@ def test_parse_attributed_mob_event_omits_source_fence_token():
     assert not hasattr(event, "source_fence_token")
 
 
+def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
+    event = MeerkatClient._parse_agent_event_envelope(
+        {
+            "source": {
+                "type": "session",
+                "session_id": "00000000-0000-4000-8000-000000000001",
+            },
+            "source_id": "session:not-a-uuid",
+            "payload": {"type": "text_delta", "delta": "hi"},
+        }
+    )
+
+    assert event.source is not None
+    assert event.source.type == "session"
+    assert event.source.session_id == "00000000-0000-4000-8000-000000000001"
+    assert event.source_id == "session:not-a-uuid"
+
+
+def test_parse_event_envelope_does_not_classify_legacy_session_string():
+    event = MeerkatClient._parse_agent_event_envelope(
+        {
+            "source_id": "session:00000000-0000-4000-8000-000000000001",
+            "payload": {"type": "text_delta", "delta": "hi"},
+        }
+    )
+
+    assert event.source is None
+    assert event.source_id == "session:00000000-0000-4000-8000-000000000001"
+
+
 def test_parse_tool_config_changed():
     raw = {
         "type": "tool_config_changed",

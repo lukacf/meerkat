@@ -421,9 +421,18 @@ export interface MobHelperResult {
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 
+/** Typed event source identity used for event source semantics. */
+export type EventSourceIdentity =
+  | { type: 'session'; session_id: string }
+  | { type: 'runtime'; runtime_id: string }
+  | { type: 'interaction'; interaction_id: string }
+  | { type: 'callback' }
+  | { type: 'external'; source_id: string };
+
 /** Envelope wrapping an agent event with metadata. */
 export interface EventEnvelope {
   event_id: string;
+  source: EventSourceIdentity;
   source_id: string;
   seq: number;
   mob_id?: string;

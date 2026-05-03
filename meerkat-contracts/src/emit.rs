@@ -197,6 +197,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "PeerDirectoryEntry": schema_for!(crate::wire::PeerDirectoryEntry),
         "PeerDirectoryListing": schema_for!(crate::wire::PeerDirectoryListing),
         "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),
+        "AgentEventEnvelope": schema_for!(meerkat_core::EventEnvelope<meerkat_core::AgentEvent>),
         "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
         "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
     });

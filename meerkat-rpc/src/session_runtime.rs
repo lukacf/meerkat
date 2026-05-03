@@ -7728,10 +7728,10 @@ impl SessionRuntime {
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             actions,

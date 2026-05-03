@@ -186,21 +186,7 @@
         "type": "object"
       },
       "CapabilityId": {
-        "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
-        "enum": [
-          "sessions",
-          "streaming",
-          "structured_output",
-          "hooks",
-          "builtins",
-          "shell",
-          "comms",
-          "memory_store",
-          "session_store",
-          "session_compaction",
-          "skills",
-          "mcp_live"
-        ],
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
       },
       "CapabilityStatus": {

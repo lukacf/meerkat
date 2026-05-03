@@ -1909,7 +1909,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let mut tokens = chatgpt_oauth_tokens("expiring-access");
         tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(30));
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
@@ -1930,7 +1930,7 @@ mod tests {
                 ),
             );
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 

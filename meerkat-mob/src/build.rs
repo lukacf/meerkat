@@ -216,8 +216,9 @@ pub async fn build_resumed_agent_config(
     let BuildResumedAgentConfigParams {
         base,
         expected_session_id,
-        resumed_session,
+        mut resumed_session,
     } = params;
+    let inherited_tool_filter = base.inherited_tool_filter.clone();
     if resumed_session.id() != expected_session_id {
         return Err(MobError::Internal(format!(
             "resume session id mismatch: expected '{}', got '{}'",
@@ -226,6 +227,10 @@ pub async fn build_resumed_agent_config(
         )));
     }
     let mut config = build_agent_config(base).await?;
+    config
+        .initial_metadata_entries
+        .remove(SESSION_TOOL_VISIBILITY_STATE_KEY);
+    merge_inherited_filter_into_resumed_visibility(&mut resumed_session, inherited_tool_filter)?;
     let metadata = resumed_session
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
@@ -238,6 +243,31 @@ pub async fn build_resumed_agent_config(
     config.app_context = None;
     config.shell_env = None;
     Ok(config)
+}
+
+fn merge_inherited_filter_into_resumed_visibility(
+    session: &mut Session,
+    inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+) -> Result<(), MobError> {
+    let Some(filter) = inherited_tool_filter else {
+        return Ok(());
+    };
+    let mut visibility_state = session
+        .try_tool_visibility_state()
+        .map_err(|err| {
+            MobError::Internal(format!(
+                "invalid canonical tool visibility state for resumed mob member: {err}"
+            ))
+        })?
+        .unwrap_or_default();
+    visibility_state.inherited_base_filter = filter;
+    session
+        .set_tool_visibility_state(visibility_state)
+        .map_err(|err| {
+            MobError::Internal(format!(
+                "failed to merge inherited tool visibility into resumed mob member: {err}"
+            ))
+        })
 }
 
 fn apply_resumed_session_metadata(
@@ -355,7 +385,7 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, OrchestratorConfig, WiringRules};
     use crate::profile::{ProfileBinding, ToolConfig};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
     fn sample_definition() -> MobDefinition {
@@ -449,6 +479,38 @@ mod tests {
             )
             .with_managed_mob_scope(["test-mob"]),
         )
+    }
+
+    fn resumed_session_with_metadata(session_id: SessionId) -> Session {
+        let mut resumed_session = Session::with_id(session_id);
+        resumed_session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-opus-4-6".to_string(),
+                max_tokens: 2048,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::session::SessionTooling {
+                    builtins: meerkat_core::session::ToolCategoryOverride::Enable,
+                    shell: meerkat_core::session::ToolCategoryOverride::Enable,
+                    comms: meerkat_core::session::ToolCategoryOverride::Enable,
+                    mob: meerkat_core::session::ToolCategoryOverride::Enable,
+                    memory: meerkat_core::session::ToolCategoryOverride::Disable,
+                    active_skills: None,
+                },
+                keep_alive: false,
+                comms_name: Some("test-mob/lead/lead-1".to_string()),
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("session metadata");
+        resumed_session
     }
 
     #[tokio::test]
@@ -737,34 +799,7 @@ mod tests {
             .as_inline()
             .unwrap();
         let session_id = SessionId::new();
-        let mut resumed_session = Session::with_id(session_id.clone());
-        resumed_session
-            .set_session_metadata(SessionMetadata {
-                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model: "claude-opus-4-6".to_string(),
-                max_tokens: 2048,
-                structured_output_retries: 2,
-                provider: meerkat_core::Provider::Anthropic,
-                self_hosted_server_id: None,
-                provider_params: None,
-                tooling: meerkat_core::session::SessionTooling {
-                    builtins: meerkat_core::session::ToolCategoryOverride::Enable,
-                    shell: meerkat_core::session::ToolCategoryOverride::Enable,
-                    comms: meerkat_core::session::ToolCategoryOverride::Enable,
-                    mob: meerkat_core::session::ToolCategoryOverride::Enable,
-                    memory: meerkat_core::session::ToolCategoryOverride::Disable,
-                    active_skills: None,
-                },
-                keep_alive: false,
-                comms_name: Some("test-mob/lead/lead-1".to_string()),
-                peer_meta: None,
-                realm_id: None,
-                instance_id: None,
-                backend: None,
-                config_generation: None,
-                connection_ref: None,
-            })
-            .expect("session metadata");
+        let resumed_session = resumed_session_with_metadata(session_id.clone());
 
         let config = build_resumed_agent_config(BuildResumedAgentConfigParams {
             base: BuildAgentConfigParams {
@@ -791,6 +826,162 @@ mod tests {
             config.override_mob,
             meerkat_core::ToolCategoryOverride::Disable,
             "runtime-injected absence of operator capabilities must beat resumed mob metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_resumed_agent_config_merges_inherited_filter_into_existing_visibility_state()
+     {
+        let def = sample_definition();
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let session_id = SessionId::new();
+        let mut resumed_session = resumed_session_with_metadata(session_id.clone());
+        let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            ["parent_shell".to_string()].into_iter().collect(),
+        );
+        let original_state = SessionToolVisibilityState {
+            inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
+                ["old_parent".to_string()].into_iter().collect(),
+            ),
+            active_filter: meerkat_core::tool_scope::ToolFilter::Deny(
+                ["active_secret".to_string()].into_iter().collect(),
+            ),
+            staged_filter: meerkat_core::tool_scope::ToolFilter::Allow(
+                ["staged_visible".to_string()].into_iter().collect(),
+            ),
+            active_requested_deferred_names: BTreeSet::from(["deferred_active".to_string()]),
+            staged_requested_deferred_names: BTreeSet::from(["deferred_staged".to_string()]),
+            active_revision: 7,
+            staged_revision: 9,
+            requested_witnesses: [(
+                "deferred_active".to_string(),
+                meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key: Some("owner:deferred_active".to_string()),
+                    last_seen_provenance: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            filter_witnesses: [(
+                "active_secret".to_string(),
+                meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key: Some("owner:active_secret".to_string()),
+                    last_seen_provenance: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        resumed_session
+            .set_tool_visibility_state(original_state.clone())
+            .expect("visibility state");
+
+        let config = build_resumed_agent_config(BuildResumedAgentConfigParams {
+            base: BuildAgentConfigParams {
+                mob_id: &def.id,
+                profile_name: &ProfileName::from("lead"),
+                agent_identity: &MeerkatId::from("lead-1"),
+                profile: lead,
+                definition: &def,
+                external_tools: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_access_context: MobToolAccessContext::None,
+                inherited_tool_filter: Some(inherited_filter.clone()),
+            },
+            expected_session_id: &session_id,
+            resumed_session,
+        })
+        .await
+        .expect("build_resumed_agent_config");
+
+        assert!(
+            !config
+                .initial_metadata_entries
+                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            "resumed mob config must not stage replacement canonical visibility metadata"
+        );
+        let visibility_state = config
+            .resume_session
+            .as_ref()
+            .expect("resume session")
+            .try_tool_visibility_state()
+            .expect("parse visibility")
+            .expect("visibility state");
+        assert_eq!(visibility_state.inherited_base_filter, inherited_filter);
+        assert_eq!(visibility_state.active_filter, original_state.active_filter);
+        assert_eq!(visibility_state.staged_filter, original_state.staged_filter);
+        assert_eq!(
+            visibility_state.active_requested_deferred_names,
+            original_state.active_requested_deferred_names
+        );
+        assert_eq!(
+            visibility_state.staged_requested_deferred_names,
+            original_state.staged_requested_deferred_names
+        );
+        assert_eq!(
+            visibility_state.active_revision,
+            original_state.active_revision
+        );
+        assert_eq!(
+            visibility_state.staged_revision,
+            original_state.staged_revision
+        );
+        assert_eq!(
+            visibility_state.requested_witnesses,
+            original_state.requested_witnesses
+        );
+        assert_eq!(
+            visibility_state.filter_witnesses,
+            original_state.filter_witnesses
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_resumed_agent_config_rejects_malformed_visibility_state_before_merge() {
+        let def = sample_definition();
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let session_id = SessionId::new();
+        let mut resumed_session = resumed_session_with_metadata(session_id.clone());
+        resumed_session.set_metadata(
+            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!("not-a-visibility-state"),
+        );
+
+        let err = build_resumed_agent_config(BuildResumedAgentConfigParams {
+            base: BuildAgentConfigParams {
+                mob_id: &def.id,
+                profile_name: &ProfileName::from("lead"),
+                agent_identity: &MeerkatId::from("lead-1"),
+                profile: lead,
+                definition: &def,
+                external_tools: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_access_context: MobToolAccessContext::None,
+                inherited_tool_filter: Some(meerkat_core::tool_scope::ToolFilter::Deny(
+                    ["parent_shell".to_string()].into_iter().collect(),
+                )),
+            },
+            expected_session_id: &session_id,
+            resumed_session,
+        })
+        .await
+        .expect_err("malformed canonical visibility must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("invalid canonical tool visibility state"),
+            "unexpected error: {err}"
         );
     }
 

@@ -11,9 +11,10 @@ use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
     RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
     RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent, WireRunResult,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
+    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion,
+    RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent,
+    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireUsage,
 };
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
@@ -857,8 +858,8 @@ fn realtime_open_info_required_fields() {
         target: RealtimeChannelTarget::SessionTarget {
             session_id: "session-1".to_string(),
         },
-        supported_protocol_versions: vec!["1".to_string()],
-        default_protocol_version: "1".to_string(),
+        supported_protocol_versions: vec![RealtimeProtocolVersion::CURRENT],
+        default_protocol_version: RealtimeProtocolVersion::CURRENT,
         capabilities: RealtimeCapabilities {
             input_kinds: vec![
                 RealtimeInputKind::Text,
@@ -892,6 +893,11 @@ fn realtime_open_info_required_fields() {
         value.get("default_protocol_version").is_some(),
         "missing default_protocol_version"
     );
+    assert_eq!(
+        value["supported_protocol_versions"],
+        serde_json::json!(["2"])
+    );
+    assert_eq!(value["default_protocol_version"], serde_json::json!("2"));
     assert!(value.get("capabilities").is_some(), "missing capabilities");
 }
 
@@ -943,7 +949,7 @@ fn realtime_open_request_roundtrip() {
 #[test]
 fn realtime_client_open_frame_pins_protocol_version_field() {
     let frame = RealtimeClientFrame::ChannelOpen(meerkat_contracts::RealtimeChannelOpenFrame {
-        protocol_version: "1".to_string(),
+        protocol_version: RealtimeProtocolVersion::CURRENT,
         open_token: "token-1".to_string(),
         role: RealtimeChannelRole::Observer,
         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -957,7 +963,7 @@ fn realtime_client_open_frame_pins_protocol_version_field() {
     );
     assert_eq!(
         value.get("protocol_version").and_then(|v| v.as_str()),
-        Some("1")
+        Some("2")
     );
     assert_eq!(
         value.get("open_token").and_then(|v| v.as_str()),

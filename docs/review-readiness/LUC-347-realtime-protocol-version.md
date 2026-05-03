@@ -36,6 +36,8 @@ Review head: the PR head commit containing this packet.
   SDK type surfaces.
 - Updated TypeScript tests to expect generated protocol literal `"2"` instead
   of raw `string`.
+- Updated Python realtime SDK fixtures to use the generated
+  `RealtimeProtocolVersion` alias and current literal `"2"`.
 
 ## Old Path Amputation Proof
 
@@ -49,6 +51,8 @@ Review head: the PR head commit containing this packet.
   by parsing open-info strings.
 - TypeScript generated contracts reject arbitrary protocol strings at compile
   time through `RealtimeProtocolVersion = "2"`.
+- REST realtime proxy fixtures now serialize the typed
+  `RealtimeProtocolVersion::CURRENT` value instead of minting protocol strings.
 - Rust serde rejects unknown protocol-version strings at the typed frame
   boundary.
 
@@ -96,3 +100,18 @@ Review head: the PR head commit containing this packet.
 - Broad BuildBuddy check:
   `make check` passed via BuildBuddy invocation
   `3cd88754-82fe-4443-b0e4-046fd7802d99`.
+- Rework REST proxy fixture:
+  `./scripts/repo-cargo test -p meerkat-rest test_realtime_open_info_route_proxies_to_realtime_rpc_host --lib`
+  passed.
+- Rework contract regression fixtures:
+  `./scripts/repo-cargo test -p meerkat-contracts realtime_ --test regression_wire_types`
+  passed.
+- Rework Python SDK fixtures:
+  `PYTHONPATH=sdks/python python3 -m pytest -q sdks/python/tests/test_realtime_channel.py sdks/python/tests/test_types.py`
+  passed. `make test-sdk-python` was blocked locally by PEP 668 system-Python
+  package installation rules before test execution.
+- Rework format:
+  `make fmt` and `make fmt-check` passed.
+- Rework BuildBuddy unit lane:
+  `make buildbuddy-test-unit` passed via BuildBuddy invocation
+  `6f9d4663-c0b5-4c4e-9cc7-c015d069f5ba`.

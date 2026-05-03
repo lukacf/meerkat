@@ -84,8 +84,11 @@ from meerkat.generated.types import (
     RealtimeCapabilities as GeneratedRealtimeCapabilities,
     RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
     RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
+    RealtimeProtocolVersion as GeneratedRealtimeProtocolVersion,
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
+
+REALTIME_PROTOCOL_VERSION: GeneratedRealtimeProtocolVersion = "2"
 
 
 def test_contract_version():
@@ -108,8 +111,8 @@ def test_generated_realtime_types_include_open_info_shape():
         open_token="token-1",
         expires_at="2026-04-15T12:00:00Z",
         target={"type": "session_target", "session_id": "session-1"},
-        supported_protocol_versions=["1"],
-        default_protocol_version="1",
+        supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
+        default_protocol_version=REALTIME_PROTOCOL_VERSION,
         capabilities=GeneratedRealtimeCapabilities(
             input_kinds=["text", "audio"],
             output_kinds=["text", "audio"],
@@ -122,20 +125,20 @@ def test_generated_realtime_types_include_open_info_shape():
     )
 
     assert info.ws_url.endswith("/realtime/ws")
-    assert info.default_protocol_version == "1"
-    assert info.supported_protocol_versions == ["1"]
+    assert info.default_protocol_version == REALTIME_PROTOCOL_VERSION
+    assert info.supported_protocol_versions == [REALTIME_PROTOCOL_VERSION]
     assert info.capabilities.turning_modes == [
         "provider_managed",
         "explicit_commit",
     ]
 
     frame = GeneratedRealtimeChannelOpenFrame(
-        protocol_version="1",
+        protocol_version=REALTIME_PROTOCOL_VERSION,
         open_token="token-1",
         role="primary",
         turning_mode="provider_managed",
     )
-    assert frame.protocol_version == "1"
+    assert frame.protocol_version == REALTIME_PROTOCOL_VERSION
 
 
 def test_generated_runtime_state_result_carries_state():
@@ -2221,8 +2224,8 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
                 "open_token": "token-1",
                 "expires_at": "2026-04-15T12:00:00Z",
                 "target": params["target"],
-                "supported_protocol_versions": ["1"],
-                "default_protocol_version": "1",
+                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
+                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
                 "capabilities": {
                     "input_kinds": ["text", "audio"],
                     "output_kinds": ["text", "audio"],
@@ -2267,7 +2270,7 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
     scoped_status = await session_channel.status()
     scoped_capabilities = await session_channel.capabilities()
 
-    assert open_info.default_protocol_version == "1"
+    assert open_info.default_protocol_version == REALTIME_PROTOCOL_VERSION
     assert status.status["state"] == "opening"
     assert capabilities.capabilities["turning_modes"] == ["provider_managed"]
     assert scoped_open_info.open_token == "token-1"
@@ -2304,8 +2307,8 @@ async def test_realtime_channel_mob_member_builds_mob_member_wire_target() -> No
                 "open_token": "token-mob",
                 "expires_at": "2026-04-15T12:00:00Z",
                 "target": params["target"],
-                "supported_protocol_versions": ["1"],
-                "default_protocol_version": "1",
+                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
+                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
                 "capabilities": {
                     "input_kinds": ["text"],
                     "output_kinds": ["text"],

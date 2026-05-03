@@ -56,7 +56,7 @@ use meerkat::{
 };
 use meerkat_contracts::{
     ErrorCode, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    RealtimeOpenRequest, RealtimeProtocolVersion, RealtimeStatusParams, RealtimeStatusResult,
     RuntimeRealtimeAttachmentStatusResult, RuntimeStateResult, SessionLocator, SkillsParams,
     WireError, format_session_ref,
 };
@@ -9040,8 +9040,8 @@ mod tests {
                 "type": "session_target",
                 "session_id": created.session_id.to_string(),
             },
-            "supported_protocol_versions": ["2026-04-01"],
-            "default_protocol_version": "2026-04-01",
+            "supported_protocol_versions": [RealtimeProtocolVersion::CURRENT],
+            "default_protocol_version": RealtimeProtocolVersion::CURRENT,
             "capabilities": {
                 "input_kinds": ["text", "audio"],
                 "output_kinds": ["text", "audio"],

@@ -1,0 +1,63 @@
+name: Dogma cleanup immutable gate
+run-name: Dogma cleanup immutable review gate
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - labeled
+      - unlabeled
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dogma-cleanup-immutable-gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pull request content
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: pr
+
+      - name: Checkout immutable gate source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: dogma-gate-source
+
+      - name: Fetch base commit for diff
+        if: ${{ github.event_name == 'pull_request_target' }}
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          git -C "$pr_repo" remote add dogma-base "https://github.com/$BASE_REPOSITORY.git"
+          git -C "$pr_repo" fetch --no-tags dogma-base "$BASE_SHA:refs/remotes/dogma-base/dogma-cleanup-base"
+
+      - name: Enforce immutable dogma cleanup review packet
+        shell: bash
+        env:
+          DOGMA_CLEANUP_BASE: refs/remotes/dogma-base/dogma-cleanup-base
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          gate_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/dogma_cleanup_gate.py"
+          if [[ ! -f "$gate_script" ]]; then
+            echo "::error::Base dogma cleanup gate is missing: scripts/dogma_cleanup_gate.py"
+            exit 1
+          fi
+          python3 "$gate_script" --repo "$pr_repo" --base "$DOGMA_CLEANUP_BASE" --github-event "$GITHUB_EVENT_PATH"

@@ -215,6 +215,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,
@@ -266,6 +267,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(new_expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,

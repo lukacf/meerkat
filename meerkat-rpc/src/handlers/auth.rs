@@ -505,7 +505,7 @@ async fn rollback_token_commit(
                 store
                     .save(&commit.key, previous)
                     .await
-                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?
+                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
             }
         },
         None => {
@@ -2898,7 +2898,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_api_key_requires_runtime_oauth_flow_admission_before_token_store() {
+    async fn provision_api_key_requires_runtime_oauth_flow_admission_before_token_store()
+    -> Result<(), String> {
         let runtime = test_runtime_with_config_without_token_store(
             config_with_anthropic_oauth_to_api_key_binding(),
         );
@@ -2923,7 +2924,7 @@ mod tests {
                     operation: "admit_oauth_browser_flow",
                     ..
                 }) => break,
-                Err(err) => panic!("unexpected OAuth flow admission error: {err}"),
+                Err(err) => return Err(format!("unexpected OAuth flow admission error: {err}")),
             }
         }
         let params = raw_params(serde_json::json!({
@@ -2953,6 +2954,7 @@ mod tests {
             "expected runtime OAuth authority failure before TokenStore access, got `{}`",
             error.message
         );
+        Ok(())
     }
 
     #[tokio::test]

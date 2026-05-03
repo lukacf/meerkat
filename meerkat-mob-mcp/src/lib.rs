@@ -1789,10 +1789,9 @@ impl SessionService for LocalSessionService {
             current
         };
         if let Some(event_tx) = event_tx {
-            let source_id = id.to_string();
             let mut seq = 1u64;
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
@@ -1800,16 +1799,16 @@ impl SessionService for LocalSessionService {
                     prompt: effective_prompt.clone(),
                 },
             ));
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::TurnStarted { turn_number: 1 },
             ));
             let usage = Usage::default();
             let turn_usage = usage.clone();
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::TurnCompleted {
@@ -1817,8 +1816,8 @@ impl SessionService for LocalSessionService {
                     usage: turn_usage,
                 },
             ));
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id,
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunCompleted {
@@ -2753,9 +2752,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                         WireMemberRef::encode(mob_id.as_str(), &identity),
                                     ))
                                 }
-                                Err(error) => {
-                                    json!(MobSpawnManyResultEntry::failed(error.to_string()))
-                                }
+                                Err(error) => json!(MobSpawnManyResultEntry::failed(
+                                    error.spawn_many_failure_cause(),
+                                    error.to_string(),
+                                )),
                             }
                         },
                     )
@@ -4798,6 +4798,38 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(ids.contains("w-many-a"));
         assert!(ids.contains("w-many-b"));
+    }
+
+    #[tokio::test]
+    async fn test_mob_spawn_many_dispatches_typed_failure_cause() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let spawned = call_tool(
+            &d,
+            "mob_spawn_member",
+            json!({
+                "mob_id": mob_id,
+                "specs": [
+                    {"profile":"missing","agent_identity":"w-missing"}
+                ]
+            }),
+        )
+        .await;
+        let row = &spawned["results"].as_array().expect("results array")[0];
+        assert_eq!(row["status"], "failed");
+        assert_eq!(row["result"]["cause"], "profile_not_found");
+        assert!(
+            row["result"]["message"].as_str().is_some_and(|msg| {
+                msg.contains("profile not found") && msg.contains("missing")
+            })
+        );
+        assert!(row.get("ok").is_none());
+        assert!(row.get("error").is_none());
     }
 
     #[tokio::test]

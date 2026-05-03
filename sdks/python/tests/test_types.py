@@ -69,6 +69,7 @@ from meerkat.events import (
     RunCompleted,
     RunFailed,
     RunStarted,
+    SkillsResolved,
     SkillResolutionFailed,
     SkillResolutionFailureReason,
     ToolConfigChanged,
@@ -85,8 +86,11 @@ from meerkat.generated.types import (
     RealtimeCapabilities as GeneratedRealtimeCapabilities,
     RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
     RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
+    RealtimeProtocolVersion as GeneratedRealtimeProtocolVersion,
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
+
+REALTIME_PROTOCOL_VERSION: GeneratedRealtimeProtocolVersion = "2"
 
 
 def test_contract_version():
@@ -109,8 +113,8 @@ def test_generated_realtime_types_include_open_info_shape():
         open_token="token-1",
         expires_at="2026-04-15T12:00:00Z",
         target={"type": "session_target", "session_id": "session-1"},
-        supported_protocol_versions=["1"],
-        default_protocol_version="1",
+        supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
+        default_protocol_version=REALTIME_PROTOCOL_VERSION,
         capabilities=GeneratedRealtimeCapabilities(
             input_kinds=["text", "audio"],
             output_kinds=["text", "audio"],
@@ -123,20 +127,20 @@ def test_generated_realtime_types_include_open_info_shape():
     )
 
     assert info.ws_url.endswith("/realtime/ws")
-    assert info.default_protocol_version == "1"
-    assert info.supported_protocol_versions == ["1"]
+    assert info.default_protocol_version == REALTIME_PROTOCOL_VERSION
+    assert info.supported_protocol_versions == [REALTIME_PROTOCOL_VERSION]
     assert info.capabilities.turning_modes == [
         "provider_managed",
         "explicit_commit",
     ]
 
     frame = GeneratedRealtimeChannelOpenFrame(
-        protocol_version="1",
+        protocol_version=REALTIME_PROTOCOL_VERSION,
         open_token="token-1",
         role="primary",
         turning_mode="provider_managed",
     )
-    assert frame.protocol_version == "1"
+    assert frame.protocol_version == REALTIME_PROTOCOL_VERSION
 
 
 def test_generated_runtime_state_result_carries_state():
@@ -218,6 +222,7 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 def test_generated_mob_spawn_many_preserves_nested_contract_types():
     from meerkat.generated.types import (
         MobSpawnManyFailedResult as GeneratedMobSpawnManyFailedResult,
+        MobSpawnManyFailureCause as GeneratedMobSpawnManyFailureCause,
         MobSpawnManyParams as GeneratedMobSpawnManyParams,
         MobSpawnManyResult as GeneratedMobSpawnManyResult,
         MobSpawnManyResultEntry as GeneratedMobSpawnManyResultEntry,
@@ -245,6 +250,10 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
         GeneratedMobSpawnManySpawnedResult,
         GeneratedMobSpawnManyFailedResult,
     )
+    failure_hints = get_type_hints(GeneratedMobSpawnManyFailedResult)
+    assert get_origin(failure_hints["cause"]) is Literal
+    assert "profile_not_found" in get_args(failure_hints["cause"])
+    assert GeneratedMobSpawnManyFailureCause == failure_hints["cause"]
 
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
@@ -263,10 +272,14 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     )
     failure = GeneratedMobSpawnManyResultEntry(
         status="failed",
-        result=GeneratedMobSpawnManyFailedResult(message="profile missing"),
+        result=GeneratedMobSpawnManyFailedResult(
+            cause="profile_not_found",
+            message="profile missing",
+        ),
     )
     result = GeneratedMobSpawnManyResult(results=[entry, failure])
     assert result.results[0].result.member_ref == "opaque-member-ref"
+    assert result.results[1].result.cause == "profile_not_found"
     assert result.results[1].result.message == "profile missing"
 
 
@@ -301,7 +314,10 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
                 },
                 {
                     "status": "failed",
-                    "result": {"message": "profile missing"},
+                    "result": {
+                        "cause": "profile_not_found",
+                        "message": "profile missing",
+                    },
                 },
             ]
         }
@@ -317,6 +333,7 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     assert [entry.status for entry in result.results] == ["spawned", "failed"]
     assert result.results[0].result.agent_identity == "worker-1"
     assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
+    assert result.results[1].result.cause == "profile_not_found"
     assert result.results[1].result.message == "profile missing"
 
 
@@ -334,6 +351,15 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
             ]
         },
         {"results": [{"status": "spawned", "result": {"agent_identity": "worker-1"}}]},
+        {"results": [{"status": "failed", "result": {"message": "profile missing"}}]},
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {"cause": "future_failure", "message": "profile missing"},
+                }
+            ]
+        },
         {"results": [{"status": "failed", "result": {"message": ""}}]},
         {
             "results": [
@@ -351,7 +377,7 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
             "results": [
                 {
                     "status": "failed",
-                    "result": {"message": "profile missing"},
+                    "result": {"cause": "profile_not_found", "message": "profile missing"},
                     "error": "legacy profile missing",
                 }
             ]
@@ -373,6 +399,7 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
                 {
                     "status": "failed",
                     "result": {
+                        "cause": "profile_not_found",
                         "message": "profile missing",
                         "error": "legacy profile missing",
                     },
@@ -920,8 +947,11 @@ async def test_peer_response_terminal_uses_canonical_peer_id_and_correlation() -
 def test_live_mcp_contract_types_exported():
     add = McpAddParams(
         session_id="s1",
-        server_config={"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]},
-        server_name="filesystem",
+        server_config={
+            "name": "filesystem",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        },
         persisted=False,
     )
     response = McpLiveOpResponse(
@@ -931,7 +961,7 @@ def test_live_mcp_contract_types_exported():
         persisted=False,
         applied_at_turn=5,
     )
-    assert add.server_name == "filesystem"
+    assert add.server_config["name"] == "filesystem"
     assert response.applied_at_turn == 5
 
 
@@ -1073,6 +1103,36 @@ def test_parse_attributed_mob_event_omits_source_fence_token():
 
     assert event.source == "writer"
     assert not hasattr(event, "source_fence_token")
+
+
+def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
+    event = MeerkatClient._parse_agent_event_envelope(
+        {
+            "source": {
+                "type": "session",
+                "session_id": "00000000-0000-4000-8000-000000000001",
+            },
+            "source_id": "session:not-a-uuid",
+            "payload": {"type": "text_delta", "delta": "hi"},
+        }
+    )
+
+    assert event.source is not None
+    assert event.source.type == "session"
+    assert event.source.session_id == "00000000-0000-4000-8000-000000000001"
+    assert event.source_id == "session:not-a-uuid"
+
+
+def test_parse_event_envelope_does_not_classify_legacy_session_string():
+    event = MeerkatClient._parse_agent_event_envelope(
+        {
+            "source_id": "session:00000000-0000-4000-8000-000000000001",
+            "payload": {"type": "text_delta", "delta": "hi"},
+        }
+    )
+
+    assert event.source is None
+    assert event.source_id == "session:00000000-0000-4000-8000-000000000001"
 
 
 def test_parse_tool_config_changed():
@@ -1510,6 +1570,43 @@ def test_parse_retrying():
     assert event.delay_ms == 2000
 
 
+def test_parse_skills_resolved_with_typed_skill_identities():
+    source_uuid = "00000000-0000-4b11-8111-000000000001"
+    raw = {
+        "type": "skills_resolved",
+        "skills": [{"source_uuid": source_uuid, "skill_name": "email-extractor"}],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillsResolved)
+    assert event.skills == [
+        SkillKey(source_uuid=source_uuid, skill_name="email-extractor"),
+    ]
+    assert event.injection_bytes == 128
+
+
+def test_parse_skills_resolved_rejects_legacy_string_only_payload():
+    raw = {
+        "type": "skills_resolved",
+        "skills": ["legacy/ref"],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+
+
+def test_parse_skills_resolved_rejects_missing_typed_identity_fields():
+    raw = {
+        "type": "skills_resolved",
+        "skills": [{"source_uuid": "00000000-0000-4b11-8111-000000000001"}],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+
+
 def test_parse_skill_resolution_failed_with_typed_reason():
     source_uuid = "00000000-0000-4b11-8111-000000000001"
     raw = {
@@ -1561,6 +1658,35 @@ def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
+    assert event.reason is None
+
+
+def test_parse_skill_resolution_failed_preserves_unknown_status_as_typed_unknown():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": "future_status", "message": "future details"},
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key is None
+    assert isinstance(event.reason, SkillResolutionFailureReason)
+    assert event.reason.reason_type == "unknown"
+    assert event.reason.message == "future details"
+    assert event.reason.raw_reason_type == "future_status"
+
+
+def test_parse_skill_resolution_failed_does_not_fabricate_empty_keyed_reason():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": "not_found"},
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key is None
     assert event.reason is None
 
 
@@ -1814,13 +1940,14 @@ async def test_client_mcp_methods_send_expected_rpc_calls():
             "operation": method.split("/")[1],
             "status": "staged",
             "persisted": params.get("persisted", False),
-            "server_name": params.get("server_name"),
+            "server_name": params.get("server_name")
+            or params.get("server_config", {}).get("name"),
             "applied_at_turn": None,
         }
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    add = await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+    add = await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
     remove = await client.mcp_remove("s1", "filesystem", persisted=True)
     reload = await client.mcp_reload("s1", server_name="filesystem")
 
@@ -1840,7 +1967,7 @@ async def test_client_mcp_methods_propagate_request_failures():
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="boom"):
-        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+        await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
     with pytest.raises(MeerkatError, match="boom"):
         await client.mcp_remove("s1", "filesystem")
     with pytest.raises(MeerkatError, match="boom"):
@@ -1862,7 +1989,7 @@ async def test_client_mcp_methods_reject_malformed_response():
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="persisted must be boolean"):
-        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+        await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
 
 
 @pytest.mark.asyncio
@@ -2307,8 +2434,8 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
                 "open_token": "token-1",
                 "expires_at": "2026-04-15T12:00:00Z",
                 "target": params["target"],
-                "supported_protocol_versions": ["1"],
-                "default_protocol_version": "1",
+                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
+                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
                 "capabilities": {
                     "input_kinds": ["text", "audio"],
                     "output_kinds": ["text", "audio"],
@@ -2353,7 +2480,7 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
     scoped_status = await session_channel.status()
     scoped_capabilities = await session_channel.capabilities()
 
-    assert open_info.default_protocol_version == "1"
+    assert open_info.default_protocol_version == REALTIME_PROTOCOL_VERSION
     assert status.status["state"] == "opening"
     assert capabilities.capabilities["turning_modes"] == ["provider_managed"]
     assert scoped_open_info.open_token == "token-1"
@@ -2390,8 +2517,8 @@ async def test_realtime_channel_mob_member_builds_mob_member_wire_target() -> No
                 "open_token": "token-mob",
                 "expires_at": "2026-04-15T12:00:00Z",
                 "target": params["target"],
-                "supported_protocol_versions": ["1"],
-                "default_protocol_version": "1",
+                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
+                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
                 "capabilities": {
                     "input_kinds": ["text"],
                     "output_kinds": ["text"],

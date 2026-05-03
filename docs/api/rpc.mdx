@@ -934,9 +934,8 @@ Stage a live MCP server addition for a running session. The server is connected 
   "method": "mcp/add",
   "params": {
     "session_id": "01936f8a-...",
-    "server_name": "my-tools",
     "server_config": {
-      "transport": "stdio",
+      "name": "my-tools",
       "command": "npx",
       "args": ["-y", "@my/mcp-server"]
     },
@@ -951,9 +950,9 @@ Stage a live MCP server addition for a running session. The server is connected 
   "id": 14,
   "result": {
     "session_id": "01936f8a-...",
-    "operation": "Add",
+    "operation": "add",
     "server_name": "my-tools",
-    "status": "Staged",
+    "status": "staged",
     "persisted": false,
     "applied_at_turn": null
   }
@@ -965,12 +964,8 @@ Stage a live MCP server addition for a running session. The server is connected 
   Session ID to add the server to.
 </ParamField>
 
-<ParamField body="server_name" type="string" required>
-  Name for the MCP server.
-</ParamField>
-
 <ParamField body="server_config" type="object" required>
-  MCP server configuration (transport, command, args, url, etc.).
+  Typed MCP server configuration. Include `name` with either stdio fields (`command`, optional `args`/`env`) or HTTP fields (`url`, optional `headers`/`transport`).
 </ParamField>
 
 <ParamField body="persisted" type="bool" default="false">
@@ -1001,9 +996,9 @@ Stage removal of an MCP server from a running session. Active tool calls drain b
   "id": 15,
   "result": {
     "session_id": "01936f8a-...",
-    "operation": "Remove",
+    "operation": "remove",
     "server_name": "my-tools",
-    "status": "Staged",
+    "status": "staged",
     "persisted": false,
     "applied_at_turn": null
   }
@@ -1046,9 +1041,9 @@ Reload one or all MCP servers for a running session. Useful after config changes
   "id": 16,
   "result": {
     "session_id": "01936f8a-...",
-    "operation": "Reload",
+    "operation": "reload",
     "server_name": "my-tools",
-    "status": "Staged",
+    "status": "staged",
     "persisted": false,
     "applied_at_turn": null
   }

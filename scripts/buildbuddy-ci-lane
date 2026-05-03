@@ -123,6 +123,7 @@ fi
 
 run_id="${GITHUB_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 attempt="${GITHUB_RUN_ATTEMPT:-0}"
+bazel_jobs="${MEERKAT_BUILDBUDDY_CI_JOBS:-64}"
 log_root="${MEERKAT_BUILDBUDDY_LOG_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-ci-lane-logs/${run_id}-${attempt}}"
 lane_log_root="${log_root}/${lane}"
 summary_path="${lane_log_root}/summary.tsv"
@@ -202,101 +203,101 @@ run_bazel_lane() {
 
 case "${lane}" in
   native-build-clippy)
-    run_bazel_lane workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
+    run_bazel_lane workspace-build-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
     ;;
   native-unit-tests)
-    run_bazel_lane workspace-unit-rbe --jobs=64
+    run_bazel_lane workspace-unit-rbe --jobs="${bazel_jobs}"
     ;;
   native-integration-fast)
-    run_bazel_lane workspace-integration-fast-rbe --jobs=64
+    run_bazel_lane workspace-integration-fast-rbe --jobs="${bazel_jobs}"
     ;;
   native-e2e-system)
-    run_bazel_lane e2e-system-rbe --jobs=64
+    run_bazel_lane e2e-system-rbe --jobs="${bazel_jobs}"
     ;;
   fmt-lint)
-    run_bazel_lane --name fmt-static fmt-static-rbe --jobs=64
-    run_bazel_lane --name native-build-clippy workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
-    run_bazel_lane --name feature-clippy feature-clippy-rbe --jobs=64 --color=no --curses=no
-    run_bazel_lane --name unused-deps security-audit-rbe --jobs=64
+    run_bazel_lane --name fmt-static fmt-static-rbe --jobs="${bazel_jobs}"
+    run_bazel_lane --name native-build-clippy workspace-build-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
+    run_bazel_lane --name feature-clippy feature-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
+    run_bazel_lane --name unused-deps security-audit-rbe --jobs="${bazel_jobs}"
     ;;
   fmt-static)
-    run_bazel_lane fmt-static-rbe --jobs=64
+    run_bazel_lane fmt-static-rbe --jobs="${bazel_jobs}"
     ;;
   cargo-all-features-clippy)
-    run_bazel_lane workspace-build-clippy-rbe --jobs=64 --color=no --curses=no
+    run_bazel_lane workspace-build-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
     ;;
   feature-clippy)
-    run_bazel_lane feature-clippy-rbe --jobs=64 --color=no --curses=no
+    run_bazel_lane feature-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
     ;;
   unused-deps)
-    run_bazel_lane security-audit-rbe --jobs=64
+    run_bazel_lane security-audit-rbe --jobs="${bazel_jobs}"
     ;;
   sdk-suites)
-    run_bazel_lane sdk-suites-rbe --jobs=64
+    run_bazel_lane sdk-suites-rbe --jobs="${bazel_jobs}"
     ;;
   rust-release-packaging)
     echo "rust-release-packaging is release-preflight/manual-only; use Cargo release-preflight for package archive verification" >&2
     exit 2
     ;;
   machine-authority)
-    run_bazel_lane machine-authority-rbe --jobs=64
+    run_bazel_lane machine-authority-rbe --jobs="${bazel_jobs}"
     ;;
   rmat-audit)
-    run_bazel_lane rmat-audit-rbe --jobs=64
+    run_bazel_lane rmat-audit-rbe --jobs="${bazel_jobs}"
     ;;
   seam-inventory)
-    run_bazel_lane seam-inventory-rbe --jobs=64
+    run_bazel_lane seam-inventory-rbe --jobs="${bazel_jobs}"
     ;;
   wasm-contract)
-    run_bazel_lane wasm-contract-rbe --jobs=64
+    run_bazel_lane wasm-contract-rbe --jobs="${bazel_jobs}"
     ;;
   wasm-contract-tests)
-    run_bazel_lane wasm-contract-rbe --jobs=64
+    run_bazel_lane wasm-contract-rbe --jobs="${bazel_jobs}"
     ;;
   test-unit)
-    run_bazel_lane workspace-unit-rbe --jobs=64
+    run_bazel_lane workspace-unit-rbe --jobs="${bazel_jobs}"
     ;;
   integration-fast)
-    run_bazel_lane workspace-integration-fast-rbe --jobs=64
+    run_bazel_lane workspace-integration-fast-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-fast)
-    run_bazel_lane e2e-fast-rbe --jobs=64
+    run_bazel_lane e2e-fast-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-system)
-    run_bazel_lane e2e-system-rbe --jobs=64
+    run_bazel_lane e2e-system-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-live)
-    run_bazel_lane e2e-live-rbe --jobs=64
+    run_bazel_lane e2e-live-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-smoke)
-    run_bazel_lane e2e-smoke-rbe --jobs=64
+    run_bazel_lane e2e-smoke-rbe --jobs="${bazel_jobs}"
     ;;
   minimal-feature-builds)
-    run_bazel_lane minimal-feature-builds-rbe --jobs=64
+    run_bazel_lane minimal-feature-builds-rbe --jobs="${bazel_jobs}"
     ;;
   test-minimal)
-    run_bazel_lane minimal-feature-builds-rbe --jobs=64
+    run_bazel_lane minimal-feature-builds-rbe --jobs="${bazel_jobs}"
     ;;
   feature-matrix-lib)
-    run_bazel_lane feature-matrix-lib-rbe --jobs=64
+    run_bazel_lane feature-matrix-lib-rbe --jobs="${bazel_jobs}"
     ;;
   test-feature-matrix-lib)
-    run_bazel_lane feature-matrix-lib-rbe --jobs=64
+    run_bazel_lane feature-matrix-lib-rbe --jobs="${bazel_jobs}"
     ;;
   feature-matrix-surface)
-    run_bazel_lane feature-matrix-surface-rbe --jobs=64
+    run_bazel_lane feature-matrix-surface-rbe --jobs="${bazel_jobs}"
     ;;
   test-feature-matrix-surface-checks)
-    run_bazel_lane feature-matrix-surface-rbe --jobs=64
+    run_bazel_lane feature-matrix-surface-rbe --jobs="${bazel_jobs}"
     ;;
   wasm-check)
-    run_bazel_lane wasm-check-rbe --jobs=64
+    run_bazel_lane wasm-check-rbe --jobs="${bazel_jobs}"
     ;;
   security-audit)
-    run_bazel_lane security-audit-rbe --jobs=64
+    run_bazel_lane security-audit-rbe --jobs="${bazel_jobs}"
     ;;
   audit)
-    run_bazel_lane security-audit-rbe --jobs=64
+    run_bazel_lane security-audit-rbe --jobs="${bazel_jobs}"
     ;;
   *)
     echo "unknown BuildBuddy CI lane: ${lane}" >&2

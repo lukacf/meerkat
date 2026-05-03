@@ -6,6 +6,7 @@ use crate::error::{
     AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
 };
 use crate::hooks::{HookId, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::interaction::InteractionId;
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
@@ -17,10 +18,93 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 
+/// Canonical typed source identity for streamed agent events.
+///
+/// `source_id` on [`EventEnvelope`] is a compatibility/display projection.
+/// Callers that need source semantics must read this typed identity instead of
+/// parsing legacy strings such as `session:{uuid}`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventSourceIdentity {
+    Session { session_id: SessionId },
+    Runtime { runtime_id: String },
+    Interaction { interaction_id: InteractionId },
+    Callback,
+    External { source_id: String },
+}
+
+impl EventSourceIdentity {
+    #[must_use]
+    pub fn session(session_id: SessionId) -> Self {
+        Self::Session { session_id }
+    }
+
+    #[must_use]
+    pub fn runtime(runtime_id: impl Into<String>) -> Self {
+        Self::Runtime {
+            runtime_id: runtime_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn interaction(interaction_id: InteractionId) -> Self {
+        Self::Interaction { interaction_id }
+    }
+
+    #[must_use]
+    pub fn callback() -> Self {
+        Self::Callback
+    }
+
+    #[must_use]
+    pub fn external(source_id: impl Into<String>) -> Self {
+        Self::External {
+            source_id: source_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::Session { session_id } => Some(session_id),
+            Self::Runtime { .. }
+            | Self::Interaction { .. }
+            | Self::Callback
+            | Self::External { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn legacy_source_id(&self) -> String {
+        match self {
+            Self::Session { session_id } => format!("session:{session_id}"),
+            Self::Runtime { runtime_id } => format!("runtime:{runtime_id}"),
+            Self::Interaction { interaction_id } => format!("interaction:{interaction_id}"),
+            Self::Callback => "callback".to_string(),
+            Self::External { source_id } => source_id.clone(),
+        }
+    }
+
+    fn canonical_sort_key(&self) -> String {
+        match self {
+            Self::Session { session_id } => format!("session:{session_id}"),
+            Self::Runtime { runtime_id } => format!("runtime:{runtime_id}"),
+            Self::Interaction { interaction_id } => format!("interaction:{interaction_id}"),
+            Self::Callback => "callback".to_string(),
+            Self::External { source_id } => format!("external:{source_id}"),
+        }
+    }
+}
+
 /// Canonical event envelope for stream transport and ordering.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventEnvelope<T> {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub event_id: uuid::Uuid,
+    pub source: EventSourceIdentity,
+    /// Legacy display/compat projection. Do not parse for source semantics.
     pub source_id: String,
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,18 +686,56 @@ impl From<&SkillError> for SkillResolutionFailureReason {
 impl<T> EventEnvelope<T> {
     /// Create a new envelope with a UUIDv7 id and current wall-clock timestamp.
     pub fn new(source_id: impl Into<String>, seq: u64, mob_id: Option<String>, payload: T) -> Self {
+        Self::new_with_source(
+            EventSourceIdentity::external(source_id),
+            seq,
+            mob_id,
+            payload,
+        )
+    }
+
+    /// Create a new envelope from a typed source identity.
+    pub fn new_with_source(
+        source: EventSourceIdentity,
+        seq: u64,
+        mob_id: Option<String>,
+        payload: T,
+    ) -> Self {
         let timestamp_ms = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             Ok(duration) => duration.as_millis() as u64,
             Err(_) => u64::MAX,
         };
+        let source_id = source.legacy_source_id();
         Self {
             event_id: uuid::Uuid::now_v7(),
-            source_id: source_id.into(),
+            source,
+            source_id,
             seq,
             mob_id,
             timestamp_ms,
             payload,
         }
+    }
+
+    /// Create a new session-scoped envelope.
+    pub fn new_session(
+        session_id: SessionId,
+        seq: u64,
+        mob_id: Option<String>,
+        payload: T,
+    ) -> Self {
+        Self::new_with_source(
+            EventSourceIdentity::session(session_id),
+            seq,
+            mob_id,
+            payload,
+        )
+    }
+
+    /// Typed session source, when this event is session-scoped.
+    #[must_use]
+    pub fn source_session_id(&self) -> Option<&SessionId> {
+        self.source.session_id()
     }
 }
 
@@ -663,7 +785,11 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
 pub fn compare_event_envelopes<T>(a: &EventEnvelope<T>, b: &EventEnvelope<T>) -> Ordering {
     a.timestamp_ms
         .cmp(&b.timestamp_ms)
-        .then_with(|| a.source_id.cmp(&b.source_id))
+        .then_with(|| {
+            a.source
+                .canonical_sort_key()
+                .cmp(&b.source.canonical_sort_key())
+        })
         .then_with(|| a.seq.cmp(&b.seq))
         .then_with(|| a.event_id.cmp(&b.event_id))
 }
@@ -2728,8 +2854,9 @@ mod tests {
 
     #[test]
     fn test_event_envelope_roundtrip() {
-        let envelope = EventEnvelope::new(
-            "session:sid_test",
+        let session_id = SessionId::new();
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
             7,
             Some("mob_1".to_string()),
             AgentEvent::TextDelta {
@@ -2739,7 +2866,8 @@ mod tests {
         let value = serde_json::to_value(&envelope).expect("serialize envelope");
         let parsed: EventEnvelope<AgentEvent> =
             serde_json::from_value(value).expect("deserialize envelope");
-        assert_eq!(parsed.source_id, "session:sid_test");
+        assert_eq!(parsed.source_session_id(), Some(&session_id));
+        assert_eq!(parsed.source_id, format!("session:{session_id}"));
         assert_eq!(parsed.seq, 7);
         assert_eq!(parsed.mob_id.as_deref(), Some("mob_1"));
         assert!(parsed.timestamp_ms > 0);
@@ -2747,6 +2875,66 @@ mod tests {
             parsed.payload,
             AgentEvent::TextDelta { delta } if delta == "hello"
         ));
+    }
+
+    #[test]
+    fn event_envelope_requires_typed_source_identity() {
+        let value = serde_json::json!({
+            "event_id": uuid::Uuid::now_v7(),
+            "source_id": "session:00000000-0000-4000-8000-000000000001",
+            "seq": 7,
+            "timestamp_ms": 1,
+            "payload": {
+                "type": "text_delta",
+                "delta": "hello",
+            },
+        });
+
+        let result = serde_json::from_value::<EventEnvelope<AgentEvent>>(value);
+
+        assert!(
+            result.is_err(),
+            "source_id alone must not deserialize as canonical source identity"
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_source_id_does_not_override_typed_source() {
+        let session_id = SessionId::new();
+        let value = serde_json::json!({
+            "event_id": uuid::Uuid::now_v7(),
+            "source": {
+                "type": "session",
+                "session_id": session_id.clone(),
+            },
+            "source_id": "session:not-a-uuid",
+            "seq": 7,
+            "timestamp_ms": 1,
+            "payload": {
+                "type": "text_delta",
+                "delta": "hello",
+            },
+        });
+
+        let parsed: EventEnvelope<AgentEvent> =
+            serde_json::from_value(value).expect("typed source should deserialize");
+
+        assert_eq!(parsed.source_session_id(), Some(&session_id));
+        assert_eq!(parsed.source_id, "session:not-a-uuid");
+    }
+
+    #[test]
+    fn legacy_session_source_id_string_does_not_classify_envelope() {
+        let session_id = SessionId::new();
+        let envelope = EventEnvelope::new(
+            format!("session:{session_id}"),
+            1,
+            None,
+            AgentEvent::TurnStarted { turn_number: 1 },
+        );
+
+        assert_eq!(envelope.source_session_id(), None);
+        assert_eq!(envelope.source_id, format!("session:{session_id}"));
     }
 
     #[test]

@@ -5392,8 +5392,8 @@ args = [{}]
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
         let session_id = SessionId::new();
-        let envelope = EventEnvelope::new(
-            session_id.to_string(),
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
             1,
             None,
             AgentEvent::TextDelta {
@@ -5424,8 +5424,8 @@ args = [{}]
         let sink = NotificationSink::new(tx);
         let session_id = SessionId::new();
         let stream_id = Uuid::new_v4();
-        let envelope = EventEnvelope::new(
-            session_id.to_string(),
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
             1,
             None,
             AgentEvent::TextDelta {

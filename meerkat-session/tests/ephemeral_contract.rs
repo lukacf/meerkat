@@ -989,6 +989,8 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         .await
         .expect("timed out waiting for session event")
         .expect("stream closed unexpectedly");
+    assert_eq!(first.source_session_id(), Some(&sid));
+    assert_eq!(first.source_id, format!("session:{sid}"));
     assert!(
         matches!(
             first.payload,

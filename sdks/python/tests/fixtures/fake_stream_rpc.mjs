@@ -16,7 +16,11 @@ function streamEvent(streamId, eventId, delta, seq) {
       stream_id: streamId,
       event: {
         event_id: eventId,
-        source_id: "fake-session",
+        source: {
+          type: "session",
+          session_id: "00000000-0000-4000-8000-000000000001",
+        },
+        source_id: "session:00000000-0000-4000-8000-000000000001",
         seq,
         timestamp_ms: seq,
         payload: {

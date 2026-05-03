@@ -3172,8 +3172,8 @@ capabilities = [{capability_values}]
     fn poll_subscription_surfaces_lagged_signal() {
         let (tx, rx) = crate::tokio::sync::broadcast::channel(1);
         let session_id = meerkat_core::SessionId::new();
-        tx.send(meerkat_core::EventEnvelope::new(
-            session_id.to_string(),
+        tx.send(meerkat_core::EventEnvelope::new_session(
+            session_id.clone(),
             1,
             None,
             meerkat_core::AgentEvent::TextDelta {
@@ -3181,8 +3181,8 @@ capabilities = [{capability_values}]
             },
         ))
         .unwrap_or(0);
-        tx.send(meerkat_core::EventEnvelope::new(
-            session_id.to_string(),
+        tx.send(meerkat_core::EventEnvelope::new_session(
+            session_id.clone(),
             2,
             None,
             meerkat_core::AgentEvent::TextDelta {

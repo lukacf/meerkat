@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::error::AgentError;
-use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
@@ -2699,12 +2699,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSes
 /// Long-lived task that exclusively owns a session agent and processes commands.
 fn stamp_event_envelope(
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
     event: AgentEvent,
 ) -> EventEnvelope<AgentEvent> {
     *next_seq += 1;
     // mob_id is optional and only set when a surface/runtime has mob context.
-    EventEnvelope::new(source_id, *next_seq, None, event)
+    EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
 fn render_runtime_system_context_event_prompt(
@@ -2742,7 +2742,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
     appends: &[PendingSystemContextAppend],
     control: &SessionTaskControl,
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
 ) {
     agent.apply_runtime_system_context(appends);
     let snap = agent.snapshot();
@@ -2757,7 +2757,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
         let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
                 prompt: ContentInput::Text(prompt),
@@ -2767,7 +2767,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
 
         let completed = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
@@ -2783,13 +2783,13 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
     appends: &[PendingSystemContextAppend],
     control: &SessionTaskControl,
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
 ) {
     if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
         let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
                 prompt: ContentInput::Text(prompt),
@@ -2799,7 +2799,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
 
         let completed = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
@@ -3089,7 +3089,7 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
-    let source_id = format!("session:{}", agent.session_id());
+    let source = EventSourceIdentity::session(agent.session_id());
 
     loop {
         let Some(cmd) = commands.recv().await else {
@@ -3339,7 +3339,7 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                                let envelope = stamp_event_envelope(&mut next_seq, &source, event);
                                 let _ = control.session_event_tx.send(envelope.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
@@ -3358,7 +3358,7 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                        let envelope = stamp_event_envelope(&mut next_seq, &source, event);
                         let _ = control.session_event_tx.send(envelope.clone());
                         if event_stream_open
                             && let Some(ref tx) = event_tx
@@ -3455,7 +3455,7 @@ async fn session_task<A: SessionAgent>(
                     &appends,
                     &control,
                     &mut next_seq,
-                    &source_id,
+                    &source,
                 );
                 let _ = reply_tx.send(());
             }
@@ -3465,7 +3465,7 @@ async fn session_task<A: SessionAgent>(
                     &appends,
                     &control,
                     &mut next_seq,
-                    &source_id,
+                    &source,
                 );
                 let _ = reply_tx.send(());
             }
@@ -3512,7 +3512,7 @@ async fn session_task<A: SessionAgent>(
                     if !text_content.is_empty() {
                         let envelope = stamp_event_envelope(
                             &mut next_seq,
-                            &source_id,
+                            &source,
                             AgentEvent::TextComplete {
                                 content: text_content,
                             },
@@ -3521,7 +3521,7 @@ async fn session_task<A: SessionAgent>(
                     }
                     let envelope = stamp_event_envelope(
                         &mut next_seq,
-                        &source_id,
+                        &source,
                         AgentEvent::TurnCompleted {
                             stop_reason,
                             usage: usage_for_event,

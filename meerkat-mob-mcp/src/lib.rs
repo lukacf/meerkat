@@ -1789,10 +1789,9 @@ impl SessionService for LocalSessionService {
             current
         };
         if let Some(event_tx) = event_tx {
-            let source_id = id.to_string();
             let mut seq = 1u64;
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
@@ -1800,16 +1799,16 @@ impl SessionService for LocalSessionService {
                     prompt: effective_prompt.clone(),
                 },
             ));
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::TurnStarted { turn_number: 1 },
             ));
             let usage = Usage::default();
             let turn_usage = usage.clone();
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id.clone(),
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::TurnCompleted {
@@ -1817,8 +1816,8 @@ impl SessionService for LocalSessionService {
                     usage: turn_usage,
                 },
             ));
-            let _ = event_tx.send(EventEnvelope::new(
-                source_id,
+            let _ = event_tx.send(EventEnvelope::new_session(
+                id.clone(),
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunCompleted {

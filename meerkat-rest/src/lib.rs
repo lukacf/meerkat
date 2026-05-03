@@ -5522,10 +5522,10 @@ async fn apply_mcp_boundary(
     // Emit events for queued actions from the background drain task.
     if !queued_actions.is_empty() {
         let drained = std::mem::take(&mut queued_actions);
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             drained,
@@ -5549,10 +5549,10 @@ async fn apply_mcp_boundary(
 
     queued_actions.extend(result.delta.lifecycle_actions);
     if !queued_actions.is_empty() {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             queued_actions,

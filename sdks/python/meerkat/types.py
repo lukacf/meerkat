@@ -481,10 +481,22 @@ class SessionHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class EventSourceIdentity:
+    """Typed source identity for session or runtime event semantics."""
+
+    type: str = ""
+    session_id: str | None = None
+    runtime_id: str | None = None
+    interaction_id: str | None = None
+    source_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EventEnvelope:
     """Session or agent event with delivery metadata."""
 
     event_id: str = ""
+    source: EventSourceIdentity | None = None
     source_id: str = ""
     seq: int = 0
     timestamp_ms: int = 0

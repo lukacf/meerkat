@@ -101,6 +101,7 @@ from .types import (
     ScheduleToolsResult,
     ScheduleToolCall,
     EventEnvelope,
+    EventSourceIdentity,
     McpLiveOpResponse,
     RunResult,
     SchemaWarning,
@@ -2028,11 +2029,49 @@ class MeerkatClient:
         payload = raw.get("payload", {})
         return EventEnvelope(
             event_id=str(raw.get("event_id", "")),
+            source=MeerkatClient._parse_event_source_identity(raw.get("source")),
             source_id=str(raw.get("source_id", "")),
             seq=int(raw.get("seq", 0)),
             timestamp_ms=int(raw.get("timestamp_ms", 0)),
             payload=parse_event(payload if isinstance(payload, dict) else {}),
         )
+
+    @staticmethod
+    def _parse_event_source_identity(raw: Any) -> EventSourceIdentity | None:
+        if not isinstance(raw, dict):
+            return None
+        source_type = raw.get("type")
+        if source_type == "session":
+            session_id = raw.get("session_id", raw.get("sessionId"))
+            return (
+                EventSourceIdentity(type="session", session_id=session_id)
+                if isinstance(session_id, str)
+                else None
+            )
+        if source_type == "runtime":
+            runtime_id = raw.get("runtime_id", raw.get("runtimeId"))
+            return (
+                EventSourceIdentity(type="runtime", runtime_id=runtime_id)
+                if isinstance(runtime_id, str)
+                else None
+            )
+        if source_type == "interaction":
+            interaction_id = raw.get("interaction_id", raw.get("interactionId"))
+            return (
+                EventSourceIdentity(type="interaction", interaction_id=interaction_id)
+                if isinstance(interaction_id, str)
+                else None
+            )
+        if source_type == "callback":
+            return EventSourceIdentity(type="callback")
+        if source_type == "external":
+            source_id = raw.get("source_id", raw.get("sourceId"))
+            return (
+                EventSourceIdentity(type="external", source_id=source_id)
+                if isinstance(source_id, str)
+                else None
+            )
+        return None
 
     @staticmethod
     def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:

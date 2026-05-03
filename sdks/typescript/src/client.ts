@@ -80,6 +80,7 @@ import type {
   ContentInput,
   ContentBlock,
   CreateScheduleRequest,
+  EventSourceIdentity,
   ModelsCatalog,
   MobEventsOptions,
   MobEventsResult,
@@ -1842,6 +1843,7 @@ export class MeerkatClient {
 
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
     const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
+    const source = MeerkatClient.parseEventSourceIdentity(raw.source);
     const sourceId = MeerkatClient.parseOptionalString(raw.source_id ?? raw.sourceId);
     const seq = MeerkatClient.parseOptionalNumber(raw.seq);
     const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
@@ -1851,11 +1853,44 @@ export class MeerkatClient {
       : undefined;
     return {
       ...(eventId != null ? { eventId } : {}),
+      ...(source != null ? { source } : {}),
       ...(sourceId != null ? { sourceId } : {}),
       ...(seq != null ? { seq } : {}),
       ...(timestampMs != null ? { timestampMs } : {}),
       ...(payload ? { payload } : {}),
     };
+  }
+
+  private static parseEventSourceIdentity(raw: unknown): EventSourceIdentity | undefined {
+    if (!raw || typeof raw !== "object") {
+      return undefined;
+    }
+    const record = raw as Record<string, unknown>;
+    const type = MeerkatClient.parseOptionalString(record.type);
+    switch (type) {
+      case "session": {
+        const sessionId = MeerkatClient.parseOptionalString(record.session_id ?? record.sessionId);
+        return sessionId != null ? { type: "session", sessionId } : undefined;
+      }
+      case "runtime": {
+        const runtimeId = MeerkatClient.parseOptionalString(record.runtime_id ?? record.runtimeId);
+        return runtimeId != null ? { type: "runtime", runtimeId } : undefined;
+      }
+      case "interaction": {
+        const interactionId = MeerkatClient.parseOptionalString(
+          record.interaction_id ?? record.interactionId,
+        );
+        return interactionId != null ? { type: "interaction", interactionId } : undefined;
+      }
+      case "callback":
+        return { type: "callback" };
+      case "external": {
+        const sourceId = MeerkatClient.parseOptionalString(record.source_id ?? record.sourceId);
+        return sourceId != null ? { type: "external", sourceId } : undefined;
+      }
+      default:
+        return undefined;
+    }
   }
 
   private static parseOptionalString(raw: unknown): string | undefined {

@@ -24,6 +24,7 @@ FIXTURE_DIR = Path(
         REPO_ROOT / "scripts" / "fixtures" / "dogma_cleanup_gate",
     )
 ).resolve()
+WORKFLOW_EXEC_ROOT = Path(os.environ.get("DOGMA_GATE_WORKFLOW_EXEC_ROOT", REPO_ROOT)).resolve()
 
 
 def run_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1097,6 +1098,11 @@ class DogmaCleanupGateTest(unittest.TestCase):
                 "assert True\n# changed\n",
             ),
             ("scripts/fixtures/dogma_cleanup_gate/passing_packet.md", "old\n", "new\n"),
+            (
+                ".github/workflows/dogma-cleanup-immutable-gate.yml",
+                "name: immutable\n",
+                "name: noop\n",
+            ),
         ]
         for rel_path, base_text, pr_text in cases:
             with self.subTest(rel_path=rel_path):
@@ -1193,7 +1199,7 @@ class DogmaCleanupGateTest(unittest.TestCase):
         self.assertIn('python3 "$pr_test_script" -v', workflow)
         self.assertNotIn("make dogma-cleanup-ci-gate", workflow)
 
-    def test_pull_request_target_gate_uses_base_checker_without_pr_code_execution(self) -> None:
+    def test_pull_request_target_gate_uses_base_checker_and_base_owned_oracle(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "dogma-cleanup-immutable-gate.yml"
         ).read_text(encoding="utf-8")
@@ -1208,9 +1214,160 @@ class DogmaCleanupGateTest(unittest.TestCase):
         self.assertIn("dogma-gate-source/scripts/dogma_cleanup_gate.py", workflow)
         self.assertIn("refs/remotes/dogma-base/dogma-cleanup-base", workflow)
         self.assertIn('python3 "$gate_script" --repo "$pr_repo"', workflow)
+        self.assertIn("Detect dogma gate-owned changes", workflow)
+        self.assertIn("id: dogma_gate_changes", workflow)
+        self.assertIn(".github/workflows/dogma-cleanup-immutable-gate.yml", workflow)
+        self.assertIn("Validate immutable dogma gate behavior", workflow)
+        self.assertIn("steps.dogma_gate_changes.outputs.changed == 'true'", workflow)
+        self.assertIn(
+            'base_test_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/tests/dogma_cleanup_gate_test.py"',
+            workflow,
+        )
+        self.assertIn(
+            'base_fixture_dir="$GITHUB_WORKSPACE/dogma-gate-source/scripts/fixtures/dogma_cleanup_gate"',
+            workflow,
+        )
+        self.assertIn('pr_gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"', workflow)
+        self.assertIn('pr_test_script="$pr_repo/scripts/tests/dogma_cleanup_gate_test.py"', workflow)
+        self.assertIn('pr_fixture_dir="$pr_repo/scripts/fixtures/dogma_cleanup_gate"', workflow)
+        self.assertIn('DOGMA_GATE_REPO_ROOT="$pr_repo"', workflow)
+        self.assertIn(
+            'DOGMA_GATE_WORKFLOW_EXEC_ROOT="$GITHUB_WORKSPACE/dogma-gate-source"',
+            workflow,
+        )
+        self.assertIn('DOGMA_GATE_SCRIPT="$pr_gate_script"', workflow)
+        self.assertIn('DOGMA_GATE_FIXTURE_DIR="$base_fixture_dir"', workflow)
+        self.assertIn('DOGMA_GATE_FIXTURE_DIR="$pr_fixture_dir"', workflow)
+        self.assertIn('python3 "$base_test_script" -v', workflow)
         self.assertNotIn("make dogma-cleanup-ci-gate", workflow)
         self.assertNotIn("python3 \"$pr_test_script\"", workflow)
-        self.assertNotIn("DOGMA_GATE_SCRIPT=\"$pr_gate_script\"", workflow)
+
+    def test_immutable_fixture_step_uses_base_oracle_against_pr_gate_and_fixtures(self) -> None:
+        body = self.workflow_step_body(
+            "Validate immutable dogma gate behavior",
+            ".github/workflows/dogma-cleanup-immutable-gate.yml",
+        )
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name)
+
+        pr_gate = workspace / "pr" / "scripts" / "dogma_cleanup_gate.py"
+        pr_gate.parent.mkdir(parents=True, exist_ok=True)
+        pr_gate.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        pr_test = workspace / "pr" / "scripts" / "tests" / "dogma_cleanup_gate_test.py"
+        pr_test.parent.mkdir(parents=True, exist_ok=True)
+        pr_test.write_text(
+            "from pathlib import Path\n"
+            "Path(__file__).with_name('pr-ran.txt').write_text('bad', encoding='utf-8')\n"
+            "raise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        pr_fixture_dir = workspace / "pr" / "scripts" / "fixtures" / "dogma_cleanup_gate"
+        pr_fixture_dir.mkdir(parents=True, exist_ok=True)
+
+        base_test = (
+            workspace
+            / "dogma-gate-source"
+            / "scripts"
+            / "tests"
+            / "dogma_cleanup_gate_test.py"
+        )
+        base_test.parent.mkdir(parents=True, exist_ok=True)
+        base_fixture_dir = (
+            workspace / "dogma-gate-source" / "scripts" / "fixtures" / "dogma_cleanup_gate"
+        )
+        base_fixture_dir.mkdir(parents=True, exist_ok=True)
+        base_test.write_text(
+            "from pathlib import Path\n"
+            "import os\n"
+            "marker = Path(__file__).with_name('base-ran.txt')\n"
+            "with marker.open('a', encoding='utf-8') as handle:\n"
+            "    handle.write(os.environ['DOGMA_GATE_REPO_ROOT'] + '\\n')\n"
+            "    handle.write(os.environ['DOGMA_GATE_WORKFLOW_EXEC_ROOT'] + '\\n')\n"
+            "    handle.write(os.environ['DOGMA_GATE_SCRIPT'] + '\\n')\n"
+            "    handle.write(os.environ['DOGMA_GATE_FIXTURE_DIR'] + '\\n---\\n')\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_workflow_step_body(body, workspace)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((pr_test.parent / "pr-ran.txt").exists())
+        marker = (base_test.parent / "base-ran.txt").read_text(encoding="utf-8")
+        self.assertIn(str(workspace / "pr"), marker)
+        self.assertIn(str(workspace / "dogma-gate-source"), marker)
+        self.assertEqual(marker.count(str(pr_gate)), 2, marker)
+        self.assertIn(str(base_fixture_dir), marker)
+        self.assertIn(str(pr_fixture_dir), marker)
+
+    def test_immutable_fixture_step_rejects_pr_head_noop_gate_with_base_fixture(self) -> None:
+        body = self.workflow_step_body(
+            "Validate immutable dogma gate behavior",
+            ".github/workflows/dogma-cleanup-immutable-gate.yml",
+        )
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        workspace = Path(temp_dir.name)
+
+        pr_gate = workspace / "pr" / "scripts" / "dogma_cleanup_gate.py"
+        pr_gate.parent.mkdir(parents=True, exist_ok=True)
+        pr_gate.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        pr_test = workspace / "pr" / "scripts" / "tests" / "dogma_cleanup_gate_test.py"
+        pr_test.parent.mkdir(parents=True, exist_ok=True)
+        pr_test.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        (workspace / "pr" / "scripts" / "fixtures" / "dogma_cleanup_gate").mkdir(
+            parents=True, exist_ok=True
+        )
+
+        base_test = (
+            workspace
+            / "dogma-gate-source"
+            / "scripts"
+            / "tests"
+            / "dogma_cleanup_gate_test.py"
+        )
+        base_test.parent.mkdir(parents=True, exist_ok=True)
+        base_fixture_dir = (
+            workspace / "dogma-gate-source" / "scripts" / "fixtures" / "dogma_cleanup_gate"
+        )
+        base_fixture_dir.mkdir(parents=True, exist_ok=True)
+        (base_fixture_dir / "wrapper_only_packet.md").write_text(
+            (FIXTURE_DIR / "wrapper_only_packet.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        base_test.write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "import subprocess\n"
+            "import sys\n"
+            "fixture = Path(os.environ['DOGMA_GATE_FIXTURE_DIR']) / 'wrapper_only_packet.md'\n"
+            "result = subprocess.run(\n"
+            "    [\n"
+            "        sys.executable,\n"
+            "        os.environ['DOGMA_GATE_SCRIPT'],\n"
+            "        '--packet',\n"
+            "        str(fixture),\n"
+            "        '--head-sha',\n"
+            "        '0000000000000000000000000000000000000000',\n"
+            "        '--packet-only',\n"
+            "    ],\n"
+            "    text=True,\n"
+            "    stdout=subprocess.PIPE,\n"
+            "    stderr=subprocess.PIPE,\n"
+            ")\n"
+            "if result.returncode == 0:\n"
+            "    print('base-owned dogma oracle rejected PR-head no-op gate for wrapper-only sample', file=sys.stderr)\n"
+            "    raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_workflow_step_body(body, workspace)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "base-owned dogma oracle rejected PR-head no-op gate for wrapper-only sample",
+            result.stdout + result.stderr,
+        )
 
     def test_pr_head_fixture_step_fails_closed_when_suite_is_missing_or_renamed(self) -> None:
         body = self.workflow_step_body("Validate PR-head dogma gate fixtures")
@@ -1475,8 +1632,10 @@ class DogmaCleanupGateTest(unittest.TestCase):
         )
         return ["Cargo.toml"]
 
-    def workflow_step_body(self, step_name: str) -> str:
-        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    def workflow_step_body(
+        self, step_name: str, workflow_path: str = ".github/workflows/ci.yml"
+    ) -> str:
+        workflow = (WORKFLOW_EXEC_ROOT / workflow_path).read_text(encoding="utf-8")
         lines = workflow.splitlines()
         for index, line in enumerate(lines):
             if line.strip() != f"- name: {step_name}":

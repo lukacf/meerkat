@@ -61,3 +61,70 @@ jobs:
             exit 1
           fi
           python3 "$gate_script" --repo "$pr_repo" --base "$DOGMA_CLEANUP_BASE" --github-event "$GITHUB_EVENT_PATH"
+
+      - name: Detect dogma gate-owned changes
+        id: dogma_gate_changes
+        shell: bash
+        env:
+          DOGMA_CLEANUP_BASE: refs/remotes/dogma-base/dogma-cleanup-base
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          has_gate_changes=0
+          while IFS= read -r path; do
+            case "$path" in
+              Makefile|.github/PULL_REQUEST_TEMPLATE.md|.github/workflows/ci.yml|.github/workflows/dogma-cleanup-immutable-gate.yml|scripts/dogma_cleanup_gate.py|scripts/tests/dogma_cleanup_gate_test.py|scripts/fixtures/dogma_cleanup_gate/*|docs/process/dogma-cleanup-gate.md)
+                echo "Dogma gate-owned change detected: $path"
+                has_gate_changes=1
+                ;;
+            esac
+          done < <(git -C "$pr_repo" diff --name-only "$DOGMA_CLEANUP_BASE"...HEAD)
+
+          if [[ "$has_gate_changes" -eq 1 ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate immutable dogma gate behavior
+        if: ${{ steps.dogma_gate_changes.outputs.changed == 'true' }}
+        shell: bash
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          base_test_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/tests/dogma_cleanup_gate_test.py"
+          base_fixture_dir="$GITHUB_WORKSPACE/dogma-gate-source/scripts/fixtures/dogma_cleanup_gate"
+          pr_gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"
+          pr_test_script="$pr_repo/scripts/tests/dogma_cleanup_gate_test.py"
+          pr_fixture_dir="$pr_repo/scripts/fixtures/dogma_cleanup_gate"
+
+          if [[ ! -f "$base_test_script" ]]; then
+            echo "::error::Base dogma cleanup fixture oracle is missing: scripts/tests/dogma_cleanup_gate_test.py"
+            exit 1
+          fi
+          if [[ ! -d "$base_fixture_dir" ]]; then
+            echo "::error::Base dogma cleanup fixture directory is missing: scripts/fixtures/dogma_cleanup_gate"
+            exit 1
+          fi
+          if [[ ! -f "$pr_gate_script" ]]; then
+            echo "::error::PR-head dogma gate script is missing: scripts/dogma_cleanup_gate.py"
+            exit 1
+          fi
+          if [[ ! -f "$pr_test_script" ]]; then
+            echo "::error::PR-head dogma gate fixture suite is missing: scripts/tests/dogma_cleanup_gate_test.py"
+            exit 1
+          fi
+          if [[ ! -d "$pr_fixture_dir" ]]; then
+            echo "::error::PR-head dogma gate fixture directory is missing: scripts/fixtures/dogma_cleanup_gate"
+            exit 1
+          fi
+
+          DOGMA_GATE_REPO_ROOT="$pr_repo" \
+          DOGMA_GATE_WORKFLOW_EXEC_ROOT="$GITHUB_WORKSPACE/dogma-gate-source" \
+          DOGMA_GATE_SCRIPT="$pr_gate_script" \
+          DOGMA_GATE_FIXTURE_DIR="$base_fixture_dir" \
+            python3 "$base_test_script" -v
+
+          DOGMA_GATE_REPO_ROOT="$pr_repo" \
+          DOGMA_GATE_WORKFLOW_EXEC_ROOT="$GITHUB_WORKSPACE/dogma-gate-source" \
+          DOGMA_GATE_SCRIPT="$pr_gate_script" \
+          DOGMA_GATE_FIXTURE_DIR="$pr_fixture_dir" \
+            python3 "$base_test_script" -v

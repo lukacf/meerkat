@@ -22,7 +22,7 @@ describe("RealtimeChannel websocket client", () => {
         socket.send(
           JSON.stringify({
             type: "channel.opened",
-            protocol_version: "1",
+            protocol_version: "2",
             status: { state: "ready", attempt_count: 0 },
             capabilities: {
               input_kinds: ["text"],
@@ -66,8 +66,8 @@ describe("RealtimeChannel websocket client", () => {
       open_token: "token-1",
       expires_at: "2026-04-15T12:00:00Z",
       target: { type: "session_target", session_id: "session-1" },
-      supported_protocol_versions: ["1"],
-      default_protocol_version: "1",
+      supported_protocol_versions: ["2"],
+      default_protocol_version: "2",
       capabilities: {
         input_kinds: ["text"],
         output_kinds: ["text"],
@@ -95,7 +95,7 @@ describe("RealtimeChannel websocket client", () => {
     assert.deepEqual(seen, [
       {
         type: "channel.open",
-        protocol_version: "1",
+        protocol_version: "2",
         open_token: "token-1",
         role: "primary",
         turning_mode: "provider_managed",
@@ -128,7 +128,7 @@ describe("RealtimeChannel websocket client", () => {
         socket.send(
           JSON.stringify({
             type: "channel.opened",
-            protocol_version: "1",
+            protocol_version: "2",
             status: { state: "ready", attempt_count: 0 },
             capabilities: {
               input_kinds: ["text"],
@@ -157,8 +157,8 @@ describe("RealtimeChannel websocket client", () => {
       open_token: "token-2",
       expires_at: "2026-04-15T12:00:00Z",
       target: { type: "session_target", session_id: "session-1" },
-      supported_protocol_versions: ["1"],
-      default_protocol_version: "1",
+      supported_protocol_versions: ["2"],
+      default_protocol_version: "2",
       capabilities: {
         input_kinds: ["text"],
         output_kinds: ["text"],
@@ -175,7 +175,7 @@ describe("RealtimeChannel websocket client", () => {
     assert.deepEqual(seen, [
       {
         type: "channel.open",
-        protocol_version: "1",
+        protocol_version: "2",
         open_token: "token-2",
         role: "primary",
         turning_mode: "provider_managed",

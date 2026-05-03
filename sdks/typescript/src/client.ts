@@ -53,6 +53,7 @@ import {
   type McpLiveOpResponse,
   type McpReloadParams,
   type McpRemoveParams,
+  type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
@@ -80,6 +81,7 @@ import type {
   ContentInput,
   ContentBlock,
   CreateScheduleRequest,
+  EventSourceIdentity,
   ModelsCatalog,
   MobEventsOptions,
   MobEventsResult,
@@ -134,6 +136,46 @@ const MEERKAT_BINARY_CACHE_ROOT = path.join(
   "bin",
   MEERKAT_RELEASE_BINARY,
 );
+const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
+  "profile_not_found",
+  "member_not_found",
+  "member_already_exists",
+  "not_externally_addressable",
+  "invalid_transition",
+  "wiring_error",
+  "bridge_command_rejected",
+  "member_restore_failed",
+  "kickoff_wait_timed_out",
+  "ready_wait_timed_out",
+  "definition_error",
+  "flow_not_found",
+  "flow_failed",
+  "run_not_found",
+  "run_canceled",
+  "flow_turn_timed_out",
+  "frame_depth_limit_exceeded",
+  "frame_atomic_persistence_unavailable",
+  "spec_revision_conflict",
+  "schema_validation",
+  "insufficient_targets",
+  "topology_violation",
+  "bridge_delivery_rejected",
+  "supervisor_escalation",
+  "unsupported_for_mode",
+  "reset_barrier",
+  "storage_error",
+  "session_error",
+  "comms_error",
+  "callback_pending",
+  "stale_fence_token",
+  "stale_event_cursor",
+  "work_not_found",
+  "internal",
+]);
+
+function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
+  return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
+}
 
 interface ResolvedBinary {
   command: string;
@@ -1109,10 +1151,17 @@ export class MeerkatClient {
           },
         };
       }
-      if (Object.keys(resultRecord).some((key) => key !== "message")) {
+      if (Object.keys(resultRecord).some((key) => key !== "cause" && key !== "message")) {
         throw new MeerkatError(
           "INVALID_RESPONSE",
           "Invalid mob/spawn_many response: failed result has unknown fields",
+        );
+      }
+      const cause = resultRecord.cause;
+      if (!isMobSpawnManyFailureCause(cause)) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid mob/spawn_many response: failed result has invalid cause",
         );
       }
       const message = resultRecord.message;
@@ -1125,6 +1174,7 @@ export class MeerkatClient {
       return {
         status,
         result: {
+          cause,
           message,
         },
       };
@@ -1842,6 +1892,7 @@ export class MeerkatClient {
 
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
     const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
+    const source = MeerkatClient.parseEventSourceIdentity(raw.source);
     const sourceId = MeerkatClient.parseOptionalString(raw.source_id ?? raw.sourceId);
     const seq = MeerkatClient.parseOptionalNumber(raw.seq);
     const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
@@ -1851,11 +1902,44 @@ export class MeerkatClient {
       : undefined;
     return {
       ...(eventId != null ? { eventId } : {}),
+      ...(source != null ? { source } : {}),
       ...(sourceId != null ? { sourceId } : {}),
       ...(seq != null ? { seq } : {}),
       ...(timestampMs != null ? { timestampMs } : {}),
       ...(payload ? { payload } : {}),
     };
+  }
+
+  private static parseEventSourceIdentity(raw: unknown): EventSourceIdentity | undefined {
+    if (!raw || typeof raw !== "object") {
+      return undefined;
+    }
+    const record = raw as Record<string, unknown>;
+    const type = MeerkatClient.parseOptionalString(record.type);
+    switch (type) {
+      case "session": {
+        const sessionId = MeerkatClient.parseOptionalString(record.session_id ?? record.sessionId);
+        return sessionId != null ? { type: "session", sessionId } : undefined;
+      }
+      case "runtime": {
+        const runtimeId = MeerkatClient.parseOptionalString(record.runtime_id ?? record.runtimeId);
+        return runtimeId != null ? { type: "runtime", runtimeId } : undefined;
+      }
+      case "interaction": {
+        const interactionId = MeerkatClient.parseOptionalString(
+          record.interaction_id ?? record.interactionId,
+        );
+        return interactionId != null ? { type: "interaction", interactionId } : undefined;
+      }
+      case "callback":
+        return { type: "callback" };
+      case "external": {
+        const sourceId = MeerkatClient.parseOptionalString(record.source_id ?? record.sourceId);
+        return sourceId != null ? { type: "external", sourceId } : undefined;
+      }
+      default:
+        return undefined;
+    }
   }
 
   private static parseOptionalString(raw: unknown): string | undefined {

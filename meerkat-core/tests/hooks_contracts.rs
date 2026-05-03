@@ -157,8 +157,32 @@ fn hook_denied_event_and_error_preserve_typed_hook_id() -> Result<(), Box<dyn st
     assert_eq!(
         report.reason,
         Some(meerkat_core::event::AgentErrorReason::HookDenied {
-            hook_id,
+            hook_id: Some(hook_id),
             point: HookPoint::PreToolExecution,
+            reason_code: HookReasonCode::PolicyViolation,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_hook_denied_error_reason_without_hook_id_is_unresolved()
+-> Result<(), Box<dyn std::error::Error>> {
+    let report: AgentErrorReport = serde_json::from_value(json!({
+        "class": "hook",
+        "message": "Hook denied at TurnBoundary: PolicyViolation - blocked",
+        "reason": {
+            "reason_type": "hook_denied",
+            "point": "turn_boundary",
+            "reason_code": "policy_violation"
+        }
+    }))?;
+
+    assert_eq!(
+        report.reason,
+        Some(meerkat_core::event::AgentErrorReason::HookDenied {
+            hook_id: None,
+            point: HookPoint::TurnBoundary,
             reason_code: HookReasonCode::PolicyViolation,
         })
     );

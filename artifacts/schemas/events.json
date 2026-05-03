@@ -165,7 +165,14 @@
           {
             "properties": {
               "hook_id": {
-                "$ref": "#/$defs/HookId"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HookId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
@@ -180,7 +187,6 @@
             },
             "required": [
               "reason_type",
-              "hook_id",
               "point",
               "reason_code"
             ],
@@ -2394,7 +2400,14 @@
           {
             "properties": {
               "hook_id": {
-                "$ref": "#/$defs/HookId"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HookId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
@@ -2409,7 +2422,6 @@
             },
             "required": [
               "reason_type",
-              "hook_id",
               "point",
               "reason_code"
             ],

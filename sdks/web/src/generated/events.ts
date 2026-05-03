@@ -27,7 +27,7 @@ export type AgentErrorReason = {
   duration_ms: number;
   reason_type: "llm_call_timeout";
 } | {
-  hook_id: HookId;
+  hook_id?: HookId | null;
   point: HookPoint;
   reason_code: HookReasonCode;
   reason_type: "hook_denied";

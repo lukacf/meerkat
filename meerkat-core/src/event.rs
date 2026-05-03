@@ -138,7 +138,8 @@ pub enum AgentErrorReason {
         duration_ms: u64,
     },
     HookDenied {
-        hook_id: HookId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_id: Option<HookId>,
         point: HookPoint,
         reason_code: HookReasonCode,
     },
@@ -209,7 +210,7 @@ impl AgentErrorReason {
                 reason_code,
                 ..
             } => Some(Self::HookDenied {
-                hook_id: hook_id.clone(),
+                hook_id: Some(hook_id.clone()),
                 point: *point,
                 reason_code: *reason_code,
             }),
@@ -2306,7 +2307,7 @@ mod tests {
         assert_eq!(
             report.reason,
             Some(AgentErrorReason::HookDenied {
-                hook_id,
+                hook_id: Some(hook_id),
                 point: HookPoint::RunStarted,
                 reason_code: HookReasonCode::PolicyViolation,
             })

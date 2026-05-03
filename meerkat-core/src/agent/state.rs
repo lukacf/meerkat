@@ -4242,7 +4242,7 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
-                                hook_id,
+                                hook_id: Some(hook_id),
                                 point: HookPoint::TurnBoundary,
                                 reason_code: HookReasonCode::PolicyViolation,
                             }) if hook_id == &crate::hooks::HookId::new("deny-turn-boundary")
@@ -5002,7 +5002,7 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
-                                hook_id,
+                                hook_id: Some(hook_id),
                                 point: crate::hooks::HookPoint::PostToolExecution,
                                 reason_code: crate::hooks::HookReasonCode::PolicyViolation,
                             }) if hook_id == &crate::hooks::HookId::new("deny-image-tool")

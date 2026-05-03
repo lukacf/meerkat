@@ -276,9 +276,13 @@ export type {
   ExternalToolDeltaPhase,
   MalformedEvent,
   UnknownEvent,
+  AgentErrorClass,
+  AgentErrorReason,
+  AgentErrorReport,
   StopReason,
   ToolCallArguments,
   BudgetType,
+  HookId,
   HookPoint,
 } from "./events.js";
 

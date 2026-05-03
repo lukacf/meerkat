@@ -278,6 +278,7 @@ export type {
   UnknownEvent,
   StopReason,
   BudgetType,
+  HookId,
   HookPoint,
 } from "./events.js";
 

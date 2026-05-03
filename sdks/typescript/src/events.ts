@@ -63,6 +63,9 @@ export type HookPoint =
   | "post_tool_execution"
   | "turn_boundary";
 
+/** Stable identifier for a configured hook. */
+export type HookId = string;
+
 // ---------------------------------------------------------------------------
 // Scoped streaming attribution
 // ---------------------------------------------------------------------------
@@ -229,27 +232,27 @@ export interface RetryingEvent {
 
 export interface HookStartedEvent {
   readonly type: "hook_started";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
 }
 
 export interface HookCompletedEvent {
   readonly type: "hook_completed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly durationMs: number;
 }
 
 export interface HookFailedEvent {
   readonly type: "hook_failed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly error: string;
 }
 
 export interface HookDeniedEvent {
   readonly type: "hook_denied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly reasonCode: string;
   readonly message: string;
@@ -258,14 +261,14 @@ export interface HookDeniedEvent {
 
 export interface HookRewriteAppliedEvent {
   readonly type: "hook_rewrite_applied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly patch: Record<string, unknown>;
 }
 
 export interface HookPatchPublishedEvent {
   readonly type: "hook_patch_published";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly envelope: Record<string, unknown>;
 }

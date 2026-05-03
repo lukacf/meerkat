@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 ContentBlock = dict[str, Any]
 ContentInput = str | list[ContentBlock]
+HookId = str
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +244,7 @@ class Retrying(Event):
 class HookStarted(Event):
     """A hook invocation started."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
 
 
@@ -251,7 +252,7 @@ class HookStarted(Event):
 class HookCompleted(Event):
     """A hook invocation completed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     duration_ms: int = 0
 
@@ -260,7 +261,7 @@ class HookCompleted(Event):
 class HookFailed(Event):
     """A hook invocation failed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     error: str = ""
 
@@ -269,7 +270,7 @@ class HookFailed(Event):
 class HookDenied(Event):
     """A hook denied the current operation."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     reason_code: str = ""
     message: str = ""
@@ -280,7 +281,7 @@ class HookDenied(Event):
 class HookRewriteApplied(Event):
     """A hook rewrote part of the request or response."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     patch: dict[str, Any] = field(default_factory=dict)
 
@@ -289,7 +290,7 @@ class HookRewriteApplied(Event):
 class HookPatchPublished(Event):
     """A hook patch envelope was published."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     envelope: dict[str, Any] = field(default_factory=dict)
 

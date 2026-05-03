@@ -1478,7 +1478,10 @@ fn extend_filter_witnesses(
 
     for name in filter_names {
         if let Some(tool) = base_tools.iter().find(|tool| tool.name == name.as_str()) {
-            witnesses.insert(name.as_str().to_string(), filter_witness_for_tool(tool));
+            let witness = filter_witness_for_tool(tool);
+            if witness.has_identity_witness() {
+                witnesses.insert(name.as_str().to_string(), witness);
+            }
         }
     }
 }

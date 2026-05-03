@@ -1972,6 +1972,35 @@ mod tests {
     }
 
     #[test]
+    fn name_only_deferred_staging_rejects_without_witness_authority() {
+        let requested = tool_with_provenance("deferred", "owner-a");
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&requested)].into(),
+            HashSet::new(),
+            raw_set(&["deferred"]),
+        );
+
+        let err = scope
+            .stage_requested_deferred_names(["deferred".to_string()].into_iter().collect())
+            .expect_err("name-only deferred staging must not become authority");
+
+        assert_eq!(
+            err,
+            ToolScopeStageError::MissingWitnesses {
+                names: vec!["deferred".to_string()],
+            }
+        );
+        assert!(
+            scope
+                .visibility_state()
+                .unwrap()
+                .staged_requested_deferred_names
+                .is_empty(),
+            "failed name-only staging must not stage deferred names"
+        );
+    }
+
+    #[test]
     fn requested_deferred_authorities_require_provenance_witnesses() {
         let requested = tool_with_provenance("deferred", "owner-a");
         let scope = ToolScope::new_with_projection_names(
@@ -2031,6 +2060,42 @@ mod tests {
                 .staged_requested_deferred_names
                 .is_empty(),
             "failed empty-witness validation must not stage deferred names"
+        );
+    }
+
+    #[test]
+    fn requested_deferred_authorities_reject_mismatched_visible_catalog() {
+        let requested = tool_with_provenance("deferred", "owner-a");
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&requested)].into(),
+            HashSet::new(),
+            raw_set(&["deferred"]),
+        );
+
+        let err = scope
+            .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
+                "deferred",
+                crate::ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:owner-b".to_string()),
+                    last_seen_provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Callback,
+                        source_id: "owner-b".into(),
+                    }),
+                },
+            )])
+            .expect_err("mismatched deferred-tool authority should fail");
+
+        assert!(
+            err.to_string().contains("deferred"),
+            "mismatch error should name the requested tool: {err}"
+        );
+        assert!(
+            scope
+                .visibility_state()
+                .unwrap()
+                .staged_requested_deferred_names
+                .is_empty(),
+            "failed mismatch validation must not stage deferred names"
         );
     }
 

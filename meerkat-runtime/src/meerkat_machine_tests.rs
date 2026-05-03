@@ -13937,6 +13937,27 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
     assert_eq!(state.active_revision, 0);
 }
 
+#[test]
+fn machine_visibility_restore_requires_bound_dsl_authority() {
+    let owner = MachineToolVisibilityOwner::new();
+
+    let err = owner
+        .replace_visibility_state(meerkat_core::SessionToolVisibilityState::default())
+        .expect_err("machine visibility restore must require a bound DSL authority");
+
+    assert!(
+        err.to_string().contains("not bound"),
+        "unbound restore should report the missing machine authority: {err}"
+    );
+    assert_eq!(
+        owner
+            .visibility_state()
+            .expect("owner state should remain readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed restore must leave machine visibility state unchanged"
+    );
+}
+
 fn callback_tool_provenance(source_id: &str) -> meerkat_core::ToolProvenance {
     meerkat_core::ToolProvenance {
         kind: meerkat_core::ToolSourceKind::Callback,
@@ -14015,6 +14036,46 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
         "requested deferred tools must be staged on the machine-owned state"
     );
     assert_eq!(state.staged_revision, revision.0);
+}
+
+#[tokio::test]
+async fn machine_requested_deferred_names_rejects_name_only_staging() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+
+    let err = bindings
+        .tool_visibility_owner()
+        .stage_requested_deferred_names(["deferred_tool".to_string()].into_iter().collect())
+        .expect_err("name-only deferred staging must not become authority");
+
+    assert!(
+        err.to_string().contains("deferred_tool"),
+        "missing-witness rejection should name the deferred tool: {err}"
+    );
+    let state = bindings
+        .tool_visibility_owner()
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert!(
+        state.staged_requested_deferred_names.is_empty(),
+        "failed name-only staging must not stage deferred names"
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        authority.state.staged_deferred_names.is_empty()
+            && authority.state.staged_deferred_authorities.is_empty(),
+        "failed name-only staging must not mutate DSL deferred authority"
+    );
 }
 
 #[tokio::test]

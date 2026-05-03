@@ -339,51 +339,54 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             .map_err(|_| ToolScopeApplyError::Owner {
                 message: "machine visibility DSL authority slot lock poisoned".to_string(),
             })?;
-        if let Some(authority) = slot.as_ref().cloned() {
-            drop(slot);
-            let mut guard = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match super::dsl::MeerkatMachineMutator::apply(
-                &mut *guard,
-                super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
-                    active_revision: visibility_state.active_revision,
-                    staged_revision: visibility_state.staged_revision,
-                    active_deferred_names: visibility_state.active_requested_deferred_names.clone(),
-                    staged_deferred_names: visibility_state.staged_requested_deferred_names.clone(),
-                    active_deferred_authorities: active_deferred_authorities.clone(),
-                    staged_deferred_authorities: staged_deferred_authorities.clone(),
-                },
-            ) {
-                Ok(_) => {}
-                // Typed guard rejection is the idempotent no-op case:
-                // neither revision advances the counter and the installed
-                // deferred authority projection already matches the DSL.
-                Err(err @ super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
-                    let counter_covers_install = visibility_state.active_revision
-                        <= guard.state.next_staged_visibility_revision
-                        && visibility_state.staged_revision
-                            <= guard.state.next_staged_visibility_revision;
-                    let deferred_authority_matches = guard.state.active_deferred_names
-                        == visibility_state.active_requested_deferred_names
-                        && guard.state.staged_deferred_names
-                            == visibility_state.staged_requested_deferred_names
-                        && guard.state.active_deferred_authorities == active_deferred_authorities
-                        && guard.state.staged_deferred_authorities == staged_deferred_authorities;
-                    if !(counter_covers_install && deferred_authority_matches) {
-                        return Err(ToolScopeApplyError::Owner {
-                            message: super::dsl_authority::map_error(
-                                err,
-                                "SyncVisibilityRevisions",
-                            ),
-                        });
-                    }
-                }
-                Err(err) => {
+        let authority = slot
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ToolScopeApplyError::Owner {
+                message:
+                    "machine visibility DSL authority not bound — restore before session wiring"
+                        .to_string(),
+            })?;
+        drop(slot);
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
+                active_revision: visibility_state.active_revision,
+                staged_revision: visibility_state.staged_revision,
+                active_deferred_names: visibility_state.active_requested_deferred_names.clone(),
+                staged_deferred_names: visibility_state.staged_requested_deferred_names.clone(),
+                active_deferred_authorities: active_deferred_authorities.clone(),
+                staged_deferred_authorities: staged_deferred_authorities.clone(),
+            },
+        ) {
+            Ok(_) => {}
+            // Typed guard rejection is the idempotent no-op case:
+            // neither revision advances the counter and the installed
+            // deferred authority projection already matches the DSL.
+            Err(err @ super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
+                let counter_covers_install = visibility_state.active_revision
+                    <= guard.state.next_staged_visibility_revision
+                    && visibility_state.staged_revision
+                        <= guard.state.next_staged_visibility_revision;
+                let deferred_authority_matches = guard.state.active_deferred_names
+                    == visibility_state.active_requested_deferred_names
+                    && guard.state.staged_deferred_names
+                        == visibility_state.staged_requested_deferred_names
+                    && guard.state.active_deferred_authorities == active_deferred_authorities
+                    && guard.state.staged_deferred_authorities == staged_deferred_authorities;
+                if !(counter_covers_install && deferred_authority_matches) {
                     return Err(ToolScopeApplyError::Owner {
                         message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
                     });
                 }
+            }
+            Err(err) => {
+                return Err(ToolScopeApplyError::Owner {
+                    message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
+                });
             }
         }
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {

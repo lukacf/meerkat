@@ -25,6 +25,15 @@ pub enum AuthStatusPhase {
 }
 
 impl AuthStatusPhase {
+    pub const ALL: &'static [Self] = &[
+        Self::Valid,
+        Self::Expiring,
+        Self::Expired,
+        Self::ReauthRequired,
+        Self::RefreshFailed,
+        Self::Unknown,
+    ];
+
     pub const fn as_public_str(self) -> &'static str {
         match self {
             Self::Valid => "valid",

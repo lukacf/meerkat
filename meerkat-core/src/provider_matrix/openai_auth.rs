@@ -21,6 +21,14 @@ pub enum OpenAiAuthMethod {
 }
 
 impl OpenAiAuthMethod {
+    pub const ALL: &'static [Self] = &[
+        Self::ApiKey,
+        Self::StaticBearer,
+        Self::ManagedChatGptOauth,
+        Self::ExternalChatGptTokens,
+        Self::ExternalAuthorizer,
+    ];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
@@ -50,13 +58,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            OpenAiAuthMethod::ApiKey,
-            OpenAiAuthMethod::StaticBearer,
-            OpenAiAuthMethod::ManagedChatGptOauth,
-            OpenAiAuthMethod::ExternalChatGptTokens,
-            OpenAiAuthMethod::ExternalAuthorizer,
-        ] {
+        for v in OpenAiAuthMethod::ALL {
+            let v = *v;
             assert_eq!(OpenAiAuthMethod::parse(v.as_str()), Some(v));
         }
     }

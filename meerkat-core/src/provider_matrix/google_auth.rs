@@ -12,6 +12,16 @@ pub enum GoogleAuthMethod {
 }
 
 impl GoogleAuthMethod {
+    pub const ALL: &'static [Self] = &[
+        Self::ApiKey,
+        Self::BearerApiKey,
+        Self::ExternalAuthorizer,
+        Self::Adc,
+        Self::ApiKeyExpress,
+        Self::GoogleOauth,
+        Self::ComputeAdc,
+    ];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
@@ -44,15 +54,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            GoogleAuthMethod::ApiKey,
-            GoogleAuthMethod::BearerApiKey,
-            GoogleAuthMethod::ExternalAuthorizer,
-            GoogleAuthMethod::Adc,
-            GoogleAuthMethod::ApiKeyExpress,
-            GoogleAuthMethod::GoogleOauth,
-            GoogleAuthMethod::ComputeAdc,
-        ] {
+        for v in GoogleAuthMethod::ALL {
+            let v = *v;
             assert_eq!(GoogleAuthMethod::parse(v.as_str()), Some(v));
         }
     }

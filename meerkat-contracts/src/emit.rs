@@ -21,6 +21,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         Ok(())
     }
 
+    fn unique_contract_values(groups: &[&[&'static str]]) -> Vec<&'static str> {
+        let mut values = Vec::new();
+        for group in groups {
+            for value in *group {
+                if !values.contains(value) {
+                    values.push(*value);
+                }
+            }
+        }
+        values
+    }
+
     // Version
     let version_schema = serde_json::json!({
         "contract_version": crate::version::ContractVersion::CURRENT.to_string(),
@@ -358,6 +370,96 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         )
     });
     write_pretty_json(output_dir.join("rpc-methods.json"), &rpc_methods)?;
+
+    // Auth/connection semantic vocabulary consumed by generated SDK helpers.
+    // Values are projected from typed provider/auth/source/state enums so Web
+    // helpers fail closed without carrying local string authority.
+    let openai_backend_kinds: Vec<&'static str> =
+        meerkat_core::provider_matrix::OpenAiBackendKind::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::OpenAiBackendKind::as_str)
+            .collect();
+    let anthropic_backend_kinds: Vec<&'static str> =
+        meerkat_core::provider_matrix::AnthropicBackendKind::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::AnthropicBackendKind::as_str)
+            .collect();
+    let google_backend_kinds: Vec<&'static str> =
+        meerkat_core::provider_matrix::GoogleBackendKind::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::GoogleBackendKind::as_str)
+            .collect();
+    let self_hosted_backend_kinds = ["self_hosted", "openai_compatible"];
+    let backend_kinds = unique_contract_values(&[
+        &openai_backend_kinds,
+        &anthropic_backend_kinds,
+        &google_backend_kinds,
+        &self_hosted_backend_kinds,
+    ]);
+
+    let openai_auth_methods: Vec<&'static str> =
+        meerkat_core::provider_matrix::OpenAiAuthMethod::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::OpenAiAuthMethod::as_str)
+            .collect();
+    let anthropic_auth_methods: Vec<&'static str> =
+        meerkat_core::provider_matrix::AnthropicAuthMethod::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::AnthropicAuthMethod::as_str)
+            .collect();
+    let google_auth_methods: Vec<&'static str> =
+        meerkat_core::provider_matrix::GoogleAuthMethod::ALL
+            .iter()
+            .copied()
+            .map(meerkat_core::provider_matrix::GoogleAuthMethod::as_str)
+            .collect();
+    let self_hosted_auth_methods = ["api_key", "static_bearer", "none"];
+    let auth_methods = unique_contract_values(&[
+        &openai_auth_methods,
+        &anthropic_auth_methods,
+        &google_auth_methods,
+        &self_hosted_auth_methods,
+    ]);
+
+    let providers: Vec<&'static str> = meerkat_core::Provider::ALL_CONCRETE
+        .iter()
+        .map(meerkat_core::Provider::as_str)
+        .collect();
+    let auth_status_states: Vec<&'static str> = meerkat_core::AuthStatusPhase::ALL
+        .iter()
+        .copied()
+        .map(meerkat_core::AuthStatusPhase::as_public_str)
+        .collect();
+    let auth_connection_contracts = serde_json::json!({
+        "providers": providers,
+        "backend_kinds": backend_kinds,
+        "auth_methods": auth_methods,
+        "credential_source_kinds": meerkat_core::CredentialSourceSpec::ALL_KIND_LABELS,
+        "auth_status_states": auth_status_states,
+        "device_complete_states": ["pending", "slow_down", "access_denied", "expired", "ready"],
+        "login_ready_state": "ready",
+        "provider_backend_kinds": {
+            "openai": openai_backend_kinds,
+            "anthropic": anthropic_backend_kinds,
+            "gemini": google_backend_kinds,
+            "self_hosted": self_hosted_backend_kinds,
+        },
+        "provider_auth_methods": {
+            "openai": openai_auth_methods,
+            "anthropic": anthropic_auth_methods,
+            "gemini": google_auth_methods,
+            "self_hosted": self_hosted_auth_methods,
+        }
+    });
+    write_pretty_json(
+        output_dir.join("auth-connection-contracts.json"),
+        &auth_connection_contracts,
+    )?;
 
     fn schema_ref(name: &str) -> Value {
         serde_json::json!({ "$ref": format!("#/components/schemas/{name}") })
@@ -1200,6 +1302,56 @@ mod tests {
         assert_eq!(
             auth_status["result_type"], "WireAuthStatusDetail",
             "auth/status/get should catalog its concrete detailed response"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_auth_connection_contracts_carry_closed_web_vocabularies() {
+        let output_dir = temp_output_dir("auth-connection-contracts");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let contracts: serde_json::Value = serde_json::from_slice(
+            &fs::read(output_dir.join("auth-connection-contracts.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            contracts["providers"],
+            serde_json::json!(["anthropic", "openai", "gemini", "self_hosted"])
+        );
+        assert!(
+            contracts["backend_kinds"]
+                .as_array()
+                .expect("backend kinds")
+                .contains(&serde_json::json!("openai_api")),
+            "backend vocabulary must include provider-matrix kinds"
+        );
+        assert!(
+            contracts["auth_methods"]
+                .as_array()
+                .expect("auth methods")
+                .contains(&serde_json::json!("managed_chatgpt_oauth")),
+            "auth vocabulary must include provider-matrix methods"
+        );
+        assert!(
+            contracts["credential_source_kinds"]
+                .as_array()
+                .expect("credential source kinds")
+                .contains(&serde_json::json!("external_resolver")),
+            "source vocabulary must include CredentialSourceSpec labels"
+        );
+        assert_eq!(
+            contracts["auth_status_states"],
+            serde_json::json!([
+                "valid",
+                "expiring",
+                "expired",
+                "reauth_required",
+                "refresh_failed",
+                "unknown"
+            ])
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

@@ -189,20 +189,11 @@ pub struct WireAuthProfile {
 
 impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
     fn from(value: &meerkat_core::AuthProfile) -> Self {
-        let source_kind = match &value.source {
-            meerkat_core::CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
-            meerkat_core::CredentialSourceSpec::ManagedStore => "managed_store",
-            meerkat_core::CredentialSourceSpec::Env { .. } => "env",
-            meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
-            meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
-            meerkat_core::CredentialSourceSpec::Command { .. } => "command",
-            meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
-        };
         Self {
             id: value.id.clone(),
             provider: value.provider.as_str().to_string(),
             auth_method: value.auth_method.clone(),
-            source_kind: source_kind.to_string(),
+            source_kind: value.source.kind_label().to_string(),
         }
     }
 }

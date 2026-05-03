@@ -201,6 +201,30 @@ pub enum CredentialSourceSpec {
     },
 }
 
+impl CredentialSourceSpec {
+    pub const ALL_KIND_LABELS: &'static [&'static str] = &[
+        "inline_secret",
+        "managed_store",
+        "env",
+        "external_resolver",
+        "platform_default",
+        "command",
+        "file_descriptor",
+    ];
+
+    pub const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::InlineSecret { .. } => "inline_secret",
+            Self::ManagedStore => "managed_store",
+            Self::Env { .. } => "env",
+            Self::ExternalResolver { .. } => "external_resolver",
+            Self::PlatformDefault => "platform_default",
+            Self::Command { .. } => "command",
+            Self::FileDescriptor { .. } => "file_descriptor",
+        }
+    }
+}
+
 fn default_command_timeout_ms() -> u64 {
     30_000
 }

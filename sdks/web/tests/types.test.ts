@@ -7,6 +7,7 @@
 
 import type {
   Mob,
+  AuthProfile,
   AuthBindingIdentity,
   AuthCredentialsCleared,
   AuthProfileCreated,
@@ -15,6 +16,7 @@ import type {
   AuthLoginReady,
   AuthStatus,
   AuthTransport,
+  OAuthLoginStart,
   ExternalAuthFailure,
   ExternalAuthLease,
   ExternalAuthResolver,
@@ -33,6 +35,11 @@ import type {
   MemberDeliveryReceipt,
   MobMemberSnapshot,
   MobHelperResult,
+  WireAuthMethod,
+  WireAuthProvider,
+  WireBackendKind,
+  WireCredentialSourceKind,
+  WireAuthStatusState,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
 
@@ -82,10 +89,30 @@ const authCreate: Promise<AuthProfileCreated> = auth.createProfile({
   auth_method: 'api_key',
   secret: 'sk-test',
 });
+auth.createProfile({
+  realm_id: 'default',
+  binding_id: 'openai',
+  // @ts-expect-error auth_method is a generated closed wire union, not string authority.
+  auth_method: 'password',
+  secret: 'sk-test',
+});
 const authDelete: Promise<AuthCredentialsCleared> = auth.deleteProfile(
   'default',
   'openai',
 );
+const authLoginStart: Promise<OAuthLoginStart> = auth.loginStart({
+  provider: 'openai',
+  redirect_uri: 'http://localhost:1455/callback',
+  realm_id: 'default',
+  binding_id: 'openai',
+});
+auth.loginStart({
+  // @ts-expect-error provider is a generated closed wire union, not string authority.
+  provider: 'not_a_provider',
+  redirect_uri: 'http://localhost:1455/callback',
+  realm_id: 'default',
+  binding_id: 'openai',
+});
 const authLogin: Promise<AuthLoginReady> = auth.loginComplete({
   provider: 'openai',
   code: 'oauth-code',
@@ -112,6 +139,39 @@ const authBinding: AuthBindingIdentity = {
   connection_ref: { realm: 'default', binding: 'openai' },
   profile_id: 'openai_apikey',
 };
+const authProfile: AuthProfile = {
+  id: 'openai_apikey',
+  provider: 'openai',
+  auth_method: 'api_key',
+  source_kind: 'env',
+};
+const authStatusBody: AuthStatus = {
+  realm_id: 'default',
+  binding_id: 'openai',
+  connection_ref: { realm: 'default', binding: 'openai' },
+  profile_id: 'openai_apikey',
+  provider: 'openai',
+  auth_method: 'api_key',
+  state: 'valid',
+  has_refresh_token: false,
+};
+const validAuthProvider: WireAuthProvider = 'openai';
+const validBackendKind: WireBackendKind = 'chatgpt_backend';
+const validAuthMethod: WireAuthMethod = 'managed_chatgpt_oauth';
+const validSourceKind: WireCredentialSourceKind = 'external_resolver';
+const validAuthStatusState: WireAuthStatusState = 'reauth_required';
+// @ts-expect-error unknown providers are not behavior-driving Web auth truth.
+const rejectedAuthProvider: WireAuthProvider = 'future_provider';
+// @ts-expect-error unknown backend kinds are not behavior-driving Web auth truth.
+const rejectedBackendKind: WireBackendKind = 'future_backend';
+// @ts-expect-error unknown auth methods are not behavior-driving Web auth truth.
+const rejectedAuthMethod: WireAuthMethod = 'future_auth_method';
+// @ts-expect-error unknown source kinds are not behavior-driving Web auth truth.
+const rejectedSourceKind: WireCredentialSourceKind = 'browser_local_storage';
+// @ts-expect-error unknown status states are not behavior-driving Web auth truth.
+const rejectedAuthStatusState: WireAuthStatusState = 'credential_present';
+// @ts-expect-error auth transport methods are generated closed contract names.
+authTransport.request('auth/not_real', {});
 
 const externalAuthLease: ExternalAuthLease = {
   kind: 'inline_secret',
@@ -331,12 +391,25 @@ void authList;
 void authGet;
 void authCreate;
 void authDelete;
+void authLoginStart;
 void authLogin;
 void authStatus;
 void authLogout;
 void authStatusWithProfile;
 void authLogoutWithProfile;
 void authBinding;
+void authProfile;
+void authStatusBody;
+void validAuthProvider;
+void validBackendKind;
+void validAuthMethod;
+void validSourceKind;
+void validAuthStatusState;
+void rejectedAuthProvider;
+void rejectedBackendKind;
+void rejectedAuthMethod;
+void rejectedSourceKind;
+void rejectedAuthStatusState;
 void externalAuthLease;
 void externalAuthFailure;
 void typedExternalAuthResolver;

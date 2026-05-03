@@ -1594,6 +1594,10 @@ impl AgentFactory {
     /// peer-to-peer addressing.
     #[cfg(feature = "comms")]
     pub fn with_comms_runtime(mut self, runtime: Arc<meerkat_comms::CommsRuntime>) -> Self {
+        // A factory-owned runtime can later be wired into `SessionOwned`
+        // builds, so local compatibility classification must be inert as soon
+        // as the runtime enters this surface.
+        runtime.require_peer_comms_machine_authority();
         self.comms_runtime = Some(runtime);
         self
     }
@@ -3080,6 +3084,27 @@ impl AgentFactory {
             session.set_metadata(key, value.clone());
         }
         let _session_id = session.id().to_string();
+        use meerkat_core::runtime_epoch::RuntimeBuildMode;
+
+        let resolved_mode = &build_config.runtime_build_mode;
+        if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
+            if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
+                return Err(BuildAgentError::Config(
+                    "SessionRuntimeBindings were not prepared by MeerkatMachine; \
+                     session-owned runtime builds must use MeerkatMachine::prepare_bindings"
+                        .to_string(),
+                ));
+            }
+            if bindings.session_id() != session.id() {
+                return Err(BuildAgentError::Config(format!(
+                    "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
+                     bindings may have been prepared for a different session",
+                    bindings.session_id(),
+                    session.id(),
+                )));
+            }
+        }
+
         // 6b. Create comms runtime before tool wiring.
         // If the factory has a pre-built runtime (surface with stable identity),
         // use it directly. Otherwise create a per-session runtime from config.
@@ -3179,6 +3204,16 @@ impl AgentFactory {
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
 
+        #[cfg(feature = "comms")]
+        if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode
+            && let Some(runtime) = &comms_runtime
+        {
+            // Close the runtime-backed ingress window before any later build
+            // work can interleave with already-started shared listeners.
+            runtime.require_peer_comms_machine_authority();
+            runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
+        }
+
         // Resolve model profile for capability gating and runtime defaults.
         let _image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
 
@@ -3201,31 +3236,12 @@ impl AgentFactory {
             }
         }
         // Resolve ops lifecycle registry via RuntimeBuildMode.
-        use meerkat_core::runtime_epoch::RuntimeBuildMode;
-
-        let resolved_mode = &build_config.runtime_build_mode;
-
         #[allow(unused_variables)]
         let (ops_lifecycle, concrete_ops_lifecycle): (
             Arc<dyn OpsLifecycleRegistry>,
             Option<Arc<RuntimeOpsLifecycleRegistry>>,
-        ) = match &resolved_mode {
+        ) = match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
-                if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
-                    return Err(BuildAgentError::Config(
-                        "SessionRuntimeBindings were not prepared by MeerkatMachine; \
-                         session-owned runtime builds must use MeerkatMachine::prepare_bindings"
-                            .to_string(),
-                    ));
-                }
-                if bindings.session_id() != session.id() {
-                    return Err(BuildAgentError::Config(format!(
-                        "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
-                         bindings may have been prepared for a different session",
-                        bindings.session_id(),
-                        session.id(),
-                    )));
-                }
                 (Arc::clone(bindings.ops_lifecycle()), None)
             }
             RuntimeBuildMode::StandaloneEphemeral => {
@@ -3301,13 +3317,6 @@ impl AgentFactory {
         if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
             tools.bind_external_tool_surface_handle(Arc::clone(bindings.external_tool_surface()));
             tools.bind_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
-            // LUC-104: classified comms ingress must hand raw external/plain
-            // ingress through the session's MeerkatMachine before the comms
-            // shell computes compatibility auth/routing projections.
-            #[cfg(feature = "comms")]
-            if let Some(runtime) = &comms_runtime {
-                runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
-            }
             // W1-A/U6: install the typed machine authority required before
             // comms can emit semantic peer request/response receipts.
             #[cfg(feature = "comms")]
@@ -6622,6 +6631,51 @@ mod tests {
         assert!(
             caps.iter().any(|cap| cap.as_str() == "comms"),
             "per-session comms identity should expose comms capability to skills"
+        );
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn session_owned_shared_comms_runtime_is_marked_machine_required() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared_name = format!("shared-session-owned-{}", meerkat_core::SessionId::new());
+        let shared_runtime =
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only(&shared_name).unwrap());
+        assert!(!shared_runtime.peer_comms_machine_authority_required());
+        assert!(shared_runtime.peer_comms_handle().is_none());
+
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .with_comms_runtime(Arc::clone(&shared_runtime));
+        assert!(
+            shared_runtime.peer_comms_machine_authority_required(),
+            "factory attachment must fail closed before a session-owned build can install machine authority"
+        );
+
+        let _agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("session-owned build should succeed");
+
+        assert!(
+            shared_runtime.peer_comms_machine_authority_required(),
+            "shared runtime must fail closed before any session-owned ingress can use local classifier authority"
+        );
+        assert!(
+            shared_runtime.peer_comms_handle().is_some(),
+            "session-owned shared runtime should install the PeerComms machine handle"
         );
     }
 

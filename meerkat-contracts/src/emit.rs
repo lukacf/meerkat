@@ -131,10 +131,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireInputStateHistoryEntry": schema_for!(crate::wire::WireInputStateHistoryEntry),
         "WireInputState": schema_for!(crate::wire::WireInputState),
         "RuntimeAcceptResult": schema_for!(crate::wire::RuntimeAcceptResult),
-        "RuntimeRetireResult": schema_for!(crate::wire::RuntimeRetireResult),
-        "RuntimeResetResult": schema_for!(crate::wire::RuntimeResetResult),
-        "InputStateResult": schema_for!(crate::wire::InputStateResult),
-        "InputListResult": schema_for!(crate::wire::InputListResult),
         "WireContentBlock": schema_for!(crate::wire::WireContentBlock),
         "WireContentInput": schema_for!(crate::wire::WireContentInput),
         "WireToolResultContent": schema_for!(crate::wire::WireToolResultContent),
@@ -257,13 +253,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RealtimeOpenRequest": schema_for!(crate::wire::RealtimeOpenRequest),
         "RealtimeStatusParams": schema_for!(crate::wire::RealtimeStatusParams),
         "RealtimeCapabilitiesParams": schema_for!(crate::wire::RealtimeCapabilitiesParams),
-        "RuntimeStateParams": schema_for!(crate::wire::RuntimeStateParams),
-        "RuntimeAcceptParams": schema_for!(crate::wire::RuntimeAcceptParams),
-        "RuntimeRetireParams": schema_for!(crate::wire::RuntimeRetireParams),
-        "RuntimeResetParams": schema_for!(crate::wire::RuntimeResetParams),
         "SessionPeerResponseTerminalParams": schema_for!(crate::wire::SessionPeerResponseTerminalParams),
-        "InputStateParams": schema_for!(crate::wire::InputStateParams),
-        "InputListParams": schema_for!(crate::wire::InputListParams),
         "RuntimeRealtimeAttachmentStatusParams": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusParams),
         "SessionStreamOpenParams": schema_for!(crate::wire::SessionStreamOpenParams),
         "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
@@ -414,6 +404,55 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 add_component_schema(components, name.clone(), schema.clone());
             }
         }
+    }
+
+    fn collect_component_refs(value: &Value, refs: &mut std::collections::BTreeSet<String>) {
+        match value {
+            Value::Object(object) => {
+                if let Some(Value::String(reference)) = object.get("$ref")
+                    && let Some(name) = reference.strip_prefix("#/components/schemas/")
+                {
+                    refs.insert(name.to_string());
+                }
+                for nested in object.values() {
+                    collect_component_refs(nested, refs);
+                }
+            }
+            Value::Array(values) => {
+                for nested in values {
+                    collect_component_refs(nested, refs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn referenced_rest_components(
+        components: Map<String, Value>,
+        rest_paths: &Value,
+    ) -> Map<String, Value> {
+        let mut needed = std::collections::BTreeSet::new();
+        collect_component_refs(rest_paths, &mut needed);
+
+        let mut queue = needed
+            .iter()
+            .cloned()
+            .collect::<std::collections::VecDeque<_>>();
+        while let Some(name) = queue.pop_front() {
+            let Some(schema) = components.get(&name) else {
+                continue;
+            };
+            let before = needed.clone();
+            collect_component_refs(schema, &mut needed);
+            for discovered in needed.difference(&before) {
+                queue.push_back(discovered.clone());
+            }
+        }
+
+        components
+            .into_iter()
+            .filter(|(name, _schema)| needed.contains(name))
+            .collect()
     }
 
     fn object_schema(properties: Vec<(&str, Value)>, required: Vec<&str>) -> Value {
@@ -885,16 +924,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ("/sessions/{id}/realtime-attachment-status", "get") => {
                 RestOperationContract::json("RuntimeRealtimeAttachmentStatusResult")
             }
-            ("/sessions/{id}/submit", "post") => RestOperationContract::with_json_request(
-                "RuntimeAcceptParams",
-                "RuntimeAcceptResult",
-            ),
-            ("/sessions/{id}/retire", "post") => RestOperationContract::json("RuntimeRetireResult"),
-            ("/sessions/{id}/reset", "post") => RestOperationContract::json("RuntimeResetResult"),
-            ("/sessions/{id}/submissions", "get") => RestOperationContract::json("InputListResult"),
-            ("/sessions/{session_id}/submissions/{submission_id}", "get") => {
-                RestOperationContract::json("InputStateResult")
-            }
             ("/schedule/call", "post") => {
                 RestOperationContract::with_json_request("RestScheduleToolCallRequest", "JsonValue")
             }
@@ -1100,6 +1129,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             (path.path.to_string(), Value::Object(operations))
         })
         .collect();
+    let rest_components =
+        referenced_rest_components(rest_components, &Value::Object(rest_paths.clone()));
     let rest_openapi = serde_json::json!({
         "openapi": "3.1.0",
         "info": {
@@ -1658,6 +1689,41 @@ mod tests {
             Some("#/components/schemas/SessionDetailsResponse")
         );
 
+        for retired in [
+            "/sessions/{id}/submit",
+            "/sessions/{id}/retire",
+            "/sessions/{id}/reset",
+            "/sessions/{id}/submissions",
+            "/sessions/{session_id}/submissions/{submission_id}",
+        ] {
+            assert!(
+                rest_openapi["paths"].get(retired).is_none(),
+                "retired REST runtime/session control mirror must not be emitted: {retired}"
+            );
+        }
+        let components_json = serde_json::to_string(components).unwrap();
+        for retired_schema in [
+            "RuntimeAcceptParams",
+            "RuntimeAcceptResult",
+            "RuntimeAcceptOutcomeType",
+            "RuntimeRetireParams",
+            "RuntimeResetParams",
+            "RuntimeRetireResult",
+            "RuntimeResetResult",
+            "InputStateParams",
+            "InputListParams",
+            "InputStateResult",
+            "InputListResult",
+            "WireInputLifecycleState",
+            "WireInputState",
+            "WireInputStateHistoryEntry",
+        ] {
+            assert!(
+                !components_json.contains(retired_schema),
+                "old REST runtime/session control schema must not be carried by OpenAPI: {retired_schema}"
+            );
+        }
+
         for (path, request_schema) in [
             ("/sessions/{id}/mcp/add", "McpAddParams"),
             ("/sessions/{id}/mcp/remove", "McpRemoveParams"),
@@ -1706,6 +1772,37 @@ mod tests {
             !body.contains("#/$defs/"),
             "OpenAPI component refs must resolve through #/components/schemas"
         );
+        fn collect_openapi_component_refs(
+            value: &serde_json::Value,
+            refs: &mut std::collections::BTreeSet<String>,
+        ) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(serde_json::Value::String(reference)) = object.get("$ref")
+                        && let Some(name) = reference.strip_prefix("#/components/schemas/")
+                    {
+                        refs.insert(name.to_string());
+                    }
+                    for nested in object.values() {
+                        collect_openapi_component_refs(nested, refs);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for nested in values {
+                        collect_openapi_component_refs(nested, refs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut refs = std::collections::BTreeSet::new();
+        collect_openapi_component_refs(&rest_openapi, &mut refs);
+        for reference in refs {
+            assert!(
+                components.contains_key(&reference),
+                "OpenAPI component ref must resolve: {reference}"
+            );
+        }
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

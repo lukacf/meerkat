@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 
 ContentBlock = dict[str, Any]
 ContentInput = str | list[ContentBlock]
+HookId = str
+AgentErrorClass = str
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +121,28 @@ class AgentErrorReason:
     raw_reason_type: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
+    def __getitem__(self, key: str) -> Any:
+        if key == "reason_type":
+            return self.reason_type
+        if key == "outcome":
+            return self.outcome
+        if key == "cause_kind":
+            return self.cause_kind
+        if key == "raw_reason_type":
+            return self.raw_reason_type
+        if key == "raw":
+            return self.raw
+        return self.raw[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in {
+            "reason_type",
+            "outcome",
+            "cause_kind",
+            "raw_reason_type",
+            "raw",
+        } or key in self.raw
+
 
 @dataclass(frozen=True, slots=True)
 class AgentErrorReport:
@@ -127,6 +151,18 @@ class AgentErrorReport:
     class_: str = ""
     message: str = ""
     reason: AgentErrorReason | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "class":
+            return self.class_
+        if key == "message":
+            return self.message
+        if key == "reason":
+            return self.reason
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        return key in {"class", "message", "reason"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +325,7 @@ class Retrying(Event):
 class HookStarted(Event):
     """A hook invocation started."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
 
 
@@ -297,7 +333,7 @@ class HookStarted(Event):
 class HookCompleted(Event):
     """A hook invocation completed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     duration_ms: int = 0
 
@@ -306,7 +342,7 @@ class HookCompleted(Event):
 class HookFailed(Event):
     """A hook invocation failed."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     error: str = ""
 
@@ -315,7 +351,7 @@ class HookFailed(Event):
 class HookDenied(Event):
     """A hook denied the current operation."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     reason_code: str = ""
     message: str = ""
@@ -326,7 +362,7 @@ class HookDenied(Event):
 class HookRewriteApplied(Event):
     """A hook rewrote part of the request or response."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     patch: dict[str, Any] = field(default_factory=dict)
 
@@ -335,7 +371,7 @@ class HookRewriteApplied(Event):
 class HookPatchPublished(Event):
     """A hook patch envelope was published."""
 
-    hook_id: str = ""
+    hook_id: HookId = ""
     point: str = ""
     envelope: dict[str, Any] = field(default_factory=dict)
 
@@ -588,6 +624,103 @@ def _parse_usage(raw: dict[str, Any] | None) -> Usage:
     )
 
 
+def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("error_report.reason must be object")
+
+    reason_type = raw.get("reason_type", raw.get("reasonType"))
+    if not isinstance(reason_type, str):
+        raise ValueError("error_report.reason.reason_type must be string")
+
+    if reason_type == "turn_terminal_cause":
+        outcome = raw.get("outcome")
+        cause_kind = raw.get("cause_kind", raw.get("causeKind"))
+        if (
+            isinstance(outcome, str)
+            and isinstance(cause_kind, str)
+            and outcome in _TURN_TERMINAL_OUTCOMES
+            and cause_kind in _TURN_TERMINAL_CAUSE_KINDS
+        ):
+            return AgentErrorReason(
+                reason_type=reason_type,
+                outcome=outcome,
+                cause_kind=cause_kind,
+            )
+        return None
+
+    if reason_type not in {
+        "hook_denied",
+        "hook_timeout",
+        "hook_execution_failed",
+    }:
+        return AgentErrorReason(
+            reason_type="unknown",
+            raw_reason_type=reason_type,
+            raw=dict(raw),
+        )
+
+    reason = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"hook_id", "hook_id_string"}
+    }
+    reason["reason_type"] = reason_type
+
+    if reason_type == "hook_denied":
+        point = raw.get("point")
+        reason_code = raw.get("reason_code")
+        if not isinstance(point, str):
+            raise ValueError("error_report.reason.point must be string")
+        if not isinstance(reason_code, str):
+            raise ValueError("error_report.reason.reason_code must be string")
+        reason["point"] = point
+        reason["reason_code"] = reason_code
+        hook_id = raw.get("hook_id")
+        if "hook_id" in raw:
+            if hook_id is not None and not isinstance(hook_id, str):
+                raise ValueError("error_report.reason.hook_id must be string or null")
+            reason["hook_id"] = hook_id
+    else:
+        hook_id = raw.get("hook_id")
+        if not isinstance(hook_id, str):
+            raise ValueError("error_report.reason.hook_id must be string")
+        reason["hook_id"] = hook_id
+
+    if reason_type == "hook_timeout":
+        timeout_ms = raw.get("timeout_ms")
+        if not _is_number(timeout_ms):
+            raise ValueError("error_report.reason.timeout_ms must be number")
+        reason["timeout_ms"] = timeout_ms
+    if reason_type == "hook_execution_failed":
+        reason_text = raw.get("reason")
+        if not isinstance(reason_text, str):
+            raise ValueError("error_report.reason.reason must be string")
+        reason["reason"] = reason_text
+
+    return AgentErrorReason(reason_type=reason_type, raw=reason)
+
+
+def _parse_agent_error_report(raw: Any) -> AgentErrorReport | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("error_report must be object")
+
+    error_class = raw.get("class")
+    message = raw.get("message")
+    if not isinstance(error_class, str):
+        raise ValueError("error_report.class must be string")
+    if not isinstance(message, str):
+        raise ValueError("error_report.message must be string")
+
+    reason = None
+    if "reason" in raw:
+        reason = _parse_agent_error_reason(raw.get("reason"))
+    return AgentErrorReport(class_=error_class, message=message, reason=reason)
+
+
 def _parse_tool_config_change_status(raw: Any) -> ToolConfigChangeStatus | None:
     if not isinstance(raw, dict):
         return None
@@ -679,54 +812,6 @@ _TURN_TERMINAL_CAUSE_KINDS = {
     "runtime_apply_failure",
     "fatal_failure",
 }
-
-
-def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
-    if not isinstance(raw, dict):
-        return None
-
-    reason_type = raw.get("reason_type", raw.get("reasonType"))
-    if not isinstance(reason_type, str):
-        return None
-
-    if reason_type == "turn_terminal_cause":
-        outcome = raw.get("outcome")
-        cause_kind = raw.get("cause_kind", raw.get("causeKind"))
-        if (
-            isinstance(outcome, str)
-            and isinstance(cause_kind, str)
-            and outcome in _TURN_TERMINAL_OUTCOMES
-            and cause_kind in _TURN_TERMINAL_CAUSE_KINDS
-        ):
-            return AgentErrorReason(
-                reason_type=reason_type,
-                outcome=outcome,
-                cause_kind=cause_kind,
-            )
-        return None
-
-    return AgentErrorReason(
-        reason_type="unknown",
-        raw_reason_type=reason_type,
-        raw=dict(raw),
-    )
-
-
-def _parse_agent_error_report(raw: Any) -> AgentErrorReport | None:
-    if not isinstance(raw, dict):
-        return None
-
-    class_ = raw.get("class")
-    message = raw.get("message")
-    if not isinstance(class_, str) or not isinstance(message, str):
-        return None
-
-    return AgentErrorReport(
-        class_=class_,
-        message=message,
-        reason=_parse_agent_error_reason(raw.get("reason")),
-    )
-
 
 def _parse_skill_resolution_failure_reason(
     raw: Any,
@@ -914,6 +999,8 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_calls",
     }:
         raise ValueError("budget_type must be known")
+    if event_type == "run_failed" and "error_report" in raw:
+        _parse_agent_error_report(raw.get("error_report"))
 
     for field_name in required.get(event_type, ()):
         if field_name == "usage":

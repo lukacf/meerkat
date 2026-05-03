@@ -454,65 +454,72 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
         })
         .transpose()?;
 
-    let runtime = match config.comms.mode {
-        CommsRuntimeMode::Inproc => CommsRuntime::inproc_only_with_silent_intents(
-            comms_name,
-            inproc_namespace.clone(),
-            silent_intents.clone(),
-        )
-        .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
-        CommsRuntimeMode::Tcp => {
-            let address = config
-                .comms
-                .address
-                .as_ref()
-                .ok_or_else(|| "comms.address is required when comms.mode = tcp".to_string())?;
-            let listen_tcp = address
-                .parse()
-                .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
-            let comms = CoreCommsConfig {
-                enabled: true,
-                name: comms_name.to_string(),
-                inproc_namespace: inproc_namespace.clone(),
-                listen_tcp: Some(listen_tcp),
-                auth: config.comms.auth,
-                event_listen_tcp,
-                ..Default::default()
-            };
-            let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+    let runtime =
+        match config.comms.mode {
+            CommsRuntimeMode::Inproc => CommsRuntime::inproc_only_with_silent_intents(
+                comms_name,
+                inproc_namespace.clone(),
+                silent_intents.clone(),
+            )
+            .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
+            CommsRuntimeMode::Tcp => {
+                let address =
+                    config.comms.address.as_ref().ok_or_else(|| {
+                        "comms.address is required when comms.mode = tcp".to_string()
+                    })?;
+                let listen_tcp = address
+                    .parse()
+                    .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
+                let comms = CoreCommsConfig {
+                    enabled: true,
+                    name: comms_name.to_string(),
+                    inproc_namespace: inproc_namespace.clone(),
+                    listen_tcp: Some(listen_tcp),
+                    auth: config.comms.auth,
+                    event_listen_tcp,
+                    ..Default::default()
+                };
+                let resolved = comms.resolve_paths(base_dir.as_ref());
+                let mut rt = CommsRuntime::new_machine_authority_required_with_silent_intents(
+                    resolved,
+                    silent_intents.clone(),
+                )
                 .await
                 .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
-            rt.start_listeners()
-                .await
-                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
-            rt
-        }
-        CommsRuntimeMode::Uds => {
-            let address = config
-                .comms
-                .address
-                .as_ref()
-                .ok_or_else(|| "comms.address is required when comms.mode = uds".to_string())?;
-            let comms = CoreCommsConfig {
-                enabled: true,
-                name: comms_name.to_string(),
-                inproc_namespace: inproc_namespace.clone(),
-                listen_uds: Some(std::path::PathBuf::from(address)),
-                auth: config.comms.auth,
-                event_listen_tcp,
-                ..Default::default()
-            };
-            let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+                rt.start_listeners()
+                    .await
+                    .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+                rt
+            }
+            CommsRuntimeMode::Uds => {
+                let address =
+                    config.comms.address.as_ref().ok_or_else(|| {
+                        "comms.address is required when comms.mode = uds".to_string()
+                    })?;
+                let comms = CoreCommsConfig {
+                    enabled: true,
+                    name: comms_name.to_string(),
+                    inproc_namespace: inproc_namespace.clone(),
+                    listen_uds: Some(std::path::PathBuf::from(address)),
+                    auth: config.comms.auth,
+                    event_listen_tcp,
+                    ..Default::default()
+                };
+                let resolved = comms.resolve_paths(base_dir.as_ref());
+                let mut rt = CommsRuntime::new_machine_authority_required_with_silent_intents(
+                    resolved,
+                    silent_intents.clone(),
+                )
                 .await
                 .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
-            rt.start_listeners()
-                .await
-                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
-            rt
-        }
-    };
+                rt.start_listeners()
+                    .await
+                    .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+                rt
+            }
+        };
+
+    runtime.require_peer_comms_machine_authority();
 
     if let Some(meta) = peer_meta {
         runtime.set_peer_meta(meta);
@@ -574,9 +581,12 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
-                .await
-                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            let mut rt = CommsRuntime::new_machine_authority_required_with_silent_intents(
+                resolved,
+                silent_intents.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
             rt.start_listeners()
                 .await
                 .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
@@ -598,9 +608,12 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
-            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
-                .await
-                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            let mut rt = CommsRuntime::new_machine_authority_required_with_silent_intents(
+                resolved,
+                silent_intents.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
             rt.start_listeners()
                 .await
                 .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
@@ -665,6 +678,111 @@ mod tests {
         HookRuntimeKind,
     };
     use std::path::Path;
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    fn trusted_descriptor(
+        name: &str,
+        pubkey: meerkat_comms::identity::PubKey,
+        address: meerkat_core::comms::PeerAddress,
+    ) -> meerkat_core::comms::TrustedPeerDescriptor {
+        meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id: pubkey.to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(name.to_string()).expect("valid peer name"),
+            address,
+            pubkey: *pubkey.as_bytes(),
+        }
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    fn peer_route(
+        name: &str,
+        pubkey: meerkat_comms::identity::PubKey,
+    ) -> meerkat_core::comms::PeerRoute {
+        meerkat_core::comms::PeerRoute::with_display_name(
+            pubkey.to_peer_id(),
+            meerkat_core::comms::PeerName::new(name.to_string()).expect("valid peer name"),
+        )
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn sdk_tcp_runtime_fails_closed_before_session_machine_handle() {
+        use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+        use meerkat_core::comms::CommsCommand;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let suffix = meerkat_core::SessionId::new().to_string();
+        let sender_name = format!("sdk-pre-authority-sender-{suffix}");
+        let receiver_name = format!("sdk-pre-authority-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).expect("sender runtime");
+        let mut config = Config::default();
+        config.comms.mode = CommsRuntimeMode::Tcp;
+        config.comms.address = Some("127.0.0.1:0".to_string());
+
+        let receiver = build_comms_runtime_from_config(&config, temp.path(), &receiver_name, None)
+            .await
+            .expect("sdk tcp runtime");
+
+        assert!(
+            receiver.peer_comms_machine_authority_required(),
+            "public SDK listener runtimes must fail closed before a session-owned build installs machine authority"
+        );
+        assert!(
+            receiver.peer_comms_handle().is_none(),
+            "fixture must prove the pre-handle ingress path is closed"
+        );
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                meerkat_core::comms::PeerAddress::new(
+                    meerkat_core::comms::PeerTransport::Inproc,
+                    receiver_name.clone(),
+                ),
+            ),
+        )
+        .await
+        .expect("sender trusts receiver");
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                meerkat_core::comms::PeerAddress::new(
+                    meerkat_core::comms::PeerTransport::Inproc,
+                    sender_name.clone(),
+                ),
+            ),
+        )
+        .await
+        .expect("receiver trusts sender");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: peer_route(&receiver_name, receiver.public_key()),
+                body: "must not pass sdk compatibility classifier".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(meerkat_core::comms::SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::ClassificationRejected
+            })
+        ));
+        assert!(
+            CoreCommsRuntime::drain_inbox_interactions(&receiver)
+                .await
+                .is_empty(),
+            "pre-handle SDK-built runtime must not enqueue peer ingress"
+        );
+    }
 
     async fn dispatch_json(
         dispatcher: &dyn AgentToolDispatcher,

@@ -727,7 +727,13 @@ impl MeerkatMachine {
     }
 }
 
-/// Per-session comms drain slot, driven by direct in-kernel state.
+/// Capability token proving a session-control mutation is routed through
+/// `MeerkatMachine` authority instead of a public store-only service path.
+#[derive(Debug, Clone, Copy)]
+pub struct MachineSessionControlAuthority {
+    _private: (),
+}
+
 /// Session-scoped execution kernel for the Meerkat runtime.
 ///
 /// Owns per-session runtime state (driver, ops registry, completion waiters,
@@ -767,6 +773,13 @@ pub struct MeerkatMachine {
 }
 
 impl MeerkatMachine {
+    /// Capability token for store-only session-control mutations routed
+    /// through this machine authority.
+    #[must_use]
+    pub fn session_control_authority(&self) -> MachineSessionControlAuthority {
+        MachineSessionControlAuthority { _private: () }
+    }
+
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {
         match err {
             RuntimeDriverError::NotReady {

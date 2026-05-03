@@ -1826,6 +1826,10 @@ fn interaction_terminal_event(
                 args,
             }
         }
+        CompletionOutcome::Cancelled => AgentEvent::InteractionFailed {
+            interaction_id,
+            error: "cancelled".to_string(),
+        },
         CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
             AgentEvent::InteractionFailed {
                 interaction_id,

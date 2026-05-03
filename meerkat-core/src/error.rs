@@ -1,6 +1,6 @@
 //! Core error types for Meerkat
 
-use crate::hooks::{HookPoint, HookReasonCode};
+use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -329,8 +329,9 @@ pub enum AgentError {
     #[error("Invalid output schema: {0}")]
     InvalidOutputSchema(String),
 
-    #[error("Hook denied at {point:?}: {reason_code:?} - {message}")]
+    #[error("Hook '{hook_id}' denied at {point:?}: {reason_code:?} - {message}")]
     HookDenied {
+        hook_id: HookId,
         point: HookPoint,
         reason_code: HookReasonCode,
         message: String,
@@ -338,10 +339,10 @@ pub enum AgentError {
     },
 
     #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
-    HookTimeout { hook_id: String, timeout_ms: u64 },
+    HookTimeout { hook_id: HookId, timeout_ms: u64 },
 
     #[error("Hook execution failed for '{hook_id}': {reason}")]
-    HookExecutionFailed { hook_id: String, reason: String },
+    HookExecutionFailed { hook_id: HookId, reason: String },
 
     #[error("Hook configuration invalid: {reason}")]
     HookConfigInvalid { reason: String },

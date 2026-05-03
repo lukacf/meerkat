@@ -63,6 +63,12 @@ export type HookPoint =
   | "post_tool_execution"
   | "turn_boundary";
 
+/** Stable identifier for a configured hook. */
+export type HookId = string;
+
+/** Machine-readable agent error class. */
+export type AgentErrorClass = string;
+
 // ---------------------------------------------------------------------------
 // Scoped streaming attribution
 // ---------------------------------------------------------------------------
@@ -136,14 +142,20 @@ export interface UnknownAgentErrorReason {
   readonly raw: Readonly<Record<string, unknown>>;
 }
 
+export type HookAgentErrorReason = Record<string, unknown> & {
+  readonly reason_type: string;
+  readonly hook_id?: HookId | null;
+};
+
 export type AgentErrorReason =
   | TurnTerminalCauseReason
-  | UnknownAgentErrorReason;
+  | UnknownAgentErrorReason
+  | HookAgentErrorReason;
 
 export interface AgentErrorReport {
-  readonly class: string;
+  readonly class: AgentErrorClass;
   readonly message: string;
-  readonly reason?: AgentErrorReason;
+  readonly reason?: AgentErrorReason | null;
 }
 
 export interface RunFailedEvent {
@@ -151,7 +163,7 @@ export interface RunFailedEvent {
   readonly sessionId: string;
   readonly errorClass: string;
   readonly error: string;
-  readonly errorReport?: AgentErrorReport;
+  readonly errorReport?: AgentErrorReport | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -274,27 +286,27 @@ export interface RetryingEvent {
 
 export interface HookStartedEvent {
   readonly type: "hook_started";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
 }
 
 export interface HookCompletedEvent {
   readonly type: "hook_completed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly durationMs: number;
 }
 
 export interface HookFailedEvent {
   readonly type: "hook_failed";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly error: string;
 }
 
 export interface HookDeniedEvent {
   readonly type: "hook_denied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly reasonCode: string;
   readonly message: string;
@@ -303,14 +315,14 @@ export interface HookDeniedEvent {
 
 export interface HookRewriteAppliedEvent {
   readonly type: "hook_rewrite_applied";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly patch: Record<string, unknown>;
 }
 
 export interface HookPatchPublishedEvent {
   readonly type: "hook_patch_published";
-  readonly hookId: string;
+  readonly hookId: HookId;
   readonly point: HookPoint;
   readonly envelope: Record<string, unknown>;
 }
@@ -588,6 +600,102 @@ function parseUsage(raw: unknown): Usage {
   };
 }
 
+function hasOwn(raw: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(raw, field);
+}
+
+function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report.reason must be object");
+  }
+
+  const reasonType = parseWireString(raw.reason_type ?? raw.reasonType);
+  if (reasonType === undefined) {
+    throw new Error("error_report.reason.reason_type must be string");
+  }
+
+  if (reasonType === "turn_terminal_cause") {
+    const outcome = parseWireString(raw.outcome);
+    const causeKind = parseWireString(raw.cause_kind ?? raw.causeKind);
+    if (
+      outcome !== undefined &&
+      causeKind !== undefined &&
+      TURN_TERMINAL_OUTCOMES.has(outcome as TurnTerminalOutcome) &&
+      TURN_TERMINAL_CAUSE_KINDS.has(causeKind as TurnTerminalCauseKind)
+    ) {
+      return {
+        reasonType,
+        outcome: outcome as TurnTerminalOutcome,
+        causeKind: causeKind as TurnTerminalCauseKind,
+      };
+    }
+    return undefined;
+  }
+
+  if (!["hook_denied", "hook_timeout", "hook_execution_failed"].includes(reasonType)) {
+    return { reasonType: "unknown", rawReasonType: reasonType, raw };
+  }
+
+  const reason: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key !== "hook_id" && key !== "hook_id_string") {
+      reason[key] = value;
+    }
+  }
+  reason.reason_type = reasonType;
+
+  if (reasonType === "hook_denied") {
+    reason.point = requireStringField(raw, "point");
+    reason.reason_code = requireStringField(raw, "reason_code");
+  } else {
+    reason.hook_id = requireStringField(raw, "hook_id");
+  }
+
+  if (reasonType === "hook_timeout") {
+    reason.timeout_ms = requireNumberField(raw, "timeout_ms");
+  }
+  if (reasonType === "hook_execution_failed") {
+    reason.reason = requireStringField(raw, "reason");
+  }
+
+  if (reasonType === "hook_denied" && hasOwn(raw, "hook_id")) {
+    const hookId = raw.hook_id;
+    if (hookId !== null && typeof hookId !== "string") {
+      throw new Error("error_report.reason.hook_id must be string or null");
+    }
+    reason.hook_id = hookId;
+  }
+
+  return reason as HookAgentErrorReason;
+}
+
+function parseAgentErrorReport(raw: unknown): AgentErrorReport | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("error_report must be object");
+  }
+
+  const reason = hasOwn(raw, "reason")
+    ? parseAgentErrorReason(raw.reason)
+    : undefined;
+  return {
+    class: requireStringField(raw, "class"),
+    message: requireStringField(raw, "message"),
+    ...(reason !== undefined ? { reason } : {}),
+  };
+}
+
 function parseContentInput(raw: unknown): ContentInput {
   if (Array.isArray(raw)) return raw as ContentInput;
   return String(raw ?? "");
@@ -713,57 +821,6 @@ const TURN_TERMINAL_CAUSE_KINDS = new Set<TurnTerminalCauseKind>([
   "runtime_apply_failure",
   "fatal_failure",
 ]);
-
-function parseAgentErrorReason(raw: unknown): AgentErrorReason | undefined {
-  if (raw == null || typeof raw !== "object") {
-    return undefined;
-  }
-
-  const value = raw as Record<string, unknown>;
-  const reasonType = parseWireString(value.reason_type ?? value.reasonType);
-  if (reasonType === undefined) {
-    return undefined;
-  }
-
-  if (reasonType === "turn_terminal_cause") {
-    const outcome = parseWireString(value.outcome);
-    const causeKind = parseWireString(value.cause_kind ?? value.causeKind);
-    if (
-      outcome !== undefined &&
-      causeKind !== undefined &&
-      TURN_TERMINAL_OUTCOMES.has(outcome as TurnTerminalOutcome) &&
-      TURN_TERMINAL_CAUSE_KINDS.has(causeKind as TurnTerminalCauseKind)
-    ) {
-      return {
-        reasonType,
-        outcome: outcome as TurnTerminalOutcome,
-        causeKind: causeKind as TurnTerminalCauseKind,
-      };
-    }
-    return undefined;
-  }
-
-  return { reasonType: "unknown", rawReasonType: reasonType, raw: value };
-}
-
-function parseAgentErrorReport(raw: unknown): AgentErrorReport | undefined {
-  if (raw == null || typeof raw !== "object") {
-    return undefined;
-  }
-
-  const value = raw as Record<string, unknown>;
-  const errorClass = parseWireString(value.class);
-  const message = parseWireString(value.message);
-  if (errorClass === undefined || message === undefined) {
-    return undefined;
-  }
-
-  return {
-    class: errorClass,
-    message,
-    reason: parseAgentErrorReason(value.reason),
-  };
-}
 
 function parseSkillResolutionFailureReason(
   raw: unknown,
@@ -898,13 +955,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "run_completed":
       return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
     case "run_failed":
-      const errorReport = parseAgentErrorReport(raw.error_report);
       return {
         type,
         sessionId: requireStringField(raw, "session_id"),
         errorClass: requireStringField(raw, "error_class"),
         error: requireStringField(raw, "error"),
-        ...(errorReport !== undefined ? { errorReport } : {}),
+        ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
       };
 
     // Turn / LLM

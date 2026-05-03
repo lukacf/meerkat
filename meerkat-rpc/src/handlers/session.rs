@@ -30,6 +30,14 @@ use meerkat::surface::{RequestContext, request_action};
 // Param types
 // ---------------------------------------------------------------------------
 
+fn parse_provider_param(provider: &str) -> Result<Provider, String> {
+    Provider::parse_strict(provider).ok_or_else(|| {
+        format!(
+            "unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)"
+        )
+    })
+}
+
 /// Controls whether the first turn runs immediately on session creation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -269,7 +277,15 @@ pub async fn handle_create(
                 .unwrap_or("claude-sonnet-4-5")
                 .to_string()
         });
-    let provider = params.provider.as_deref().map(Provider::from_name);
+    let provider = match params
+        .provider
+        .as_deref()
+        .map(parse_provider_param)
+        .transpose()
+    {
+        Ok(provider) => provider,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
 
     // Parse output schema if provided
     let output_schema = match params.output_schema {
@@ -684,6 +700,14 @@ mod tests {
         let json = serde_json::json!({"prompt": "hello"});
         let params: CreateSessionParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.initial_turn, None);
+    }
+
+    #[test]
+    fn create_session_provider_param_fails_closed_for_unknown_provider() {
+        let err = super::parse_provider_param("provider-shaped-cache-key").unwrap_err();
+
+        assert!(err.contains("unknown provider"));
+        assert!(err.contains("provider-shaped-cache-key"));
     }
 
     #[test]

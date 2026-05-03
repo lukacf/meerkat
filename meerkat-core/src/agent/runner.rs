@@ -662,13 +662,14 @@ where
             .await?;
 
         if let Some(HookDecision::Deny {
+            hook_id,
             reason_code,
             message,
             payload,
-            ..
         }) = report.decision
         {
             return Err(AgentError::HookDenied {
+                hook_id,
                 point: HookPoint::RunStarted,
                 reason_code,
                 message,
@@ -691,13 +692,14 @@ where
             .await?;
 
         if let Some(HookDecision::Deny {
+            hook_id,
             reason_code,
             message,
             payload,
-            ..
         }) = report.decision
         {
             return Err(AgentError::HookDenied {
+                hook_id,
                 point: HookPoint::RunCompleted,
                 reason_code,
                 message,
@@ -712,7 +714,7 @@ where
                         &self.event_tap,
                         event_tx,
                         AgentEvent::HookRewriteApplied {
-                            hook_id: outcome.hook_id.to_string(),
+                            hook_id: outcome.hook_id.clone(),
                             point: HookPoint::RunCompleted,
                             patch: HookPatch::RunResult { text: text.clone() },
                         },
@@ -834,13 +836,14 @@ where
             .await?;
 
         if let Some(HookDecision::Deny {
+            hook_id,
             reason_code,
             message,
             payload,
-            ..
         }) = report.decision
         {
             return Err(AgentError::HookDenied {
+                hook_id,
                 point: HookPoint::RunFailed,
                 reason_code,
                 message,

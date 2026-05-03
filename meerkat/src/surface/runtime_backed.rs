@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use meerkat_core::error::AgentError;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle,
@@ -393,24 +392,6 @@ fn start_turn_request_from_primitive(
     })
 }
 
-fn core_executor_error_from_runtime_turn_error(error: SessionError) -> CoreExecutorError {
-    match error {
-        SessionError::Agent(AgentError::TerminalFailure {
-            outcome,
-            cause_kind,
-            message,
-        }) if cause_kind.is_specific_failure_cause() => {
-            CoreExecutorError::terminal_failure(outcome, cause_kind, message)
-        }
-        SessionError::Agent(AgentError::TerminalFailure { cause_kind, .. }) => {
-            CoreExecutorError::Internal(format!(
-                "runtime turn returned unknown machine terminal cause: {cause_kind:?}"
-            ))
-        }
-        error => CoreExecutorError::apply_failed_runtime_turn(error.to_string()),
-    }
-}
-
 #[async_trait::async_trait]
 impl CoreExecutor for PersistentRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -539,7 +520,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(core_executor_error_from_runtime_turn_error)
+            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

@@ -870,6 +870,7 @@ async fn process_queue(
                         }
                     }
                     Err(e) => {
+                        let cancelled = e.is_cancelled();
                         let error_msg = e.to_string();
                         let terminal_failure = match &e {
                             CoreExecutorError::TerminalFailure {
@@ -917,11 +918,17 @@ async fn process_queue(
                         // Resolve completion waiter so callers don't hang.
                         if let Some(completions) = completions.as_ref() {
                             let mut completions = completions.lock().await;
-                            abandon_completion_waiters(
-                                &mut completions,
-                                &input_ids,
-                                format!("apply failed: {error_msg}"),
-                            );
+                            if cancelled {
+                                for input_id in &input_ids {
+                                    completions.resolve_cancelled(input_id);
+                                }
+                            } else {
+                                abandon_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("apply failed: {error_msg}"),
+                                );
+                            }
                         }
                         let mut d = driver.lock().await;
                         let should_continue = d.has_queued_input_outside(&input_ids);

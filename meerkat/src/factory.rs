@@ -932,15 +932,14 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
         )?;
         let requires_scoped_override = resolution.execution_plan.requires_scoped_override();
         let machine_routing_realtime_capable = if requires_scoped_override {
-            model_realtime_capable(
-                resolution.execution_plan.provider.0.as_str(),
-                resolution.provider_call_model.as_str(),
-            )
+            meerkat_core::Provider::parse_strict(resolution.execution_plan.provider.0.as_str())
+                .map(|provider| {
+                    model_realtime_capable(provider, resolution.provider_call_model.as_str())
+                })
+                .unwrap_or(false)
         } else {
             effective_provider
-                .map(|provider| {
-                    model_realtime_capable(provider.as_str(), status.effective_model.as_str())
-                })
+                .map(|provider| model_realtime_capable(provider, status.effective_model.as_str()))
                 .unwrap_or(false)
         };
         let machine_routing_model = if resolution.execution_plan.requires_scoped_override() {
@@ -989,7 +988,7 @@ fn image_projection_messages(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn model_realtime_capable(provider: &str, model: &str) -> bool {
+fn model_realtime_capable(provider: meerkat_core::Provider, model: &str) -> bool {
     meerkat_core::model_profile::capabilities::capabilities_for(provider, model)
         .map(|caps| caps.realtime)
         .unwrap_or(false)
@@ -1004,9 +1003,12 @@ fn model_realtime_capable(provider: &str, model: &str) -> bool {
 /// `model_not_found`, so any session whose resolved model is
 /// realtime-capable must use the WebSocket text adapter.
 fn is_openai_realtime_capable(model: &str) -> bool {
-    meerkat_core::model_profile::capabilities::capabilities_for("openai", model)
-        .map(|caps| caps.realtime)
-        .unwrap_or(false)
+    meerkat_core::model_profile::capabilities::capabilities_for(
+        meerkat_core::Provider::OpenAI,
+        model,
+    )
+    .map(|caps| caps.realtime)
+    .unwrap_or(false)
 }
 
 /// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
@@ -2068,15 +2070,23 @@ impl AgentFactory {
                 OpenAiCompatibleMode::ChatCompletions
             }
         };
+        let profile = registry
+            .profile_for_provider(Provider::SelfHosted, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "missing provider-aware profile for self-hosted model '{}'",
+                    identity.model
+                ))
+            })?;
 
         Ok(SelfHostedClientSpec {
             server_id: self_hosted.server_id.clone(),
             mode,
             remote_model: self_hosted.remote_model.clone(),
             base_url: self_hosted.base_url.clone(),
-            supports_temperature: entry.profile.supports_temperature,
-            supports_thinking: entry.profile.supports_thinking,
-            supports_reasoning: entry.profile.supports_reasoning,
+            supports_temperature: profile.supports_temperature,
+            supports_thinking: profile.supports_thinking,
+            supports_reasoning: profile.supports_reasoning,
         })
     }
 

@@ -1,10 +1,11 @@
 //! Anthropic catalog-backed request helpers.
 //!
-//! Capability facts for Anthropic models live in
-//! [`crate::model_profile::capabilities::anthropic`]. This module only exposes
+//! Capability facts for Anthropic models live in the typed
+//! [`crate::model_profile::capabilities`] catalog. This module only exposes
 //! request-shaping helpers for provider clients; uncatalogued model IDs do not
 //! synthesize semantic capabilities from name prefixes.
 
+use crate::Provider;
 use crate::model_profile::capabilities::capabilities_for;
 
 /// Whether the model accepts a non-default `temperature`.
@@ -12,7 +13,7 @@ use crate::model_profile::capabilities::capabilities_for;
 /// Catalog rows are authoritative. Unknown model IDs return `false` so callers
 /// do not send optional provider parameters based on model-name folklore.
 pub fn supports_temperature(model: &str) -> bool {
-    capabilities_for("anthropic", model).is_some_and(|caps| caps.supports_temperature)
+    capabilities_for(Provider::Anthropic, model).is_some_and(|caps| caps.supports_temperature)
 }
 
 #[cfg(test)]

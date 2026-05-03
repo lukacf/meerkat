@@ -302,16 +302,24 @@ pub fn build_models_catalog_response(
             let models = registry
                 .entries_for_provider(provider)
                 .map(|entry| {
+                    let model_profile = registry
+                        .profile_for_provider(provider, &entry.id)
+                        .ok_or_else(|| {
+                            meerkat_core::ConfigError::InternalError(format!(
+                                "missing provider-aware profile for {}:{}",
+                                provider.as_str(),
+                                entry.id
+                            ))
+                        })?;
                     let profile = Some(meerkat_contracts::WireModelProfile {
-                        model_family: entry.profile.model_family.clone(),
-                        supports_temperature: entry.profile.supports_temperature,
-                        supports_thinking: entry.profile.supports_thinking,
-                        supports_reasoning: entry.profile.supports_reasoning,
-                        supports_web_search: entry.profile.supports_web_search,
-                        inline_video: entry.profile.inline_video,
-                        params_schema: entry.profile.params_schema.clone(),
-                        beta_headers: entry
-                            .profile
+                        model_family: model_profile.model_family.clone(),
+                        supports_temperature: model_profile.supports_temperature,
+                        supports_thinking: model_profile.supports_thinking,
+                        supports_reasoning: model_profile.supports_reasoning,
+                        supports_web_search: model_profile.supports_web_search,
+                        inline_video: model_profile.inline_video,
+                        params_schema: model_profile.params_schema.clone(),
+                        beta_headers: model_profile
                             .beta_headers
                             .iter()
                             .map(|header| meerkat_contracts::WireModelBetaHeader {
@@ -321,7 +329,7 @@ pub fn build_models_catalog_response(
                             })
                             .collect(),
                     });
-                    meerkat_contracts::CatalogModelEntry {
+                    Ok(meerkat_contracts::CatalogModelEntry {
                         id: entry.id.clone(),
                         display_name: entry.display_name.clone(),
                         tier: match entry.tier {
@@ -339,16 +347,16 @@ pub fn build_models_catalog_response(
                             .as_ref()
                             .map(|server| server.server_id.clone()),
                         profile,
-                    }
+                    })
                 })
-                .collect();
-            meerkat_contracts::ProviderCatalog {
+                .collect::<Result<Vec<_>, meerkat_core::ConfigError>>()?;
+            Ok(meerkat_contracts::ProviderCatalog {
                 provider: provider.as_str().to_string(),
                 default_model_id: default_model_id.to_string(),
                 models,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, meerkat_core::ConfigError>>()?;
 
     Ok(meerkat_contracts::ModelsCatalogResponse {
         contract_version: ContractVersion::CURRENT,

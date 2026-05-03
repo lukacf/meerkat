@@ -6,6 +6,7 @@
 //! `context-windows`, `compaction`, `structured-outputs`).
 
 use super::{BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport};
+use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 // ── Beta headers ──────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (supported; compact-2026-01-12 beta header)
     ModelCapabilities {
         id: "claude-opus-4-7",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Opus 4.7",
         tier: ModelTier::Recommended,
         model_family: "claude-opus-4",
@@ -126,7 +127,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (supported, low/medium/high/max; no xhigh)
     ModelCapabilities {
         id: "claude-opus-4-6",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Opus 4.6",
         tier: ModelTier::Supported,
         model_family: "claude-opus-4",
@@ -170,7 +171,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (supported via compact-2026-01-12)
     ModelCapabilities {
         id: "claude-sonnet-4-6",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Sonnet 4.6",
         tier: ModelTier::Recommended,
         model_family: "claude-sonnet-4",
@@ -218,7 +219,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (explicitly lists claude-sonnet-4-5)
     ModelCapabilities {
         id: "claude-sonnet-4-5",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Sonnet 4.5",
         tier: ModelTier::Supported,
         model_family: "claude-sonnet-4",
@@ -257,7 +258,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (manual thinking supported; Claude Haiku 4.5 supports up to 64k output)
     ModelCapabilities {
         id: "claude-haiku-4-5-20251001",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Haiku 4.5",
         tier: ModelTier::Recommended,
         model_family: "claude-haiku-4",
@@ -290,7 +291,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // resolution stays registry-owned instead of falling back to prefix folklore.
     ModelCapabilities {
         id: "claude-haiku-4-5",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Haiku 4.5",
         tier: ModelTier::Recommended,
         model_family: "claude-haiku-4",
@@ -335,7 +336,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (NOT supported — Opus 4.5 is not in the supported-models list)
     ModelCapabilities {
         id: "claude-opus-4-5",
-        provider: "anthropic",
+        provider: Provider::Anthropic,
         display_name: "Claude Opus 4.5",
         tier: ModelTier::Supported,
         model_family: "claude-opus-4",

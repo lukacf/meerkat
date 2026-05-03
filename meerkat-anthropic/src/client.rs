@@ -9,7 +9,7 @@ use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, AnthropicThinkingConfig, ProviderTag,
 };
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage};
+use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use meerkat_llm_core::{http, streaming};
@@ -139,18 +139,23 @@ fn anthropic_tag(request: &LlmRequest) -> Option<&AnthropicProviderTag> {
 }
 
 fn catalog_beta_value(request: &LlmRequest, feature: &str) -> Option<&'static str> {
-    meerkat_core::model_profile::capabilities::capabilities_for("anthropic", &request.model)?
-        .beta_headers
-        .iter()
-        .find(|header| header.feature == feature)
-        .map(|header| header.header_value)
+    meerkat_core::model_profile::capabilities::capabilities_for(
+        Provider::Anthropic,
+        &request.model,
+    )?
+    .beta_headers
+    .iter()
+    .find(|header| header.feature == feature)
+    .map(|header| header.header_value)
 }
 
 fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
-    let header =
-        meerkat_core::model_profile::capabilities::capabilities_for("anthropic", &request.model)?
-            .context_window_beta?
-            .header;
+    let header = meerkat_core::model_profile::capabilities::capabilities_for(
+        Provider::Anthropic,
+        &request.model,
+    )?
+    .context_window_beta?
+    .header;
     header.strip_prefix("anthropic-beta: ")
 }
 

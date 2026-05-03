@@ -518,7 +518,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .map(|profile| profile.inline_video)
             .or_else(|| {
                 meerkat_core::model_profile::inline_video_support_for(
-                    identity.provider.as_str(),
+                    identity.provider,
                     &identity.model,
                 )
             })

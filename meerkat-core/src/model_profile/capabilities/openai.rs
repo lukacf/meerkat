@@ -5,6 +5,7 @@
 //! `openai.com/index/*`, and the Codex model index.
 
 use super::{ModelCapabilities, ThinkingSupport};
+use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 /// Reasoning-effort levels accepted by recent GPT-5.x models (5.4, 5.5, 5.5-pro).
@@ -33,7 +34,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // request policy does not infer facts from the model name.
     ModelCapabilities {
         id: "gpt-5.5",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT-5.5",
         tier: ModelTier::Recommended,
         model_family: "gpt-5",
@@ -66,7 +67,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // not derived from the `-pro` suffix.
     ModelCapabilities {
         id: "gpt-5.5-pro",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT-5.5 Pro",
         tier: ModelTier::Recommended,
         model_family: "gpt-5",
@@ -106,7 +107,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // supported choice but the catalog default points at 5.5.
     ModelCapabilities {
         id: "gpt-5.4",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT-5.4",
         tier: ModelTier::Supported,
         model_family: "gpt-5",
@@ -148,7 +149,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //      built-in computer use, and compaction)
     ModelCapabilities {
         id: "gpt-5.4-mini",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT-5.4 Mini",
         tier: ModelTier::Supported,
         model_family: "gpt-5",
@@ -186,7 +187,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //   - Web search: not listed among Codex-supported tools on the model page
     ModelCapabilities {
         id: "gpt-5.3-codex",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT-5.3 Codex",
         tier: ModelTier::Supported,
         model_family: "codex",
@@ -229,7 +230,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // to a realtime-capable model before opening a realtime channel.
     ModelCapabilities {
         id: "gpt-realtime-1.5",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT Realtime 1.5",
         tier: ModelTier::Recommended,
         model_family: "gpt-realtime",
@@ -267,7 +268,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // 1.5 rollout window.
     ModelCapabilities {
         id: "gpt-realtime",
-        provider: "openai",
+        provider: Provider::OpenAI,
         display_name: "GPT Realtime (legacy alias)",
         tier: ModelTier::Supported,
         model_family: "gpt-realtime",

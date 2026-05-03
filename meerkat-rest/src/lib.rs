@@ -978,7 +978,7 @@ async fn validate_prompt_video_input(
         .and_then(|state| state.config.model_registry().ok())
         .and_then(|registry| {
             registry
-                .profile_for(&identity.model)
+                .profile_for_provider(identity.provider, &identity.model)
                 .map(|profile| profile.inline_video)
         })
         .unwrap_or(false);
@@ -6323,6 +6323,16 @@ mod tests {
         }])
     }
 
+    fn validation_identity(provider: Provider, model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        }
+    }
+
     #[tokio::test]
     async fn rest_context_only_runtime_apply_preserves_run_checkpoint_boundary() {
         let temp = TempDir::new().unwrap();
@@ -7898,6 +7908,62 @@ mod tests {
         validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
             .await
             .expect("self-hosted aliases should validate inline video against the active registry");
+    }
+
+    #[tokio::test]
+    async fn validate_prompt_video_input_rejects_inline_video_for_wrong_provider_known_model() {
+        let temp = TempDir::new().unwrap();
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_runtime =
+            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let identity = validation_identity(Provider::Anthropic, "gemini-3-flash-preview");
+
+        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
+            .await
+            .expect_err("wrong typed provider must not inherit Gemini inline-video support");
+
+        assert!(err.contains("inline video"));
+        assert!(err.contains("gemini-3-flash-preview"));
+        assert!(err.contains("anthropic"));
+    }
+
+    #[tokio::test]
+    async fn validate_prompt_video_input_rejects_inline_video_for_unknown_provider_model_pair() {
+        let temp = TempDir::new().unwrap();
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_runtime =
+            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let identity = validation_identity(Provider::Other, "uncatalogued-video-model");
+
+        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
+            .await
+            .expect_err("unknown provider/model pair must fail closed without defaults");
+
+        assert!(err.contains("inline video"));
+        assert!(err.contains("uncatalogued-video-model"));
+        assert!(err.contains("other"));
+    }
+
+    #[tokio::test]
+    async fn validate_prompt_video_input_rejects_inline_video_without_typed_provider_authority() {
+        let temp = TempDir::new().unwrap();
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        let config_runtime =
+            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let identity = validation_identity(Provider::Other, "gemini-3-flash-preview");
+
+        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
+            .await
+            .expect_err(
+                "known model/display strings must not select capability without typed provider",
+            );
+
+        assert!(err.contains("inline video"));
+        assert!(err.contains("gemini-3-flash-preview"));
+        assert!(err.contains("other"));
     }
 
     #[tokio::test]

@@ -6,15 +6,16 @@
 //! hand-written struct buckets (`AnthropicOpus46Params`, `OpenAiGpt5Params`,
 //! etc.), which conflated unrelated models into the same bucket.
 
+use crate::Provider;
 use crate::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
 use serde_json::{Value, json};
 
 /// Build the JSON Schema for a model's `provider_params`.
 pub fn build_params_schema(caps: &ModelCapabilities) -> Value {
     match caps.provider {
-        "anthropic" => build_anthropic_schema(caps),
-        "openai" => build_openai_schema(caps),
-        "gemini" => build_gemini_schema(caps),
+        Provider::Anthropic => build_anthropic_schema(caps),
+        Provider::OpenAI => build_openai_schema(caps),
+        Provider::Gemini => build_gemini_schema(caps),
         _ => json!({
             "type": "object",
             "additionalProperties": false,
@@ -382,7 +383,8 @@ mod tests {
 
     #[test]
     fn opus_47_effort_includes_xhigh() {
-        let caps = capabilities_for("anthropic", "claude-opus-4-7").expect("opus 4.7 row");
+        let caps =
+            capabilities_for(crate::Provider::Anthropic, "claude-opus-4-7").expect("opus 4.7 row");
         let schema = build_params_schema(caps);
         let values = enum_values_for(&schema, "effort").expect("effort enum");
         assert!(values.contains("xhigh"), "opus 4.7 must advertise xhigh");
@@ -392,7 +394,8 @@ mod tests {
 
     #[test]
     fn sonnet_45_has_no_effort_property() {
-        let caps = capabilities_for("anthropic", "claude-sonnet-4-5").expect("sonnet 4.5 row");
+        let caps = capabilities_for(crate::Provider::Anthropic, "claude-sonnet-4-5")
+            .expect("sonnet 4.5 row");
         let schema = build_params_schema(caps);
         let keys = property_keys(&schema);
         assert!(
@@ -403,8 +406,8 @@ mod tests {
 
     #[test]
     fn gemini_3_schema_exposes_thinking_level() {
-        let caps =
-            capabilities_for("gemini", "gemini-3-flash-preview").expect("gemini 3 flash row");
+        let caps = capabilities_for(crate::Provider::Gemini, "gemini-3-flash-preview")
+            .expect("gemini 3 flash row");
         let schema = build_params_schema(caps);
         let keys = property_keys(&schema);
         assert!(
@@ -422,7 +425,7 @@ mod tests {
 
     #[test]
     fn gemini_schema_has_no_include_thoughts() {
-        for caps in all_capabilities().filter(|c| c.provider == "gemini") {
+        for caps in all_capabilities().filter(|c| c.provider == crate::Provider::Gemini) {
             let schema = build_params_schema(caps);
             let keys = property_keys(&schema);
             assert!(

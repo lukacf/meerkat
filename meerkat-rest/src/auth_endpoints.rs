@@ -423,7 +423,7 @@ async fn rollback_token_commit(
                 token_store
                     .save(&commit.key, previous)
                     .await
-                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?
+                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
             }
         },
         None => {
@@ -2392,7 +2392,7 @@ mod tests {
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-rest-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
-                        Some(self.expires_at.clone()),
+                        Some(self.expires_at),
                         "test",
                     )),
                 })

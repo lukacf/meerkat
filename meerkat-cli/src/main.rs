@@ -308,6 +308,9 @@ fn completion_outcome_to_cli_runtime_turn_result(
                 args,
             }))
         }
+        meerkat_runtime::completion::CompletionOutcome::Cancelled => {
+            Err(anyhow::anyhow!("request cancelled"))
+        }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }

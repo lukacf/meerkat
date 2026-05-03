@@ -1239,7 +1239,12 @@ fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
 ) -> Result<Value, ToolCallError> {
-    format_agent_result(result, session_id).map_err(ToolCallError::internal)
+    match result {
+        Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
+            Err(request_cancelled_tool_error())
+        }
+        result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
+    }
 }
 
 fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
@@ -1285,6 +1290,19 @@ fn post_commit_session_created_error(
     session_id: &meerkat::SessionId,
     err: &SessionError,
 ) -> ToolCallError {
+    if matches!(err, SessionError::Agent(meerkat::AgentError::Cancelled)) {
+        return ToolCallError::new(
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
+            "request cancelled",
+            Some(json!({
+                "session_id": session_id.to_string(),
+                "session_ref": session_id.to_string(),
+                "session_created": true,
+                "resumable": true,
+            })),
+        );
+    }
+
     ToolCallError::internal_with_data(
         format!("Agent error: {err}"),
         json!({
@@ -1299,7 +1317,7 @@ fn post_commit_session_created_error(
 fn request_cancelled_tool_error() -> ToolCallError {
     ToolCallError::new(
         meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
-        "request cancelled before start",
+        "request cancelled",
         None,
     )
 }
@@ -5585,6 +5603,40 @@ mod tests {
         assert_eq!(
             data.get("session_id").and_then(Value::as_str),
             Some(session_id_string.as_str())
+        );
+    }
+
+    #[test]
+    fn test_format_agent_result_tool_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = format_agent_result_tool(
+            Err(SessionError::Agent(meerkat::AgentError::Cancelled)),
+            &session_id,
+        )
+        .expect_err("cancelled terminal should be a tool error");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[test]
+    fn test_post_commit_session_created_error_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = post_commit_session_created_error(
+            &session_id,
+            &SessionError::Agent(meerkat::AgentError::Cancelled),
+        );
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        let data = err.data.as_ref().expect("structured cancellation data");
+        assert_eq!(
+            data.get("session_created").and_then(Value::as_bool),
+            Some(true)
         );
     }
 

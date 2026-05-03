@@ -28,6 +28,8 @@ pub enum CompletionOutcome {
     /// The input reached a callback boundary and requires external tool
     /// fulfillment before the turn can continue.
     CallbackPending { tool_name: String, args: Value },
+    /// The input reached the canonical cancellation terminal.
+    Cancelled,
     /// The input was abandoned before completing.
     Abandoned(String),
     /// The runtime was stopped or destroyed while the input was pending.
@@ -181,6 +183,15 @@ impl CompletionRegistry {
                     tool_name: tool_name.clone(),
                     args: args.clone(),
                 });
+            }
+        }
+    }
+
+    /// Resolve all waiters for an input that reached the cancellation terminal.
+    pub(crate) fn resolve_cancelled(&mut self, input_id: &InputId) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            for tx in senders {
+                let _ = tx.send(CompletionOutcome::Cancelled);
             }
         }
     }
@@ -429,6 +440,20 @@ mod tests {
                 assert_eq!(args, serde_json::json!({ "url": "https://example.com" }));
             }
             other => panic!("Expected CallbackPending, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_cancelled_sends_variant() {
+        let mut registry = CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        registry.resolve_cancelled(&input_id);
+
+        match handle.wait().await {
+            CompletionOutcome::Cancelled => {}
+            other => panic!("Expected Cancelled, got {other:?}"),
         }
     }
 

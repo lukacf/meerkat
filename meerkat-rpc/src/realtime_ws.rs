@@ -4381,8 +4381,13 @@ mod tests {
 
     async fn register_ready_realtime_session(
         runtime: &crate::session_runtime::SessionRuntime,
-        session_id: &SessionId,
-    ) {
+    ) -> SessionId {
+        let mut build_config = meerkat::AgentBuildConfig::new("gpt-realtime");
+        build_config.provider = Some(meerkat_core::Provider::OpenAI);
+        let session_id = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect("realtime-capable staged session should create");
         let adapter = runtime.runtime_adapter();
         adapter
             .register_session_with_executor(
@@ -4391,11 +4396,11 @@ mod tests {
             )
             .await;
         adapter
-            .project_realtime_attachment_intent(session_id, true)
+            .project_realtime_attachment_intent(&session_id, true)
             .await
             .expect("intent projection should succeed");
         let authority = adapter
-            .replace_realtime_attachment(session_id)
+            .replace_realtime_attachment(&session_id)
             .await
             .expect("replace should mint realtime authority");
         adapter
@@ -4405,6 +4410,7 @@ mod tests {
             )
             .await
             .expect("binding ready should be accepted");
+        session_id
     }
 
     fn accepted_session_open(
@@ -5031,8 +5037,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_open_status_for_observer_uses_machine_owned_attempts() {
         let runtime = test_session_runtime();
-        let session_id = SessionId::new();
-        register_ready_realtime_session(&runtime, &session_id).await;
+        let session_id = register_ready_realtime_session(&runtime).await;
         let adapter = runtime.runtime_adapter();
         adapter
             .require_realtime_attachment_reattach(&session_id)
@@ -5077,8 +5082,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_open_status_for_primary_without_factory_uses_machine_owned_exhaustion() {
         let runtime = test_session_runtime();
-        let session_id = SessionId::new();
-        register_ready_realtime_session(&runtime, &session_id).await;
+        let session_id = register_ready_realtime_session(&runtime).await;
         let adapter = runtime.runtime_adapter();
         adapter
             .require_realtime_attachment_reattach(&session_id)

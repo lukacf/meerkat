@@ -4168,7 +4168,7 @@ impl MobActor {
                                 labels: labels.clone(),
                                 additional_instructions,
                                 shell_env,
-                                mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                                mob_tool_authority_context: None,
                                 inherited_tool_filter: inherited_tool_filter.clone(),
                             },
                             expected_session_id: &resume_id,
@@ -4299,7 +4299,7 @@ impl MobActor {
                 labels: labels.clone(),
                 additional_instructions,
                 shell_env,
-                mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                mob_tool_authority_context: None,
                 inherited_tool_filter,
             })
             .await?;
@@ -4747,7 +4747,7 @@ impl MobActor {
             labels: Some(labels.clone()),
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await?;
@@ -7532,7 +7532,7 @@ impl MobActor {
             labels: Some(snapshot.labels.clone()),
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await?;
@@ -10353,7 +10353,7 @@ impl MobActor {
             &self.tool_bundles,
             self.mob_handle_for_tools(),
             default_tools,
-            crate::build::MobToolAccessContext::None,
+            None,
         )
     }
 

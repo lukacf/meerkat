@@ -14,19 +14,15 @@ use meerkat_core::RealmId;
 use meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY;
 use meerkat_core::Session;
 use meerkat_core::SessionToolVisibilityState;
+use meerkat_core::ToolCategoryOverride;
 use meerkat_core::WitnessedToolFilter;
-use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
+use meerkat_core::service::{
+    CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext,
+    resolve_mob_operator_access,
+};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
 use std::sync::Arc;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum MobToolAccessContext {
-    #[default]
-    None,
-    #[allow(dead_code)]
-    InjectedAuthority(MobToolAuthorityContext),
-}
 
 fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
     RealmId::parse(format!("mob.{mob_id}")).map_err(|e| {
@@ -36,13 +32,21 @@ fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
     })
 }
 
-impl MobToolAccessContext {
-    pub fn authority(&self) -> Option<MobToolAuthorityContext> {
-        match self {
-            Self::None => None,
-            Self::InjectedAuthority(authority) => Some(authority.clone()),
-        }
-    }
+/// Derive the effective `(override_mob, authority)` for a profile.
+///
+/// `profile.tools.mob || profile.tools.mob_tasks` is the policy declaration.
+/// The canonical resolver `resolve_mob_operator_access` synthesizes a typed
+/// `MobToolAuthorityContext` (defaulting to a generated create-only shape) when
+/// the profile says enable and no persisted authority is supplied. This is the
+/// single source of truth for both build-time `override_mob` and runtime tool
+/// dispatcher mounting; do not invent a parallel rule.
+pub(crate) fn resolve_profile_mob_operator_access(
+    profile: &Profile,
+    persisted_authority: Option<MobToolAuthorityContext>,
+) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
+    let enable_mob =
+        ToolCategoryOverride::from_effective(profile.tools.mob || profile.tools.mob_tasks);
+    resolve_mob_operator_access(enable_mob, persisted_authority)
 }
 
 /// Parameters for building an agent config from a mob profile.
@@ -57,7 +61,14 @@ pub struct BuildAgentConfigParams<'a> {
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     pub additional_instructions: Option<Vec<String>>,
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    pub mob_tool_access_context: MobToolAccessContext,
+    /// Persisted mob operator authority context (rehydration only).
+    ///
+    /// `None` means "no persisted authority" — when the profile says enable,
+    /// the canonical resolver synthesizes a generated `create_only` shape.
+    /// `Some(authority)` carries forward an already-issued capability scope
+    /// (typically restored from event-sourced session metadata) and the
+    /// resolver preserves it.
+    pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     /// Pre-resolved inherited tool filter from spawn tooling.
     ///
     /// When set, stored in canonical session tool-visibility state so the
@@ -94,7 +105,7 @@ pub async fn build_agent_config(
         labels,
         additional_instructions,
         shell_env,
-        mob_tool_access_context,
+        mob_tool_authority_context,
         inherited_tool_filter,
     } = params;
 
@@ -160,10 +171,10 @@ pub async fn build_agent_config(
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.memory);
     config.override_schedule =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.schedule);
-    config.override_mob = meerkat_core::ToolCategoryOverride::from_effective(
-        mob_tool_access_context.authority().is_some(),
-    );
-    config.mob_tool_authority_context = mob_tool_access_context.authority();
+    let (override_mob, authority) =
+        resolve_profile_mob_operator_access(profile, mob_tool_authority_context);
+    config.override_mob = override_mob;
+    config.mob_tool_authority_context = authority;
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
@@ -488,8 +499,8 @@ mod tests {
         }
     }
 
-    fn injected_authority() -> MobToolAccessContext {
-        MobToolAccessContext::InjectedAuthority(
+    fn injected_authority() -> Option<MobToolAuthorityContext> {
+        Some(
             meerkat_core::service::MobToolAuthorityContext::new(
                 meerkat_core::service::OpaquePrincipalToken::new("test-principal"),
                 true,
@@ -568,7 +579,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -594,7 +605,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -624,7 +635,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -660,7 +671,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -692,7 +703,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -709,10 +720,15 @@ mod tests {
             config.override_memory,
             meerkat_core::ToolCategoryOverride::Disable
         );
+        // Lead profile declares tools.mob = true; with no persisted authority
+        // the canonical resolver synthesizes a generated create-only shape and
+        // override_mob is Enable (not Disable as in the pre-canonicalization
+        // shadow path).
         assert_eq!(
             config.override_mob,
-            meerkat_core::ToolCategoryOverride::Disable
+            meerkat_core::ToolCategoryOverride::Enable
         );
+        assert!(config.mob_tool_authority_context.is_some());
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = def.profiles[&ProfileName::from("worker")]
             .as_inline()
@@ -728,7 +744,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -771,7 +787,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: Some(inherited_authority.clone()),
         })
         .await
@@ -818,7 +834,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: Some(WitnessedToolFilter::new(
                 meerkat_core::tool_scope::ToolFilter::Allow(
                     ["shell".to_string()].into_iter().collect(),
@@ -852,7 +868,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: injected_authority(),
+            mob_tool_authority_context: injected_authority(),
             inherited_tool_filter: None,
         })
         .await
@@ -869,12 +885,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_resumed_agent_config_does_not_restore_mob_override_without_operator_context()
-     {
+    async fn test_build_resumed_agent_config_uses_profile_intent_for_mob_override() {
+        // The profile is the canonical source of mob override intent. On resume
+        // with no persisted authority injected, the resolver synthesizes a
+        // generated create-only authority — equivalent to a fresh build of the
+        // same profile. Old metadata cannot quietly demote the profile's
+        // declared intent.
         let def = sample_definition();
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
             .unwrap();
+        assert!(
+            lead.tools.mob,
+            "fixture must declare profile.tools.mob = true"
+        );
         let session_id = SessionId::new();
         let resumed_session = resumed_session_with_metadata(session_id.clone());
 
@@ -890,7 +914,7 @@ mod tests {
                 labels: None,
                 additional_instructions: None,
                 shell_env: None,
-                mob_tool_access_context: MobToolAccessContext::None,
+                mob_tool_authority_context: None,
                 inherited_tool_filter: None,
             },
             expected_session_id: &session_id,
@@ -901,8 +925,13 @@ mod tests {
 
         assert_eq!(
             config.override_mob,
-            meerkat_core::ToolCategoryOverride::Disable,
-            "runtime-injected absence of operator capabilities must beat resumed mob metadata"
+            meerkat_core::ToolCategoryOverride::Enable,
+            "profile.tools.mob = true must yield Enable on resume; the canonical resolver \
+             synthesizes a generated create-only authority when none is persisted"
+        );
+        assert!(
+            config.mob_tool_authority_context.is_some(),
+            "resolver must synthesize an authority context when profile says enable"
         );
     }
 
@@ -969,7 +998,7 @@ mod tests {
                 labels: None,
                 additional_instructions: None,
                 shell_env: None,
-                mob_tool_access_context: MobToolAccessContext::None,
+                mob_tool_authority_context: None,
                 inherited_tool_filter: Some(inherited_authority.clone()),
             },
             expected_session_id: &session_id,
@@ -1044,7 +1073,7 @@ mod tests {
                 labels: None,
                 additional_instructions: None,
                 shell_env: None,
-                mob_tool_access_context: MobToolAccessContext::None,
+                mob_tool_authority_context: None,
                 inherited_tool_filter: Some(witnessed_filter(
                     meerkat_core::tool_scope::ToolFilter::Deny(
                         ["parent_shell".to_string()].into_iter().collect(),
@@ -1093,7 +1122,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await;
@@ -1120,7 +1149,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1153,7 +1182,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1188,7 +1217,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1223,7 +1252,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1249,7 +1278,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1275,7 +1304,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1322,7 +1351,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1376,7 +1405,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1424,7 +1453,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1457,7 +1486,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1487,7 +1516,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1525,7 +1554,7 @@ mod tests {
             labels: None,
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await
@@ -1574,7 +1603,7 @@ mod tests {
             labels: Some(app_labels),
             additional_instructions: None,
             shell_env: None,
-            mob_tool_access_context: MobToolAccessContext::None,
+            mob_tool_authority_context: None,
             inherited_tool_filter: None,
         })
         .await

@@ -6565,7 +6565,12 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
 }
 
 #[tokio::test]
-async fn test_mob_management_tools_hidden_without_operator_context() {
+async fn test_mob_management_tools_visible_with_default_authority_but_scope_restricted() {
+    // profile.tools.mob = true is the policy declaration. The canonical
+    // resolver synthesizes a generated create-only authority on spawn, so the
+    // operator dispatcher mounts and the tools are visible in the catalog.
+    // Without `managed_mob_scope`, dispatch on the current mob is denied with
+    // AccessDenied — capability scope is the gate, not visibility.
     let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
     let sid_1 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -6585,8 +6590,8 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
         "list_members",
     ] {
         assert!(
-            !tool_names.contains(&required.to_string()),
-            "operator tool '{required}' must stay hidden without runtime-injected operator context"
+            tool_names.contains(&required.to_string()),
+            "operator tool '{required}' must be visible when profile.tools.mob = true"
         );
     }
 
@@ -6597,15 +6602,115 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
             serde_json::json!({"profile": "worker", "member_id": "w-2"}),
         )
         .await
-        .expect_err("spawn_member tool should be unavailable");
-    assert!(matches!(spawn_err, ToolError::NotFound { .. }));
+        .expect_err("spawn_member should be denied without managed_mob_scope");
+    assert!(
+        matches!(spawn_err, ToolError::AccessDenied { .. }),
+        "expected AccessDenied (scope gate), got: {spawn_err:?}"
+    );
     assert!(
         handle
             .get_member(&AgentIdentity::from("w-2"))
             .await
             .is_none(),
-        "hidden operator tools must not mutate roster state"
+        "scope-denied operator tools must not mutate roster state"
     );
+}
+
+#[tokio::test]
+async fn profile_tools_mob_true_grants_operator_dispatcher_without_persisted_authority() {
+    // Regression: profile.tools.mob = true is the policy declaration. The
+    // canonical resolver must synthesize a generated create-only authority
+    // when no persisted authority is supplied (production spawn default), so
+    // the operator dispatcher mounts on the spawned member.
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap();
+    assert!(
+        profile.tools.mob,
+        "fixture must declare profile.tools.mob = true"
+    );
+
+    let dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+    )
+    .expect("compose dispatcher")
+    .expect(
+        "profile.tools.mob = true must mount the operator dispatcher even without \
+         persisted authority — the canonical resolver synthesizes a create-only shape",
+    );
+
+    let tool_names: std::collections::BTreeSet<String> = dispatcher
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    for required in [
+        "spawn_member",
+        "retire_member",
+        "wire_members",
+        "unwire_members",
+        "list_members",
+    ] {
+        assert!(
+            tool_names.contains(required),
+            "operator tool '{required}' must be visible when profile.tools.mob = true"
+        );
+    }
+}
+
+#[tokio::test]
+async fn profile_tools_mob_false_keeps_operator_dispatcher_off() {
+    // Negative half of the regression: when neither tools.mob nor mob_tasks
+    // is declared, the resolver yields no authority and the dispatcher is
+    // not mounted, even with default (None) persisted authority.
+    let (handle, _service) = create_test_mob(sample_definition_without_mob_flags()).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline()
+        .unwrap();
+    assert!(!profile.tools.mob && !profile.tools.mob_tasks);
+
+    let dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+    )
+    .expect("compose dispatcher");
+
+    if let Some(dispatcher) = dispatcher {
+        let tool_names: std::collections::BTreeSet<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for forbidden in [
+            "spawn_member",
+            "retire_member",
+            "wire_members",
+            "unwire_members",
+            "list_members",
+        ] {
+            assert!(
+                !tool_names.contains(forbidden),
+                "operator tool '{forbidden}' must stay hidden when both profile.tools.mob \
+                 and profile.tools.mob_tasks are false"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -6623,7 +6728,7 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
         &BTreeMap::new(),
         handle.clone(),
         None,
-        crate::build::MobToolAccessContext::InjectedAuthority(
+        Some(
             meerkat_core::service::MobToolAuthorityContext::new(
                 meerkat_core::service::OpaquePrincipalToken::new("out-of-scope"),
                 false,
@@ -6671,7 +6776,7 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
         &BTreeMap::new(),
         handle.clone(),
         None,
-        crate::build::MobToolAccessContext::InjectedAuthority(
+        Some(
             meerkat_core::service::MobToolAuthorityContext::new(
                 meerkat_core::service::OpaquePrincipalToken::new("out-of-scope"),
                 false,
@@ -6710,7 +6815,7 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
         &BTreeMap::new(),
         handle.clone(),
         None,
-        crate::build::MobToolAccessContext::InjectedAuthority(
+        Some(
             meerkat_core::service::MobToolAuthorityContext::new(
                 meerkat_core::service::OpaquePrincipalToken::new("in-scope"),
                 false,
@@ -7687,7 +7792,7 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
 }
 
 #[tokio::test]
-async fn test_mob_flow_tools_hidden_without_operator_context() {
+async fn test_mob_flow_tools_visible_but_scope_restricted_with_default_authority() {
     let mut definition =
         with_cancel_grace_timeout(sample_definition_with_single_step_flow(60_000, 8), 25);
     let worker = definition
@@ -7716,16 +7821,16 @@ async fn test_mob_flow_tools_hidden_without_operator_context() {
         "mob_cancel_flow",
     ] {
         assert!(
-            !tool_names.contains(&required.to_string()),
-            "flow operator tool '{required}' must stay hidden without runtime-injected operator context"
+            tool_names.contains(&required.to_string()),
+            "flow operator tool '{required}' must be visible when profile.tools.mob = true"
         );
     }
 
     let listed_err = service
         .dispatch_external_tool(&sid_1, "mob_list_flows", serde_json::json!({}))
         .await
-        .expect_err("mob_list_flows should be unavailable");
-    assert!(matches!(listed_err, ToolError::NotFound { .. }));
+        .expect_err("mob_list_flows should be denied without managed_mob_scope");
+    assert!(matches!(listed_err, ToolError::AccessDenied { .. }));
 
     let started_err = service
         .dispatch_external_tool(
@@ -7737,12 +7842,16 @@ async fn test_mob_flow_tools_hidden_without_operator_context() {
             }),
         )
         .await
-        .expect_err("mob_run_flow should be unavailable");
-    assert!(matches!(started_err, ToolError::NotFound { .. }));
+        .expect_err("mob_run_flow should be denied without managed_mob_scope");
+    assert!(matches!(started_err, ToolError::AccessDenied { .. }));
 }
 
 #[tokio::test]
-async fn test_mob_flow_status_tool_is_hidden_without_operator_context_even_for_bad_args() {
+async fn test_mob_flow_status_denies_before_arg_validation_when_scope_missing() {
+    // With default create-only authority (no managed_mob_scope), the tool is
+    // visible but dispatch is denied at the scope gate — *before* args are
+    // parsed. Bad-arg payloads must not leak as ArgValidation when the caller
+    // lacks scope; the scope check must short-circuit.
     let mut definition = sample_definition_with_single_step_flow(500, 8);
     let worker = definition
         .profiles
@@ -7768,10 +7877,10 @@ async fn test_mob_flow_status_tool_is_hidden_without_operator_context_even_for_b
             serde_json::json!({"run_id":"not-a-uuid"}),
         )
         .await
-        .expect_err("mob_flow_status should be unavailable");
+        .expect_err("mob_flow_status should be denied without managed_mob_scope");
     assert!(
-        matches!(error, ToolError::NotFound { .. }),
-        "flow operator tools should stay hidden without runtime-injected operator context"
+        matches!(error, ToolError::AccessDenied { .. }),
+        "scope check must short-circuit before arg validation; got: {error:?}"
     );
 }
 
@@ -7950,20 +8059,20 @@ async fn test_spawn_member_tool_dispatches_backend_selection() {
             }),
         )
         .await
-        .expect_err("spawn external via tool should be unavailable");
-    assert!(matches!(err, ToolError::NotFound { .. }));
+        .expect_err("spawn external via tool should be denied without managed_mob_scope");
+    assert!(matches!(err, ToolError::AccessDenied { .. }));
 
     assert!(
         handle
             .get_member(&AgentIdentity::from("w-ext"))
             .await
             .is_none(),
-        "hidden operator spawn tool must not provision a backend peer"
+        "scope-denied operator spawn tool must not provision a backend peer"
     );
 }
 
 #[tokio::test]
-async fn test_mob_task_tools_hidden_without_operator_context() {
+async fn test_mob_task_tools_visible_but_scope_restricted_with_default_authority() {
     let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
     let sid_1 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -7980,11 +8089,11 @@ async fn test_mob_task_tools_hidden_without_operator_context() {
         "mob_task_get",
     ] {
         assert!(
-            !service
+            service
                 .external_tool_names(&sid_1)
                 .await
                 .contains(&required.to_string()),
-            "task operator tool '{required}' must stay hidden without runtime-injected operator context"
+            "task operator tool '{required}' must be visible when profile.tools.mob_tasks = true"
         );
     }
 
@@ -7998,8 +8107,8 @@ async fn test_mob_task_tools_hidden_without_operator_context() {
             }),
         )
         .await
-        .expect_err("mob_task_create should be unavailable");
-    assert!(matches!(create_err, ToolError::NotFound { .. }));
+        .expect_err("mob_task_create should be denied without managed_mob_scope");
+    assert!(matches!(create_err, ToolError::AccessDenied { .. }));
 }
 
 #[tokio::test]
@@ -8333,12 +8442,12 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
 
     let names = service.external_tool_names(&restored_sid).await;
     assert!(
-        !names.contains(&"spawn_member".to_string()),
-        "restored sessions must not regain mob operator tools without runtime-injected context"
+        names.contains(&"spawn_member".to_string()),
+        "restored sessions must keep operator tools that the profile declares"
     );
     assert!(
-        !names.contains(&"mob_task_create".to_string()),
-        "restored sessions must not regain mob task operator tools without runtime-injected context"
+        names.contains(&"mob_task_create".to_string()),
+        "restored sessions must keep mob task tools that the profile declares"
     );
     assert!(
         names.contains(&"bundle_echo".to_string()),
@@ -9223,7 +9332,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 labels: None,
                 additional_instructions: None,
                 shell_env: None,
-                mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                mob_tool_authority_context: None,
                 inherited_tool_filter: None,
             },
             expected_session_id: &wrong_session_id,
@@ -23216,8 +23325,13 @@ async fn test_external_tools_provider_called_per_spawn() {
 
 #[tokio::test]
 async fn test_external_tools_name_collision_profile_wins() {
-    // Provider returns a dispatcher with tool "spawn_member". Without operator
-    // context, the callback tool should pass through unchanged.
+    // Provider returns a dispatcher with tool "spawn_member". When
+    // profile.tools.mob = true, the canonical resolver mounts the mob-owned
+    // spawn_member dispatcher; on name collision, the profile-declared tool
+    // wins and shadows the callback's spawn_member. The callback's unique
+    // tool stays visible. Dispatching the colliding name reaches the
+    // mob-owned dispatcher, which denies on scope (default create-only
+    // authority has no managed_mob_scope for this mob).
     let provider: crate::ExternalToolsProvider = Arc::new(|| {
         Some(
             Arc::new(MultiToolDispatcher::new(&["spawn_member", "my_callback"]))
@@ -23247,27 +23361,26 @@ async fn test_external_tools_name_collision_profile_wins() {
         .clone();
     let tool_names = service.external_tool_names(&session_id).await;
 
-    // Without operator context there is no mob-owned spawn_member, so the callback
-    // tool should remain visible.
     assert!(
         tool_names.contains(&"spawn_member".to_string()),
-        "callback spawn_member should be present when operator tools are hidden"
+        "spawn_member should be visible (the profile-declared mob-owned tool wins)"
     );
-    // callback's unique tool should still be present
     assert!(
         tool_names.contains(&"my_callback".to_string()),
         "non-colliding callback tool should be present"
     );
 
-    // Dispatch spawn_member — should hit the callback dispatcher directly.
+    // Dispatch spawn_member — reaches the mob-owned dispatcher, denied on scope.
     let raw_args = serde_json::json!({"profile": "worker", "member_id": "w-test"});
-    let result = service
+    let err = service
         .dispatch_external_tool_outcome(&session_id, "spawn_member", raw_args)
         .await
-        .expect("callback spawn_member should dispatch");
-    let payload: serde_json::Value =
-        serde_json::from_str(&result.result.text_content()).expect("callback result json");
-    assert_eq!(payload["tool"], "spawn_member");
+        .expect_err("mob-owned spawn_member should win and deny on missing scope");
+    assert!(
+        matches!(err, ToolError::AccessDenied { .. }),
+        "expected scope-denied AccessDenied (profile-declared tool wins, callback shadowed); \
+         got: {err:?}"
+    );
 }
 
 #[tokio::test]

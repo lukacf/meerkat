@@ -93,14 +93,17 @@ pub(super) fn compose_external_tools_for_profile(
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     mob_handle: MobHandle,
     default_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
-    mob_tool_access_context: crate::build::MobToolAccessContext,
+    persisted_mob_tool_authority_context: Option<MobToolAuthorityContext>,
 ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
     let mut dispatchers: Vec<Arc<dyn AgentToolDispatcher>> = Vec::new();
 
-    if let crate::build::MobToolAccessContext::InjectedAuthority(authority_context) =
-        mob_tool_access_context
-        && (profile.tools.mob || profile.tools.mob_tasks)
-    {
+    // Mount mob operator tools iff the canonical resolver yields an authority.
+    // The resolver is the single source of truth shared with build_agent_config.
+    let (_, effective_authority) = crate::build::resolve_profile_mob_operator_access(
+        profile,
+        persisted_mob_tool_authority_context,
+    );
+    if let Some(authority_context) = effective_authority {
         dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
             profile.tools.mob,

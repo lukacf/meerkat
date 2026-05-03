@@ -609,9 +609,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("WorkId"),
             NamedTypeBinding::string_enum("WorkOrigin", &["External", "Internal", "Ingest"]),
             // Wave-c C-6r: typed PeerEndpoint twin.
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "PeerEndpoint",
                 "crate::catalog::dsl::meerkat_machine::PeerEndpoint",
+                vec![
+                    TypePathStructField::named("name", "PeerName"),
+                    TypePathStructField::named("peer_id", "PeerId"),
+                    TypePathStructField::named("address", "PeerAddress"),
+                    TypePathStructField::named("signing_key", "PeerSigningKey"),
+                ],
             ),
             NamedTypeBinding::type_path(
                 "PeerName",

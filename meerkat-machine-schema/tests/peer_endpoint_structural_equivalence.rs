@@ -1,198 +1,249 @@
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    unused_imports
-)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-//! Structural-equivalence tripwire for the two `PeerEndpoint` twins.
+//! Typed structural-equivalence tripwire for the `PeerEndpoint` DSL twin.
 //!
-//! Invariant: the schema catalog twin at
-//! `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` and the
-//! runtime-side twin at `meerkat-runtime/src/meerkat_machine/dsl.rs`
-//! must stay in lockstep — identical field set with identical typed
-//! shapes (`PeerName`, `PeerId`, `PeerAddress`, `PeerSigningKey`) — and both must expose
-//! `From<&meerkat_core::comms::TrustedPeerDescriptor>` so the
-//! runtime/comms seam can project trusted-peer descriptors into either
-//! DSL without per-site coercion. Renames / additions / deletions on
-//! one side fail this tripwire loudly.
-//!
-//! The structural check is done at source-text level because the two
-//! crates sit on opposite sides of the dep DAG — pulling runtime into
-//! the schema crate's test just for symbol introspection would invert
-//! the dependency direction and is not justified for a structural
-//! assertion. Text extraction is equivalent in intent: we read each
-//! `pub struct PeerEndpoint` body, parse its field list, and compare.
+//! The required governance check is intentionally not a Rust source scanner.
+//! `MachineSchema` typed metadata owns the structural field set, and real
+//! `TrustedPeerDescriptor` projections own conversion coverage. A legacy source
+//! token can still appear in fixture text below; it is never sufficient for a
+//! green check when the typed schema or conversion disagrees.
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use meerkat_core::comms::TrustedPeerDescriptor;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine,
+    meerkat_machine::{PeerEndpoint, PeerSigningKey},
+};
+use meerkat_machine_schema::identity::NamedTypeId;
+use meerkat_machine_schema::{
+    MachineSchema, RustTypeAtom, TypePathStructField, TypePathStructFieldAtom,
+};
 
-const RUNTIME_DSL: &str = "meerkat-runtime/src/meerkat_machine/dsl.rs";
-const SCHEMA_CATALOG: &str = "meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs";
-
-fn workspace_root() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        let toml = p.join("Cargo.toml");
-        if toml.exists() {
-            let text = fs::read_to_string(&toml).unwrap_or_default();
-            if text.contains("[workspace]") {
-                return p;
-            }
-        }
-        assert!(p.pop(), "could not locate workspace root");
-    }
+const PEER_ENDPOINT_TYPE: &str = "PeerEndpoint";
+const PEER_ENDPOINT_PATH: &str = "crate::catalog::dsl::meerkat_machine::PeerEndpoint";
+const LEGACY_SOURCE_TOKEN_FIXTURE: &str = r#"
+pub struct PeerEndpoint {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
 }
+"#;
 
-fn read_source(root: &Path, relative: &str) -> String {
-    let path = root.join(relative);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()))
-}
+const EXPECTED_PEER_ENDPOINT_FIELDS: &[(&str, &str)] = &[
+    ("name", "PeerName"),
+    ("peer_id", "PeerId"),
+    ("address", "PeerAddress"),
+    ("signing_key", "PeerSigningKey"),
+];
 
-/// Extract the `{ ... }` body of `pub struct PeerEndpoint` and parse
-/// its fields into a `name -> type` map. Panics with a diagnostic if
-/// the struct is not present.
-fn peer_endpoint_fields(label: &str, body: &str) -> BTreeMap<String, String> {
-    let Some(head) = body.find("pub struct PeerEndpoint") else {
-        panic!("{label}: `pub struct PeerEndpoint` not found — expected twin to exist");
-    };
-    let open = body[head..]
-        .find('{')
-        .unwrap_or_else(|| panic!("{label}: PeerEndpoint has no opening brace"))
-        + head;
-    let close_rel = body[open..]
-        .find("\n}")
-        .unwrap_or_else(|| panic!("{label}: PeerEndpoint has no terminating `\\n}}`"));
-    let inner = &body[open + 1..open + close_rel];
-
-    let mut fields = BTreeMap::new();
-    for raw in inner.split(',') {
-        let line = raw
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with("//"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("pub ") else {
-            panic!("{label}: PeerEndpoint field is not `pub`: `{line}`");
-        };
-        let Some((name, ty)) = rest.split_once(':') else {
-            panic!("{label}: malformed PeerEndpoint field: `{line}`");
-        };
-        let name = name.trim().to_owned();
-        let ty = ty.trim().to_owned();
-        assert!(
-            fields.insert(name.clone(), ty.clone()).is_none(),
-            "{label}: duplicate field `{name}` in PeerEndpoint"
-        );
-    }
-    fields
-}
+const EXPECTED_NAMED_TYPE_PATHS: &[(&str, &str)] = &[
+    ("PeerName", "crate::catalog::dsl::meerkat_machine::PeerName"),
+    ("PeerId", "crate::catalog::dsl::meerkat_machine::PeerId"),
+    (
+        "PeerAddress",
+        "crate::catalog::dsl::meerkat_machine::PeerAddress",
+    ),
+    (
+        "PeerSigningKey",
+        "crate::catalog::dsl::meerkat_machine::PeerSigningKey",
+    ),
+];
 
 #[test]
-fn peer_endpoint_schema_and_runtime_fields_are_identical() {
-    let root = workspace_root();
-    let runtime_body = read_source(&root, RUNTIME_DSL);
-    let schema_body = read_source(&root, SCHEMA_CATALOG);
-    let runtime_fields = peer_endpoint_fields("runtime DSL", &runtime_body);
-    let schema_fields = peer_endpoint_fields("schema catalog", &schema_body);
+fn peer_endpoint_schema_metadata_owns_structural_field_parity() {
+    let schema = dsl_meerkat_machine();
 
-    // Identical field names.
-    let runtime_names: Vec<&String> = runtime_fields.keys().collect();
-    let schema_names: Vec<&String> = schema_fields.keys().collect();
-    assert_eq!(
-        runtime_names, schema_names,
-        "PeerEndpoint field sets drifted between schema and runtime.\n\
-         runtime: {runtime_names:?}\nschema: {schema_names:?}"
-    );
-
-    // Identical typed shapes — name=>type must match across both sides.
-    assert_eq!(
-        runtime_fields, schema_fields,
-        "PeerEndpoint field types drifted between schema and runtime.\n\
-         runtime: {runtime_fields:#?}\nschema: {schema_fields:#?}"
-    );
-
-    // Guard against silent destringification regressions — both sides
-    // must carry the typed newtypes (not `String`) at the known
-    // canonical field names.
-    for (field, expected_ty) in [
-        ("name", "PeerName"),
-        ("peer_id", "PeerId"),
-        ("address", "PeerAddress"),
-        ("signing_key", "PeerSigningKey"),
-    ] {
-        let actual = schema_fields
-            .get(field)
-            .unwrap_or_else(|| panic!("schema PeerEndpoint missing field `{field}`"));
-        assert_eq!(
-            actual, expected_ty,
-            "schema PeerEndpoint.{field}: expected `{expected_ty}`, got `{actual}`"
-        );
-    }
+    schema
+        .validate()
+        .expect("typed MeerkatMachine schema metadata must validate");
+    assert_peer_endpoint_structural_contract(&schema).unwrap();
 }
 
-#[test]
-fn peer_endpoint_both_sides_have_trusted_peer_descriptor_from_impl() {
-    let root = workspace_root();
-    let runtime_body = read_source(&root, RUNTIME_DSL);
-    let schema_body = read_source(&root, SCHEMA_CATALOG);
-
-    let runtime_needle = "impl From<&meerkat_core::comms::TrustedPeerDescriptor> for PeerEndpoint";
-    assert!(
-        runtime_body.contains(runtime_needle),
-        "runtime DSL missing `{runtime_needle}`"
-    );
-    assert!(
-        schema_body.contains(runtime_needle),
-        "schema catalog missing `{runtime_needle}` \
-         — wave-d D-e requires the schema-side twin to expose the \
-         same `From<&TrustedPeerDescriptor>` conversion as the \
-         runtime side"
-    );
-}
-
-/// Runtime check that the schema-side `From<&TrustedPeerDescriptor>`
-/// impl actually wires every identity atom through to the correct
-/// `PeerEndpoint` field. Text scans catch signatures; this catches
-/// body bugs (e.g. swapping `name` and `address` inside the impl).
 #[test]
 fn peer_endpoint_schema_from_trusted_peer_descriptor_round_trip() {
-    use meerkat_core::comms::TrustedPeerDescriptor;
-    use meerkat_machine_schema::catalog::dsl::meerkat_machine::PeerEndpoint;
+    let descriptor = trusted_peer_descriptor();
+    let endpoint = PeerEndpoint::from(&descriptor);
 
-    let descriptor = TrustedPeerDescriptor::test_only_unsigned(
+    assert_schema_endpoint_matches_descriptor(&endpoint, &descriptor).unwrap();
+}
+
+#[test]
+fn source_token_match_does_not_mask_schema_metadata_field_omission() {
+    let mut schema = dsl_meerkat_machine();
+    mutate_peer_endpoint_structural_metadata(&mut schema, |fields| {
+        fields.retain(|field| field.name.as_str() != "signing_key");
+    });
+
+    assert_legacy_source_fixture_still_contains_peer_endpoint_tokens();
+    let err = assert_peer_endpoint_structural_contract(&schema).unwrap_err();
+    assert!(
+        err.contains("PeerEndpoint structural fields"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn source_token_match_does_not_mask_schema_metadata_field_type_drift() {
+    let mut schema = dsl_meerkat_machine();
+    mutate_peer_endpoint_structural_metadata(&mut schema, |fields| {
+        fields
+            .iter_mut()
+            .find(|field| field.name.as_str() == "signing_key")
+            .expect("signing_key field exists")
+            .atom = TypePathStructFieldAtom::Named(named_type_id("PeerId"));
+    });
+
+    assert_legacy_source_fixture_still_contains_peer_endpoint_tokens();
+    let err = assert_peer_endpoint_structural_contract(&schema).unwrap_err();
+    assert!(
+        err.contains("PeerEndpoint structural fields"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn source_token_match_does_not_mask_schema_conversion_field_omission() {
+    let descriptor = trusted_peer_descriptor();
+    let endpoint = PeerEndpoint::new(
+        descriptor.name.as_str().to_owned(),
+        descriptor.peer_id.to_string(),
+        descriptor.address.to_string(),
+        PeerSigningKey([0u8; 32]),
+    );
+
+    assert_legacy_source_fixture_still_contains_peer_endpoint_tokens();
+    let err = assert_schema_endpoint_matches_descriptor(&endpoint, &descriptor).unwrap_err();
+    assert!(err.contains("signing_key"), "unexpected error: {err}");
+}
+
+fn assert_peer_endpoint_structural_contract(schema: &MachineSchema) -> Result<(), String> {
+    let actual = peer_endpoint_structural_fields(schema)?;
+    let expected = EXPECTED_PEER_ENDPOINT_FIELDS
+        .iter()
+        .map(|(field, ty)| ((*field).to_owned(), (*ty).to_owned()))
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(format!(
+            "PeerEndpoint structural fields drifted.\nexpected: {expected:?}\nactual: {actual:?}"
+        ));
+    }
+
+    for (name, expected_path) in EXPECTED_NAMED_TYPE_PATHS {
+        let binding = schema
+            .named_type_binding(&named_type_id(name))
+            .ok_or_else(|| format!("PeerEndpoint field type `{name}` has no named binding"))?;
+        match &binding.rust {
+            RustTypeAtom::TypePath(path) if path == expected_path => {}
+            other => {
+                return Err(format!(
+                    "PeerEndpoint field type `{name}` must bind to `{expected_path}`, got {other:?}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn peer_endpoint_structural_fields(
+    schema: &MachineSchema,
+) -> Result<Vec<(String, String)>, String> {
+    let binding = schema
+        .named_type_binding(&named_type_id(PEER_ENDPOINT_TYPE))
+        .ok_or_else(|| "PeerEndpoint named-type binding is missing".to_owned())?;
+
+    match &binding.rust {
+        RustTypeAtom::TypePathStruct { path, fields } => {
+            if path != PEER_ENDPOINT_PATH {
+                return Err(format!(
+                    "PeerEndpoint must bind to `{PEER_ENDPOINT_PATH}`, got `{path}`"
+                ));
+            }
+            fields
+                .iter()
+                .map(|field| match &field.atom {
+                    TypePathStructFieldAtom::Named(name) => {
+                        Ok((field.name.as_str().to_owned(), name.as_str().to_owned()))
+                    }
+                    TypePathStructFieldAtom::String => Err(format!(
+                        "PeerEndpoint.{} must be a typed named field, got String",
+                        field.name
+                    )),
+                })
+                .collect()
+        }
+        other => Err(format!(
+            "PeerEndpoint must use TypePathStruct metadata, got {other:?}"
+        )),
+    }
+}
+
+fn mutate_peer_endpoint_structural_metadata(
+    schema: &mut MachineSchema,
+    mutate: impl FnOnce(&mut Vec<TypePathStructField>),
+) {
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == PEER_ENDPOINT_TYPE)
+        .expect("PeerEndpoint binding exists");
+    let RustTypeAtom::TypePathStruct { fields, .. } = &mut binding.rust else {
+        panic!("PeerEndpoint binding must be TypePathStruct");
+    };
+    mutate(fields);
+}
+
+fn assert_schema_endpoint_matches_descriptor(
+    endpoint: &PeerEndpoint,
+    descriptor: &TrustedPeerDescriptor,
+) -> Result<(), String> {
+    if endpoint.name.as_str() != descriptor.name.as_str() {
+        return Err(format!(
+            "name mismatch: endpoint `{}`, descriptor `{}`",
+            endpoint.name.as_str(),
+            descriptor.name.as_str()
+        ));
+    }
+    let expected_peer_id = descriptor.peer_id.to_string();
+    if endpoint.peer_id.as_str() != expected_peer_id {
+        return Err(format!(
+            "peer_id mismatch: endpoint `{}`, descriptor `{expected_peer_id}`",
+            endpoint.peer_id.as_str()
+        ));
+    }
+    let expected_address = descriptor.address.to_string();
+    if endpoint.address.as_str() != expected_address {
+        return Err(format!(
+            "address mismatch: endpoint `{}`, descriptor `{expected_address}`",
+            endpoint.address.as_str()
+        ));
+    }
+    if endpoint.signing_key.0 != descriptor.pubkey {
+        return Err("signing_key mismatch between endpoint and descriptor".to_owned());
+    }
+    Ok(())
+}
+
+fn assert_legacy_source_fixture_still_contains_peer_endpoint_tokens() {
+    for (field, ty) in EXPECTED_PEER_ENDPOINT_FIELDS {
+        let token = format!("pub {field}: {ty}");
+        assert!(
+            LEGACY_SOURCE_TOKEN_FIXTURE.contains(&token),
+            "legacy source fixture should contain `{token}`"
+        );
+    }
+}
+
+fn trusted_peer_descriptor() -> TrustedPeerDescriptor {
+    TrustedPeerDescriptor::test_only_unsigned(
         "alice",
         "11111111-2222-5333-8444-555555555555",
         "inproc://alice",
     )
     .expect("synthesize a valid trusted peer descriptor")
-    .with_pubkey([42u8; 32]);
+    .with_pubkey([42u8; 32])
+}
 
-    let endpoint = PeerEndpoint::from(&descriptor);
-
-    assert_eq!(
-        endpoint.name.as_str(),
-        descriptor.name.as_str(),
-        "schema PeerEndpoint.name must mirror descriptor.name"
-    );
-    assert_eq!(
-        endpoint.peer_id.as_str(),
-        descriptor.peer_id.to_string().as_str(),
-        "schema PeerEndpoint.peer_id must mirror descriptor.peer_id"
-    );
-    assert_eq!(
-        endpoint.address.as_str(),
-        descriptor.address.to_string().as_str(),
-        "schema PeerEndpoint.address must mirror descriptor.address"
-    );
-    assert_eq!(
-        endpoint.signing_key.0, descriptor.pubkey,
-        "schema PeerEndpoint.signing_key must mirror descriptor.pubkey"
-    );
+fn named_type_id(name: &str) -> NamedTypeId {
+    NamedTypeId::parse(name).expect("valid named type")
 }

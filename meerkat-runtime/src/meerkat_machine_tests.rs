@@ -31,7 +31,8 @@ use meerkat_machine_schema::catalog::dsl::{
         MeerkatMachineInputVariant as SchemaMeerkatMachineInputVariant,
     },
 };
-use meerkat_machine_schema::{MachineSchema, TypeRef};
+use meerkat_machine_schema::identity::NamedTypeId;
+use meerkat_machine_schema::{MachineSchema, RustTypeAtom, TypeRef};
 use serde::Serialize;
 use tokio::sync::Notify;
 
@@ -64,6 +65,158 @@ fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
 
 fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
     MeerkatMachine::logical_runtime_id(session_id)
+}
+
+const PEER_ENDPOINT_TYPE: &str = "PeerEndpoint";
+const RUNTIME_LEGACY_SOURCE_TOKEN_FIXTURE: &str = r#"
+pub struct PeerEndpoint {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub signing_key: PeerSigningKey,
+}
+"#;
+
+const EXPECTED_PEER_ENDPOINT_FIELDS: &[(&str, &str)] = &[
+    ("name", "PeerName"),
+    ("peer_id", "PeerId"),
+    ("address", "PeerAddress"),
+    ("signing_key", "PeerSigningKey"),
+];
+
+#[test]
+fn peer_endpoint_runtime_projection_matches_typed_schema_contract() {
+    let schema = schema_meerkat_machine();
+    assert_eq!(
+        peer_endpoint_schema_structural_fields(&schema).unwrap(),
+        EXPECTED_PEER_ENDPOINT_FIELDS
+            .iter()
+            .map(|(field, ty)| ((*field).to_owned(), (*ty).to_owned()))
+            .collect::<Vec<_>>(),
+        "runtime PeerEndpoint projection must follow typed schema metadata"
+    );
+
+    let descriptor = peer_endpoint_trusted_descriptor();
+    let endpoint = mm_dsl::PeerEndpoint::from(&descriptor);
+
+    assert_runtime_endpoint_matches_descriptor(&endpoint, &descriptor).unwrap();
+    assert_runtime_endpoint_has_declared_fields(&endpoint);
+}
+
+#[test]
+fn source_token_match_does_not_mask_runtime_conversion_field_omission() {
+    let descriptor = peer_endpoint_trusted_descriptor();
+    let endpoint = mm_dsl::PeerEndpoint::new(
+        descriptor.name.as_str().to_owned(),
+        descriptor.peer_id.to_string(),
+        descriptor.address.to_string(),
+        mm_dsl::PeerSigningKey([0u8; 32]),
+    );
+
+    assert_runtime_legacy_source_fixture_still_contains_peer_endpoint_tokens();
+    let err = assert_runtime_endpoint_matches_descriptor(&endpoint, &descriptor).unwrap_err();
+    assert!(err.contains("signing_key"), "unexpected error: {err}");
+}
+
+fn peer_endpoint_schema_structural_fields(
+    schema: &MachineSchema,
+) -> Result<Vec<(String, String)>, String> {
+    let binding = schema
+        .named_type_binding(&named_type_id(PEER_ENDPOINT_TYPE))
+        .ok_or_else(|| "PeerEndpoint named-type binding is missing".to_owned())?;
+    let RustTypeAtom::TypePathStruct { fields, .. } = &binding.rust else {
+        return Err(format!(
+            "PeerEndpoint must use TypePathStruct metadata, got {:?}",
+            binding.rust
+        ));
+    };
+
+    fields
+        .iter()
+        .map(|field| match &field.atom {
+            meerkat_machine_schema::TypePathStructFieldAtom::Named(name) => {
+                Ok((field.name.as_str().to_owned(), name.as_str().to_owned()))
+            }
+            meerkat_machine_schema::TypePathStructFieldAtom::String => Err(format!(
+                "PeerEndpoint.{} must be a typed named field, got String",
+                field.name
+            )),
+        })
+        .collect()
+}
+
+fn assert_runtime_endpoint_has_declared_fields(endpoint: &mm_dsl::PeerEndpoint) {
+    fn assert_name(_: &mm_dsl::PeerName) {}
+    fn assert_peer_id(_: &mm_dsl::PeerId) {}
+    fn assert_address(_: &mm_dsl::PeerAddress) {}
+    fn assert_signing_key(_: &mm_dsl::PeerSigningKey) {}
+
+    assert_name(&endpoint.name);
+    assert_peer_id(&endpoint.peer_id);
+    assert_address(&endpoint.address);
+    assert_signing_key(&endpoint.signing_key);
+
+    let _exact_runtime_shape = mm_dsl::PeerEndpoint {
+        name: endpoint.name.clone(),
+        peer_id: endpoint.peer_id.clone(),
+        address: endpoint.address.clone(),
+        signing_key: endpoint.signing_key,
+    };
+}
+
+fn assert_runtime_endpoint_matches_descriptor(
+    endpoint: &mm_dsl::PeerEndpoint,
+    descriptor: &meerkat_core::comms::TrustedPeerDescriptor,
+) -> Result<(), String> {
+    if endpoint.name.as_str() != descriptor.name.as_str() {
+        return Err(format!(
+            "name mismatch: endpoint `{}`, descriptor `{}`",
+            endpoint.name.as_str(),
+            descriptor.name.as_str()
+        ));
+    }
+    let expected_peer_id = descriptor.peer_id.to_string();
+    if endpoint.peer_id.as_str() != expected_peer_id {
+        return Err(format!(
+            "peer_id mismatch: endpoint `{}`, descriptor `{expected_peer_id}`",
+            endpoint.peer_id.as_str()
+        ));
+    }
+    let expected_address = descriptor.address.to_string();
+    if endpoint.address.as_str() != expected_address {
+        return Err(format!(
+            "address mismatch: endpoint `{}`, descriptor `{expected_address}`",
+            endpoint.address.as_str()
+        ));
+    }
+    if endpoint.signing_key.0 != descriptor.pubkey {
+        return Err("signing_key mismatch between endpoint and descriptor".to_owned());
+    }
+    Ok(())
+}
+
+fn assert_runtime_legacy_source_fixture_still_contains_peer_endpoint_tokens() {
+    for (field, ty) in EXPECTED_PEER_ENDPOINT_FIELDS {
+        let token = format!("pub {field}: {ty}");
+        assert!(
+            RUNTIME_LEGACY_SOURCE_TOKEN_FIXTURE.contains(&token),
+            "legacy source fixture should contain `{token}`"
+        );
+    }
+}
+
+fn peer_endpoint_trusted_descriptor() -> meerkat_core::comms::TrustedPeerDescriptor {
+    meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        "alice",
+        "11111111-2222-5333-8444-555555555555",
+        "inproc://alice",
+    )
+    .expect("synthesize a valid trusted peer descriptor")
+    .with_pubkey([42u8; 32])
+}
+
+fn named_type_id(name: &str) -> NamedTypeId {
+    NamedTypeId::parse(name).expect("valid named type")
 }
 
 #[cfg(not(target_arch = "wasm32"))]

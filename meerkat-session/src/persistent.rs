@@ -9461,7 +9461,10 @@ mod tests {
 
         let baseline = service.export_session_with_labels(&id).await.unwrap();
         assert!(
-            baseline.tool_visibility_state().is_none(),
+            baseline
+                .tool_visibility_state()
+                .expect("canonical visibility metadata should parse")
+                .is_none(),
             "legacy-only metadata must not materialize canonical visibility state"
         );
         assert!(
@@ -9489,16 +9492,20 @@ mod tests {
         fail_store.set_fail_save(false);
 
         let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert_eq!(
-            exported.tool_visibility_state(),
-            None,
+        assert!(
+            exported
+                .tool_visibility_state()
+                .expect("canonical visibility metadata should parse")
+                .is_none(),
             "failed rollback must not promote stale legacy metadata into canonical visibility"
         );
 
         let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
-        assert_eq!(
-            persisted.tool_visibility_state(),
-            None,
+        assert!(
+            persisted
+                .tool_visibility_state()
+                .expect("canonical visibility metadata should parse")
+                .is_none(),
             "store should retain no canonical visibility state after failed rollback"
         );
     }

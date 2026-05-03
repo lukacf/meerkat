@@ -6303,7 +6303,7 @@ mod tests {
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-image-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
-                        Some(self.expires_at.clone()),
+                        Some(self.expires_at),
                         "test",
                     )),
                 })

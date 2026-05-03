@@ -44,10 +44,11 @@ use crate::meerkat_machine_types::{
     MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
     MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatFormalStateProjection,
     MeerkatInputsSnapshot, MeerkatLedgerSnapshot, MeerkatMachineCommand,
-    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunPrepared,
-    MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot, SessionLlmCapabilityDelta,
-    SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
-    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunFailure,
+    MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -288,11 +289,10 @@ type MeerkatMachineCommandFuture<'a> = Pin<
 >;
 
 pub(crate) use driver::{
-    DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run,
-    fail_machine_run_without_runtime_apply_cause, fail_runtime_loop_run,
-    machine_apply_run_return_projection, machine_batch_primitive_projections,
-    machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_executor_attach_projection, machine_input_boundary,
+    DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run, fail_machine_run,
+    fail_runtime_loop_run, machine_apply_run_return_projection,
+    machine_batch_primitive_projections, machine_batch_runtime_semantics, machine_begin_run,
+    machine_commit_prepared_destroy, machine_executor_attach_projection, machine_input_boundary,
     machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
     machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
     machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,

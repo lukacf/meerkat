@@ -133,20 +133,6 @@ impl TurnTerminalCauseKind {
         }
     }
 
-    pub fn from_terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
-        match outcome {
-            TurnTerminalOutcome::BudgetExhausted => Self::BudgetExhausted,
-            TurnTerminalOutcome::TimeBudgetExceeded => Self::TimeBudgetExceeded,
-            TurnTerminalOutcome::StructuredOutputValidationFailed => {
-                Self::StructuredOutputValidationFailed
-            }
-            TurnTerminalOutcome::Failed => Self::FatalFailure,
-            TurnTerminalOutcome::None
-            | TurnTerminalOutcome::Completed
-            | TurnTerminalOutcome::Cancelled => Self::Unknown,
-        }
-    }
-
     pub fn agent_error_class(self) -> AgentErrorClass {
         match self {
             Self::HookDenied | Self::HookFailure => AgentErrorClass::Hook,
@@ -253,39 +239,6 @@ impl TurnFailureReason {
             }
         };
         Self::with_cause(cause_kind, class, message)
-    }
-
-    pub fn terminal_outcome(outcome: TurnTerminalOutcome) -> Self {
-        match outcome {
-            TurnTerminalOutcome::BudgetExhausted => Self::with_cause(
-                TurnTerminalCauseKind::BudgetExhausted,
-                AgentErrorClass::Budget,
-                "budget exhausted",
-            ),
-            TurnTerminalOutcome::TimeBudgetExceeded => Self::with_cause(
-                TurnTerminalCauseKind::TimeBudgetExceeded,
-                AgentErrorClass::Budget,
-                "time budget exceeded",
-            ),
-            TurnTerminalOutcome::StructuredOutputValidationFailed => Self::with_cause(
-                TurnTerminalCauseKind::StructuredOutputValidationFailed,
-                AgentErrorClass::StructuredOutput,
-                "structured output validation failed",
-            ),
-            TurnTerminalOutcome::Cancelled => Self::with_cause(
-                TurnTerminalCauseKind::Unknown,
-                AgentErrorClass::Cancelled,
-                "cancelled",
-            ),
-            TurnTerminalOutcome::Completed | TurnTerminalOutcome::None => {
-                Self::new(AgentErrorClass::Terminal, "terminal outcome")
-            }
-            TurnTerminalOutcome::Failed => Self::with_cause(
-                TurnTerminalCauseKind::FatalFailure,
-                AgentErrorClass::Terminal,
-                "turn failed",
-            ),
-        }
     }
 }
 

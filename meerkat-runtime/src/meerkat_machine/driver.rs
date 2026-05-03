@@ -792,6 +792,7 @@ fn machine_apply_turn_run_failed(
     driver: &mut DriverEntry,
     run_id: &RunId,
     terminal_error: &str,
+    terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<&CoreApplyFailureCause>,
 ) -> Result<(), RuntimeDriverError> {
     let authority = driver.shared_dsl_authority();
@@ -812,7 +813,7 @@ fn machine_apply_turn_run_failed(
                 .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
             runtime_apply_failure_message: runtime_apply_failure
                 .map(|failure| failure.message().to_owned()),
-            terminal_cause_kind: machine_run_failed_terminal_cause_kind(runtime_apply_failure),
+            terminal_cause_kind: terminal_cause_kind.into(),
             error: terminal_error.to_owned(),
         },
     )
@@ -822,16 +823,6 @@ fn machine_apply_turn_run_failed(
             "failed to apply runtime turn failure for run {run_id}: {err}"
         ))
     })
-}
-
-fn machine_run_failed_terminal_cause_kind(
-    runtime_apply_failure: Option<&CoreApplyFailureCause>,
-) -> crate::meerkat_machine::dsl::TurnTerminalCauseKind {
-    if runtime_apply_failure.is_some() {
-        crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure
-    } else {
-        crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure
-    }
 }
 
 pub(crate) fn slice_starts_with(seq: &[InputId], prefix: &[InputId]) -> bool {
@@ -2502,21 +2493,36 @@ pub(crate) async fn fail_runtime_loop_run(
     run_id: RunId,
     failure: CoreApplyFailureCause,
 ) -> Result<(), RuntimeLoopRunFailError> {
-    fail_runtime_loop_run_inner(driver, run_id, failure.message().to_owned(), Some(failure)).await
+    fail_runtime_loop_run_inner(
+        driver,
+        run_id,
+        failure.message().to_owned(),
+        meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
+        Some(failure),
+    )
+    .await
 }
 
-pub(crate) async fn fail_machine_run_without_runtime_apply_cause(
+pub(crate) async fn fail_machine_run(
     driver: &SharedDriver,
     run_id: RunId,
-    error: String,
+    failure: super::MeerkatMachineRunFailure,
 ) -> Result<(), RuntimeLoopRunFailError> {
-    fail_runtime_loop_run_inner(driver, run_id, error, None).await
+    fail_runtime_loop_run_inner(
+        driver,
+        run_id,
+        failure.error,
+        failure.terminal_cause_kind,
+        None,
+    )
+    .await
 }
 
 async fn fail_runtime_loop_run_inner(
     driver: &SharedDriver,
     run_id: RunId,
     terminal_error: String,
+    terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<CoreApplyFailureCause>,
 ) -> Result<(), RuntimeLoopRunFailError> {
     let mut driver = driver.lock().await;
@@ -2530,6 +2536,7 @@ async fn fail_runtime_loop_run_inner(
         &mut driver,
         &failed_run_id,
         &terminal_error,
+        terminal_cause_kind,
         runtime_apply_failure.as_ref(),
     )
     .map_err(RuntimeLoopRunFailError::Rejected)?;
@@ -2589,8 +2596,40 @@ mod run_failed_cause_tests {
         let run_id = RunId::new();
         let mut driver = running_driver(&run_id);
 
-        machine_apply_turn_run_failed(&mut driver, &run_id, "legacy failure", None)
-            .expect("legacy run failure should apply");
+        machine_apply_turn_run_failed(
+            &mut driver,
+            &run_id,
+            "legacy failure",
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            None,
+        )
+        .expect("legacy run failure should apply");
+
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            auth.state.terminal_cause_kind,
+            Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
+        );
+        assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
+        assert_eq!(auth.state.last_runtime_apply_failure_message, None);
+    }
+
+    #[test]
+    fn direct_run_failure_display_message_does_not_classify_terminal_cause() {
+        let run_id = RunId::new();
+        let mut driver = running_driver(&run_id);
+
+        machine_apply_turn_run_failed(
+            &mut driver,
+            &run_id,
+            "runtime apply failure: display-only text",
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            None,
+        )
+        .expect("legacy run failure should apply");
 
         let authority = driver.shared_dsl_authority();
         let auth = authority
@@ -2610,8 +2649,14 @@ mod run_failed_cause_tests {
         let mut driver = running_driver(&run_id);
         let failure = CoreApplyFailureCause::runtime_turn("runtime apply failed");
 
-        machine_apply_turn_run_failed(&mut driver, &run_id, failure.message(), Some(&failure))
-            .expect("runtime apply failure should apply");
+        machine_apply_turn_run_failed(
+            &mut driver,
+            &run_id,
+            failure.message(),
+            meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
+            Some(&failure),
+        )
+        .expect("runtime apply failure should apply");
 
         let authority = driver.shared_dsl_authority();
         let auth = authority

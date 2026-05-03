@@ -39,8 +39,8 @@ use crate::completion::CompletionOutcome;
 use crate::identifiers::IdempotencyKey;
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::meerkat_machine_types::{
-    ImageOperationRoutingRequest, ImageOperationRoutingResult, ModelRoutingApprovalDisposition,
-    ModelRoutingRealtimePolicy, SwitchTurnRequest,
+    ImageOperationRoutingRequest, ImageOperationRoutingResult, MeerkatMachineRunFailure,
+    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, SwitchTurnRequest,
 };
 
 fn uuid(n: u128) -> uuid::Uuid {
@@ -1221,7 +1221,7 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
             make_prompt("legacy fail"),
             |_run_id, _primitive| async {
                 Err::<((), CoreApplyOutput), RuntimeDriverError>(RuntimeDriverError::Internal(
-                    "legacy synchronous failure".to_string(),
+                    "runtime apply failure: display-only text".to_string(),
                 ))
             },
         )
@@ -1229,7 +1229,7 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
 
     assert!(matches!(result, Err(RuntimeDriverError::Internal(_))));
 
-    let (cause, message) = {
+    let (terminal_cause_kind, cause, message) = {
         let sessions = adapter.sessions.read().await;
         let entry = sessions.get(&session_id).expect("session should exist");
         let authority = entry
@@ -1237,11 +1237,16 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
+            authority.state.terminal_cause_kind,
             authority.state.last_runtime_apply_failure_cause,
             authority.state.last_runtime_apply_failure_message.clone(),
         )
     };
 
+    assert_eq!(
+        terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::FatalFailure)
+    );
     assert_eq!(cause, None);
     assert_eq!(message, None);
 }
@@ -13329,7 +13334,7 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                error: "unwind malformed commit".to_string(),
+                failure: MeerkatMachineRunFailure::fatal("unwind malformed commit"),
             },
         )
         .await
@@ -13354,7 +13359,7 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: RunId::new(),
-                error: "reject the wrong run".to_string(),
+                failure: MeerkatMachineRunFailure::fatal("reject the wrong run"),
             },
         )
         .await;
@@ -13398,7 +13403,7 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                error: "executor failed".to_string(),
+                failure: MeerkatMachineRunFailure::fatal("executor failed"),
             },
         )
         .await
@@ -18686,7 +18691,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
             session_id: fixture.session_id.clone(),
             run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
-            error: "runtime parity failure".to_string(),
+            failure: MeerkatMachineRunFailure::fatal("runtime parity failure"),
         },
         RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
             runtime_id: fixture.runtime_id.clone(),

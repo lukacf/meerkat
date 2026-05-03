@@ -35,6 +35,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use crate::BudgetDimension;
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
 use crate::ops::OperationId;
@@ -71,6 +72,7 @@ struct LocalFields {
     llm_retry_attempt: u32,
     llm_retry_max_retries: u32,
     llm_retry_selected_delay_ms: u64,
+    force_next_llm_terminal_failed_cause_kind: Option<Option<TurnTerminalCauseKind>>,
 }
 
 impl LocalFields {
@@ -95,6 +97,7 @@ impl LocalFields {
             llm_retry_attempt: 0,
             llm_retry_max_retries: 0,
             llm_retry_selected_delay_ms: 0,
+            force_next_llm_terminal_failed_cause_kind: None,
         }
     }
 
@@ -213,7 +216,13 @@ impl LocalState {
                     return Err(invalid(phase, &input));
                 }
                 fields.boundary_count += 1;
-                DrainingBoundary
+                if let Some(cause_kind) = fields.force_next_llm_terminal_failed_cause_kind.take() {
+                    fields.terminal_outcome = TurnTerminalOutcome::Failed;
+                    fields.terminal_cause_kind = cause_kind;
+                    Failed
+                } else {
+                    DrainingBoundary
+                }
             }
             (
                 WaitingForOps,
@@ -488,12 +497,11 @@ impl LocalState {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = terminal_outcome_for_budget_exceeded(*exceeded);
-                fields.terminal_cause_kind = Some(match fields.terminal_outcome {
-                    TurnTerminalOutcome::BudgetExhausted => TurnTerminalCauseKind::BudgetExhausted,
-                    TurnTerminalOutcome::TimeBudgetExceeded => {
-                        TurnTerminalCauseKind::TimeBudgetExceeded
+                fields.terminal_cause_kind = Some(match exceeded.dimension {
+                    BudgetDimension::Time => TurnTerminalCauseKind::TimeBudgetExceeded,
+                    BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
+                        TurnTerminalCauseKind::BudgetExhausted
                     }
-                    _ => TurnTerminalCauseKind::Unknown,
                 });
                 Completed
             }
@@ -637,6 +645,17 @@ impl TestTurnStateHandle {
     pub fn suppress_terminal_cause_snapshots_for_test(&self) {
         self.suppress_terminal_cause_snapshots
             .store(true, Ordering::SeqCst);
+    }
+
+    pub fn force_next_llm_terminal_failed_for_test(
+        &self,
+        cause_kind: Option<TurnTerminalCauseKind>,
+    ) {
+        let mut guard = self
+            .state
+            .lock()
+            .expect("test turn-state handle state mutex poisoned");
+        guard.fields.force_next_llm_terminal_failed_cause_kind = Some(cause_kind);
     }
 }
 

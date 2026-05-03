@@ -529,8 +529,30 @@ pub(crate) enum MeerkatMachineCommand {
     Fail {
         session_id: SessionId,
         run_id: RunId,
-        error: String,
+        failure: MeerkatMachineRunFailure,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MeerkatMachineRunFailure {
+    pub terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
+    pub error: String,
+}
+
+impl MeerkatMachineRunFailure {
+    pub(crate) fn new(
+        terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            terminal_cause_kind,
+            error: error.into(),
+        }
+    }
+
+    pub(crate) fn fatal(error: impl Into<String>) -> Self {
+        Self::new(meerkat_core::TurnTerminalCauseKind::FatalFailure, error)
+    }
 }
 
 #[derive(Debug)]

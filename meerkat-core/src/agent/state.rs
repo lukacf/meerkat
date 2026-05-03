@@ -98,11 +98,15 @@ fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureRe
             crate::event::AgentErrorClass::MaxTurns,
             "turn limit reached",
         )),
-        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::terminal_outcome(
-            TurnTerminalOutcome::BudgetExhausted,
+        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::with_cause(
+            crate::TurnTerminalCauseKind::BudgetExhausted,
+            crate::event::AgentErrorClass::Budget,
+            "budget exhausted",
         )),
-        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::terminal_outcome(
-            TurnTerminalOutcome::TimeBudgetExceeded,
+        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::with_cause(
+            crate::TurnTerminalCauseKind::TimeBudgetExceeded,
+            crate::event::AgentErrorClass::Budget,
+            "time budget exceeded",
         )),
         TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
             Some(TurnFailureReason::budget_exceeded(*exceeded))
@@ -707,12 +711,7 @@ where
             && next_phase == TurnPhase::Failed
             && let Some(run_id) = turn_input_run_id(&input)
         {
-            let reason = turn_input_failure_reason(&input).unwrap_or_else(|| {
-                TurnFailureReason::terminal_outcome(
-                    self.turn_terminal_outcome()
-                        .unwrap_or(TurnTerminalOutcome::Failed),
-                )
-            });
+            let reason = self.turn_failure_reason_for_failed_transition(&input)?;
             effects.push(TurnExecutionEffect::RunFailed { run_id, reason });
         }
         if prev_phase != TurnPhase::Cancelled
@@ -727,6 +726,27 @@ where
             next_phase,
             effects,
         })
+    }
+
+    fn turn_failure_reason_for_failed_transition(
+        &self,
+        input: &TurnExecutionInput,
+    ) -> Result<TurnFailureReason, AgentError> {
+        if let Some(reason) = turn_input_failure_reason(input) {
+            return Ok(reason);
+        }
+
+        let outcome = self.turn_terminal_outcome()?;
+        let Some(cause_kind) = self.turn_terminal_cause_kind()? else {
+            return Err(AgentError::InternalError(format!(
+                "failed turn transition for input {input:?} missing machine-owned terminal_cause_kind"
+            )));
+        };
+        Ok(TurnFailureReason::with_cause(
+            cause_kind,
+            cause_kind.agent_error_class(),
+            cause_kind.default_message(outcome),
+        ))
     }
 
     /// Execute side effects from a transition. Handles CheckCompaction
@@ -5602,6 +5622,77 @@ mod tests {
                 assert!(
                     message.contains("Failed"),
                     "invariant error should name the terminal outcome: {message}"
+                );
+            }
+            AgentError::TerminalFailure { cause_kind, .. } => panic!(
+                "core shell must not synthesize a public terminal cause from outcome, got {cause_kind:?}"
+            ),
+            other => panic!("expected fail-closed invariant error, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind, None,
+            "fixture must prove the machine snapshot has no terminal cause"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrecognized_failed_transition_missing_cause_fails_closed() {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        use crate::{ContentShape, TurnExecutionInput};
+
+        let turn_handle = Arc::new(TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(FatalLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let run_id = crate::lifecycle::RunId::new();
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+            })
+            .expect("start conversation run should apply");
+        agent
+            .apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+                run_id: run_id.clone(),
+                admitted_content_shape: ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+            })
+            .expect("primitive application should enter CallingLlm");
+
+        turn_handle.force_next_llm_terminal_failed_for_test(None);
+
+        let err = agent
+            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                run_id: run_id.clone(),
+            })
+            .expect_err("unrecognized failed transition without machine cause should fail closed");
+
+        match err {
+            AgentError::InternalError(message) => {
+                assert!(
+                    message.contains("missing machine-owned terminal_cause_kind"),
+                    "unexpected missing-cause invariant error: {message}"
+                );
+                assert!(
+                    message.contains("LlmReturnedTerminal"),
+                    "invariant error should name the unrecognized failed input: {message}"
                 );
             }
             AgentError::TerminalFailure { cause_kind, .. } => panic!(

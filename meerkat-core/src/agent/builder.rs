@@ -1491,6 +1491,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backed_builder_rejects_malformed_canonical_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session.set_metadata(
+            SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!("not-a-visibility-state"),
+        );
+        let original_state = SessionToolVisibilityState {
+            active_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+            staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+            active_revision: 3,
+            staged_revision: 3,
+            ..Default::default()
+        };
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        owner
+            .replace_visibility_state(original_state.clone())
+            .expect("test owner should accept initial state");
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        match result {
+            Err(AgentBuildPolicyError::ToolVisibilityRestore { message }) => {
+                assert!(
+                    message.contains("failed to decode canonical session metadata"),
+                    "restore error should identify malformed canonical metadata: {message}"
+                );
+            }
+            Ok(_) => panic!("runtime-backed builder must reject malformed canonical visibility"),
+            Err(err) => panic!("unexpected build error: {err}"),
+        }
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            original_state,
+            "failed malformed restore must not install default visibility"
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_backed_builder_ignores_legacy_local_visibility_metadata() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);

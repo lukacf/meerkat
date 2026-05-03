@@ -1832,10 +1832,10 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .await
             .map_err(session_error_to_runtime_driver)?;
         let current_visibility_state = session
-            .tool_visibility_state()
+            .try_tool_visibility_state()
             .map_err(|err| {
                 RuntimeDriverError::Internal(format!(
-                    "failed to decode live session tool visibility state: {err}"
+                    "invalid canonical tool visibility state: {err}"
                 ))
             })?
             .unwrap_or_default();

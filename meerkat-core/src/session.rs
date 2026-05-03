@@ -1007,6 +1007,14 @@ impl Session {
     pub fn tool_visibility_state(
         &self,
     ) -> Result<Option<SessionToolVisibilityState>, serde_json::Error> {
+        self.try_tool_visibility_state()
+    }
+
+    /// Load durable tool-visibility control state while distinguishing absent
+    /// metadata from malformed canonical metadata.
+    pub fn try_tool_visibility_state(
+        &self,
+    ) -> Result<Option<SessionToolVisibilityState>, serde_json::Error> {
         self.metadata
             .get(SESSION_TOOL_VISIBILITY_STATE_KEY)
             .map(|value| serde_json::from_value(value.clone()))

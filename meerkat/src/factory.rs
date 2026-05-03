@@ -3226,10 +3226,10 @@ impl AgentFactory {
                     profile.image_tool_results,
                 );
             let mut visibility_state = session
-                .tool_visibility_state()
+                .try_tool_visibility_state()
                 .map_err(|err| {
                     BuildAgentError::Config(format!(
-                        "failed to decode canonical tool visibility state: {err}"
+                        "invalid canonical tool visibility state: {err}"
                     ))
                 })?
                 .unwrap_or_default();
@@ -5591,6 +5591,45 @@ mod tests {
         assert_eq!(snapshot.phase, None);
         assert!(!snapshot.credential_present);
         assert_eq!(snapshot.generation, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn factory_capability_filter_rejects_malformed_canonical_visibility_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut session = Session::new();
+        session.set_metadata(
+            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!("not-a-visibility-state"),
+        );
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let err = match factory.build_agent(build, &Config::default()).await {
+            Ok(_) => panic!("malformed canonical visibility metadata must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("invalid canonical tool visibility state"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            bindings.tool_visibility_owner().visibility_state().unwrap(),
+            meerkat_core::SessionToolVisibilityState::default(),
+            "factory failure must not install default visibility through the machine owner"
+        );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]

@@ -480,7 +480,10 @@ fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
         .expect_err("consumed device payload must not rehydrate from durable snapshot");
     assert!(matches!(
         err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation: "begin_oauth_device_poll",
+            ..
+        }
     ));
 }
 
@@ -534,7 +537,10 @@ fn persistent_oauth_authority_cache_rebinds_reopened_sqlite_store_after_drop() {
         .expect_err("consumed browser payload must not rehydrate after reopened-store consume");
     assert!(matches!(
         err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation: "verify_oauth_browser_flow",
+            ..
+        }
     ));
 }
 
@@ -588,7 +594,10 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
         .expect_err("consumed browser payload must not rehydrate after overlapping-store consume");
     assert!(matches!(
         err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation: "verify_oauth_browser_flow",
+            ..
+        }
     ));
 }
 
@@ -646,7 +655,10 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
         .expect_err("released browser payload must not rehydrate from durable snapshot");
     assert!(matches!(
         browser_err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation: "verify_oauth_browser_flow",
+            ..
+        }
     ));
 
     let device_err = restarted
@@ -655,7 +667,10 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
         .expect_err("released device payload must not rehydrate from durable snapshot");
     assert!(matches!(
         device_err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation: "begin_oauth_device_poll",
+            ..
+        }
     ));
 }
 
@@ -733,7 +748,12 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
             meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             redirect_uri,
         ),
-        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::Missing)
+        Err(
+            meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            }
+        )
     ));
 }
 
@@ -770,7 +790,12 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
             meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             redirect_uri,
         ),
-        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::Missing)
+        Err(
+            meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            }
+        )
     ));
 }
 

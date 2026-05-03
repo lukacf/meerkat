@@ -67,8 +67,8 @@ async fn realtime_channel_connects_and_exchanges_frames()
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let ws_url = format!("ws://{addr}/realtime/ws");
-    let protocol_version = RealtimeProtocolVersion::CURRENT.as_str().to_string();
-    let server_protocol_version = protocol_version.clone();
+    let protocol_version = RealtimeProtocolVersion::CURRENT;
+    let server_protocol_version = protocol_version;
 
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
@@ -90,7 +90,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
         assert_eq!(
             open_frame,
             RealtimeClientFrame::ChannelOpen(RealtimeChannelOpenFrame {
-                protocol_version: server_protocol_version.clone(),
+                protocol_version: server_protocol_version,
                 open_token: "token-1".to_string(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -101,7 +101,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
             .send(Message::Text(
                 serde_json::to_string(&RealtimeServerFrame::ChannelOpened(
                     RealtimeChannelOpenedFrame {
-                        protocol_version: server_protocol_version.clone(),
+                        protocol_version: server_protocol_version,
                         status: RealtimeChannelStatus {
                             state: RealtimeChannelState::Ready,
                             attempt_count: 0,
@@ -226,7 +226,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
         target: RealtimeChannelTarget::SessionTarget {
             session_id: "session-1".to_string(),
         },
-        supported_protocol_versions: vec![protocol_version.clone()],
+        supported_protocol_versions: vec![protocol_version],
         default_protocol_version: protocol_version,
         capabilities: RealtimeCapabilities {
             input_kinds: vec![RealtimeInputKind::Text],

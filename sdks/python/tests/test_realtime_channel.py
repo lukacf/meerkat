@@ -5,7 +5,9 @@ import json
 import pytest
 
 from meerkat import MeerkatClient, RealtimeChannel
-from meerkat.generated.types import RealtimeOpenInfo
+from meerkat.generated.types import RealtimeOpenInfo, RealtimeProtocolVersion
+
+REALTIME_PROTOCOL_VERSION: RealtimeProtocolVersion = "2"
 
 
 def test_python_sdk_connect_args_enable_realtime_ws_host() -> None:
@@ -35,7 +37,7 @@ async def test_realtime_channel_connects_and_exchanges_frames() -> None:
             json.dumps(
                 {
                     "type": "channel.opened",
-                    "protocol_version": "1",
+                    "protocol_version": REALTIME_PROTOCOL_VERSION,
                     "status": {"state": "ready", "attempt_count": 0},
                     "capabilities": {
                         "input_kinds": ["text"],
@@ -75,8 +77,8 @@ async def test_realtime_channel_connects_and_exchanges_frames() -> None:
                 open_token="token-1",
                 expires_at="2026-04-15T12:00:00Z",
                 target={"type": "session_target", "session_id": "session-1"},
-                supported_protocol_versions=["1"],
-                default_protocol_version="1",
+                supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
+                default_protocol_version=REALTIME_PROTOCOL_VERSION,
                 capabilities={
                     "input_kinds": ["text"],
                     "output_kinds": ["text"],
@@ -108,7 +110,7 @@ async def test_realtime_channel_connects_and_exchanges_frames() -> None:
         assert seen == [
             {
                 "type": "channel.open",
-                "protocol_version": "1",
+                "protocol_version": REALTIME_PROTOCOL_VERSION,
                 "open_token": "token-1",
                 "role": "primary",
                 "turning_mode": "provider_managed",
@@ -136,7 +138,7 @@ async def test_realtime_channel_connects_from_supplied_open_info() -> None:
             json.dumps(
                 {
                     "type": "channel.opened",
-                    "protocol_version": "1",
+                    "protocol_version": REALTIME_PROTOCOL_VERSION,
                     "status": {"state": "ready", "attempt_count": 0},
                     "capabilities": {
                         "input_kinds": ["text"],
@@ -169,8 +171,8 @@ async def test_realtime_channel_connects_from_supplied_open_info() -> None:
                 open_token="token-2",
                 expires_at="2026-04-15T12:00:00Z",
                 target={"type": "session_target", "session_id": "session-1"},
-                supported_protocol_versions=["1"],
-                default_protocol_version="1",
+                supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
+                default_protocol_version=REALTIME_PROTOCOL_VERSION,
                 capabilities={
                     "input_kinds": ["text"],
                     "output_kinds": ["text"],
@@ -189,7 +191,7 @@ async def test_realtime_channel_connects_from_supplied_open_info() -> None:
         assert seen == [
             {
                 "type": "channel.open",
-                "protocol_version": "1",
+                "protocol_version": REALTIME_PROTOCOL_VERSION,
                 "open_token": "token-2",
                 "role": "primary",
                 "turning_mode": "provider_managed",

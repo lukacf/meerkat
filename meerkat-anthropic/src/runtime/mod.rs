@@ -79,6 +79,11 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
+        if binding.provider != Provider::Anthropic {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
         let auth_method = match binding.auth {
             NormalizedAuthMethod::Anthropic(m) => m,
             _ => {

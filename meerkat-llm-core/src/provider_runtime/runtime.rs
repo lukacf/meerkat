@@ -1,64 +1,29 @@
-//! The `ProviderRuntime` trait — per-provider implementation of validation,
-//! resolution, and client construction.
+//! The `ProviderRuntime` trait — per-provider implementation of credential
+//! resolution and client construction.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{
-    AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, ImageGenerationProviderProfile,
-    Provider,
-};
+use meerkat_core::{ImageGenerationProviderProfile, Provider};
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
-use crate::provider_runtime::catalog::ProviderRuntimeCatalog;
-use crate::provider_runtime::errors::{
-    ProviderAuthError, ProviderBindingError, ProviderClientError,
-};
+use crate::provider_runtime::errors::{ProviderAuthError, ProviderClientError};
 use crate::provider_runtime::registry::ResolverEnvironment;
 use crate::{ImageGenerationExecutor, LlmClient};
 
-/// Per-provider runtime contract: validate a binding, resolve credentials,
-/// construct an LlmClient.
+/// Per-provider runtime contract: resolve credentials and construct clients.
 ///
-/// Implementations live in `crate::providers::{openai,anthropic,google}`.
+/// Backend/auth compatibility is owned by
+/// [`ProviderRuntimeCatalog`](crate::provider_runtime::catalog::ProviderRuntimeCatalog)
+/// and applied by
+/// [`ProviderRuntimeRegistry`](crate::provider_runtime::registry::ProviderRuntimeRegistry)
+/// before dispatching to a runtime.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait ProviderRuntime: Send + Sync {
     /// Return the provider identity this runtime owns.
     fn provider_id(&self) -> Provider;
-
-    /// Normalize backend + auth strings through the shared typed runtime
-    /// catalog.
-    ///
-    /// The canonical [`ProviderRuntimeRegistry`](crate::provider_runtime::registry::ProviderRuntimeRegistry)
-    /// path validates with [`ProviderRuntimeCatalog`] before runtime dispatch.
-    /// This method remains as a direct-call compatibility shim; provider
-    /// crates must use this default instead of parsing backend/auth strings
-    /// locally.
-    ///
-    /// `policy` carries the binding's declared auth policy
-    /// (`allow_auth_override`, metadata requirements). Implementations
-    /// MUST populate `ValidatedBinding.policy` from this argument — the
-    /// policy is a contract fact about the binding, not an injectable
-    /// default. Dogma §16 (binding policy flows through resolution):
-    /// dropping it at validation silently substitutes the wrong policy
-    /// and bleeds defaults across bindings that declared otherwise.
-    fn validate_binding(
-        &self,
-        connection_ref: &ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        ProviderRuntimeCatalog::validate_binding_for_provider(
-            self.provider_id(),
-            connection_ref,
-            backend,
-            auth,
-            policy,
-        )
-    }
 
     /// Resolve credential material per `CredentialSourceSpec` and wrap in a
     /// lease. Populates `ResolvedConnection.shim_credential` for Phase 2.

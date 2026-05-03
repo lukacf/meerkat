@@ -4407,9 +4407,8 @@ mod tests {
     #[tokio::test]
     async fn env_default_fallback_does_not_admit_auth_lease_identity() {
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
 
         struct RecordingOpenAiRuntime {
@@ -4420,28 +4419,6 @@ mod tests {
         impl ProviderRuntime for RecordingOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(
@@ -4532,9 +4509,8 @@ mod tests {
     #[tokio::test]
     async fn hot_swap_env_default_fallback_does_not_publish_auth_lease() {
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
 
         struct RecordingOpenAiRuntime {
@@ -4545,28 +4521,6 @@ mod tests {
         impl ProviderRuntime for RecordingOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(
@@ -4656,9 +4610,8 @@ mod tests {
             AuthLeaseHandle, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError, LeaseKey,
         };
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
 
         struct PublishingOpenAiRuntime {
@@ -4669,28 +4622,6 @@ mod tests {
         impl ProviderRuntime for PublishingOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(
@@ -5129,33 +5060,6 @@ mod tests {
     impl meerkat_llm_core::provider_runtime::ProviderRuntime for RecordingSelfHostedRuntime {
         fn provider_id(&self) -> Provider {
             Provider::SelfHosted
-        }
-
-        fn validate_binding(
-            &self,
-            connection_ref: &ConnectionRef,
-            backend: &meerkat_core::BackendProfile,
-            auth: &meerkat_core::AuthProfile,
-            policy: &meerkat_core::BindingPolicy,
-        ) -> Result<
-            meerkat_llm_core::provider_runtime::ValidatedBinding,
-            meerkat_llm_core::provider_runtime::ProviderBindingError,
-        > {
-            assert_eq!(backend.provider, Provider::SelfHosted);
-            assert_eq!(auth.provider, Provider::SelfHosted);
-            Ok(meerkat_llm_core::provider_runtime::ValidatedBinding {
-                connection_ref: connection_ref.clone(),
-                provider: Provider::SelfHosted,
-                backend: meerkat_llm_core::provider_runtime::NormalizedBackendKind::OpenAi(
-                    meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
-                ),
-                auth: meerkat_llm_core::provider_runtime::NormalizedAuthMethod::OpenAi(
-                    meerkat_core::provider_matrix::openai::OpenAiAuthMethod::StaticBearer,
-                ),
-                backend_profile: Arc::new(backend.clone()),
-                auth_profile: Arc::new(auth.clone()),
-                policy: policy.clone(),
-            })
         }
 
         async fn resolve_binding(
@@ -5997,6 +5901,91 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn selected_image_binding_incompatible_auth_fails_without_default_fallback() {
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderBindingError, ProviderClientError, ProviderRuntime,
+            ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, ValidatedBinding,
+        };
+
+        struct CountingOpenAiRuntime {
+            resolve_calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for CountingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                _binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                self.resolve_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderAuthError::SourceResolutionFailed(
+                    "catalog should reject before runtime dispatch".into(),
+                ))
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("test only resolves the selected image binding")
+            }
+        }
+
+        let mut config = Config::default();
+        let mut selected = inline_realm_section(&[
+            ("anthropic", "text-anthropic-key"),
+            ("openai", "image-openai-key"),
+        ]);
+        selected
+            .auth
+            .get_mut("default_openai")
+            .expect("openai auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert("session_a".to_string(), selected);
+        config.realm.insert(
+            "default".to_string(),
+            inline_realm_section(&[("openai", "default-openai-key")]),
+        );
+
+        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("session_a"),
+        )
+        .expect("selected image lookup should not fall back before validation");
+        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(binding_id, "default_openai");
+
+        let resolve_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(CountingOpenAiRuntime {
+                resolve_calls: Arc::clone(&resolve_calls),
+            }));
+
+        let err = registry
+            .resolve(&realm, &connection_ref, &ResolverEnvironment::testing())
+            .await
+            .expect_err("catalog should reject the selected incompatible image binding");
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::UnsupportedCombination { .. })
+        ));
+        assert_eq!(
+            resolve_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "invalid selected binding must not dispatch or fall back to the default realm"
+        );
+    }
+
     #[test]
     fn selected_empty_realm_image_binding_rejects_env_default_image_binding() {
         let mut config = Config::default();
@@ -6023,9 +6012,8 @@ mod tests {
     #[tokio::test]
     async fn selected_realm_skips_env_default_same_provider_image_executor() {
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
         use meerkat_llm_core::{
             ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
@@ -6054,28 +6042,6 @@ mod tests {
         impl ProviderRuntime for RecordingOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(
@@ -6145,9 +6111,8 @@ mod tests {
     #[tokio::test]
     async fn session_owned_image_executor_resolution_publishes_auth_lease_visibility() {
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
         use meerkat_llm_core::{
             ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
@@ -6182,28 +6147,6 @@ mod tests {
                 Provider::Anthropic
             }
 
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::Anthropic,
-                    backend: NormalizedBackendKind::Anthropic(
-                        meerkat_core::provider_matrix::AnthropicBackendKind::AnthropicApi,
-                    ),
-                    auth: NormalizedAuthMethod::Anthropic(
-                        meerkat_core::provider_matrix::AnthropicAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
-            }
-
             async fn resolve_binding(
                 &self,
                 binding: &ValidatedBinding,
@@ -6234,28 +6177,6 @@ mod tests {
         impl ProviderRuntime for PublishingImageOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(
@@ -6369,9 +6290,8 @@ mod tests {
     async fn session_owned_llm_resolution_publishes_auth_lease_before_image_executor_failure() {
         use meerkat_llm_core::ImageGenerationExecutor;
         use meerkat_llm_core::provider_runtime::{
-            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
-            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
-            ResolverEnvironment, StaticLease, ValidatedBinding,
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
         };
 
         struct FailingImageOpenAiRuntime {
@@ -6383,28 +6303,6 @@ mod tests {
         impl ProviderRuntime for FailingImageOpenAiRuntime {
             fn provider_id(&self) -> Provider {
                 Provider::OpenAI
-            }
-
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                Ok(ValidatedBinding {
-                    connection_ref: connection_ref.clone(),
-                    provider: Provider::OpenAI,
-                    backend: NormalizedBackendKind::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                    ),
-                    auth: NormalizedAuthMethod::OpenAi(
-                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                    ),
-                    backend_profile: Arc::new(backend.clone()),
-                    auth_profile: Arc::new(auth.clone()),
-                    policy: policy.clone(),
-                })
             }
 
             async fn resolve_binding(

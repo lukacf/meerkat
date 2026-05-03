@@ -67,6 +67,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
+        if binding.provider != Provider::OpenAI {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
         let auth_method = match binding.auth {
             NormalizedAuthMethod::OpenAi(m) => m,
             _ => {
@@ -473,58 +478,48 @@ mod tests {
         }
     }
 
+    fn connection_ref() -> meerkat_core::ConnectionRef {
+        meerkat_core::ConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+            profile: None,
+        }
+    }
+
     #[test]
-    fn validate_accepts_allowed_combination() {
-        let rt = OpenAiProviderRuntime;
-        let vb = rt
-            .validate_binding(
-                &meerkat_core::ConnectionRef {
-                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
-                    profile: None,
-                },
-                &backend("openai_api"),
-                &auth("api_key"),
-                &BindingPolicy::default(),
-            )
-            .expect("allowed combination");
+    fn typed_catalog_validate_accepts_allowed_combination() {
+        let vb = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend("openai_api"),
+            &auth("api_key"),
+            &BindingPolicy::default(),
+        )
+        .expect("allowed combination");
         assert_eq!(vb.provider, Provider::OpenAI);
     }
 
     #[test]
-    fn validate_rejects_unknown_backend_kind() {
-        let rt = OpenAiProviderRuntime;
-        let err = rt
-            .validate_binding(
-                &meerkat_core::ConnectionRef {
-                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
-                    profile: None,
-                },
-                &backend("bogus_backend"),
-                &auth("api_key"),
-                &BindingPolicy::default(),
-            )
-            .unwrap_err();
+    fn typed_catalog_validate_rejects_unknown_backend_kind() {
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend("bogus_backend"),
+            &auth("api_key"),
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ProviderBindingError::UnknownBackendKind(_)));
     }
 
     #[test]
-    fn validate_rejects_unsupported_combo() {
+    fn typed_catalog_validate_rejects_unsupported_combo() {
         // openai_api + managed_chatgpt_oauth is not a typed catalog edge.
-        let rt = OpenAiProviderRuntime;
-        let err = rt
-            .validate_binding(
-                &meerkat_core::ConnectionRef {
-                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
-                    profile: None,
-                },
-                &backend("openai_api"),
-                &auth("managed_chatgpt_oauth"),
-                &BindingPolicy::default(),
-            )
-            .unwrap_err();
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend("openai_api"),
+            &auth("managed_chatgpt_oauth"),
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             ProviderBindingError::UnsupportedCombination { .. }
@@ -532,47 +527,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_provider_mismatch() {
-        let rt = OpenAiProviderRuntime;
+    fn typed_catalog_validate_rejects_provider_mismatch() {
         let mut wrong = backend("openai_api");
         wrong.provider = Provider::Anthropic;
-        let err = rt
-            .validate_binding(
-                &meerkat_core::ConnectionRef {
-                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
-                    profile: None,
-                },
-                &wrong,
-                &auth("api_key"),
-                &BindingPolicy::default(),
-            )
-            .unwrap_err();
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &wrong,
+            &auth("api_key"),
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
 
     #[test]
-    fn validate_propagates_binding_policy() {
+    fn typed_catalog_validate_propagates_binding_policy() {
         // Dogma §16: policy declared on the binding must flow through
-        // validate_binding, not default-injected at the provider seam.
-        let rt = OpenAiProviderRuntime;
+        // catalog validation, not default-injected at the provider seam.
         let policy = BindingPolicy {
             allow_auth_override: true,
             require_metadata_account: true,
             require_metadata_workspace: false,
         };
-        let vb = rt
-            .validate_binding(
-                &meerkat_core::ConnectionRef {
-                    realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
-                    binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
-                    profile: None,
-                },
-                &backend("openai_api"),
-                &auth("api_key"),
-                &policy,
-            )
-            .expect("allowed combination");
+        let vb = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend("openai_api"),
+            &auth("api_key"),
+            &policy,
+        )
+        .expect("allowed combination");
         assert_eq!(vb.policy, policy);
     }
 }

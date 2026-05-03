@@ -23,7 +23,7 @@ use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind}
 use meerkat_core::provider_matrix::self_hosted::{SelfHostedAuthMethod, SelfHostedBackendKind};
 
 /// Provider-tagged normalized backend kind. Each variant is produced by the
-/// matching provider runtime's `validate_binding`.
+/// provider runtime catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedBackendKind {
     OpenAi(OpenAiBackendKind),

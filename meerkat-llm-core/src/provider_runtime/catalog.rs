@@ -20,6 +20,13 @@ use crate::provider_runtime::errors::ProviderBindingError;
 pub struct ProviderRuntimeCatalog;
 
 impl ProviderRuntimeCatalog {
+    pub fn is_supported_provider(provider: Provider) -> bool {
+        matches!(
+            provider,
+            Provider::Anthropic | Provider::OpenAI | Provider::Gemini | Provider::SelfHosted
+        )
+    }
+
     pub fn validate_binding(
         connection_ref: &ConnectionRef,
         backend: &BackendProfile,
@@ -316,6 +323,16 @@ mod tests {
         assert!(!ProviderRuntimeCatalog::supports(
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
             NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
+        ));
+    }
+
+    #[test]
+    fn catalog_declares_supported_provider_identities() {
+        for provider in Provider::ALL_CONCRETE {
+            assert!(ProviderRuntimeCatalog::is_supported_provider(*provider));
+        }
+        assert!(!ProviderRuntimeCatalog::is_supported_provider(
+            Provider::Other
         ));
     }
 }

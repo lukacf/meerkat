@@ -73,6 +73,11 @@ impl ProviderRuntime for GoogleProviderRuntime {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
+        if binding.provider != Provider::Gemini {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
         let auth_method = match binding.auth {
             NormalizedAuthMethod::Google(m) => m,
             _ => {

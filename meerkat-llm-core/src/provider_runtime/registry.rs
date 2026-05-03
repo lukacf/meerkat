@@ -24,7 +24,9 @@ use crate::{ImageGenerationExecutor, LlmClient};
 
 // Provider runtimes live in per-provider crates. Callers (typically the
 // `meerkat` facade's `default_provider_registry()`) register them via
-// `with_runtime()` after constructing an empty registry.
+// `with_runtime()` after constructing an empty registry. Registration is not
+// a catalog extension point: every realm binding still validates through
+// `ProviderRuntimeCatalog` before runtime lookup.
 
 /// Closure that looks up an environment variable by name. Injected into
 /// [`ResolverEnvironment`] so the new resolution stack never calls
@@ -171,10 +173,18 @@ impl ProviderRuntimeRegistry {
         }
     }
 
-    /// Install a custom runtime, replacing any previously registered
-    /// runtime for that provider.
+    /// Install a runtime for a catalog-supported provider, replacing any
+    /// previously registered runtime for that provider.
+    ///
+    /// Custom runtimes can replace credential resolution and client
+    /// construction for an existing provider identity, but they cannot add
+    /// backend/auth matrix edges. Unsupported provider identities are ignored
+    /// here so direct `with_runtime()` calls cannot become a parallel catalog.
     pub fn with_runtime(mut self, runtime: Arc<dyn ProviderRuntime>) -> Self {
-        self.runtimes.insert(runtime.provider_id(), runtime);
+        let provider = runtime.provider_id();
+        if ProviderRuntimeCatalog::is_supported_provider(provider) {
+            self.runtimes.insert(provider, runtime);
+        }
         self
     }
 
@@ -183,9 +193,9 @@ impl ProviderRuntimeRegistry {
     }
 
     /// Resolve a binding from a realm connection set through the matching
-    /// provider runtime. Dispatches to `validate_binding` then
-    /// `resolve_binding` on the runtime registered for the backend's
-    /// provider.
+    /// provider runtime. Validates through `ProviderRuntimeCatalog`, then
+    /// dispatches `resolve_binding` on the runtime registered for the
+    /// validated provider.
     pub async fn resolve(
         &self,
         realm: &RealmConnectionSet,
@@ -272,13 +282,12 @@ fn _compile_proof_of_error_wiring() -> ProviderBindingError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::provider_runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind};
     use meerkat_core::{
         AuthProfile, BackendProfile, BindingId, BindingPolicy, CredentialSourceSpec,
         ProviderBinding, RealmId,
     };
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn testing_env_has_none_lookup() {
@@ -357,38 +366,14 @@ mod tests {
         }
     }
 
-    struct PermissiveOpenAiRuntime {
-        validate_called: Arc<AtomicBool>,
+    struct RecordingOpenAiRuntime {
         resolve_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl ProviderRuntime for PermissiveOpenAiRuntime {
+    impl ProviderRuntime for RecordingOpenAiRuntime {
         fn provider_id(&self) -> Provider {
             Provider::OpenAI
-        }
-
-        fn validate_binding(
-            &self,
-            connection_ref: &ConnectionRef,
-            backend: &BackendProfile,
-            auth: &AuthProfile,
-            policy: &BindingPolicy,
-        ) -> Result<ValidatedBinding, ProviderBindingError> {
-            self.validate_called.store(true, Ordering::SeqCst);
-            Ok(ValidatedBinding {
-                connection_ref: connection_ref.clone(),
-                provider: Provider::OpenAI,
-                backend: NormalizedBackendKind::OpenAi(
-                    meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
-                ),
-                auth: NormalizedAuthMethod::OpenAi(
-                    meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
-                ),
-                backend_profile: Arc::new(backend.clone()),
-                auth_profile: Arc::new(auth.clone()),
-                policy: policy.clone(),
-            })
         }
 
         async fn resolve_binding(
@@ -399,6 +384,35 @@ mod tests {
             self.resolve_calls.fetch_add(1, Ordering::SeqCst);
             Err(ProviderAuthError::SourceResolutionFailed(
                 "runtime should not resolve invalid catalog binding".into(),
+            ))
+        }
+
+        fn build_client(
+            &self,
+            _connection: ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+            Err(ProviderClientError::MissingFeature("test"))
+        }
+    }
+
+    struct OtherRuntime {
+        resolve_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRuntime for OtherRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::Other
+        }
+
+        async fn resolve_binding(
+            &self,
+            _binding: &ValidatedBinding,
+            _env: &ResolverEnvironment,
+        ) -> Result<ResolvedConnection, ProviderAuthError> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderAuthError::SourceResolutionFailed(
+                "uncataloged runtime should not resolve".into(),
             ))
         }
 
@@ -445,12 +459,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_binding_ignores_permissive_leaf_validation() {
-        let validate_called = Arc::new(AtomicBool::new(false));
+    async fn incompatible_binding_fails_before_runtime_dispatch() {
         let resolve_calls = Arc::new(AtomicUsize::new(0));
         let registry =
-            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PermissiveOpenAiRuntime {
-                validate_called: Arc::clone(&validate_called),
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RecordingOpenAiRuntime {
                 resolve_calls: Arc::clone(&resolve_calls),
             }));
 
@@ -467,7 +479,31 @@ mod tests {
             err,
             ProviderAuthError::Binding(ProviderBindingError::UnsupportedCombination { .. })
         ));
-        assert!(!validate_called.load(Ordering::SeqCst));
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn uncataloged_provider_runtime_is_not_a_catalog_extension() {
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let registry = ProviderRuntimeRegistry::empty().with_runtime(Arc::new(OtherRuntime {
+            resolve_calls: Arc::clone(&resolve_calls),
+        }));
+
+        assert!(registry.get(Provider::Other).is_none());
+
+        let err = registry
+            .resolve(
+                &realm(Provider::Other, "other_api", "api_key"),
+                &connection_ref(),
+                &ResolverEnvironment::testing(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::UnknownBackendKind(_))
+        ));
         assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
     }
 }

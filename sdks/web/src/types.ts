@@ -417,10 +417,12 @@ export interface MobHelperResult {
 
 /** Envelope wrapping an agent event with metadata. */
 export interface EventEnvelope {
-  agent_identity?: string;
-  member_ref?: MobMemberRef;
-  cursor?: string | number;
-  event: AgentEvent | { type: string; [key: string]: unknown };
+  event_id: string;
+  source_id: string;
+  seq: number;
+  mob_id?: string;
+  timestamp_ms: number;
+  payload: AgentEvent | { type: string; [key: string]: unknown };
 }
 
 /** Poll/subscribe lag sentinel emitted by the browser runtime. */
@@ -438,6 +440,7 @@ export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
   source: string;
+  source_fence_token?: number;
   role: string;
   envelope: EventEnvelope;
 }

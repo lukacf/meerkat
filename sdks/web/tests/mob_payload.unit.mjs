@@ -40,6 +40,33 @@ async function makeRuntimeMob(wasm) {
   return { runtime, mob };
 }
 
+function canonicalEnvelope(overrides = {}) {
+  return {
+    event_id: '00000000-0000-0000-0000-000000000001',
+    source_id: 'worker-runtime',
+    seq: 7,
+    timestamp_ms: 1710000000000,
+    payload: {
+      type: 'text_delta',
+      delta: 'hello',
+    },
+    ...overrides,
+  };
+}
+
+function makeSubscriptionMob(pollSubscription) {
+  return new Mob('mob-web-unit', {
+    async mob_member_subscribe() {
+      return 1;
+    },
+    async mob_subscribe_events() {
+      return 2;
+    },
+    poll_subscription: pollSubscription,
+    close_subscription: () => undefined,
+  });
+}
+
 test('Mob.spawn strips legacy generation and projects typed wasm spawn rows', async () => {
   let captured;
   const mob = new Mob('mob-web-unit', {
@@ -172,6 +199,75 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
     () => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]),
     /Mob spawn failed: profile missing/,
   );
+});
+
+test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads', async () => {
+  const envelope = canonicalEnvelope();
+  const mob = makeSubscriptionMob((handle) => {
+    assert.equal(handle, 1);
+    return JSON.stringify([envelope]);
+  });
+
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  const items = subscription.poll();
+
+  assert.deepEqual(items, [envelope]);
+  assert.equal(items[0].payload.type, 'text_delta');
+  assert.equal('event' in items[0], false);
+});
+
+test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope payloads', async () => {
+  const envelope = canonicalEnvelope({
+    mob_id: 'mob-web-unit',
+  });
+  const attributed = {
+    source: 'worker-runtime',
+    source_fence_token: 3,
+    role: 'worker',
+    envelope,
+  };
+  const mob = makeSubscriptionMob((handle) => {
+    assert.equal(handle, 2);
+    return JSON.stringify([attributed]);
+  });
+
+  const subscription = await mob.subscribeEvents();
+  const items = subscription.poll();
+
+  assert.deepEqual(items, [attributed]);
+  assert.equal(items[0].envelope.payload.type, 'text_delta');
+  assert.equal('event' in items[0].envelope, false);
+});
+
+test('Mob subscriptions reject unrecognized event envelopes instead of fabricating unknown events', async () => {
+  const legacyMemberEnvelope = {
+    event_id: '00000000-0000-0000-0000-000000000001',
+    source_id: 'worker-runtime',
+    seq: 7,
+    timestamp_ms: 1710000000000,
+    event: {
+      type: 'text_delta',
+      delta: 'legacy',
+    },
+  };
+  const mob = makeSubscriptionMob((handle) => {
+    if (handle === 1) {
+      return JSON.stringify([legacyMemberEnvelope]);
+    }
+    return JSON.stringify([
+      {
+        source: 'worker-runtime',
+        role: 'worker',
+        envelope: legacyMemberEnvelope,
+      },
+    ]);
+  });
+
+  const memberSubscription = await mob.subscribeMemberEvents('worker-1');
+  assert.throws(() => memberSubscription.poll(), /missing payload/);
+
+  const mobSubscription = await mob.subscribeEvents();
+  assert.throws(() => mobSubscription.poll(), /missing payload/);
 });
 
 test('MeerkatRuntime keeps a clean empty subscription poll as empty success', async () => {

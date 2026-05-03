@@ -2071,6 +2071,7 @@ pub async fn mob_member_send(
         .map_err(err_mob)?;
     let identity_str = receipt.identity.to_string();
     let payload = serde_json::json!({
+        "mob_id": id.as_str(),
         "agent_identity": receipt.identity,
         "member_ref": meerkat_contracts::WireMemberRef::encode(id.as_str(), &identity_str),
         "handling_mode": match receipt.handling_mode {
@@ -2254,7 +2255,8 @@ pub async fn mob_run_flow(
 
 /// Read flow run status.
 ///
-/// Returns JSON with run state and ledgers, or null if not found.
+/// Returns a generated `MobFlowStatusResult` JSON envelope whose `run` field
+/// carries run state and ledgers, or null when not found.
 #[wasm_bindgen]
 pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -2263,13 +2265,9 @@ pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsVa
         .parse()
         .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
     let status = mob_state.mob_flow_status(&id, rid).await.map_err(err_mob)?;
-    match status {
-        Some(run) => {
-            let json = serde_json::to_string(&run).map_err(|e| err_str("serialize_error", e))?;
-            Ok(JsValue::from_str(&json))
-        }
-        None => Ok(JsValue::from_str("null")),
-    }
+    let json = serde_json::to_string(&serde_json::json!({ "run": status }))
+        .map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Cancel an in-flight flow run.

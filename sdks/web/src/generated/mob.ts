@@ -3,6 +3,8 @@
 
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
+export type WireMemberRef = string;
+
 export interface MobStatusResult {
   mob_id: string;
   status: string;
@@ -20,6 +22,24 @@ export interface MobRespawnResult {
 
 export interface MobEventsResult {
   events: unknown[];
+}
+
+export interface MobMemberSendResult {
+  agent_identity: string;
+  handling_mode: "queue" | "steer";
+  member_ref: WireMemberRef;
+  mob_id: string;
+}
+
+export interface MobFlowStatusResult {
+  run: unknown;
+}
+
+export interface MobHelperResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+  output?: string;
+  tokens_used: number;
 }
 
 export interface MobMemberStatusResult {

@@ -8,6 +8,14 @@ on:
       - feat/**
       - feature/**
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - labeled
+      - unlabeled
+      - ready_for_review
   workflow_dispatch:
 
 permissions:
@@ -35,10 +43,67 @@ jobs:
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
 
+  dogma-cleanup-gate:
+    name: Dogma cleanup review gate
+    runs-on: ubuntu-latest
+    env:
+      DOGMA_CLEANUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          path: pr
+
+      - name: Checkout immutable gate source
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          path: dogma-gate-source
+
+      - name: Enforce dogma cleanup review packet
+        shell: bash
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          gate_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/dogma_cleanup_gate.py"
+          if [[ ! -f "$gate_script" ]]; then
+            gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"
+            echo "Base dogma cleanup gate is not available; using PR checkout for bootstrap."
+          fi
+          python3 "$gate_script" --repo "$pr_repo" --base "$DOGMA_CLEANUP_BASE" --github-event "$GITHUB_EVENT_PATH"
+
+      - name: Validate PR-head dogma gate fixtures
+        shell: bash
+        run: |
+          pr_repo="$GITHUB_WORKSPACE/pr"
+          pr_gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"
+          pr_fixture_dir="$pr_repo/scripts/fixtures/dogma_cleanup_gate"
+          pr_test_script="$pr_repo/scripts/tests/dogma_cleanup_gate_test.py"
+          base_test_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/tests/dogma_cleanup_gate_test.py"
+          if [[ ! -f "$pr_test_script" ]]; then
+            echo "::error::PR-head dogma gate fixture suite is missing: scripts/tests/dogma_cleanup_gate_test.py"
+            exit 1
+          fi
+          if [[ ! -f "$pr_gate_script" ]]; then
+            echo "::error::PR-head dogma gate script is missing: scripts/dogma_cleanup_gate.py"
+            exit 1
+          fi
+          if [[ -f "$base_test_script" ]]; then
+            DOGMA_GATE_REPO_ROOT="$pr_repo" \
+            DOGMA_GATE_SCRIPT="$pr_gate_script" \
+            DOGMA_GATE_FIXTURE_DIR="$pr_fixture_dir" \
+              python3 "$base_test_script" -v
+          else
+            echo "Base dogma cleanup fixture oracle is not available; using PR checkout for bootstrap."
+            python3 "$pr_test_script" -v
+          fi
+
   gate:
     name: CI gate
     if: always()
-    needs: [cargo, buildbuddy]
+    needs: [cargo, buildbuddy, dogma-cleanup-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check selected backend
@@ -46,6 +111,12 @@ jobs:
           bb_enabled="${{ (vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}"
           cargo_result="${{ needs.cargo.result }}"
           buildbuddy_result="${{ needs.buildbuddy.result }}"
+          dogma_result="${{ needs.dogma-cleanup-gate.result }}"
+
+          echo "Dogma cleanup gate: $dogma_result"
+          if [[ "$dogma_result" != "success" ]]; then
+            exit 1
+          fi
 
           if [[ "$bb_enabled" == "true" ]]; then
             echo "BuildBuddy selected: $buildbuddy_result"

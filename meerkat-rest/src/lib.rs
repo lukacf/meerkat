@@ -7083,7 +7083,7 @@ mod tests {
             result = &mut webhook_task => {
                 panic!("wakeful webhook completed before registration lock release: {result:?}");
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
@@ -7414,7 +7414,7 @@ mod tests {
                 release.notify_waiters();
                 tokio::select! {
                     result = &mut continue_task => break result,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                 }
             }
         })
@@ -9914,7 +9914,7 @@ mod tests {
             result = &mut continue_task => {
                 panic!("rebuild continue completed before taking the runtime registration lock: {result:?}");
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,

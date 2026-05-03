@@ -741,7 +741,7 @@
   },
   "InputListParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submissions`.",
+    "description": "Request payload for runtime input-state listing.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -755,7 +755,7 @@
   },
   "InputStateParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submission`.",
+    "description": "Request payload for runtime input-state lookup.",
     "properties": {
       "input_id": {
         "type": "string"
@@ -8281,7 +8281,7 @@
   },
   "RuntimeAcceptParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_submit`.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
+    "description": "Request payload for runtime-backed input submission.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
     "properties": {
       "input": true,
       "session_id": {
@@ -8311,7 +8311,7 @@
   },
   "RuntimeResetParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_reset`.",
+    "description": "Request payload for runtime reset.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -8325,7 +8325,7 @@
   },
   "RuntimeRetireParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_retire`.",
+    "description": "Request payload for runtime retirement.",
     "properties": {
       "session_id": {
         "type": "string"
@@ -8339,7 +8339,7 @@
   },
   "RuntimeStateParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `runtime/session_status`.",
+    "description": "Request payload for runtime-backed session status projections.",
     "properties": {
       "session_id": {
         "type": "string"

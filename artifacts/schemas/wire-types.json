@@ -1082,7 +1082,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `runtime/session_submissions`.",
+    "description": "Response payload for runtime input-state listing.",
     "properties": {
       "inputs": {
         "items": {
@@ -9580,7 +9580,7 @@
   },
   "RuntimeAcceptOutcomeType": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Discriminator for `runtime/session_submit` responses.",
+    "description": "Discriminator for runtime-backed input submission responses.",
     "enum": [
       "accepted",
       "deduplicated",
@@ -9596,7 +9596,7 @@
         "type": "string"
       },
       "RuntimeAcceptOutcomeType": {
-        "description": "Discriminator for `runtime/session_submit` responses.",
+        "description": "Discriminator for runtime-backed input submission responses.",
         "enum": [
           "accepted",
           "deduplicated",
@@ -9881,7 +9881,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `runtime/session_submit`.",
+    "description": "Response payload for runtime-backed input submission.",
     "properties": {
       "existing_id": {
         "type": [
@@ -9961,7 +9961,7 @@
   },
   "RuntimeResetResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `runtime/session_reset`.",
+    "description": "Response payload for runtime reset.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -9977,7 +9977,7 @@
   },
   "RuntimeRetireResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `runtime/session_retire`.",
+    "description": "Response payload for runtime retirement.",
     "properties": {
       "inputs_abandoned": {
         "format": "uint",
@@ -10014,7 +10014,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `runtime/session_status`.",
+    "description": "Response payload for runtime-backed session status projections.",
     "properties": {
       "state": {
         "$ref": "#/$defs/WireRuntimeState"

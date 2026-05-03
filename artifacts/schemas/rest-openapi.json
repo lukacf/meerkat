@@ -2505,7 +2505,7 @@
         ]
       },
       "InputListParams": {
-        "description": "Request payload for `runtime/session_submissions`.",
+        "description": "Request payload for runtime input-state listing.",
         "properties": {
           "session_id": {
             "type": "string"
@@ -2518,7 +2518,7 @@
         "type": "object"
       },
       "InputListResult": {
-        "description": "Response payload for `runtime/session_submissions`.",
+        "description": "Response payload for runtime input-state listing.",
         "properties": {
           "inputs": {
             "items": {
@@ -2545,7 +2545,7 @@
         "type": "string"
       },
       "InputStateParams": {
-        "description": "Request payload for `runtime/session_submission`.",
+        "description": "Request payload for runtime input-state lookup.",
         "properties": {
           "input_id": {
             "type": "string"
@@ -9052,7 +9052,7 @@
         "type": "string"
       },
       "RuntimeAcceptOutcomeType": {
-        "description": "Discriminator for `runtime/session_submit` responses.",
+        "description": "Discriminator for runtime-backed input submission responses.",
         "enum": [
           "accepted",
           "deduplicated",
@@ -9062,7 +9062,7 @@
         "type": "string"
       },
       "RuntimeAcceptParams": {
-        "description": "Request payload for `runtime/session_submit`.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
+        "description": "Request payload for runtime-backed input submission.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
         "properties": {
           "input": true,
           "session_id": {
@@ -9077,7 +9077,7 @@
         "type": "object"
       },
       "RuntimeAcceptResult": {
-        "description": "Response payload for `runtime/session_submit`.",
+        "description": "Response payload for runtime-backed input submission.",
         "properties": {
           "existing_id": {
             "type": [
@@ -9477,7 +9477,7 @@
         "type": "object"
       },
       "RuntimeResetParams": {
-        "description": "Request payload for `runtime/session_reset`.",
+        "description": "Request payload for runtime reset.",
         "properties": {
           "session_id": {
             "type": "string"
@@ -9490,7 +9490,7 @@
         "type": "object"
       },
       "RuntimeResetResult": {
-        "description": "Response payload for `runtime/session_reset`.",
+        "description": "Response payload for runtime reset.",
         "properties": {
           "inputs_abandoned": {
             "format": "uint",
@@ -9505,7 +9505,7 @@
         "type": "object"
       },
       "RuntimeRetireParams": {
-        "description": "Request payload for `runtime/session_retire`.",
+        "description": "Request payload for runtime retirement.",
         "properties": {
           "session_id": {
             "type": "string"
@@ -9518,7 +9518,7 @@
         "type": "object"
       },
       "RuntimeRetireResult": {
-        "description": "Response payload for `runtime/session_retire`.",
+        "description": "Response payload for runtime retirement.",
         "properties": {
           "inputs_abandoned": {
             "format": "uint",
@@ -9539,7 +9539,7 @@
         "type": "object"
       },
       "RuntimeStateParams": {
-        "description": "Request payload for `runtime/session_status`.",
+        "description": "Request payload for runtime-backed session status projections.",
         "properties": {
           "session_id": {
             "type": "string"
@@ -9552,7 +9552,7 @@
         "type": "object"
       },
       "RuntimeStateResult": {
-        "description": "Response payload for `runtime/session_status`.",
+        "description": "Response payload for runtime-backed session status projections.",
         "properties": {
           "state": {
             "$ref": "#/components/schemas/WireRuntimeState"

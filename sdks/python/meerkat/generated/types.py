@@ -1089,7 +1089,7 @@ class SessionStreamCloseResult:
 
 @dataclass
 class RuntimeStateParams:
-    """Request payload for `runtime/session_status`."""
+    """Request payload for runtime-backed session status projections."""
     session_id: str
 
 
@@ -1123,7 +1123,7 @@ class RealtimeCapabilitiesParams:
 
 @dataclass
 class RuntimeAcceptParams:
-    """Request payload for `runtime/session_submit`.
+    """Request payload for runtime-backed input submission.
 
 The runtime input body is owned by `meerkat-runtime`; contracts cannot
 depend on the runtime crate without inverting the dependency graph. The
@@ -1135,26 +1135,26 @@ authority over the `input` discriminator and variant body."""
 
 @dataclass
 class RuntimeRetireParams:
-    """Request payload for `runtime/session_retire`."""
+    """Request payload for runtime retirement."""
     session_id: str
 
 
 @dataclass
 class RuntimeResetParams:
-    """Request payload for `runtime/session_reset`."""
+    """Request payload for runtime reset."""
     session_id: str
 
 
 @dataclass
 class InputStateParams:
-    """Request payload for `runtime/session_submission`."""
+    """Request payload for runtime input-state lookup."""
     input_id: str
     session_id: str
 
 
 @dataclass
 class InputListParams:
-    """Request payload for `runtime/session_submissions`."""
+    """Request payload for runtime input-state listing."""
     session_id: str
 
 
@@ -1235,7 +1235,7 @@ not provide raw peer IDs, and missing key material fails at the boundary."""
 
 @dataclass
 class RuntimeStateResult:
-    """Response payload for runtime/session_status."""
+    """Response payload for runtime-backed session status projections."""
     state: WireRuntimeState
 
 
@@ -1433,7 +1433,7 @@ class RealtimeChannelClosedFrame:
 
 @dataclass
 class RuntimeAcceptResult:
-    """Response payload for `runtime/session_submit`."""
+    """Response payload for runtime-backed input submission."""
     outcome_type: Literal['accepted', 'deduplicated', 'rejected']
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
@@ -1444,14 +1444,14 @@ class RuntimeAcceptResult:
 
 @dataclass
 class RuntimeRetireResult:
-    """Response payload for `runtime/session_retire`."""
+    """Response payload for runtime retirement."""
     inputs_abandoned: int
     inputs_pending_drain: Optional[int] = None
 
 
 @dataclass
 class RuntimeResetResult:
-    """Response payload for `runtime/session_reset`."""
+    """Response payload for runtime reset."""
     inputs_abandoned: int
 
 
@@ -1489,7 +1489,7 @@ fields with typed projections so the wire carries no untyped carriers."""
 
 @dataclass
 class InputListResult:
-    """Response payload for `runtime/session_submissions`."""
+    """Response payload for runtime input-state listing."""
     inputs: list[dict[str, Any]]
 
 
@@ -2357,7 +2357,7 @@ class RealtimeServerFrameChannelClosed(TypedDict, total=False):
 
 RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
 
-# Discriminator for `runtime/session_submit` responses.
+# Discriminator for runtime-backed input submission responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
 
 # Public input lifecycle state projection used by RPC surfaces.
@@ -2606,5 +2606,5 @@ PeerReachability = Literal['unknown', 'reachable', 'unreachable']
 # Comms/session-stream RPC contract for PeerReachabilityReason.
 PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']
 
-# Response payload for `runtime/session_submission`.
+# Response payload for runtime input-state lookup.
 InputStateResult = Optional[WireInputState]

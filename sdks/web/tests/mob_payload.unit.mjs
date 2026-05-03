@@ -37,3 +37,22 @@ test('Mob.spawn strips legacy generation from wasm payloads', async () => {
     ],
   });
 });
+
+test('Mob.spawn rejects legacy ok result rows from wasm payloads', async () => {
+  const mob = new Mob('mob-web-unit', {
+    async mob_spawn() {
+      return JSON.stringify([
+        {
+          ok: true,
+          agent_identity: 'worker-1',
+          member_ref: 'ref-worker-1',
+        },
+      ]);
+    },
+  });
+
+  await assert.rejects(
+    () => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]),
+    /Invalid mob spawn response/,
+  );
+});

@@ -679,17 +679,103 @@ pub struct MobSpawnManyParams {
     pub specs: Vec<MobSpawnSpecParams>,
 }
 
-/// One result entry in a `mob/spawn_many` response.
+/// Typed status for one `mob/spawn_many` row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MobSpawnManyResultStatus {
+    Spawned,
+    Failed,
+}
+
+/// Successful per-member `mob/spawn_many` result payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobSpawnManySpawnedResult {
+    pub agent_identity: String,
+    pub member_ref: WireMemberRef,
+}
+
+/// Failed per-member `mob/spawn_many` result payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobSpawnManyFailedResult {
+    pub message: String,
+}
+
+/// Typed payload for one `mob/spawn_many` row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum MobSpawnManyResultPayload {
+    Spawned(MobSpawnManySpawnedResult),
+    Failed(MobSpawnManyFailedResult),
+}
+
+/// One typed result entry in a `mob/spawn_many` response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "MobSpawnManyResultEntryRaw")]
 pub struct MobSpawnManyResultEntry {
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_ref: Option<WireMemberRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub status: MobSpawnManyResultStatus,
+    pub result: MobSpawnManyResultPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct MobSpawnManyResultEntryRaw {
+    status: MobSpawnManyResultStatus,
+    result: MobSpawnManyResultPayload,
+}
+
+impl TryFrom<MobSpawnManyResultEntryRaw> for MobSpawnManyResultEntry {
+    type Error = String;
+
+    fn try_from(raw: MobSpawnManyResultEntryRaw) -> Result<Self, Self::Error> {
+        let entry = Self {
+            status: raw.status,
+            result: raw.result,
+        };
+        entry.validate().map_err(str::to_owned)?;
+        Ok(entry)
+    }
+}
+
+impl MobSpawnManyResultEntry {
+    pub fn spawned(agent_identity: impl Into<String>, member_ref: WireMemberRef) -> Self {
+        Self {
+            status: MobSpawnManyResultStatus::Spawned,
+            result: MobSpawnManyResultPayload::Spawned(MobSpawnManySpawnedResult {
+                agent_identity: agent_identity.into(),
+                member_ref,
+            }),
+        }
+    }
+
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            status: MobSpawnManyResultStatus::Failed,
+            result: MobSpawnManyResultPayload::Failed(MobSpawnManyFailedResult {
+                message: message.into(),
+            }),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match (&self.status, &self.result) {
+            (MobSpawnManyResultStatus::Spawned, MobSpawnManyResultPayload::Spawned(_))
+            | (MobSpawnManyResultStatus::Failed, MobSpawnManyResultPayload::Failed(_)) => Ok(()),
+            (MobSpawnManyResultStatus::Spawned, MobSpawnManyResultPayload::Failed(_)) => {
+                Err("mob spawn_many result status spawned requires spawned result")
+            }
+            (MobSpawnManyResultStatus::Failed, MobSpawnManyResultPayload::Spawned(_)) => {
+                Err("mob spawn_many result status failed requires failed result")
+            }
+        }
+    }
 }
 
 /// Response payload for `mob/spawn_many`.
@@ -1955,6 +2041,77 @@ mod tests {
         }))
         .expect_err("unknown reconcile stage must be rejected");
         assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn mob_spawn_many_result_entry_uses_typed_status_result_envelope() {
+        let member_ref = WireMemberRef::encode("mob-1", "worker-1");
+        let entry = MobSpawnManyResultEntry::spawned("worker-1", member_ref.clone());
+
+        let json = serde_json::to_value(&entry).expect("serialize typed spawn_many row");
+        assert_eq!(json["status"], "spawned");
+        assert_eq!(json["result"]["agent_identity"], "worker-1");
+        assert_eq!(json["result"]["member_ref"], member_ref.as_str());
+        assert!(json.get("ok").is_none());
+        assert!(json.get("error").is_none());
+
+        let round_trip: MobSpawnManyResultEntry =
+            serde_json::from_value(json).expect("deserialize typed spawn_many row");
+        assert_eq!(round_trip, entry);
+    }
+
+    #[test]
+    fn mob_spawn_many_result_entry_rejects_legacy_or_malformed_envelopes() {
+        let legacy = serde_json::json!({
+            "ok": true,
+            "agent_identity": "worker-1",
+            "member_ref": WireMemberRef::encode("mob-1", "worker-1"),
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(legacy)
+            .expect_err("legacy ok carrier must not deserialize");
+        assert!(
+            err.to_string().contains("missing field `status`")
+                || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+
+        let missing_result = serde_json::json!({
+            "status": "spawned"
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(missing_result)
+            .expect_err("missing typed result must fail closed");
+        assert!(
+            err.to_string().contains("missing field `result`"),
+            "unexpected error: {err}"
+        );
+
+        let unknown_status = serde_json::json!({
+            "status": "ok",
+            "result": {
+                "agent_identity": "worker-1",
+                "member_ref": WireMemberRef::encode("mob-1", "worker-1"),
+            }
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(unknown_status)
+            .expect_err("unknown typed status must fail closed");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
+
+        let mismatched = serde_json::json!({
+            "status": "spawned",
+            "result": {
+                "message": "profile missing"
+            }
+        });
+        let err = serde_json::from_value::<MobSpawnManyResultEntry>(mismatched)
+            .expect_err("status/result mismatch must fail closed");
+        assert!(
+            err.to_string()
+                .contains("status spawned requires spawned result"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

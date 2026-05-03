@@ -30,7 +30,7 @@ mod tokio {
 use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
-use meerkat_contracts::MobDefinitionInput;
+use meerkat_contracts::{MobDefinitionInput, MobSpawnManyResultEntry, WireMemberRef};
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -2756,9 +2756,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         }),
                     )
                 } else {
+                    let mob_id = MobId::from(args.mob_id);
                     let results = self
                         .state
-                        .mob_spawn_many(&MobId::from(args.mob_id), specs)
+                        .mob_spawn_many(&mob_id, specs)
                         .await
                         .map_err(|e| map_mob_err(call, e))?;
                     let results = results
@@ -2766,14 +2767,16 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map(
                             |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
                                 match result {
-                                    Ok(spawn_result) => json!({
-                                        "ok": true,
-                                        "agent_identity": spawn_result.agent_identity,
-                                    }),
-                                    Err(error) => json!({
-                                        "ok": false,
-                                        "error": error.to_string(),
-                                    }),
+                                    Ok(spawn_result) => {
+                                        let identity = spawn_result.agent_identity.to_string();
+                                        json!(MobSpawnManyResultEntry::spawned(
+                                            identity.clone(),
+                                            WireMemberRef::encode(mob_id.as_str(), &identity),
+                                        ))
+                                    }
+                                    Err(error) => {
+                                        json!(MobSpawnManyResultEntry::failed(error.to_string()))
+                                    }
                                 }
                             },
                         )
@@ -4723,7 +4726,10 @@ mod tests {
         let results = spawned["results"].as_array().expect("results array");
         assert_eq!(results.len(), 2, "expected two batch rows");
         assert!(
-            results.iter().all(|row| row["ok"] == json!(true)),
+            results
+                .iter()
+                .all(|row| row["status"] == json!("spawned")
+                    && row["result"]["member_ref"].is_string()),
             "all batch spawn rows should succeed"
         );
 

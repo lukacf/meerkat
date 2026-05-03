@@ -4,7 +4,7 @@ use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, RealtimeCapabilities, RealtimeCapabilitiesParams,
     RealtimeCapabilitiesResult, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams,
-    RealtimeStatusResult, WireContentInput, WireMobBackendKind, WireMobRuntimeMode,
+    RealtimeStatusResult, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode,
     WireRuntimeBinding, WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
@@ -654,14 +654,15 @@ pub async fn handle_public_tools_call(
             Ok(json!({
                 "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| match result {
                     Ok(spawn_result) => {
-                        let mut payload = spawn_result_payload(&mob_id, &spawn_result);
-                        payload["ok"] = json!(true);
-                        payload
+                        let identity = spawn_result.agent_identity.to_string();
+                        json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
+                            identity.clone(),
+                            WireMemberRef::encode(mob_id.as_str(), &identity),
+                        ))
                     }
-                    Err(error) => json!({
-                        "ok": false,
-                        "error": error.to_string(),
-                    }),
+                    Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
+                        error.to_string(),
+                    )),
                 }).collect::<Vec<_>>()
             }))
         }

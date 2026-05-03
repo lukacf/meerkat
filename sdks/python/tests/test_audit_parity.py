@@ -380,10 +380,11 @@ async def test_spawn_many_uses_explicit_rpc_method():
         return_value={
             "results": [
                 {
-                    "ok": True,
-                    "mob_id": "mob1",
-                    "agent_identity": "m1",
-                    "member_ref": _make_member_ref("mob1", "m1"),
+                    "status": "spawned",
+                    "result": {
+                        "agent_identity": "m1",
+                        "member_ref": _make_member_ref("mob1", "m1"),
+                    },
                 }
             ]
         }
@@ -400,8 +401,9 @@ async def test_spawn_many_uses_explicit_rpc_method():
             "specs": specs,
         },
     )
-    assert results.results[0].agent_identity == "m1"
-    assert results.results[0].member_ref == _make_member_ref("mob1", "m1")
+    assert results.results[0].status == "spawned"
+    assert results.results[0].result.agent_identity == "m1"
+    assert results.results[0].result.member_ref == _make_member_ref("mob1", "m1")
 
 
 @pytest.mark.asyncio

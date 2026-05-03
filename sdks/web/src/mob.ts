@@ -204,6 +204,9 @@ export class Mob {
       JSON.stringify(specs.map(spawnSpecPayload)),
     );
     return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry) => {
+      if ('ok' in entry) {
+        throw new Error('Invalid mob spawn response: legacy ok result row');
+      }
       if (typeof entry.agent_identity !== 'string' || entry.agent_identity.length === 0) {
         throw new Error('Invalid mob spawn response: missing agent_identity');
       }

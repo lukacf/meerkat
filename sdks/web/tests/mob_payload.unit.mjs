@@ -4,6 +4,7 @@ import test from 'node:test';
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
+import { isKnownEvent } from '../dist/types.js';
 
 function makeSubscriptionRuntime(overrides = {}) {
   return {
@@ -96,6 +97,59 @@ async function runtimeWithMobList(payload) {
     {},
   );
 }
+
+test('isKnownEvent requires typed skills_resolved identities', () => {
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: [
+        {
+          source_uuid: '00000000-0000-4b11-8111-000000000001',
+          skill_name: 'email-extractor',
+        },
+      ],
+      injection_bytes: 128,
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: ['legacy/ref'],
+      injection_bytes: 128,
+    }),
+    false,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: [{ source_uuid: '00000000-0000-4b11-8111-000000000001' }],
+      injection_bytes: 128,
+    }),
+    false,
+  );
+});
+
+test('isKnownEvent fails closed for unknown skill resolution statuses', () => {
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'future_status', message: 'future details' },
+      reference: 'legacy/ref',
+      error: 'missing',
+    }),
+    false,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'unknown', message: 'future details' },
+      reference: 'legacy/ref',
+      error: 'missing',
+    }),
+    true,
+  );
+});
 
 test('Mob.spawn strips legacy generation and projects typed wasm spawn rows', async () => {
   let captured;

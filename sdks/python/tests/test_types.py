@@ -68,6 +68,7 @@ from meerkat.events import (
     RunCompleted,
     RunFailed,
     RunStarted,
+    SkillsResolved,
     SkillResolutionFailed,
     SkillResolutionFailureReason,
     ToolConfigChanged,
@@ -1424,6 +1425,43 @@ def test_parse_retrying():
     assert event.delay_ms == 2000
 
 
+def test_parse_skills_resolved_with_typed_skill_identities():
+    source_uuid = "00000000-0000-4b11-8111-000000000001"
+    raw = {
+        "type": "skills_resolved",
+        "skills": [{"source_uuid": source_uuid, "skill_name": "email-extractor"}],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillsResolved)
+    assert event.skills == [
+        SkillKey(source_uuid=source_uuid, skill_name="email-extractor"),
+    ]
+    assert event.injection_bytes == 128
+
+
+def test_parse_skills_resolved_rejects_legacy_string_only_payload():
+    raw = {
+        "type": "skills_resolved",
+        "skills": ["legacy/ref"],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+
+
+def test_parse_skills_resolved_rejects_missing_typed_identity_fields():
+    raw = {
+        "type": "skills_resolved",
+        "skills": [{"source_uuid": "00000000-0000-4b11-8111-000000000001"}],
+        "injection_bytes": 128,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+
+
 def test_parse_skill_resolution_failed_with_typed_reason():
     source_uuid = "00000000-0000-4b11-8111-000000000001"
     raw = {
@@ -1475,6 +1513,35 @@ def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
+    assert event.reason is None
+
+
+def test_parse_skill_resolution_failed_preserves_unknown_status_as_typed_unknown():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": "future_status", "message": "future details"},
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key is None
+    assert isinstance(event.reason, SkillResolutionFailureReason)
+    assert event.reason.reason_type == "unknown"
+    assert event.reason.message == "future details"
+    assert event.reason.raw_reason_type == "future_status"
+
+
+def test_parse_skill_resolution_failed_does_not_fabricate_empty_keyed_reason():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": "not_found"},
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key is None
     assert event.reason is None
 
 

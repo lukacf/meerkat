@@ -473,9 +473,92 @@ export interface MobEvent {
 
 export { KNOWN_AGENT_EVENT_TYPES };
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isWireSkillKey(value: unknown): value is SkillKey {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.source_uuid) &&
+    isNonEmptyString(value.skill_name)
+  );
+}
+
+function hasStringFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  return fields.every((field) => typeof value[field] === 'string');
+}
+
+function isSkillResolutionFailureReason(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.reason_type !== 'string') {
+    return false;
+  }
+  switch (value.reason_type) {
+    case 'not_found':
+      return isWireSkillKey(value.key);
+    case 'capability_unavailable':
+      return isWireSkillKey(value.key) && isNonEmptyString(value.capability);
+    case 'load':
+    case 'parse':
+    case 'unknown':
+      return typeof value.message === 'string';
+    case 'source_uuid_collision':
+      return hasStringFields(value, ['source_uuid', 'existing_fingerprint', 'new_fingerprint']);
+    case 'source_uuid_mutation_without_lineage':
+      return hasStringFields(value, ['fingerprint', 'existing_source_uuid', 'mutated_source_uuid']);
+    case 'missing_skill_remaps':
+      return hasStringFields(value, ['event_id', 'event_kind']);
+    case 'remap_without_lineage':
+      return hasStringFields(value, [
+        'from_source_uuid',
+        'from_skill_name',
+        'to_source_uuid',
+        'to_skill_name',
+      ]);
+    case 'unknown_skill_alias':
+      return typeof value.alias === 'string';
+    case 'remap_cycle':
+      return hasStringFields(value, ['source_uuid', 'skill_name']);
+    default:
+      return false;
+  }
+}
+
+function isKnownSkillResolutionEvent(event: { type: string }): boolean {
+  const value = event as Record<string, unknown>;
+
+  if (event.type === 'skills_resolved') {
+    return (
+      Array.isArray(value.skills) &&
+      value.skills.every(isWireSkillKey) &&
+      typeof value.injection_bytes === 'number' &&
+      Number.isFinite(value.injection_bytes) &&
+      value.injection_bytes >= 0
+    );
+  }
+
+  if (event.type === 'skill_resolution_failed') {
+    return (
+      (value.skill_key == null || isWireSkillKey(value.skill_key)) &&
+      (value.reason == null || isSkillResolutionFailureReason(value.reason)) &&
+      (value.reference == null || typeof value.reference === 'string') &&
+      (value.error == null || typeof value.error === 'string')
+    );
+  }
+
+  return true;
+}
+
 /** Type guard for known event types. */
 export function isKnownEvent(event: { type: string }): event is AgentEvent {
-  return (KNOWN_AGENT_EVENT_TYPES as readonly string[]).includes(event.type);
+  return (
+    (KNOWN_AGENT_EVENT_TYPES as readonly string[]).includes(event.type) &&
+    isKnownSkillResolutionEvent(event)
+  );
 }
 
 // ─── Tool callback types ────────────────────────────────────────

@@ -296,6 +296,21 @@ function handleEvent(event: AgentEvent): string {
   }
 }
 
+const typedSkillsResolved: AgentEvent = {
+  type: 'skills_resolved',
+  skills: [
+    {
+      source_uuid: '00000000-0000-4b11-8111-000000000001',
+      skill_name: 'email-extractor',
+    },
+  ],
+  injection_bytes: 128,
+};
+handleEvent(typedSkillsResolved);
+
+// @ts-expect-error Legacy string-only skills_resolved payloads are not semantic AgentEvent data.
+const legacyStringSkillsResolved: AgentEvent = { type: 'skills_resolved', skills: ['legacy/ref'], injection_bytes: 128 };
+
 // ─── ToolCallback ───────────────────────────────────────────────
 
 const myTool: ToolCallback = async (args: string) => {
@@ -352,6 +367,8 @@ void mobAppendSystemContextResult;
 void mobDef;
 void spawnSpec;
 void handleEvent;
+void typedSkillsResolved;
+void legacyStringSkillsResolved;
 void myTool;
 void actions;
 void memberSendResult;

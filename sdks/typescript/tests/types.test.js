@@ -452,6 +452,51 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse skills_resolved with typed skill identities", () => {
+    const sourceUuid = "00000000-0000-4b11-8111-000000000001";
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: [{ source_uuid: sourceUuid, skill_name: "email-extractor" }],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "skills_resolved");
+    if (event.type === "skills_resolved") {
+      assert.deepEqual(event.skills, [
+        { sourceUuid, skillName: "email-extractor" },
+      ]);
+      assert.equal(event.injectionBytes, 128);
+    }
+  });
+
+  it("should reject legacy string-only skills_resolved payloads", () => {
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: ["legacy/ref"],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.rawType, "skills_resolved");
+      assert.match(event.error, /SkillKey/);
+    }
+  });
+
+  it("should reject skills_resolved missing typed skill identity fields", () => {
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: [{ source_uuid: "00000000-0000-4b11-8111-000000000001" }],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.rawType, "skills_resolved");
+      assert.match(event.error, /SkillKey/);
+    }
+  });
+
   it("should parse skill_resolution_failed with typed key and reason", () => {
     const sourceUuid = "00000000-0000-4b11-8111-000000000001";
     const event = parseEvent({
@@ -509,6 +554,40 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "skill_resolution_failed");
     if (event.type === "skill_resolution_failed") {
+      assert.equal(event.reason, undefined);
+    }
+  });
+
+  it("should preserve unknown skill resolution reason types as typed unknown", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: "future_status", message: "future details" },
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.skillKey, undefined);
+      assert.deepEqual(event.reason, {
+        reasonType: "unknown",
+        message: "future details",
+        rawReasonType: "future_status",
+      });
+    }
+  });
+
+  it("should not fabricate empty skill keys for keyed failure reasons", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: "not_found" },
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.skillKey, undefined);
       assert.equal(event.reason, undefined);
     }
   });

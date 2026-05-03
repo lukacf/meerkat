@@ -5939,29 +5939,18 @@ mod tests {
                 Provider::OpenAI
             }
 
-            fn validate_binding(
-                &self,
-                connection_ref: &ConnectionRef,
-                backend: &meerkat_core::BackendProfile,
-                auth: &meerkat_core::AuthProfile,
-                policy: &meerkat_core::BindingPolicy,
-            ) -> Result<ValidatedBinding, ProviderBindingError> {
-                assert_eq!(connection_ref.realm.as_str(), "session_a");
-                assert_eq!(connection_ref.binding.as_str(), "default_openai");
-                assert_eq!(backend.provider, Provider::OpenAI);
-                assert_eq!(auth.provider, Provider::OpenAI);
-                assert!(policy.require_metadata_account);
-                Err(ProviderBindingError::MissingRequiredDefault(
-                    "metadata_account",
-                ))
-            }
-
             async fn resolve_binding(
                 &self,
-                _binding: &ValidatedBinding,
+                binding: &ValidatedBinding,
                 _env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                unreachable!("validation failure should keep the typed auth-policy error shape")
+                assert_eq!(binding.connection_ref.realm.as_str(), "session_a");
+                assert_eq!(binding.connection_ref.binding.as_str(), "default_openai");
+                assert_eq!(binding.provider, Provider::OpenAI);
+                assert!(binding.policy.require_metadata_account);
+                Err(ProviderAuthError::Binding(
+                    ProviderBindingError::MissingRequiredDefault("metadata_account"),
+                ))
             }
 
             fn build_client(

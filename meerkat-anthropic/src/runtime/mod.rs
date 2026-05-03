@@ -15,7 +15,7 @@ use meerkat_core::AuthError;
     all(not(target_arch = "wasm32"), feature = "foundry")
 ))]
 use meerkat_core::HttpAuthorizer;
-use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
@@ -65,66 +65,6 @@ fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthErr
     }
 }
 
-/// Allowed (backend, auth) combinations for Anthropic.
-pub const ALLOWED_BINDINGS: &[(AnthropicBackendKind, AnthropicAuthMethod)] = &[
-    // Native Anthropic API.
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ApiKey,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::StaticBearer,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ClaudeAiOauth,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::OauthToApiKey,
-    ),
-    (
-        AnthropicBackendKind::AnthropicApi,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Bedrock.
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::BedrockBearer,
-    ),
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::BedrockAwsSigv4,
-    ),
-    (
-        AnthropicBackendKind::Bedrock,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Vertex.
-    (
-        AnthropicBackendKind::Vertex,
-        AnthropicAuthMethod::VertexGoogleAuth,
-    ),
-    (
-        AnthropicBackendKind::Vertex,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-    // Foundry.
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::FoundryApiKey,
-    ),
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::FoundryAzureAd,
-    ),
-    (
-        AnthropicBackendKind::Foundry,
-        AnthropicAuthMethod::ExternalAuthorizer,
-    ),
-];
-
 pub struct AnthropicProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -132,38 +72,6 @@ pub struct AnthropicProviderRuntime;
 impl ProviderRuntime for AnthropicProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::Anthropic
-    }
-
-    fn validate_binding(
-        &self,
-        connection_ref: &meerkat_core::ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        if backend.provider != Provider::Anthropic || auth.provider != Provider::Anthropic {
-            return Err(ProviderBindingError::ProviderMismatch);
-        }
-        let backend_kind = AnthropicBackendKind::parse(&backend.backend_kind).ok_or_else(|| {
-            ProviderBindingError::UnknownBackendKind(backend.backend_kind.clone())
-        })?;
-        let auth_method = AnthropicAuthMethod::parse(&auth.auth_method)
-            .ok_or_else(|| ProviderBindingError::UnknownAuthMethod(auth.auth_method.clone()))?;
-        if !ALLOWED_BINDINGS.contains(&(backend_kind, auth_method)) {
-            return Err(ProviderBindingError::UnsupportedCombination {
-                backend: backend.backend_kind.clone(),
-                auth: auth.auth_method.clone(),
-            });
-        }
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
-            provider: Provider::Anthropic,
-            backend: NormalizedBackendKind::Anthropic(backend_kind),
-            auth: NormalizedAuthMethod::Anthropic(auth_method),
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
     }
 
     async fn resolve_binding(
@@ -716,18 +624,21 @@ fn non_empty_region(region: String) -> Option<String> {
 mod tests {
     use super::*;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
     #[test]
-    fn allowed_bindings_cover_api_key_and_oauth_variants() {
-        assert!(ALLOWED_BINDINGS.contains(&(
-            AnthropicBackendKind::AnthropicApi,
-            AnthropicAuthMethod::ApiKey,
-        )));
-        assert!(ALLOWED_BINDINGS.contains(&(
-            AnthropicBackendKind::AnthropicApi,
-            AnthropicAuthMethod::ClaudeAiOauth,
-        )));
+    fn typed_catalog_covers_api_key_and_oauth_variants() {
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ClaudeAiOauth),
+        ));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use meerkat_core::{
 use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
 use meerkat_core::provider_matrix::google::{GoogleAuthMethod, GoogleBackendKind};
 use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
+use meerkat_core::provider_matrix::self_hosted::{SelfHostedAuthMethod, SelfHostedBackendKind};
 
 /// Provider-tagged normalized backend kind. Each variant is produced by the
 /// matching provider runtime's `validate_binding`.
@@ -28,6 +29,7 @@ pub enum NormalizedBackendKind {
     OpenAi(OpenAiBackendKind),
     Anthropic(AnthropicBackendKind),
     Google(GoogleBackendKind),
+    SelfHosted(SelfHostedBackendKind),
 }
 
 /// Provider-tagged normalized auth method.
@@ -36,6 +38,7 @@ pub enum NormalizedAuthMethod {
     OpenAi(OpenAiAuthMethod),
     Anthropic(AnthropicAuthMethod),
     Google(GoogleAuthMethod),
+    SelfHosted(SelfHostedAuthMethod),
 }
 
 /// A binding that has been provider-validated but not yet resolved.

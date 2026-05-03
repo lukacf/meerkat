@@ -15,6 +15,7 @@ use meerkat_core::{
 };
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
+use crate::provider_runtime::catalog::ProviderRuntimeCatalog;
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
@@ -200,13 +201,17 @@ impl ProviderRuntimeRegistry {
                 connection_ref.realm, realm.realm_id
             )));
         }
+        let validated = ProviderRuntimeCatalog::validate_binding(
+            connection_ref,
+            backend,
+            auth,
+            &binding.policy,
+        )
+        .map_err(ProviderAuthError::Binding)?;
         let runtime = self
             .runtimes
-            .get(&backend.provider)
-            .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
-        let validated = runtime
-            .validate_binding(connection_ref, backend, auth, &binding.policy)
-            .map_err(ProviderAuthError::Binding)?;
+            .get(&validated.provider)
+            .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider))?;
         runtime.resolve_binding(&validated, env).await
     }
 
@@ -267,6 +272,13 @@ fn _compile_proof_of_error_wiring() -> ProviderBindingError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::provider_runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind};
+    use meerkat_core::{
+        AuthProfile, BackendProfile, BindingId, BindingPolicy, CredentialSourceSpec,
+        ProviderBinding, RealmId,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn testing_env_has_none_lookup() {
@@ -288,5 +300,174 @@ mod tests {
             Some("sk-fake")
         );
         assert!((env.env_lookup)("OTHER").is_none());
+    }
+
+    fn connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default").unwrap(),
+            profile: None,
+        }
+    }
+
+    fn realm(provider: Provider, backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
+        let mut backends = BTreeMap::new();
+        backends.insert(
+            "backend".to_string(),
+            BackendProfile {
+                id: "backend".into(),
+                provider,
+                backend_kind: backend_kind.into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        let mut auth_profiles = BTreeMap::new();
+        auth_profiles.insert(
+            "auth".to_string(),
+            AuthProfile {
+                id: "auth".into(),
+                provider,
+                auth_method: auth_method.into(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "secret".into(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "default".to_string(),
+            ProviderBinding {
+                id: "default".into(),
+                backend_profile: "backend".into(),
+                auth_profile: "auth".into(),
+                default_model: None,
+                policy: BindingPolicy::default(),
+            },
+        );
+
+        RealmConnectionSet {
+            realm_id: "dev".into(),
+            backends,
+            auth_profiles,
+            bindings,
+            default_binding: Some("default".into()),
+        }
+    }
+
+    struct PermissiveOpenAiRuntime {
+        validate_called: Arc<AtomicBool>,
+        resolve_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRuntime for PermissiveOpenAiRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        fn validate_binding(
+            &self,
+            connection_ref: &ConnectionRef,
+            backend: &BackendProfile,
+            auth: &AuthProfile,
+            policy: &BindingPolicy,
+        ) -> Result<ValidatedBinding, ProviderBindingError> {
+            self.validate_called.store(true, Ordering::SeqCst);
+            Ok(ValidatedBinding {
+                connection_ref: connection_ref.clone(),
+                provider: Provider::OpenAI,
+                backend: NormalizedBackendKind::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                ),
+                auth: NormalizedAuthMethod::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                ),
+                backend_profile: Arc::new(backend.clone()),
+                auth_profile: Arc::new(auth.clone()),
+                policy: policy.clone(),
+            })
+        }
+
+        async fn resolve_binding(
+            &self,
+            _binding: &ValidatedBinding,
+            _env: &ResolverEnvironment,
+        ) -> Result<ResolvedConnection, ProviderAuthError> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderAuthError::SourceResolutionFailed(
+                "runtime should not resolve invalid catalog binding".into(),
+            ))
+        }
+
+        fn build_client(
+            &self,
+            _connection: ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+            Err(ProviderClientError::MissingFeature("test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_backend_fails_before_runtime_lookup() {
+        let err = ProviderRuntimeRegistry::empty()
+            .resolve(
+                &realm(Provider::OpenAI, "bogus_backend", "api_key"),
+                &connection_ref(),
+                &ResolverEnvironment::testing(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::UnknownBackendKind(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_auth_fails_before_runtime_lookup() {
+        let err = ProviderRuntimeRegistry::empty()
+            .resolve(
+                &realm(Provider::OpenAI, "openai_api", "bogus_auth"),
+                &connection_ref(),
+                &ResolverEnvironment::testing(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::UnknownAuthMethod(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn incompatible_binding_ignores_permissive_leaf_validation() {
+        let validate_called = Arc::new(AtomicBool::new(false));
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PermissiveOpenAiRuntime {
+                validate_called: Arc::clone(&validate_called),
+                resolve_calls: Arc::clone(&resolve_calls),
+            }));
+
+        let err = registry
+            .resolve(
+                &realm(Provider::OpenAI, "openai_api", "managed_chatgpt_oauth"),
+                &connection_ref(),
+                &ResolverEnvironment::testing(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::UnsupportedCombination { .. })
+        ));
+        assert!(!validate_called.load(Ordering::SeqCst));
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
     }
 }

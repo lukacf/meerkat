@@ -11,6 +11,7 @@ use meerkat_core::{
 };
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
+use crate::provider_runtime::catalog::ProviderRuntimeCatalog;
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
@@ -27,8 +28,14 @@ pub trait ProviderRuntime: Send + Sync {
     /// Return the provider identity this runtime owns.
     fn provider_id(&self) -> Provider;
 
-    /// Normalize backend + auth strings into typed enums and verify the
-    /// combination is listed in the runtime's `ALLOWED_BINDINGS` table.
+    /// Normalize backend + auth strings through the shared typed runtime
+    /// catalog.
+    ///
+    /// The canonical [`ProviderRuntimeRegistry`](crate::provider_runtime::registry::ProviderRuntimeRegistry)
+    /// path validates with [`ProviderRuntimeCatalog`] before runtime dispatch.
+    /// This method remains as a direct-call compatibility shim; provider
+    /// crates must use this default instead of parsing backend/auth strings
+    /// locally.
     ///
     /// `policy` carries the binding's declared auth policy
     /// (`allow_auth_override`, metadata requirements). Implementations
@@ -43,7 +50,15 @@ pub trait ProviderRuntime: Send + Sync {
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError>;
+    ) -> Result<ValidatedBinding, ProviderBindingError> {
+        ProviderRuntimeCatalog::validate_binding_for_provider(
+            self.provider_id(),
+            connection_ref,
+            backend,
+            auth,
+            policy,
+        )
+    }
 
     /// Resolve credential material per `CredentialSourceSpec` and wrap in a
     /// lease. Populates `ResolvedConnection.shim_credential` for Phase 2.
@@ -94,15 +109,6 @@ mod tests {
     impl ProviderRuntime for MockRuntime {
         fn provider_id(&self) -> Provider {
             Provider::Other
-        }
-        fn validate_binding(
-            &self,
-            _connection_ref: &ConnectionRef,
-            _backend: &BackendProfile,
-            _auth: &AuthProfile,
-            _policy: &BindingPolicy,
-        ) -> Result<ValidatedBinding, ProviderBindingError> {
-            Err(ProviderBindingError::ProviderMismatch)
         }
         async fn resolve_binding(
             &self,

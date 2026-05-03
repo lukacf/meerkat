@@ -9,6 +9,7 @@
 //! in provider-specific or heavy-IO dependencies.
 
 pub mod binding;
+pub mod catalog;
 pub mod errors;
 pub mod registry;
 pub mod runtime;
@@ -17,6 +18,7 @@ pub use binding::{
     DynamicLease, NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease,
     ValidatedBinding,
 };
+pub use catalog::ProviderRuntimeCatalog;
 pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};
 pub use meerkat_core::AuthLease;
 pub use registry::{ExternalAuthResolverHandle, ProviderRuntimeRegistry, ResolverEnvironment};

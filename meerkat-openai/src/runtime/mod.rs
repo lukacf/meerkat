@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_core::AuthError;
-use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
@@ -53,27 +53,6 @@ fn openai_oauth_refresh_failure_is_permanent(error: &oauth::OpenAiOAuthError) ->
     }
 }
 
-/// Allowed (backend, auth) combinations for OpenAI. Phase 2 parses all
-/// variants but only resolves ApiKey / StaticBearer / ExternalAuthorizer;
-/// the ChatGpt combinations return `InteractiveLoginRequired` on resolve
-/// and `MissingFeature("openai-chatgpt-auth")` on build.
-pub const ALLOWED_BINDINGS: &[(OpenAiBackendKind, OpenAiAuthMethod)] = &[
-    (OpenAiBackendKind::OpenAiApi, OpenAiAuthMethod::ApiKey),
-    (OpenAiBackendKind::OpenAiApi, OpenAiAuthMethod::StaticBearer),
-    (
-        OpenAiBackendKind::OpenAiApi,
-        OpenAiAuthMethod::ExternalAuthorizer,
-    ),
-    (
-        OpenAiBackendKind::ChatGptBackend,
-        OpenAiAuthMethod::ManagedChatGptOauth,
-    ),
-    (
-        OpenAiBackendKind::ChatGptBackend,
-        OpenAiAuthMethod::ExternalChatGptTokens,
-    ),
-];
-
 pub struct OpenAiProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -81,38 +60,6 @@ pub struct OpenAiProviderRuntime;
 impl ProviderRuntime for OpenAiProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::OpenAI
-    }
-
-    fn validate_binding(
-        &self,
-        connection_ref: &meerkat_core::ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        if backend.provider != Provider::OpenAI || auth.provider != Provider::OpenAI {
-            return Err(ProviderBindingError::ProviderMismatch);
-        }
-        let backend_kind = OpenAiBackendKind::parse(&backend.backend_kind).ok_or_else(|| {
-            ProviderBindingError::UnknownBackendKind(backend.backend_kind.clone())
-        })?;
-        let auth_method = OpenAiAuthMethod::parse(&auth.auth_method)
-            .ok_or_else(|| ProviderBindingError::UnknownAuthMethod(auth.auth_method.clone()))?;
-        if !ALLOWED_BINDINGS.contains(&(backend_kind, auth_method)) {
-            return Err(ProviderBindingError::UnsupportedCombination {
-                backend: backend.backend_kind.clone(),
-                auth: auth.auth_method.clone(),
-            });
-        }
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
-            provider: Provider::OpenAI,
-            backend: NormalizedBackendKind::OpenAi(backend_kind),
-            auth: NormalizedAuthMethod::OpenAi(auth_method),
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
     }
 
     async fn resolve_binding(
@@ -483,16 +430,19 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
 
     #[test]
-    fn allowed_bindings_contain_expected_combinations() {
-        assert!(
-            ALLOWED_BINDINGS.contains(&(OpenAiBackendKind::OpenAiApi, OpenAiAuthMethod::ApiKey))
-        );
-        assert!(ALLOWED_BINDINGS.contains(&(
-            OpenAiBackendKind::ChatGptBackend,
-            OpenAiAuthMethod::ManagedChatGptOauth,
-        )));
+    fn typed_catalog_contains_expected_combinations() {
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ManagedChatGptOauth),
+        ));
     }
 
     #[test]
@@ -561,7 +511,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_unsupported_combo() {
-        // openai_api + managed_chatgpt_oauth is NOT in ALLOWED_BINDINGS.
+        // openai_api + managed_chatgpt_oauth is not a typed catalog edge.
         let rt = OpenAiProviderRuntime;
         let err = rt
             .validate_binding(

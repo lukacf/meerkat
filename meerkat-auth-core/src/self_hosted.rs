@@ -30,12 +30,12 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        if binding.provider != Provider::SelfHosted {
+        if binding.provider() != Provider::SelfHosted {
             return Err(ProviderAuthError::Binding(
                 ProviderBindingError::ProviderMismatch,
             ));
         }
-        match binding.backend {
+        match binding.backend() {
             NormalizedBackendKind::SelfHosted(_) => {}
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -43,7 +43,7 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
                 ));
             }
         }
-        let auth_method = match binding.auth {
+        let auth_method = match binding.auth() {
             NormalizedAuthMethod::SelfHosted(method) => method,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -51,7 +51,7 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
                 ));
             }
         };
-        let source_label = format!("self_hosted:{}", binding.auth_profile.id);
+        let source_label = format!("self_hosted:{}", binding.auth_profile().id);
         let lease: Arc<dyn AuthLease> = match auth_method {
             SelfHostedAuthMethod::None => Arc::new(StaticLease::empty_lease(
                 AuthMetadata::default(),
@@ -59,7 +59,7 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
             )),
             SelfHostedAuthMethod::ApiKey | SelfHostedAuthMethod::StaticBearer => {
                 let secret = crate::resolver::resolve_simple_secret(
-                    &binding.auth_profile.source,
+                    &binding.auth_profile().source,
                     env,
                     binding,
                 )
@@ -75,8 +75,8 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
 
         Ok(ResolvedConnection {
             provider: Provider::SelfHosted,
-            backend: binding.backend,
-            backend_profile: Arc::clone(&binding.backend_profile),
+            backend: binding.backend(),
+            backend_profile: Arc::clone(binding.backend_profile()),
             auth_lease: lease,
         })
     }
@@ -95,13 +95,12 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::provider_matrix::{
-        OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
-    };
+    use meerkat_core::provider_matrix::{SelfHostedAuthMethod, SelfHostedBackendKind};
     use meerkat_core::{
         AuthProfile, BackendProfile, BindingId, BindingPolicy, ConnectionRef, CredentialSourceSpec,
         RealmId,
     };
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
 
     fn connection_ref() -> ConnectionRef {
         ConnectionRef {
@@ -135,76 +134,65 @@ mod tests {
     }
 
     fn self_hosted_binding() -> ValidatedBinding {
-        ValidatedBinding {
-            connection_ref: connection_ref(),
-            provider: Provider::SelfHosted,
-            backend: NormalizedBackendKind::SelfHosted(SelfHostedBackendKind::SelfHosted),
-            auth: NormalizedAuthMethod::SelfHosted(SelfHostedAuthMethod::None),
-            backend_profile: Arc::new(backend_profile(
-                Provider::SelfHosted,
-                SelfHostedBackendKind::SelfHosted.as_str(),
-            )),
-            auth_profile: Arc::new(auth_profile(
-                Provider::SelfHosted,
-                SelfHostedAuthMethod::None.as_str(),
-            )),
-            policy: BindingPolicy::default(),
-        }
+        let backend = backend_profile(
+            Provider::SelfHosted,
+            SelfHostedBackendKind::SelfHosted.as_str(),
+        );
+        let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
+        ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
-    async fn direct_resolve_rejects_mismatched_provider_tag() {
-        let mut binding = self_hosted_binding();
-        binding.provider = Provider::OpenAI;
-
-        let err = SelfHostedProviderRuntime
-            .resolve_binding(&binding, &ResolverEnvironment::testing())
+    async fn direct_resolve_accepts_catalog_validated_self_hosted_none() {
+        let resolved = SelfHostedProviderRuntime
+            .resolve_binding(&self_hosted_binding(), &ResolverEnvironment::testing())
             .await
-            .unwrap_err();
+            .unwrap();
 
+        assert_eq!(resolved.provider, Provider::SelfHosted);
         assert!(matches!(
-            err,
-            ProviderAuthError::Binding(ProviderBindingError::ProviderMismatch)
+            resolved.backend,
+            NormalizedBackendKind::SelfHosted(SelfHostedBackendKind::SelfHosted)
         ));
     }
 
-    #[tokio::test]
-    async fn direct_resolve_rejects_non_self_hosted_backend_tag() {
-        let mut binding = self_hosted_binding();
-        binding.backend = NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi);
-        binding.backend_profile = Arc::new(backend_profile(
-            Provider::OpenAI,
-            OpenAiBackendKind::OpenAiApi.as_str(),
-        ));
+    #[test]
+    fn catalog_rejects_mismatched_self_hosted_provider_tags() {
+        let backend = backend_profile(
+            Provider::SelfHosted,
+            SelfHostedBackendKind::SelfHosted.as_str(),
+        );
+        let auth = auth_profile(Provider::OpenAI, "api_key");
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
 
-        let err = SelfHostedProviderRuntime
-            .resolve_binding(&binding, &ResolverEnvironment::testing())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ProviderAuthError::Binding(ProviderBindingError::ProviderMismatch)
-        ));
+        assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
 
-    #[tokio::test]
-    async fn direct_resolve_rejects_non_self_hosted_auth_tag() {
-        let mut binding = self_hosted_binding();
-        binding.auth = NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey);
-        binding.auth_profile = Arc::new(auth_profile(
-            Provider::OpenAI,
-            OpenAiAuthMethod::ApiKey.as_str(),
-        ));
+    #[test]
+    fn catalog_rejects_non_self_hosted_backend_for_self_hosted_provider() {
+        let backend = backend_profile(Provider::OpenAI, "openai_api");
+        let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
+        let err = ProviderRuntimeCatalog::validate_binding_for_provider(
+            Provider::SelfHosted,
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
 
-        let err = SelfHostedProviderRuntime
-            .resolve_binding(&binding, &ResolverEnvironment::testing())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ProviderAuthError::Binding(ProviderBindingError::ProviderMismatch)
-        ));
+        assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
 }

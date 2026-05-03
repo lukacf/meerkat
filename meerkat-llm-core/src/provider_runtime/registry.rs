@@ -220,8 +220,8 @@ impl ProviderRuntimeRegistry {
         .map_err(ProviderAuthError::Binding)?;
         let runtime = self
             .runtimes
-            .get(&validated.provider)
-            .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider))?;
+            .get(&validated.provider())
+            .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
         runtime.resolve_binding(&validated, env).await
     }
 

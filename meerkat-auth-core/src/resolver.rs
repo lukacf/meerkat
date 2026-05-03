@@ -312,10 +312,10 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .as_ref()
         .ok_or_else(|| interactive_login_error(binding))?
         .clone();
-    let key = TokenKey::from_connection_ref(&binding.connection_ref);
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let key = TokenKey::from_connection_ref(binding.connection_ref());
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let lifecycle_guard = if crate::auth_store::persisted_auth_mode_for_auth_method(
-        &binding.auth_profile.auth_method,
+        &binding.auth_profile().auth_method,
     )
     .is_some_and(crate::auth_store::persisted_auth_mode_is_oauth_login)
     {
@@ -328,7 +328,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
         .ok_or_else(|| interactive_login_error(binding))?;
-    let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
+    let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile().auth_method)?;
     let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
     if is_oauth_login && !oauth_lifecycle_marker_payload_valid_for_tokens(&tokens) {
         return Err(interactive_login_error(binding));
@@ -354,7 +354,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             let previous_snapshot = snapshot.clone();
             let transition = meerkat_core::publish_token_lifecycle_acquired(
                 auth_lease.as_ref(),
-                &binding.connection_ref,
+                binding.connection_ref(),
                 &tokens,
             )
             .map_err(|e| {
@@ -506,7 +506,7 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let current_snapshot = auth_lease.snapshot(&lease_key);
     if current_snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
         previous.lifecycle_snapshot = Some(current_snapshot);
@@ -551,7 +551,7 @@ pub fn mark_managed_store_oauth_refresh_failed(
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     if auth_lease.snapshot(&lease_key).phase
         != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
     {
@@ -816,7 +816,7 @@ fn publish_managed_store_tokens_refresh_lifecycle(
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let snapshot = auth_lease.snapshot(&lease_key);
     let began_here = if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
         false
@@ -854,7 +854,7 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let _guard = if previous.lifecycle_guard.is_none() {
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
     } else {
@@ -954,7 +954,7 @@ pub fn require_credential_lifecycle_authority(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(|| interactive_login_error(binding))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let snapshot = auth_lease.snapshot(&lease_key);
     match AuthStatusPhase::from_lease_snapshot((env.now)(), &snapshot) {
         AuthStatusPhase::Valid | AuthStatusPhase::Expiring => Ok(()),
@@ -1000,8 +1000,8 @@ pub fn finalize_auth_metadata(
     binding: &ValidatedBinding,
     metadata: AuthMetadata,
 ) -> Result<AuthMetadata, ProviderAuthError> {
-    let defaults = &binding.auth_profile.metadata_defaults;
-    if !binding.policy.allow_auth_override {
+    let defaults = &binding.auth_profile().metadata_defaults;
+    if !binding.policy().allow_auth_override {
         if let (Some(default_workspace), Some(resolved_workspace)) = (
             defaults.workspace_id.as_deref(),
             metadata.workspace_id.as_deref(),
@@ -1025,13 +1025,13 @@ pub fn finalize_auth_metadata(
 
 /// Return true when the binding allows silent refresh/token renewal.
 pub fn refresh_allowed(binding: &ValidatedBinding) -> bool {
-    binding.auth_profile.constraints.allow_refresh
+    binding.auth_profile().constraints.allow_refresh
 }
 
 /// Return the auth error to surface when runtime resolution would need an
 /// interactive login that the binding does not permit.
 pub fn interactive_login_error(binding: &ValidatedBinding) -> ProviderAuthError {
-    if binding.auth_profile.constraints.allow_interactive_login {
+    if binding.auth_profile().constraints.allow_interactive_login {
         ProviderAuthError::Auth(AuthError::InteractiveLoginRequired)
     } else {
         ProviderAuthError::Auth(AuthError::MissingSecret)
@@ -1113,9 +1113,9 @@ pub async fn resolve_external_authorizer(
         // site.
         format!(
             "external:{}:{}:{}",
-            binding.connection_ref.realm.as_str(),
-            binding.connection_ref.binding.as_str(),
-            binding.auth_profile.id,
+            binding.connection_ref().realm.as_str(),
+            binding.connection_ref().binding.as_str(),
+            binding.auth_profile().id,
         ),
     )
 }
@@ -1212,8 +1212,8 @@ fn enforce_metadata_requirements(
     binding: &ValidatedBinding,
     metadata: &AuthMetadata,
 ) -> Result<(), ProviderAuthError> {
-    if (binding.policy.require_metadata_account
-        || binding.auth_profile.constraints.require_account_id)
+    if (binding.policy().require_metadata_account
+        || binding.auth_profile().constraints.require_account_id)
         && metadata.account_id.is_none()
     {
         return Err(ProviderAuthError::Auth(AuthError::MissingRequiredMetadata(
@@ -1221,8 +1221,8 @@ fn enforce_metadata_requirements(
         )));
     }
 
-    if (binding.policy.require_metadata_workspace
-        || binding.auth_profile.constraints.require_workspace_id)
+    if (binding.policy().require_metadata_workspace
+        || binding.auth_profile().constraints.require_workspace_id)
         && metadata.workspace_id.is_none()
     {
         return Err(ProviderAuthError::Auth(AuthError::MissingRequiredMetadata(
@@ -1246,10 +1246,10 @@ mod tests {
         AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
         DslTransitionError, LeaseKey,
     };
-    use meerkat_core::{AuthProfile, AuthRouteHints, BindingPolicy, ConnectionRef, Provider};
-    use meerkat_llm_core::provider_runtime::binding::{
-        NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
+    use meerkat_core::{
+        AuthProfile, AuthRouteHints, BackendProfile, BindingPolicy, ConnectionRef, Provider,
     };
+    use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
 
     #[test]
     fn extract_secret_inline_variant() {
@@ -1312,62 +1312,77 @@ mod tests {
     }
 
     fn binding() -> ValidatedBinding {
-        ValidatedBinding {
-            connection_ref: ConnectionRef {
+        let backend = BackendProfile {
+            id: "backend".into(),
+            provider: Provider::Gemini,
+            backend_kind: "google_genai".into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        };
+        let auth = AuthProfile {
+            id: "auth".into(),
+            provider: Provider::Gemini,
+            auth_method: "external_authorizer".into(),
+            source: CredentialSourceSpec::ExternalResolver {
+                handle: "host".into(),
+            },
+            constraints: Default::default(),
+            metadata_defaults: meerkat_core::AuthMetadataDefaults {
+                organization_id: Some("org-default".into()),
+                workspace_id: Some("ws-default".into()),
+                route_hints: AuthRouteHints::Google(Box::default()),
+                provider_metadata: Some(ProviderAuthMetadata::Google(GoogleAuthMetadata {
+                    project_id: Some("proj-default".into()),
+                    ..Default::default()
+                })),
+            },
+        };
+        ProviderRuntimeCatalog::validate_binding(
+            &ConnectionRef {
                 realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
                 profile: None,
             },
-            provider: Provider::Gemini,
-            backend: NormalizedBackendKind::Google(
-                meerkat_core::provider_matrix::google::GoogleBackendKind::GoogleGenAi,
-            ),
-            auth: NormalizedAuthMethod::Google(
-                meerkat_core::provider_matrix::google::GoogleAuthMethod::ExternalAuthorizer,
-            ),
-            backend_profile: Arc::new(meerkat_core::BackendProfile {
-                id: "backend".into(),
-                provider: Provider::Gemini,
-                backend_kind: "google_genai".into(),
-                base_url: None,
-                options: serde_json::Value::Null,
-            }),
-            auth_profile: Arc::new(AuthProfile {
-                id: "auth".into(),
-                provider: Provider::Gemini,
-                auth_method: "external_authorizer".into(),
-                source: CredentialSourceSpec::ExternalResolver {
-                    handle: "host".into(),
-                },
-                constraints: Default::default(),
-                metadata_defaults: meerkat_core::AuthMetadataDefaults {
-                    organization_id: Some("org-default".into()),
-                    workspace_id: Some("ws-default".into()),
-                    route_hints: AuthRouteHints::Google(Box::default()),
-                    provider_metadata: Some(ProviderAuthMetadata::Google(GoogleAuthMetadata {
-                        project_id: Some("proj-default".into()),
-                        ..Default::default()
-                    })),
-                },
-            }),
-            policy: BindingPolicy::default(),
-        }
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap()
     }
 
     fn simple_secret_binding(source: CredentialSourceSpec, auth_method: &str) -> ValidatedBinding {
-        let mut binding = binding();
-        binding.auth = NormalizedAuthMethod::Google(
-            meerkat_core::provider_matrix::google::GoogleAuthMethod::ApiKey,
-        );
-        binding.auth_profile = Arc::new(AuthProfile {
+        let (provider, backend_kind) = match auth_method {
+            "managed_chatgpt_oauth" | "external_chatgpt_tokens" => {
+                (Provider::OpenAI, "chatgpt_backend")
+            }
+            _ => (Provider::Gemini, "google_genai"),
+        };
+        let backend = BackendProfile {
+            id: "backend".into(),
+            provider,
+            backend_kind: backend_kind.into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        };
+        let auth = AuthProfile {
             id: "managed".into(),
-            provider: Provider::Gemini,
+            provider,
             auth_method: auth_method.into(),
             source,
             constraints: Default::default(),
             metadata_defaults: Default::default(),
-        });
-        binding
+        };
+        ProviderRuntimeCatalog::validate_binding(
+            &ConnectionRef {
+                realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
+                binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
+                profile: None,
+            },
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap()
     }
 
     struct StaticEnvelopeResolver(ResolvedAuthEnvelope);
@@ -1697,7 +1712,7 @@ mod tests {
             )),
         );
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1709,7 +1724,7 @@ mod tests {
     async fn managed_store_source_reads_binding_scoped_token_store() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &PersistedTokens::api_key("sk-managed"))
             .await
@@ -1718,7 +1733,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap();
 
@@ -1730,14 +1745,14 @@ mod tests {
     async fn managed_store_non_oauth_source_reads_token_without_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &PersistedTokens::api_key("sk-standalone"))
             .await
             .unwrap();
         let env = ResolverEnvironment::testing().with_token_store(store);
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap();
 
@@ -1749,7 +1764,7 @@ mod tests {
     async fn managed_store_non_oauth_source_ignores_empty_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &PersistedTokens::api_key("sk-runtime"))
             .await
@@ -1758,7 +1773,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::unknown());
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap();
 
@@ -1770,7 +1785,7 @@ mod tests {
     async fn managed_store_non_oauth_source_rejects_released_auth_lifecycle() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &PersistedTokens::api_key("sk-stale"))
             .await
@@ -1779,7 +1794,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::released());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1795,7 +1810,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(
                 &key,
@@ -1815,7 +1830,7 @@ mod tests {
             .unwrap();
         let env = ResolverEnvironment::testing().with_token_store(store);
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1831,7 +1846,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &chatgpt_oauth_tokens("oauth-access"))
             .await
@@ -1840,7 +1855,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1856,7 +1871,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let mut stale_tokens = chatgpt_oauth_tokens("stale-generation-access");
         stale_tokens.metadata = serde_json::json!({
             "meerkat_auth_lifecycle": {
@@ -1870,7 +1885,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2));
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1886,7 +1901,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("corrupt-marker-access");
         let token_expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let mut stale_marker = tokens.clone();
@@ -1904,7 +1919,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1925,7 +1940,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let mut incomplete_marker = chatgpt_oauth_tokens("incomplete-marker-access");
         incomplete_marker.metadata = serde_json::json!({
             "meerkat_auth_lifecycle": {
@@ -1938,7 +1953,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -1959,8 +1974,8 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("oauth-only-access");
         store
             .save(
@@ -1980,7 +1995,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .expect("OAuth-only flow membership must not block marked token adoption");
 
@@ -1996,7 +2011,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("released-oauth-access");
         store
             .save(
@@ -2016,7 +2031,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -2037,7 +2052,7 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("post-consume-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let publication_time = Some(2_000);
@@ -2064,7 +2079,7 @@ mod tests {
                 ),
             );
 
-        let secret = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .expect("terminal OAuth flow consume must not stale a freshly committed marker");
 
@@ -2077,8 +2092,8 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let mut tokens = chatgpt_oauth_tokens("newer-shared-access");
         tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
         let newer_expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
@@ -2107,7 +2122,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 
@@ -2359,8 +2374,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("token-newer-refresh-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
@@ -2427,8 +2442,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
             &chatgpt_oauth_tokens("expired-access"),
             AuthLeaseTransition {
@@ -2484,8 +2499,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("refreshing-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -2536,8 +2551,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("refreshing-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -2583,8 +2598,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let mut expired_tokens = chatgpt_oauth_tokens("transient-refresh-access");
         expired_tokens.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
         let tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
@@ -2638,8 +2653,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("cancelled-refresh-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -2721,8 +2736,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("pre-coordinator-cancel-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -2800,8 +2815,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let tokens = chatgpt_oauth_tokens("inner-coordinator-reject-access");
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -2857,7 +2872,7 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         let initial_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
             &chatgpt_oauth_tokens("expired-access"),
             1,
@@ -2913,8 +2928,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let auth_lease = StaticAuthLeaseHandle::valid();
         let previous_tokens = chatgpt_oauth_tokens("expired-access");
         store.save(&key, &previous_tokens).await.unwrap();
@@ -2956,8 +2971,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
             &chatgpt_oauth_tokens("expired-access"),
             1,
@@ -2999,8 +3014,8 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
-        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
+        let lease_key = LeaseKey::from_connection_ref(binding.connection_ref());
         let previous_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
             &chatgpt_oauth_tokens("expired-access"),
             AuthLeaseTransition {
@@ -3068,7 +3083,7 @@ mod tests {
     async fn managed_store_source_rejects_wrong_token_mode() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
-        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let key = TokenKey::from_connection_ref(binding.connection_ref());
         store
             .save(&key, &PersistedTokens::static_bearer("bearer"))
             .await
@@ -3077,7 +3092,7 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
 
-        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
             .unwrap_err();
 

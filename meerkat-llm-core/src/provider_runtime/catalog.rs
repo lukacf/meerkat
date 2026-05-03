@@ -12,10 +12,94 @@ use meerkat_core::provider_matrix::{
 };
 use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider};
 
-use crate::provider_runtime::binding::{
-    NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
-};
+use crate::provider_runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind};
 use crate::provider_runtime::errors::ProviderBindingError;
+
+/// A binding that has been provider-validated but not yet resolved.
+///
+/// This type is opaque to callers outside the provider-runtime catalog.
+/// Backend/auth compatibility is established by
+/// [`ProviderRuntimeCatalog`]; provider runtimes can inspect a validated
+/// binding, but they cannot forge or mutate one.
+///
+/// ```compile_fail
+/// use meerkat_llm_core::provider_runtime::ValidatedBinding;
+///
+/// let _forged = ValidatedBinding {};
+/// ```
+#[derive(Clone)]
+pub struct ValidatedBinding {
+    connection_ref: ConnectionRef,
+    provider: Provider,
+    backend: NormalizedBackendKind,
+    auth: NormalizedAuthMethod,
+    backend_profile: Arc<BackendProfile>,
+    auth_profile: Arc<AuthProfile>,
+    policy: BindingPolicy,
+}
+
+impl ValidatedBinding {
+    fn from_catalog(
+        connection_ref: ConnectionRef,
+        provider: Provider,
+        backend: NormalizedBackendKind,
+        auth: NormalizedAuthMethod,
+        backend_profile: Arc<BackendProfile>,
+        auth_profile: Arc<AuthProfile>,
+        policy: BindingPolicy,
+    ) -> Self {
+        Self {
+            connection_ref,
+            provider,
+            backend,
+            auth,
+            backend_profile,
+            auth_profile,
+            policy,
+        }
+    }
+
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    pub fn backend(&self) -> NormalizedBackendKind {
+        self.backend
+    }
+
+    pub fn auth(&self) -> NormalizedAuthMethod {
+        self.auth
+    }
+
+    pub fn backend_profile(&self) -> &Arc<BackendProfile> {
+        &self.backend_profile
+    }
+
+    pub fn auth_profile(&self) -> &Arc<AuthProfile> {
+        &self.auth_profile
+    }
+
+    pub fn policy(&self) -> &BindingPolicy {
+        &self.policy
+    }
+}
+
+impl std::fmt::Debug for ValidatedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedBinding")
+            .field("connection_ref", &self.connection_ref)
+            .field("provider", &self.provider)
+            .field("backend", &self.backend)
+            .field("auth", &self.auth)
+            .field("backend_profile_id", &self.backend_profile.id)
+            .field("auth_profile_id", &self.auth_profile.id)
+            .finish()
+    }
+}
 
 pub struct ProviderRuntimeCatalog;
 
@@ -59,15 +143,15 @@ impl ProviderRuntimeCatalog {
             });
         }
 
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
+        Ok(ValidatedBinding::from_catalog(
+            connection_ref.clone(),
             provider,
-            backend: backend_kind,
-            auth: auth_method,
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
+            backend_kind,
+            auth_method,
+            Arc::new(backend.clone()),
+            Arc::new(auth.clone()),
+            policy.clone(),
+        ))
     }
 
     pub fn normalize_backend(
@@ -236,13 +320,13 @@ mod tests {
             &BindingPolicy::default(),
         )
         .unwrap();
-        assert_eq!(binding.provider, Provider::OpenAI);
+        assert_eq!(binding.provider(), Provider::OpenAI);
         assert_eq!(
-            binding.backend,
+            binding.backend(),
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi)
         );
         assert_eq!(
-            binding.auth,
+            binding.auth(),
             NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey)
         );
     }

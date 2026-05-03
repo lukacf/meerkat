@@ -67,12 +67,12 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        if binding.provider != Provider::OpenAI {
+        if binding.provider() != Provider::OpenAI {
             return Err(ProviderAuthError::Binding(
                 ProviderBindingError::ProviderMismatch,
             ));
         }
-        let auth_method = match binding.auth {
+        let auth_method = match binding.auth() {
             NormalizedAuthMethod::OpenAi(m) => m,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -80,7 +80,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 ));
             }
         };
-        let backend_kind = match binding.backend {
+        let backend_kind = match binding.backend() {
             NormalizedBackendKind::OpenAi(k) => k,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -89,11 +89,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             }
         };
 
-        let source_label = format!("openai:{}", binding.auth_profile.id);
+        let source_label = format!("openai:{}", binding.auth_profile().id);
         let lease: Arc<dyn AuthLease> = match auth_method {
             OpenAiAuthMethod::ApiKey | OpenAiAuthMethod::StaticBearer => {
                 let secret =
-                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                    resolve_simple_secret(&binding.auth_profile().source, env, binding).await?;
                 let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
                 Arc::new(StaticLease::inline_secret(
                     secret,
@@ -103,7 +103,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 ))
             }
             OpenAiAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
+                resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
             OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -116,7 +116,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         _ => unreachable!("OAuth branch only handles OAuth auth methods"),
                     };
                     validate_oauth_target_for_auth_mode(
-                        &binding.auth_profile,
+                        binding.auth_profile(),
                         Provider::OpenAI,
                         expected_mode,
                     )
@@ -276,7 +276,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Ok(ResolvedConnection {
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(backend_kind),
-            backend_profile: binding.backend_profile.clone(),
+            backend_profile: binding.backend_profile().clone(),
             auth_lease: lease,
         })
     }
@@ -495,7 +495,7 @@ mod tests {
             &BindingPolicy::default(),
         )
         .expect("allowed combination");
-        assert_eq!(vb.provider, Provider::OpenAI);
+        assert_eq!(vb.provider(), Provider::OpenAI);
     }
 
     #[test]
@@ -556,6 +556,6 @@ mod tests {
             &policy,
         )
         .expect("allowed combination");
-        assert_eq!(vb.policy, policy);
+        assert_eq!(vb.policy(), &policy);
     }
 }

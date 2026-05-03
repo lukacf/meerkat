@@ -4426,15 +4426,15 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
+                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
                 self.auth_lease_handle_seen.fetch_or(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -4528,15 +4528,15 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
+                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
                 self.auth_lease_handle_seen.fetch_or(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -4631,8 +4631,8 @@ mod tests {
             ) -> Result<ResolvedConnection, ProviderAuthError> {
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-openai-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -5071,9 +5071,9 @@ mod tests {
             meerkat_llm_core::provider_runtime::ProviderAuthError,
         > {
             self.calls.lock().unwrap().push(RecordedSelfHostedResolve {
-                connection_ref: binding.connection_ref.clone(),
-                backend_base_url: binding.backend_profile.base_url.clone(),
-                auth_source: binding.auth_profile.source.clone(),
+                connection_ref: binding.connection_ref().clone(),
+                backend_base_url: binding.backend_profile().base_url.clone(),
+                auth_source: binding.auth_profile().source.clone(),
                 token_store_present: env.token_store.is_some(),
                 auth_lease_handle_present: env.auth_lease_handle.is_some(),
             });
@@ -5096,8 +5096,8 @@ mod tests {
             };
             Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
                 provider: Provider::SelfHosted,
-                backend: binding.backend,
-                backend_profile: Arc::clone(&binding.backend_profile),
+                backend: binding.backend(),
+                backend_profile: Arc::clone(binding.backend_profile()),
                 auth_lease,
             })
         }
@@ -5848,10 +5848,10 @@ mod tests {
                 binding: &ValidatedBinding,
                 _env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref.realm.as_str(), "session_a");
-                assert_eq!(binding.connection_ref.binding.as_str(), "default_openai");
-                assert_eq!(binding.provider, Provider::OpenAI);
-                assert!(binding.policy.require_metadata_account);
+                assert_eq!(binding.connection_ref().realm.as_str(), "session_a");
+                assert_eq!(binding.connection_ref().binding.as_str(), "default_openai");
+                assert_eq!(binding.provider(), Provider::OpenAI);
+                assert!(binding.policy().require_metadata_account);
                 Err(ProviderAuthError::Binding(
                     ProviderBindingError::MissingRequiredDefault("metadata_account"),
                 ))
@@ -6049,11 +6049,11 @@ mod tests {
                 binding: &ValidatedBinding,
                 _env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
+                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -6154,8 +6154,8 @@ mod tests {
             ) -> Result<ResolvedConnection, ProviderAuthError> {
                 Ok(ResolvedConnection {
                     provider: Provider::Anthropic,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-ant-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -6184,16 +6184,16 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref.realm.as_str(), "session_a");
-                assert_eq!(binding.connection_ref.binding.as_str(), "default_openai");
+                assert_eq!(binding.connection_ref().realm.as_str(), "session_a");
+                assert_eq!(binding.connection_ref().binding.as_str(), "default_openai");
                 self.saw_auth_lease_handle.store(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-image-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -6316,8 +6316,8 @@ mod tests {
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-openai-test".to_string(),
                         meerkat_core::AuthMetadata::default(),

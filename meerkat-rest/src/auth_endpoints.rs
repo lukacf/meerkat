@@ -2364,8 +2364,8 @@ mod tests {
                 );
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
-                    backend: binding.backend,
-                    backend_profile: Arc::clone(&binding.backend_profile),
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-rest-test".to_string(),
                         meerkat_core::AuthMetadata::default(),

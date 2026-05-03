@@ -2,10 +2,11 @@
 
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
-    MobCreateParams, MobMemberSendParams, RealtimeCapabilities, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams,
-    RealtimeStatusResult, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode,
-    WireRuntimeBinding, WireTrustedPeerIdentity,
+    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams,
+    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
+    RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
+    WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
+    WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -46,13 +47,6 @@ fn respawn_receipt_payload(
 #[serde(deny_unknown_fields)]
 struct MeerkatMobIdInput {
     mob_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MeerkatMobLifecycleInput {
-    mob_id: String,
-    action: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -359,7 +353,7 @@ pub fn public_tools_list() -> Vec<Value> {
         tool(
             "meerkat_mob_lifecycle",
             "Apply a lifecycle action to a mob.",
-            schema_for!(MeerkatMobLifecycleInput),
+            schema_for!(MobLifecycleParams),
         ),
         tool(
             "meerkat_mob_spawn",
@@ -547,63 +541,24 @@ pub async fn handle_public_tools_call(
             Ok(json!({ "mob_id": mob_id, "status": status.to_string() }))
         }
         "meerkat_mob_lifecycle" => {
-            let input: MeerkatMobLifecycleInput = parse_args(arguments)?;
+            let input: MobLifecycleParams = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            // `destroy` returns a structured MobDestroyReport; the public
-            // MCP surface projects it into the response body. Other actions
-            // stay `()` on success.
-            let destroy_report = match input.action.as_str() {
-                "stop" => {
-                    state
-                        .mob_stop(&mob_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    None
-                }
-                "resume" => {
-                    state
-                        .mob_resume(&mob_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    None
-                }
-                "complete" => {
-                    state
-                        .mob_complete(&mob_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    None
-                }
-                "reset" => {
-                    state
-                        .mob_reset(&mob_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    None
-                }
-                "destroy" => {
-                    let report = state
-                        .mob_destroy(&mob_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    Some(report)
-                }
-                other => {
-                    return Err(McpToolError::invalid_params(format!(
-                        "unknown lifecycle action: {other}"
-                    )));
-                }
-            };
-            let mut body = json!({ "mob_id": mob_id, "action": input.action, "ok": true });
-            if let Some(report) = destroy_report
-                && let Some(obj) = body.as_object_mut()
-            {
-                let report_value = serde_json::to_value(&report).map_err(|err| {
-                    McpToolError::internal(format!("destroy report serialize: {err}"))
-                })?;
-                obj.insert("destroy_report".to_string(), report_value);
-            }
-            Ok(body)
+            let destroy_report = state
+                .mob_lifecycle_action(&mob_id, input.action)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?
+                .map(|report| {
+                    serde_json::to_value(&report).map_err(|err| {
+                        McpToolError::internal(format!("destroy report serialize: {err}"))
+                    })
+                })
+                .transpose()?;
+            Ok(json!(MobLifecycleResult {
+                mob_id: mob_id.to_string(),
+                action: input.action,
+                ok: true,
+                destroy_report,
+            }))
         }
         "meerkat_mob_spawn" => {
             let input: MeerkatMobSpawnInput = parse_args(arguments)?;
@@ -1411,5 +1366,117 @@ mod tests {
             .collect();
         assert!(names.contains(&"meerkat_mob_create".to_string()));
         assert!(!names.contains(&"mob_create".to_string()));
+    }
+
+    #[tokio::test]
+    async fn public_mcp_lifecycle_rejects_unknown_action_at_contract_boundary() {
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "typed-public-lifecycle-rejects-unknown",
+                    "profiles": {
+                        "lead": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("create typed public mob");
+
+        let err = handle_public_tools_call(
+            &state,
+            "meerkat_mob_lifecycle",
+            &json!({
+                "mob_id": "typed-public-lifecycle-rejects-unknown",
+                "action": "explode"
+            }),
+        )
+        .await
+        .expect_err("unknown action must fail at contract parse boundary");
+
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("unknown variant")
+                && !err.message.contains("unknown lifecycle action"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        let status = handle_public_tools_call(
+            &state,
+            "meerkat_mob_status",
+            &json!({"mob_id": "typed-public-lifecycle-rejects-unknown"}),
+        )
+        .await
+        .expect("status after rejected lifecycle action");
+        assert_eq!(status["status"], "Running");
+
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_lifecycle",
+            &json!({
+                "mob_id": "typed-public-lifecycle-rejects-unknown",
+                "action": "destroy"
+            }),
+        )
+        .await
+        .expect("cleanup mob");
+    }
+
+    #[tokio::test]
+    async fn public_mcp_lifecycle_accepts_typed_contract_params() {
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "typed-public-lifecycle-complete",
+                    "profiles": {
+                        "lead": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("create typed public mob");
+
+        let params = meerkat_contracts::MobLifecycleParams {
+            mob_id: "typed-public-lifecycle-complete".to_string(),
+            action: meerkat_contracts::WireMobLifecycleAction::Complete,
+        };
+        let payload = serde_json::to_value(&params).expect("typed lifecycle params serialize");
+        let result = handle_public_tools_call(&state, "meerkat_mob_lifecycle", &payload)
+            .await
+            .expect("typed lifecycle action dispatches");
+        let result: meerkat_contracts::MobLifecycleResult =
+            serde_json::from_value(result).expect("typed lifecycle result");
+
+        assert_eq!(result.mob_id, "typed-public-lifecycle-complete");
+        assert_eq!(
+            result.action,
+            meerkat_contracts::WireMobLifecycleAction::Complete
+        );
+        assert!(result.ok);
+
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_lifecycle",
+            &json!({
+                "mob_id": "typed-public-lifecycle-complete",
+                "action": "destroy"
+            }),
+        )
+        .await
+        .expect("cleanup mob");
     }
 }

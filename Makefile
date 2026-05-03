@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory dogma-cleanup-gate dogma-cleanup-gate-fixtures dogma-cleanup-ci-gate verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -207,7 +207,7 @@ cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
 	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
 
-agent-gate:
+agent-gate: dogma-cleanup-local-gate
 	@. ./scripts/build-backend-env; \
 	if meerkat_buildbuddy_enabled; then \
 		$(MAKE) buildbuddy-doctor; \
@@ -311,12 +311,12 @@ buildbuddy-ci-full-warm: buildbuddy-doctor
 	@scripts/buildbuddy-ci-full --warm
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity seam-inventory rmat-audit audit-generated-headers audit
+ci: dogma-cleanup-local-gate fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity seam-inventory rmat-audit audit-generated-headers audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal seam-inventory rmat-audit audit-generated-headers audit
+ci-smoke: dogma-cleanup-local-gate fmt-check legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal seam-inventory rmat-audit audit-generated-headers audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -337,6 +337,35 @@ session-control-gate:
 deprecated-backend-gate:
 	@echo "$(GREEN)Checking for deprecated backend references...$(NC)"
 	@scripts/deprecated_backend_scan.sh
+
+dogma-cleanup-gate:
+	@if [ -z "$${DOGMA_PACKET:-}" ]; then \
+		echo "$(RED)DOGMA_PACKET=<review-readiness-packet.md> is required$(NC)" >&2; \
+		exit 2; \
+	fi
+	@$(PYTHON) scripts/dogma_cleanup_gate.py --packet "$$DOGMA_PACKET" $(DOGMA_CLEANUP_GATE_ARGS)
+
+dogma-cleanup-gate-fixtures:
+	@$(PYTHON) scripts/tests/dogma_cleanup_gate_test.py
+
+dogma-cleanup-local-gate: dogma-cleanup-gate-fixtures
+	@if [ -n "$${GITHUB_EVENT_PATH:-}" ]; then \
+		$(PYTHON) scripts/dogma_cleanup_gate.py --github-event "$$GITHUB_EVENT_PATH" $(DOGMA_CLEANUP_GATE_ARGS); \
+	elif [ -n "$${DOGMA_PACKET:-}" ]; then \
+		$(PYTHON) scripts/dogma_cleanup_gate.py --packet "$$DOGMA_PACKET" $(DOGMA_CLEANUP_GATE_ARGS); \
+	else \
+		echo "$(YELLOW)Dogma cleanup gate skipped for local broad lane: set DOGMA_PACKET or GITHUB_EVENT_PATH to enforce.$(NC)"; \
+	fi
+
+dogma-cleanup-ci-gate: dogma-cleanup-gate-fixtures
+	@if [ -n "$${GITHUB_EVENT_PATH:-}" ]; then \
+		$(PYTHON) scripts/dogma_cleanup_gate.py --github-event "$$GITHUB_EVENT_PATH" $(DOGMA_CLEANUP_GATE_ARGS); \
+	elif [ -n "$${DOGMA_PACKET:-}" ]; then \
+		$(PYTHON) scripts/dogma_cleanup_gate.py --packet "$$DOGMA_PACKET" $(DOGMA_CLEANUP_GATE_ARGS); \
+	else \
+		echo "DOGMA_PACKET or GITHUB_EVENT_PATH is required for dogma cleanup CI enforcement." >&2; \
+		exit 2; \
+	fi
 
 # W2-F bridge-classifier gate: supervisor_bridge / local_bridge / bridge
 # wire types must not re-interpret `ResponseStatus`. All terminal-vs-progress
@@ -648,6 +677,9 @@ help:
 	@echo "  $(GREEN)rust-lane-doctor$(NC)- Check Rust lane isolation and filtered test lanes"
 	@echo "  $(GREEN)agent-gate$(NC)    - Run Cargo or MEERKAT_BUILDBUDDY=1 BuildBuddy changed gate (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)cargo-agent-gate$(NC)- Run Cargo gate for changed agent files"
+	@echo "  $(GREEN)dogma-cleanup-gate$(NC)- Validate dogma cleanup Review Readiness Packet (DOGMA_PACKET=...)"
+	@echo "  $(GREEN)dogma-cleanup-gate-fixtures$(NC)- Run dogma cleanup gate fixture tests"
+	@echo "  $(GREEN)dogma-cleanup-ci-gate$(NC)- Enforce dogma cleanup packet for signaled PRs"
 	@echo "  $(GREEN)buildbuddy-install$(NC)- Install pinned optional BuildBuddy CLI"
 	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
 	@echo "  $(GREEN)buildbuddy-generate-check$(NC)- Check optional Bazel BUILD freshness"

@@ -5993,7 +5993,6 @@ async fn prepare_run_mob_tools_from_surface(
     })
 }
 
-#[cfg(test)]
 fn compose_external_tool_dispatchers(
     primary: Option<Arc<dyn AgentToolDispatcher>>,
     secondary: Option<Arc<dyn AgentToolDispatcher>>,
@@ -6032,6 +6031,20 @@ fn compose_external_tool_dispatchers(
                 .build()
                 .map_err(|e| anyhow::anyhow!("failed to compose external tools: {e}"))?;
             Ok(Some(Arc::new(gateway)))
+        }
+    }
+}
+
+fn compose_rpc_mob_external_tools(
+    callback_tools: Arc<dyn AgentToolDispatcher>,
+    mcp_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> Option<Arc<dyn AgentToolDispatcher>> {
+    match compose_external_tool_dispatchers(Some(callback_tools.clone()), mcp_tools) {
+        Ok(Some(dispatcher)) => Some(dispatcher),
+        Ok(None) => Some(callback_tools),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to compose RPC mob member external tools");
+            Some(callback_tools)
         }
     }
 }
@@ -10517,19 +10530,23 @@ where
     // Pre-initialize the callback channel so the ExternalToolsProvider closure
     // can read callback_request_tx() during mob creation and resume.
     let callback_rx = runtime.init_callback_channel();
+    let (mcp_external_tools, _mcp_adapter_guard) =
+        load_mcp_external_tools(scope, false, None).await;
 
     let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
         let runtime = runtime.clone();
+        let mcp_external_tools = mcp_external_tools.clone();
         move || {
             let tx = runtime.callback_request_tx()?;
-            Some(Arc::new(
+            let callback_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(
                 meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::new(
                     runtime.registered_tools(),
                     tx,
                     runtime.callback_id_counter(),
                     vec![],
                 ),
-            ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
+            );
+            compose_rpc_mob_external_tools(callback_tools, mcp_external_tools.clone())
         }
     }));
 
@@ -14807,6 +14824,28 @@ capabilities = ["definitely_missing_capability"]
             merged.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains("alpha_tool"));
         assert!(names.contains("beta_tool"));
+    }
+
+    #[test]
+    fn test_rpc_mob_external_tools_include_callback_and_mcp_dispatchers() {
+        let callback_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("callback_tool"));
+        let mcp_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("linear_add_comment"));
+
+        let merged = compose_rpc_mob_external_tools(callback_tools, Some(mcp_tools))
+            .expect("RPC mob members should keep callback tools even when MCP tools are present");
+        let names: std::collections::BTreeSet<String> =
+            merged.tools().iter().map(|t| t.name.to_string()).collect();
+
+        assert!(
+            names.contains("callback_tool"),
+            "MobKit callback tools must remain visible for RPC mob members"
+        );
+        assert!(
+            names.contains("linear_add_comment"),
+            "configured MCP tools must be visible to RPC mob members"
+        );
     }
 
     #[cfg(feature = "mob")]

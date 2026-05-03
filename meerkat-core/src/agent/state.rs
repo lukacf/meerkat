@@ -550,13 +550,14 @@ where
             )
             .await?;
         if let Some(HookDecision::Deny {
+            hook_id,
             reason_code,
             message,
             payload,
-            ..
         }) = turn_boundary_report.decision
         {
             return Err(AgentError::HookDenied {
+                hook_id,
                 point: HookPoint::TurnBoundary,
                 reason_code,
                 message,
@@ -1509,13 +1510,14 @@ where
                         .await?;
 
                     if let Some(HookDecision::Deny {
+                        hook_id,
                         reason_code,
                         message,
                         payload,
-                        ..
                     }) = pre_llm_report.decision
                     {
                         let error = AgentError::HookDenied {
+                            hook_id,
                             point: HookPoint::PreLlmRequest,
                             reason_code,
                             message,
@@ -1535,7 +1537,7 @@ where
                             } = patch
                             {
                                 emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.to_string(),
+                                    hook_id: outcome.hook_id.clone(),
                                     point: HookPoint::PreLlmRequest,
                                     patch: HookPatch::LlmRequest {
                                         max_tokens: *max_tokens,
@@ -1685,13 +1687,14 @@ where
                         .await?;
 
                     if let Some(HookDecision::Deny {
+                        hook_id,
                         reason_code,
                         message,
                         payload,
-                        ..
                     }) = post_llm_report.decision
                     {
                         let error = AgentError::HookDenied {
+                            hook_id,
                             point: HookPoint::PostLlmResponse,
                             reason_code,
                             message,
@@ -1706,7 +1709,7 @@ where
                         for patch in &outcome.patches {
                             if let HookPatch::AssistantText { text } = patch {
                                 emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.to_string(),
+                                    hook_id: outcome.hook_id.clone(),
                                     point: HookPoint::PostLlmResponse,
                                     patch: HookPatch::AssistantText { text: text.clone() },
                                 });
@@ -1797,13 +1800,14 @@ where
                             let pre_tool_report = pre_tool_report?;
 
                             if let Some(HookDecision::Deny {
+                                hook_id,
                                 reason_code,
                                 message,
                                 payload,
-                                ..
                             }) = pre_tool_report.decision
                             {
                                 let error = AgentError::HookDenied {
+                                    hook_id,
                                     point: HookPoint::PreToolExecution,
                                     reason_code,
                                     message,
@@ -1820,7 +1824,7 @@ where
                                 for patch in &outcome.patches {
                                     if let HookPatch::ToolArgs { args } = patch {
                                         emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.to_string(),
+                                            hook_id: outcome.hook_id.clone(),
                                             point: HookPoint::PreToolExecution,
                                             patch: HookPatch::ToolArgs { args: args.clone() },
                                         });
@@ -1932,13 +1936,14 @@ where
                                 .await?;
 
                             if let Some(HookDecision::Deny {
+                                hook_id,
                                 reason_code,
                                 message,
                                 payload,
-                                ..
                             }) = post_tool_report.decision
                             {
                                 let error = AgentError::HookDenied {
+                                    hook_id,
                                     point: HookPoint::PostToolExecution,
                                     reason_code,
                                     message,
@@ -1955,7 +1960,7 @@ where
                                 for patch in &outcome.patches {
                                     if let HookPatch::ToolResult { content, is_error } = patch {
                                         emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.to_string(),
+                                            hook_id: outcome.hook_id.clone(),
                                             point: HookPoint::PostToolExecution,
                                             patch: HookPatch::ToolResult {
                                                 content: content.clone(),
@@ -4237,9 +4242,10 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
+                                hook_id: Some(hook_id),
                                 point: HookPoint::TurnBoundary,
                                 reason_code: HookReasonCode::PolicyViolation,
-                            })
+                            }) if hook_id == &crate::hooks::HookId::new("deny-turn-boundary")
                         );
                 }
                 crate::event::AgentEvent::ToolExecutionCompleted { .. }
@@ -4996,9 +5002,10 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
+                                hook_id: Some(hook_id),
                                 point: crate::hooks::HookPoint::PostToolExecution,
                                 reason_code: crate::hooks::HookReasonCode::PolicyViolation,
-                            })
+                            }) if hook_id == &crate::hooks::HookId::new("deny-image-tool")
                         );
                 }
                 crate::event::AgentEvent::RunCompleted { .. }

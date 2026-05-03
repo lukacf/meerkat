@@ -1,10 +1,12 @@
 import { MeerkatClient } from "../src/index.js";
 import type {
+  AgentErrorReport,
   MobCreateOptions,
   MobDefinition,
   MobTurnStartOptions,
   PeerCorrelationId,
   PeerId,
+  RunFailedEvent,
   SpawnManySpec,
   SpawnSpec,
 } from "../src/index.js";
@@ -55,6 +57,27 @@ const spawnSpec: SpawnSpec = {
 };
 
 void spawnSpec;
+
+const hookDeniedErrorReport: AgentErrorReport = {
+  class: "hook",
+  message: "denied",
+  reason: {
+    reason_type: "hook_denied",
+    hook_id: "policy-gate",
+    point: "pre_tool_execution",
+    reason_code: "policy",
+  },
+};
+
+const publicRunFailedEvent: RunFailedEvent = {
+  type: "run_failed",
+  sessionId: "session-1",
+  errorClass: "hook",
+  error: "denied",
+  errorReport: hookDeniedErrorReport,
+};
+
+void publicRunFailedEvent;
 
 const spawnSpecWithGeneration: SpawnSpec = {
   profile: "worker",

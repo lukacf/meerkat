@@ -32,7 +32,7 @@ where
                     &self.event_tap,
                     event_tx,
                     AgentEvent::HookStarted {
-                        hook_id: hook_id.to_string(),
+                        hook_id,
                         point: invocation.point,
                     },
                 )
@@ -56,7 +56,7 @@ where
                     &self.event_tap,
                     event_tx,
                     AgentEvent::HookFailed {
-                        hook_id: outcome.hook_id.to_string(),
+                        hook_id: outcome.hook_id.clone(),
                         point: outcome.point,
                         error: error.clone(),
                     },
@@ -67,7 +67,7 @@ where
                     &self.event_tap,
                     event_tx,
                     AgentEvent::HookCompleted {
-                        hook_id: outcome.hook_id.to_string(),
+                        hook_id: outcome.hook_id.clone(),
                         point: outcome.point,
                         duration_ms: outcome.duration_ms.unwrap_or(0),
                     },
@@ -87,7 +87,7 @@ where
                 &self.event_tap,
                 event_tx,
                 AgentEvent::HookDenied {
-                    hook_id: hook_id.to_string(),
+                    hook_id: hook_id.clone(),
                     point: invocation.point,
                     reason_code: *reason_code,
                     message: message.clone(),
@@ -102,7 +102,7 @@ where
                 &self.event_tap,
                 event_tx,
                 AgentEvent::HookPatchPublished {
-                    hook_id: envelope.hook_id.to_string(),
+                    hook_id: envelope.hook_id.clone(),
                     point: envelope.point,
                     envelope: envelope.clone(),
                 },
@@ -122,14 +122,11 @@ where
                 hook_id,
                 timeout_ms,
             } => AgentError::HookTimeout {
-                hook_id: hook_id.to_string(),
+                hook_id,
                 timeout_ms,
             },
             HookEngineError::ExecutionFailed { hook_id, reason } => {
-                AgentError::HookExecutionFailed {
-                    hook_id: hook_id.to_string(),
-                    reason,
-                }
+                AgentError::HookExecutionFailed { hook_id, reason }
             }
         }
     }

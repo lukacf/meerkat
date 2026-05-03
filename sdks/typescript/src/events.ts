@@ -405,7 +405,7 @@ export interface BackgroundJobCompletedEvent {
   readonly type: "background_job_completed";
   readonly jobId: string;
   readonly displayName: string;
-  readonly legacyStatus: string;
+  readonly legacyStatus?: string;
   readonly terminalStatus: BackgroundJobTerminalStatus;
   readonly detail: string;
 }
@@ -926,12 +926,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         },
       };
     }
-    case "background_job_completed":
+    case "background_job_completed": {
+      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
       return {
         type,
         jobId: requireStringField(raw, "job_id"),
         displayName: requireStringField(raw, "display_name"),
-        legacyStatus: requireStringField(raw, "status"),
+        ...(legacyStatus != null ? { legacyStatus } : {}),
         terminalStatus: requireOneOf(
           requireStringField(raw, "terminal_status"),
           "terminal_status",
@@ -939,6 +940,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         ),
         detail: requireStringField(raw, "detail"),
       };
+    }
 
     // Unknown — forward-compat
     default:

@@ -32,6 +32,7 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "skills_resolved",
     "skill_resolution_failed",
     "interaction_complete",
+    "interaction_callback_pending",
     "interaction_failed",
     "stream_truncated",
     "tool_config_changed",

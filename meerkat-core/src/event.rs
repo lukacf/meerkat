@@ -110,6 +110,16 @@ impl BackgroundJobTerminalStatus {
     }
 }
 
+fn deserialize_legacy_background_job_status<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.as_str().map(str::to_owned)))
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason_type", rename_all = "snake_case")]
@@ -1272,7 +1282,12 @@ pub enum AgentEvent {
         display_name: String,
         /// Legacy display mirror for consumers still rendering string status.
         #[serde(rename = "status")]
-        legacy_status: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_legacy_background_job_status"
+        )]
+        legacy_status: Option<String>,
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
@@ -1288,7 +1303,7 @@ impl AgentEvent {
         Self::BackgroundJobCompleted {
             job_id: job_id.into(),
             display_name: display_name.into(),
-            legacy_status: terminal_status.as_str().to_string(),
+            legacy_status: Some(terminal_status.as_str().to_string()),
             terminal_status,
             detail: detail.into(),
         }
@@ -2047,7 +2062,7 @@ mod tests {
                 terminal_status,
                 ..
             } => {
-                assert_eq!(legacy_status, "failed");
+                assert_eq!(legacy_status.as_deref(), Some("failed"));
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
             }
             other => unreachable!("unexpected event: {other:?}"),
@@ -2093,6 +2108,31 @@ mod tests {
             "unknown typed terminal status must fail closed"
         );
 
+        let typed_without_legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "terminal_status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let event: AgentEvent = serde_json::from_value(typed_without_legacy_json).unwrap();
+        match event {
+            AgentEvent::BackgroundJobCompleted {
+                job_id,
+                display_name,
+                legacy_status,
+                terminal_status,
+                detail,
+            } => {
+                assert_eq!(job_id, "j_123");
+                assert_eq!(display_name, "sleep 2");
+                assert_eq!(legacy_status, None);
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
+                assert_eq!(detail, "exit_code: 1");
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
         let stale_legacy_json = serde_json::json!({
             "type": "background_job_completed",
             "job_id": "j_123",
@@ -2112,7 +2152,30 @@ mod tests {
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(legacy_status, "completed");
+                assert_eq!(legacy_status.as_deref(), Some("completed"));
+                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
+                assert_eq!(detail, "exit_code: 1");
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
+        let malformed_legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": 0,
+            "terminal_status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let event: AgentEvent = serde_json::from_value(malformed_legacy_json).unwrap();
+        match event {
+            AgentEvent::BackgroundJobCompleted {
+                legacy_status,
+                terminal_status,
+                detail,
+                ..
+            } => {
+                assert_eq!(legacy_status, None);
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }

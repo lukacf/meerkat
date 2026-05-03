@@ -2196,7 +2196,10 @@
           },
           "status": {
             "description": "Legacy display mirror for consumers still rendering string status.",
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "terminal_status": {
             "$ref": "#/$defs/BackgroundJobTerminalStatus"
@@ -2210,7 +2213,6 @@
           "type",
           "job_id",
           "display_name",
-          "status",
           "terminal_status",
           "detail"
         ],
@@ -3399,7 +3401,10 @@
               },
               "status": {
                 "description": "Legacy display mirror for consumers still rendering string status.",
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "terminal_status": {
                 "$ref": "#/$defs/BackgroundJobTerminalStatus"
@@ -3413,7 +3418,6 @@
               "type",
               "job_id",
               "display_name",
-              "status",
               "terminal_status",
               "detail"
             ],
@@ -4536,6 +4540,7 @@
       "skills_resolved",
       "skill_resolution_failed",
       "interaction_complete",
+      "interaction_callback_pending",
       "interaction_failed",
       "stream_truncated",
       "tool_config_changed",

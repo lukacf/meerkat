@@ -448,11 +448,11 @@ class ToolConfigChanged(Event):
 class BackgroundJobCompleted(Event):
     """A background shell job reached a typed terminal state."""
 
-    job_id: str = ""
-    display_name: str = ""
-    legacy_status: str = ""
-    terminal_status: BackgroundJobTerminalStatus = "completed"
-    detail: str = ""
+    job_id: str
+    display_name: str
+    terminal_status: BackgroundJobTerminalStatus
+    detail: str
+    legacy_status: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -799,7 +799,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     if event_type == "background_job_completed":
         _require_str(raw, "job_id")
         _require_str(raw, "display_name")
-        _require_str(raw, "status")
         terminal_status = raw.get("terminal_status")
         if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
             raise ValueError("terminal_status must be a background job terminal status")
@@ -929,7 +928,10 @@ def parse_event(raw: dict[str, Any]) -> Event:
                     ),
                 )
             elif f == "legacy_status" and cls is BackgroundJobCompleted:
-                kwargs["legacy_status"] = raw["status"]
+                legacy_status = raw.get("status")
+                kwargs["legacy_status"] = (
+                    legacy_status if isinstance(legacy_status, str) else None
+                )
             elif f == "terminal_status" and cls is BackgroundJobCompleted:
                 kwargs["terminal_status"] = cast(
                     BackgroundJobTerminalStatus,

@@ -295,6 +295,26 @@ function handleEvent(event: AgentEvent): string {
   }
 }
 
+const backgroundJobWithoutLegacyStatus: AgentEvent = {
+  type: 'background_job_completed',
+  job_id: 'j_123',
+  display_name: 'sleep 2',
+  terminal_status: 'failed',
+  detail: 'exit_code: 1',
+};
+
+// @ts-expect-error terminal_status is required; status is only a legacy display mirror.
+const backgroundJobStringOnly: AgentEvent = {
+  type: 'background_job_completed',
+  job_id: 'j_123',
+  display_name: 'sleep 2',
+  status: 'completed',
+  detail: 'exit_code: 0',
+};
+
+handleEvent(backgroundJobWithoutLegacyStatus);
+void backgroundJobStringOnly;
+
 // ─── ToolCallback ───────────────────────────────────────────────
 
 const myTool: ToolCallback = async (args: string) => {

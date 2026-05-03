@@ -481,7 +481,7 @@ export interface BackgroundJobCompletedEvent {
   detail: string;
   display_name: string;
   job_id: string;
-  status: string;
+  status?: string | null;
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 }
@@ -515,6 +515,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "skills_resolved",
   "skill_resolution_failed",
   "interaction_complete",
+  "interaction_callback_pending",
   "interaction_failed",
   "stream_truncated",
   "tool_config_changed",

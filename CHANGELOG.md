@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `background_job_completed` events now require typed `terminal_status` for completion semantics; the legacy `status` string is retained only as a display mirror.
+- `background_job_completed` events now require typed `terminal_status` for completion semantics; the legacy `status` string is retained only as an optional display mirror.
 
 ## [0.5.2] - 2026-04-12
 

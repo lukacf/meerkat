@@ -492,12 +492,12 @@ interface BackgroundJobCompletedEvent {
   jobId: string;
   displayName: string;
   terminalStatus: BackgroundJobTerminalStatus;
-  legacyStatus: string;
+  legacyStatus?: string;
   detail: string;
 }
 ```
 
-`terminalStatus` is the semantic status. `legacyStatus` is the wire `status` display mirror.
+`terminalStatus` is the semantic status. `legacyStatus` is the optional wire `status` display mirror.
 
 ### Stream management
 

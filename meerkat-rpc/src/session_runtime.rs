@@ -269,6 +269,20 @@ fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToo
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness {
+    let provenance = meerkat_core::ToolProvenance {
+        kind: meerkat_core::ToolSourceKind::Builtin,
+        source_id: "builtin".into(),
+    };
+    meerkat_core::ToolVisibilityWitness {
+        stable_owner_key: Some(
+            meerkat_core::tool_catalog::stable_owner_key_from_provenance(&provenance),
+        ),
+        last_seen_provenance: Some(provenance),
+    }
+}
+
 struct RuntimePreAdmissionGuard {
     admission: Option<RuntimePreAdmission>,
 }
@@ -18080,6 +18094,9 @@ mod tests {
         visibility_state.active_filter =
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect());
         visibility_state.staged_filter = visibility_state.active_filter.clone();
+        visibility_state
+            .filter_witnesses
+            .insert("datetime".to_string(), builtin_tool_visibility_witness());
         runtime
             .service
             .set_session_tool_visibility_state(&session_id, Some(visibility_state))

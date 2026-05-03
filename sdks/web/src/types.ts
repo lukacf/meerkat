@@ -130,7 +130,8 @@ export interface SessionState {
   mob_id: string;
   model: string;
   usage: Usage;
-  run_counter: number;
+  /** @deprecated Direct browser sessions no longer expose a local run counter. */
+  run_counter?: number;
   message_count: number;
   is_active: boolean;
   last_assistant_text?: string | null;

@@ -182,7 +182,6 @@ const sessionState: SessionState = {
   mob_id: '',
   model: 'claude-sonnet-4-5',
   usage: { input_tokens: 1, output_tokens: 2 },
-  run_counter: 0,
   message_count: 0,
   is_active: true,
   last_assistant_text: null,

@@ -49,6 +49,8 @@ export type StopReason =
   | "content_filter"
   | "cancelled";
 
+export type ToolCallArguments = Readonly<Record<string, unknown>>;
+
 /** Which budget dimension triggered a warning. */
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
@@ -132,7 +134,7 @@ export interface ToolCallRequestedEvent {
   readonly type: "tool_call_requested";
   readonly id: string;
   readonly name: string;
-  readonly args: unknown;
+  readonly args: ToolCallArguments;
 }
 
 export interface ToolResultReceivedEvent {
@@ -516,6 +518,14 @@ function requireBooleanField(raw: Record<string, unknown>, field: string): boole
   return value;
 }
 
+function requireRecordField(raw: Record<string, unknown>, field: string): Record<string, unknown> {
+  const value = raw[field];
+  if (!isPlainRecord(value)) {
+    throw new Error(`${field} must be object`);
+  }
+  return value;
+}
+
 function requireOneOf<T extends string>(
   value: string,
   field: string,
@@ -788,7 +798,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "text_complete":
       return { type, content: requireStringField(raw, "content") };
     case "tool_call_requested":
-      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), args: raw.args };
+      return {
+        type,
+        id: requireStringField(raw, "id"),
+        name: requireStringField(raw, "name"),
+        args: requireRecordField(raw, "args"),
+      };
     case "tool_result_received":
       return {
         type,

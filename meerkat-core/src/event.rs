@@ -115,7 +115,13 @@ impl BackgroundJobTerminalStatus {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct ToolCallArguments(Value);
+pub struct ToolCallArguments(
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
+    )]
+    Value,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallArgumentsError {

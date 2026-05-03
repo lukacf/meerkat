@@ -277,6 +277,7 @@ export type {
   MalformedEvent,
   UnknownEvent,
   StopReason,
+  ToolCallArguments,
   BudgetType,
   HookPoint,
 } from "./events.js";

@@ -597,7 +597,9 @@
           {
             "description": "Replace serialized tool arguments.",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "patch_type": {
                 "const": "tool_args",
                 "type": "string"
@@ -1128,6 +1130,10 @@
             "type": "string"
           }
         ]
+      },
+      "ToolCallArguments": {
+        "additionalProperties": true,
+        "type": "object"
       },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
@@ -1688,7 +1694,9 @@
       {
         "description": "Model requested a tool call",
         "properties": {
-          "args": true,
+          "args": {
+            "$ref": "#/$defs/ToolCallArguments"
+          },
           "id": {
             "type": "string"
           },
@@ -2896,7 +2904,9 @@
           {
             "description": "Model requested a tool call",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "id": {
                 "type": "string"
               },
@@ -3685,7 +3695,9 @@
           {
             "description": "Replace serialized tool arguments.",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "patch_type": {
                 "const": "tool_args",
                 "type": "string"
@@ -4259,6 +4271,10 @@
             "type": "object"
           }
         ]
+      },
+      "ToolCallArguments": {
+        "additionalProperties": true,
+        "type": "object"
       },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",

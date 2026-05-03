@@ -866,11 +866,24 @@ impl CompositeImageGenerationPlanner {
 
     fn profile_for_provider(
         &self,
-        provider: &str,
+        provider: meerkat_core::Provider,
     ) -> Option<&Arc<dyn meerkat_core::ImageGenerationProviderProfile>> {
         self.profiles
             .iter()
+            .find(|profile| profile.canonical_provider() == provider)
+    }
+
+    fn profile_for_provider_id(
+        &self,
+        provider: &str,
+    ) -> Option<(
+        meerkat_core::Provider,
+        &Arc<dyn meerkat_core::ImageGenerationProviderProfile>,
+    )> {
+        self.profiles
+            .iter()
             .find(|profile| profile.matches_provider_id(provider))
+            .map(|profile| (profile.canonical_provider(), profile))
     }
 }
 
@@ -902,26 +915,33 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
 
         let effective_provider =
             meerkat_core::Provider::infer_from_model(status.effective_model.as_str());
-        let profile = match &request.target {
-            ImageGenerationTargetPreference::Auto => effective_provider
-                .and_then(|provider| self.profile_for_provider(provider.as_str()))
-                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
+        let (target_provider, profile) = match &request.target {
+            ImageGenerationTargetPreference::Auto => {
+                let provider =
+                    effective_provider.ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
+                let profile = self
+                    .profile_for_provider(provider)
+                    .ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
+                (provider, profile)
+            }
             ImageGenerationTargetPreference::ProviderDefault { provider }
             | ImageGenerationTargetPreference::Model { provider, .. } => self
-                .profile_for_provider(provider.0.as_str())
+                .profile_for_provider_id(provider.0.as_str())
                 .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
         };
         let requested_model = match &request.target {
-            ImageGenerationTargetPreference::Model { model, .. } => model.clone(),
-            _ => profile.default_model_for_session(effective_provider, &status.effective_model),
+            ImageGenerationTargetPreference::Model { model, .. } => {
+                meerkat_core::model_profile::catalog::image_generation_model(
+                    target_provider,
+                    model.as_str(),
+                )
+                .ok_or(ImageOperationDenialReason::UnsupportedTarget)?
+            }
+            _ => meerkat_core::model_profile::catalog::default_image_generation_model(
+                target_provider,
+            )
+            .ok_or(ImageOperationDenialReason::UnsupportedTarget)?,
         };
-        if matches!(
-            request.target,
-            ImageGenerationTargetPreference::Model { .. }
-        ) && !profile.owns_model(requested_model.as_str())
-        {
-            return Err(ImageOperationDenialReason::UnsupportedTarget);
-        }
 
         let resolution = profile.resolve_execution_plan(
             operation_id,
@@ -932,11 +952,7 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
         )?;
         let requires_scoped_override = resolution.execution_plan.requires_scoped_override();
         let machine_routing_realtime_capable = if requires_scoped_override {
-            meerkat_core::Provider::parse_strict(resolution.execution_plan.provider.0.as_str())
-                .map(|provider| {
-                    model_realtime_capable(provider, resolution.provider_call_model.as_str())
-                })
-                .unwrap_or(false)
+            model_realtime_capable(target_provider, resolution.provider_call_model.as_str())
         } else {
             effective_provider
                 .map(|provider| model_realtime_capable(provider, status.effective_model.as_str()))
@@ -957,10 +973,10 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
     }
 
     fn infer_provider_for_model(&self, model: &str) -> Option<meerkat_core::ProviderId> {
-        self.profiles
-            .iter()
-            .find(|profile| profile.owns_model(model))
-            .map(|profile| meerkat_core::ProviderId::new(profile.canonical_provider()))
+        let provider =
+            meerkat_core::model_profile::catalog::image_generation_provider_for_model(model)?;
+        self.profile_for_provider(provider)?;
+        Some(meerkat_core::ProviderId::new(provider.as_str()))
     }
 
     fn provider_documentation(&self) -> Vec<String> {
@@ -6633,28 +6649,14 @@ mod tests {
         struct NativeImageProfile;
 
         impl meerkat_core::ImageGenerationProviderProfile for NativeImageProfile {
-            fn canonical_provider(&self) -> &'static str {
-                "gemini"
-            }
-
-            fn default_model_for_session(
-                &self,
-                _effective_provider: Option<Provider>,
-                _effective_model: &meerkat_core::lifecycle::run_primitive::ModelId,
-            ) -> meerkat_core::lifecycle::run_primitive::ModelId {
-                meerkat_core::lifecycle::run_primitive::ModelId::new(
-                    "gemini-3.1-flash-image-preview",
-                )
-            }
-
-            fn owns_model(&self, model: &str) -> bool {
-                model == "gemini-3.1-flash-image-preview"
+            fn canonical_provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Gemini
             }
 
             fn resolve_execution_plan(
                 &self,
                 _operation_id: meerkat_core::ImageOperationId,
-                requested_model: &meerkat_core::lifecycle::run_primitive::ModelId,
+                model: &meerkat_core::model_profile::catalog::ImageGenerationModelProfile,
                 _request: &meerkat_core::GenerateImageRequest,
                 capabilities: meerkat_core::ImageGenerationTargetCapabilities,
                 max_count: std::num::NonZeroU32,
@@ -6663,7 +6665,9 @@ mod tests {
                 meerkat_core::ImageOperationDenialReason,
             > {
                 Ok(meerkat_core::ImageGenerationProviderResolution {
-                    provider_call_model: requested_model.clone(),
+                    provider_call_model: meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        model.model_id,
+                    ),
                     execution_plan: meerkat_core::GenerateImageExecutionPlan {
                         provider: meerkat_core::ProviderId::new("gemini"),
                         backend: meerkat_core::ImageGenerationBackendKind::NativeModel,
@@ -6717,6 +6721,115 @@ mod tests {
             !plan.machine_routing_realtime_capable,
             "uncatalogued Gemini image models must not be treated as realtime-capable"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_rejects_uncatalogued_model_before_provider_execution() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        struct PanickingGeminiProfile;
+
+        impl meerkat_core::ImageGenerationProviderProfile for PanickingGeminiProfile {
+            fn canonical_provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Gemini
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _operation_id: meerkat_core::ImageOperationId,
+                _model: &meerkat_core::model_profile::catalog::ImageGenerationModelProfile,
+                _request: &meerkat_core::GenerateImageRequest,
+                _capabilities: meerkat_core::ImageGenerationTargetCapabilities,
+                _max_count: std::num::NonZeroU32,
+            ) -> Result<
+                meerkat_core::ImageGenerationProviderResolution,
+                meerkat_core::ImageOperationDenialReason,
+            > {
+                panic!("provider profile must not receive uncatalogued image models")
+            }
+        }
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(PanickingGeminiProfile)]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            None,
+            None,
+            None,
+        );
+        let request = meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::Model {
+                provider: meerkat_core::ProviderId::new("gemini"),
+                model: meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "gemini-unknown-image-preview",
+                ),
+            },
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+
+        let result = planner.resolve_image_generation_plan(
+            &status,
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+            &request,
+        );
+
+        assert!(matches!(
+            result,
+            Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_planner_rejects_unknown_provider_without_alias_fallback() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(Vec::new());
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            None,
+            None,
+            None,
+        );
+        let request = meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::ProviderDefault {
+                provider: meerkat_core::ProviderId::new("unknown-provider"),
+            },
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+
+        let result = planner.resolve_image_generation_plan(
+            &status,
+            serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+            &request,
+        );
+
+        assert!(matches!(
+            result,
+            Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+        ));
     }
 
     #[test]

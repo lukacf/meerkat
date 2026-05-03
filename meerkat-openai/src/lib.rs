@@ -25,7 +25,8 @@ pub use client::OpenAiClient;
 pub use client_compatible::OpenAiCompatibleClient;
 pub use image_generation::{
     OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
-    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiResponsesImagePlan,
+    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiImagesApiRequestShape,
+    OpenAiResponsesImagePlan,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use live::OpenAiLiveClient;

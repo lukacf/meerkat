@@ -139,7 +139,7 @@ Routing and defaults:
 - On image-capable sessions, auto uses the current provider's registered image default.
 - On non-image-capable session providers, auto is unsupported; set provider:"openai" or provider:"gemini".
 - provider:"openai" or provider:"gemini" uses that provider's registered image default.
-- To force a model, pass provider plus model. Passing only model is accepted when a configured provider profile owns that model.
+- To force a model, pass provider plus model. Passing only model is accepted when the catalog identifies a configured provider for that model.
 
 Supported request fields:
 - intent: "generate" for a new image, "edit" only with source_images. If omitted and prompt is present, intent defaults to "generate".
@@ -1193,7 +1193,7 @@ mod tests {
 
         for expected in [
             "registered image default",
-            "configured provider profile owns that model",
+            "catalog identifies a configured provider for that model",
             "count/n: currently only 1 is supported",
             "provider_params",
             "Size support is model/provider dependent",

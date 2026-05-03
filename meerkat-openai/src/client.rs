@@ -31,7 +31,6 @@ use std::collections::HashSet;
 use crate::image_generation::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
     OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
-    openai_images_api_request_shape,
 };
 
 /// Extract the typed OpenAI provider tag from a request.
@@ -558,12 +557,8 @@ impl OpenAiClient {
             "prompt": Self::image_prompt(&request),
             "n": request.generate_request.count.get(),
         });
-        let request_shape =
-            openai_images_api_request_shape(&model).ok_or_else(|| LlmError::InvalidRequest {
-                message: format!("OpenAI Images API plan does not support model {model}"),
-            })?;
         if let Some(obj) = body.as_object_mut() {
-            match request_shape {
+            match plan.request_shape {
                 OpenAiImagesApiRequestShape::GptImage => {
                     Self::apply_image_output_options(obj, &plan.output);
                     Self::apply_openai_image_provider_params(obj, &plan.provider_params, false);

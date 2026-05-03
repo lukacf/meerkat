@@ -8,6 +8,7 @@
 //! `meerkat-core` reads defaults from this module; `config_template.toml` is
 //! validated against it.
 
+use crate::Provider;
 use crate::model_profile::capabilities;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -52,6 +53,70 @@ pub struct ProviderDefaults {
     pub models: Vec<CatalogEntry>,
 }
 
+/// Catalog-owned OpenAI Images API request shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiImageGenerationRequestShape {
+    GptImage,
+    DallE,
+}
+
+/// Whether a native image-generation model accepts an explicit image-size field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationSizeParameter {
+    Supported,
+    Unsupported,
+}
+
+/// Catalog-owned execution route for an image-generation model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "route", rename_all = "snake_case")]
+pub enum ImageGenerationModelRoute {
+    /// OpenAI Responses-hosted `image_generation` tool route.
+    OpenAiHostedResponsesTool {
+        /// `None` means use the requested model as the provider-call model.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_call_model_id: Option<&'static str>,
+        /// Tool model passed inside the hosted Responses image tool.
+        tool_model_id: &'static str,
+    },
+    /// OpenAI Images API route.
+    OpenAiImagesApi {
+        request_shape: OpenAiImageGenerationRequestShape,
+    },
+    /// Gemini native image model route.
+    GeminiNativeModel {
+        image_size_parameter: ImageGenerationSizeParameter,
+    },
+}
+
+/// Shared image-generation catalog entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImageGenerationModelProfile {
+    /// Typed provider owner.
+    pub provider: Provider,
+    /// Model identifier.
+    pub model_id: &'static str,
+    /// Human-readable display name.
+    pub display_name: &'static str,
+    /// Recommendation tier.
+    pub tier: ModelTier,
+    /// Catalog-owned execution route.
+    pub route: ImageGenerationModelRoute,
+}
+
+/// Provider-level grouping with a default image-generation model.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImageGenerationProviderDefaults {
+    /// Typed provider owner.
+    pub provider: Provider,
+    /// Default image-generation model ID for this provider.
+    pub default_model_id: &'static str,
+    /// All catalog-supported image-generation models for this provider.
+    pub models: Vec<ImageGenerationModelProfile>,
+}
+
 // ---------------------------------------------------------------------------
 // Static catalog data
 // ---------------------------------------------------------------------------
@@ -63,6 +128,83 @@ const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 const DEFAULT_ANTHROPIC: &str = "claude-opus-4-7";
 const DEFAULT_OPENAI: &str = "gpt-5.5";
 const DEFAULT_GEMINI: &str = "gemini-3-flash-preview";
+
+/// Image-generation default model ID per provider.
+const IMAGE_DEFAULT_OPENAI: &str = "gpt-image-2";
+const IMAGE_DEFAULT_GEMINI: &str = "gemini-3.1-flash-image-preview";
+
+/// OpenAI hosted image tool host model. This route detail is deliberately
+/// catalog-owned so provider executors do not infer policy from model names.
+const OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL: &str = "gpt-5.4";
+
+/// Image-generation-only model rows. OpenAI text catalog models are admitted by
+/// `image_generation_model()` below and route through the same hosted tool.
+const IMAGE_GENERATION_MODELS: &[ImageGenerationModelProfile] = &[
+    ImageGenerationModelProfile {
+        provider: Provider::OpenAI,
+        model_id: IMAGE_DEFAULT_OPENAI,
+        display_name: "GPT Image 2",
+        tier: ModelTier::Recommended,
+        route: ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some(OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL),
+            tool_model_id: IMAGE_DEFAULT_OPENAI,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::OpenAI,
+        model_id: "gpt-image-1",
+        display_name: "GPT Image 1",
+        tier: ModelTier::Supported,
+        route: ImageGenerationModelRoute::OpenAiImagesApi {
+            request_shape: OpenAiImageGenerationRequestShape::GptImage,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::OpenAI,
+        model_id: "dall-e-3",
+        display_name: "DALL-E 3",
+        tier: ModelTier::Supported,
+        route: ImageGenerationModelRoute::OpenAiImagesApi {
+            request_shape: OpenAiImageGenerationRequestShape::DallE,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::OpenAI,
+        model_id: "dall-e-2",
+        display_name: "DALL-E 2",
+        tier: ModelTier::Supported,
+        route: ImageGenerationModelRoute::OpenAiImagesApi {
+            request_shape: OpenAiImageGenerationRequestShape::DallE,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::Gemini,
+        model_id: IMAGE_DEFAULT_GEMINI,
+        display_name: "Gemini 3.1 Flash Image Preview",
+        tier: ModelTier::Recommended,
+        route: ImageGenerationModelRoute::GeminiNativeModel {
+            image_size_parameter: ImageGenerationSizeParameter::Supported,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::Gemini,
+        model_id: "gemini-3-pro-image-preview",
+        display_name: "Gemini 3 Pro Image Preview",
+        tier: ModelTier::Supported,
+        route: ImageGenerationModelRoute::GeminiNativeModel {
+            image_size_parameter: ImageGenerationSizeParameter::Supported,
+        },
+    },
+    ImageGenerationModelProfile {
+        provider: Provider::Gemini,
+        model_id: "gemini-2.5-flash-image",
+        display_name: "Gemini 2.5 Flash Image",
+        tier: ModelTier::Supported,
+        route: ImageGenerationModelRoute::GeminiNativeModel {
+            image_size_parameter: ImageGenerationSizeParameter::Unsupported,
+        },
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -100,6 +242,66 @@ pub fn default_model(provider: &str) -> Option<&'static str> {
     }
 }
 
+/// Return the default image-generation model profile for a typed provider.
+pub fn default_image_generation_model(provider: Provider) -> Option<ImageGenerationModelProfile> {
+    let default = match provider {
+        Provider::OpenAI => IMAGE_DEFAULT_OPENAI,
+        Provider::Gemini => IMAGE_DEFAULT_GEMINI,
+        _ => return None,
+    };
+    image_generation_model(provider, default)
+}
+
+/// Return a catalog-owned image-generation model profile for a typed provider/model pair.
+///
+/// Returns `None` for unknown providers, unknown model IDs, and provider/model
+/// mismatches. OpenAI text catalog models are supported through the hosted
+/// Responses image tool; other providers must have explicit image model rows.
+pub fn image_generation_model(
+    provider: Provider,
+    model_id: &str,
+) -> Option<ImageGenerationModelProfile> {
+    if let Some(profile) = IMAGE_GENERATION_MODELS
+        .iter()
+        .copied()
+        .find(|profile| profile.provider == provider && profile.model_id == model_id)
+    {
+        return Some(profile);
+    }
+
+    match provider {
+        Provider::OpenAI => {
+            capabilities::capabilities_for(Provider::OpenAI, model_id).map(|caps| {
+                ImageGenerationModelProfile {
+                    provider,
+                    model_id: caps.id,
+                    display_name: caps.display_name,
+                    tier: caps.tier,
+                    route: ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+                        provider_call_model_id: None,
+                        tool_model_id: IMAGE_DEFAULT_OPENAI,
+                    },
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Infer a typed image-generation provider from the catalog.
+///
+/// This is intentionally catalog-only: unknown image-like names fail closed
+/// instead of being accepted by prefix folklore.
+pub fn image_generation_provider_for_model(model_id: &str) -> Option<Provider> {
+    IMAGE_GENERATION_MODELS
+        .iter()
+        .find(|profile| profile.model_id == model_id)
+        .map(|profile| profile.provider)
+        .or_else(|| {
+            capabilities::capabilities_for(Provider::OpenAI, model_id).map(|_| Provider::OpenAI)
+        })
+}
+
 /// Return an iterator over model IDs in the catalog for a given provider.
 pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 'static {
     let provider = provider.to_string();
@@ -134,6 +336,37 @@ pub fn provider_defaults() -> &'static [ProviderDefaults] {
                 Some(ProviderDefaults {
                     provider,
                     default_model_id: default_id,
+                    models,
+                })
+            })
+            .collect()
+    })
+}
+
+/// Return provider-grouped image-generation catalog data with default model IDs.
+pub fn image_generation_provider_defaults() -> &'static [ImageGenerationProviderDefaults] {
+    static DEFAULTS: OnceLock<Vec<ImageGenerationProviderDefaults>> = OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        [Provider::Gemini, Provider::OpenAI]
+            .into_iter()
+            .filter_map(|provider| {
+                let default_model = default_image_generation_model(provider)?;
+                let mut models: Vec<ImageGenerationModelProfile> = IMAGE_GENERATION_MODELS
+                    .iter()
+                    .copied()
+                    .filter(|profile| profile.provider == provider)
+                    .collect();
+                if provider == Provider::OpenAI {
+                    models.extend(
+                        catalog()
+                            .iter()
+                            .filter(|entry| entry.provider == Provider::OpenAI.as_str())
+                            .filter_map(|entry| image_generation_model(provider, entry.id)),
+                    );
+                }
+                Some(ImageGenerationProviderDefaults {
+                    provider,
+                    default_model_id: default_model.model_id,
                     models,
                 })
             })
@@ -262,6 +495,82 @@ mod tests {
             assert_eq!(entry.tier, caps.tier);
             assert_eq!(entry.context_window, Some(caps.context_window));
             assert_eq!(entry.max_output_tokens, Some(caps.max_output_tokens));
+        }
+    }
+
+    #[test]
+    fn image_generation_defaults_are_catalog_owned_and_typed() {
+        let openai = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI must have an image-generation default");
+        assert_eq!(openai.model_id, IMAGE_DEFAULT_OPENAI);
+        assert_eq!(openai.provider, Provider::OpenAI);
+        assert!(matches!(
+            openai.route,
+            ImageGenerationModelRoute::OpenAiHostedResponsesTool { .. }
+        ));
+
+        let gemini = default_image_generation_model(Provider::Gemini)
+            .expect("Gemini must have an image-generation default");
+        assert_eq!(gemini.model_id, IMAGE_DEFAULT_GEMINI);
+        assert_eq!(gemini.provider, Provider::Gemini);
+        assert!(matches!(
+            gemini.route,
+            ImageGenerationModelRoute::GeminiNativeModel { .. }
+        ));
+
+        assert!(default_image_generation_model(Provider::Anthropic).is_none());
+        assert!(default_image_generation_model(Provider::Other).is_none());
+    }
+
+    #[test]
+    fn image_generation_lookup_fails_closed_for_unknown_or_mismatched_models() {
+        assert!(image_generation_model(Provider::Gemini, "gemini-unknown-image-preview").is_none());
+        assert!(image_generation_model(Provider::OpenAI, "gpt-image-unknown").is_none());
+        assert!(image_generation_model(Provider::Gemini, IMAGE_DEFAULT_OPENAI).is_none());
+        assert!(image_generation_model(Provider::OpenAI, IMAGE_DEFAULT_GEMINI).is_none());
+        assert!(image_generation_model(Provider::Other, IMAGE_DEFAULT_OPENAI).is_none());
+    }
+
+    #[test]
+    fn image_generation_provider_inference_is_catalog_only() {
+        assert_eq!(
+            image_generation_provider_for_model(IMAGE_DEFAULT_OPENAI),
+            Some(Provider::OpenAI)
+        );
+        assert_eq!(
+            image_generation_provider_for_model(IMAGE_DEFAULT_GEMINI),
+            Some(Provider::Gemini)
+        );
+        assert_eq!(
+            image_generation_provider_for_model("gpt-5.4"),
+            Some(Provider::OpenAI)
+        );
+        assert_eq!(
+            image_generation_provider_for_model("gpt-image-future"),
+            None
+        );
+        assert_eq!(
+            image_generation_provider_for_model("gemini-3-flash-preview"),
+            None,
+            "Gemini text catalog rows are not image-generation model authority"
+        );
+    }
+
+    #[test]
+    fn image_generation_provider_defaults_are_complete() {
+        let defaults = image_generation_provider_defaults();
+        assert_eq!(defaults.len(), 2);
+        for defaults in defaults {
+            let default_profile = default_image_generation_model(defaults.provider)
+                .expect("provider default must resolve");
+            assert_eq!(defaults.default_model_id, default_profile.model_id);
+            assert!(
+                defaults
+                    .models
+                    .iter()
+                    .any(|model| model.model_id == defaults.default_model_id),
+                "image-generation default must be present in provider models"
+            );
         }
     }
 }

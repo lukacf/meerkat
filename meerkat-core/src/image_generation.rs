@@ -6,6 +6,7 @@
 use crate::approval::ApprovalId;
 use crate::blob::BlobRef;
 use crate::lifecycle::run_primitive::ModelId;
+use crate::model_profile::catalog::ImageGenerationModelProfile;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU32;
@@ -457,7 +458,7 @@ pub struct ImageGenerationProviderResolution {
 }
 
 pub trait ImageGenerationProviderProfile: Send + Sync {
-    fn canonical_provider(&self) -> &'static str;
+    fn canonical_provider(&self) -> crate::Provider;
 
     fn provider_aliases(&self) -> &'static [&'static str] {
         &[]
@@ -465,17 +466,9 @@ pub trait ImageGenerationProviderProfile: Send + Sync {
 
     fn matches_provider_id(&self, provider: &str) -> bool {
         let provider = provider.to_ascii_lowercase();
-        provider == self.canonical_provider()
+        provider == self.canonical_provider().as_str()
             || self.provider_aliases().contains(&provider.as_str())
     }
-
-    fn default_model_for_session(
-        &self,
-        effective_provider: Option<crate::Provider>,
-        effective_model: &ModelId,
-    ) -> ModelId;
-
-    fn owns_model(&self, model: &str) -> bool;
 
     fn image_generation_documentation(&self) -> Option<&'static str> {
         None
@@ -484,7 +477,7 @@ pub trait ImageGenerationProviderProfile: Send + Sync {
     fn resolve_execution_plan(
         &self,
         operation_id: ImageOperationId,
-        requested_model: &ModelId,
+        model: &ImageGenerationModelProfile,
         request: &GenerateImageRequest,
         capabilities: ImageGenerationTargetCapabilities,
         max_count: NonZeroU32,

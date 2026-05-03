@@ -10,14 +10,10 @@ use meerkat_core::image_generation::{
     ImageSizePreference, ProjectionSnapshotId, ProviderId,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
+use meerkat_core::model_profile::catalog::{
+    ImageGenerationModelProfile, ImageGenerationModelRoute, ImageGenerationSizeParameter,
+};
 use serde::{Deserialize, Serialize};
-
-const GEMINI_IMAGE_DEFAULT_MODEL: &str = "gemini-3.1-flash-image-preview";
-const GEMINI_IMAGE_MODELS: &[&str] = &[
-    GEMINI_IMAGE_DEFAULT_MODEL,
-    "gemini-3-pro-image-preview",
-    "gemini-2.5-flash-image",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeminiImageTurnPlan {
@@ -97,30 +93,18 @@ pub struct GeminiImageProviderParams {
 pub struct GeminiImageGenerationProfile;
 
 impl ImageGenerationProviderProfile for GeminiImageGenerationProfile {
-    fn canonical_provider(&self) -> &'static str {
-        "gemini"
+    fn canonical_provider(&self) -> Provider {
+        Provider::Gemini
     }
 
     fn provider_aliases(&self) -> &'static [&'static str] {
         &["google"]
     }
 
-    fn default_model_for_session(
-        &self,
-        _effective_provider: Option<Provider>,
-        _effective_model: &ModelId,
-    ) -> ModelId {
-        ModelId::new(GEMINI_IMAGE_DEFAULT_MODEL)
-    }
-
-    fn owns_model(&self, model: &str) -> bool {
-        is_supported_gemini_image_model(model)
-    }
-
     fn image_generation_documentation(&self) -> Option<&'static str> {
         Some(
             r#"Gemini:
-- Models: provider:"gemini" uses the Gemini image default; pass provider plus model to force another Gemini-owned image model.
+- Models: provider:"gemini" uses the catalog Gemini image default; supported native image models are owned by the shared model catalog.
 - provider_params: {"aspect_ratio":"1:1"|"16:9"|"9:16"|"square1x1"|"landscape16x9"|"portrait9x16","image_size":"1K"|"2K"|"4K"|"one_k"|"two_k"|"four_k"}.
 - Universal size maps to Gemini aspectRatio/imageSize first; provider_params override those mapped values."#,
         )
@@ -129,16 +113,22 @@ impl ImageGenerationProviderProfile for GeminiImageGenerationProfile {
     fn resolve_execution_plan(
         &self,
         operation_id: ImageOperationId,
-        requested_model: &ModelId,
+        model: &ImageGenerationModelProfile,
         request: &GenerateImageRequest,
         capabilities: ImageGenerationTargetCapabilities,
         max_count: NonZeroU32,
     ) -> Result<ImageGenerationProviderResolution, ImageOperationDenialReason> {
-        if !self.owns_model(requested_model.as_str()) {
+        if model.provider != self.canonical_provider() {
             return Err(ImageOperationDenialReason::UnsupportedTarget);
         }
+        let ImageGenerationModelRoute::GeminiNativeModel {
+            image_size_parameter,
+        } = model.route
+        else {
+            return Err(ImageOperationDenialReason::UnsupportedTarget);
+        };
         let output = gemini_image_output_options_with_provider_params(
-            requested_model.as_str(),
+            image_size_parameter,
             &request.size,
             request.provider_params.as_ref(),
         )?;
@@ -148,9 +138,9 @@ impl ImageGenerationProviderProfile for GeminiImageGenerationProfile {
         })
         .map_err(|_| ImageOperationDenialReason::ProjectionUnsupported)?;
         Ok(ImageGenerationProviderResolution {
-            provider_call_model: requested_model.clone(),
+            provider_call_model: ModelId::new(model.model_id),
             execution_plan: GenerateImageExecutionPlan {
-                provider: ProviderId::new(self.canonical_provider()),
+                provider: ProviderId::new(self.canonical_provider().as_str()),
                 backend: ImageGenerationBackendKind::NativeModel,
                 max_count,
                 capabilities,
@@ -161,23 +151,19 @@ impl ImageGenerationProviderProfile for GeminiImageGenerationProfile {
     }
 }
 
-fn is_supported_gemini_image_model(model: &str) -> bool {
-    GEMINI_IMAGE_MODELS.contains(&model)
-}
-
 pub fn gemini_image_output_options(
-    model: &str,
+    image_size_parameter: ImageGenerationSizeParameter,
     size: &ImageSizePreference,
 ) -> GeminiImageOutputOptions {
-    gemini_base_image_output_options(model, size)
+    gemini_base_image_output_options(image_size_parameter, size)
 }
 
 fn gemini_image_output_options_with_provider_params(
-    model: &str,
+    image_size_parameter: ImageGenerationSizeParameter,
     size: &ImageSizePreference,
     provider_params: Option<&serde_json::Value>,
 ) -> Result<GeminiImageOutputOptions, ImageOperationDenialReason> {
-    let mut output = gemini_base_image_output_options(model, size);
+    let mut output = gemini_base_image_output_options(image_size_parameter, size);
     if let Some(value) = provider_params {
         let params: GeminiImageProviderParams = serde_json::from_value(value.clone())
             .map_err(|_| ImageOperationDenialReason::ProjectionUnsupported)?;
@@ -192,7 +178,7 @@ fn gemini_image_output_options_with_provider_params(
 }
 
 fn gemini_base_image_output_options(
-    model: &str,
+    image_size_parameter: ImageGenerationSizeParameter,
     size: &ImageSizePreference,
 ) -> GeminiImageOutputOptions {
     let aspect_ratio = match size {
@@ -206,10 +192,9 @@ fn gemini_base_image_output_options(
         }
         _ => GeminiImageAspectRatio::Square1x1,
     };
-    let image_size = if model == "gemini-2.5-flash-image" {
-        None
-    } else {
-        Some(match size {
+    let image_size = match image_size_parameter {
+        ImageGenerationSizeParameter::Unsupported => None,
+        ImageGenerationSizeParameter::Supported => Some(match size {
             ImageSizePreference::Custom { width, height } => {
                 let edge = width.get().max(height.get());
                 if edge > 2048 {
@@ -221,7 +206,7 @@ fn gemini_base_image_output_options(
                 }
             }
             _ => GeminiImageSize::OneK,
-        })
+        }),
     };
     GeminiImageOutputOptions {
         aspect_ratio,
@@ -235,6 +220,9 @@ mod tests {
     use meerkat_core::image_generation::{
         ImageFormatPreference, ImageGenerationIntent, ImageGenerationTargetPreference,
         ImageQualityPreference, PromptSource, PromptText, ToolCallId,
+    };
+    use meerkat_core::model_profile::catalog::{
+        default_image_generation_model, image_generation_model,
     };
     use serde_json::json;
 
@@ -275,6 +263,11 @@ mod tests {
         serde_json::from_str("\"00000000-0000-0000-0000-000000000001\"")
     }
 
+    fn gemini_image_profile(model: &str) -> ImageGenerationModelProfile {
+        image_generation_model(Provider::Gemini, model)
+            .unwrap_or_else(|| panic!("Gemini image profile for {model} must be cataloged"))
+    }
+
     #[test]
     fn profile_carries_gemini_provider_params_in_private_plan()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -282,11 +275,13 @@ mod tests {
             "aspect_ratio": "16:9",
             "image_size": "2K"
         }))?;
+        let profile = default_image_generation_model(Provider::Gemini)
+            .expect("Gemini default image profile must be cataloged");
 
         let resolution = GeminiImageGenerationProfile
             .resolve_execution_plan(
                 operation_id()?,
-                &ModelId::new(GEMINI_IMAGE_DEFAULT_MODEL),
+                &profile,
                 &request,
                 capabilities(),
                 NonZeroU32::MIN,
@@ -306,10 +301,12 @@ mod tests {
     #[test]
     fn profile_rejects_invalid_gemini_provider_params() -> Result<(), Box<dyn std::error::Error>> {
         let request = generate_request(json!({"aspect_ratio": "21:9"}))?;
+        let profile = default_image_generation_model(Provider::Gemini)
+            .expect("Gemini default image profile must be cataloged");
 
         let result = GeminiImageGenerationProfile.resolve_execution_plan(
             operation_id()?,
-            &ModelId::new(GEMINI_IMAGE_DEFAULT_MODEL),
+            &profile,
             &request,
             capabilities(),
             NonZeroU32::MIN,
@@ -323,22 +320,28 @@ mod tests {
     }
 
     #[test]
-    fn profile_rejects_non_image_gemini_models() -> Result<(), Box<dyn std::error::Error>> {
-        let request = generate_request(serde_json::Value::Null)?;
+    fn catalog_rejects_non_image_gemini_models() {
+        assert!(image_generation_model(Provider::Gemini, "gemini-3-flash-preview").is_none());
+    }
 
-        assert!(!GeminiImageGenerationProfile.owns_model("gemini-3-flash-preview"));
-        let result = GeminiImageGenerationProfile.resolve_execution_plan(
-            operation_id()?,
-            &ModelId::new("gemini-3-flash-preview"),
-            &request,
-            capabilities(),
-            NonZeroU32::MIN,
-        );
+    #[test]
+    fn profile_uses_catalog_image_size_support() -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({}))?;
+        let profile = gemini_image_profile("gemini-2.5-flash-image");
 
-        assert!(matches!(
-            result,
-            Err(ImageOperationDenialReason::UnsupportedTarget)
-        ));
+        let resolution = GeminiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &profile,
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        let plan: GeminiImageTurnPlan =
+            serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(plan.output.image_size, None);
         Ok(())
     }
 }

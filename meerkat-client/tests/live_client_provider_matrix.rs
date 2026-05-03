@@ -25,7 +25,7 @@ use meerkat_gemini::{GeminiImageOutputOptions, GeminiImageTurnPlan};
 use meerkat_llm_core::{ImageGenerationExecutor, ProviderImageGenerationRequest};
 use meerkat_openai::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
-    OpenAiImagesApiPlan, OpenAiResponsesImagePlan,
+    OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
 };
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
@@ -240,6 +240,7 @@ async fn e2e_smoke_openai_live_image_generation() -> Result<(), Box<dyn std::err
                 requires_scoped_override: false,
                 provider_plan: serde_json::to_value(OpenAiImagesApiPlan {
                     endpoint: OpenAiImagesApiEndpoint::Generations,
+                    request_shape: OpenAiImagesApiRequestShape::GptImage,
                     output: OpenAiImageOutputOptions::default(),
                     provider_params: OpenAiImageProviderParams::default(),
                 })?,

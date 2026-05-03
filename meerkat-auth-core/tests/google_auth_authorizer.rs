@@ -215,6 +215,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,
@@ -266,6 +267,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(new_expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,
@@ -434,8 +436,8 @@ async fn service_account_path_signs_jwt_and_gets_token() {
         .unwrap();
     assert_eq!(auth.1, "Bearer sa-access-token");
     assert!(
-        authorizer.expires_at().is_some(),
-        "service-account token expiry must be observable through HttpAuthorizer"
+        authorizer.expires_at().is_none(),
+        "Google token expiry is only projected from AuthMachine lease truth"
     );
     assert_eq!(mock.counter.load(Ordering::SeqCst), 1);
     let captured = mock.captured.lock().unwrap();
@@ -550,7 +552,7 @@ async fn default_chain_falls_through_to_metadata_when_no_sa_and_no_user_adc() {
 }
 
 #[tokio::test]
-async fn token_is_cached_between_calls() {
+async fn provider_local_cache_without_auth_lease_is_not_reused_as_fresh() {
     let mock = start_mock("cached-sa-token").await;
     let tempdir = tempfile::tempdir().unwrap();
     let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
@@ -579,8 +581,69 @@ async fn token_is_cached_between_calls() {
     }
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
-        1,
-        "expected single fetch with caching"
+        4,
+        "provider-local cache must not decide freshness without AuthMachine lease truth"
+    );
+}
+
+#[tokio::test]
+async fn provider_local_cache_without_auth_lease_fails_closed_instead_of_reuse() {
+    let mock = start_mock_with_config(
+        "cached-without-lease",
+        vec![3600],
+        Some(MockFailure {
+            from_call: 2,
+            status: axum::http::StatusCode::UNAUTHORIZED,
+            body: serde_json::json!({"error": "invalid_client"}),
+        }),
+    )
+    .await;
+    let tempdir = tempfile::tempdir().unwrap();
+    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
+    let env_lookup = {
+        let sa_path = sa_path.clone();
+        Arc::new(move |k: &str| {
+            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
+                Some(sa_path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+    };
+    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+        .with_home_dir(tempdir.path())
+        .with_token_url_override(format!("{}/token", mock.base_url));
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+
+    assert!(
+        matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
+        "second authorize must refetch and fail without lease freshness, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "stale provider-local cache must not attach an authorization header without AuthMachine lease truth"
+    );
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "second authorize must reach the token endpoint instead of treating the private cache as fresh"
     );
 }
 
@@ -748,7 +811,7 @@ async fn observer_failure_fails_closed_without_authorization_header() {
 }
 
 #[tokio::test]
-async fn short_lived_token_expiry_is_observable_and_refetched() {
+async fn short_lived_token_without_auth_lease_refetches_without_expiry_projection() {
     let mock = start_mock_with_expiry("short-lived-sa-token", 30).await;
     let tempdir = tempfile::tempdir().unwrap();
     let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
@@ -776,17 +839,14 @@ async fn short_lived_token_expiry_is_observable_and_refetched() {
         authorizer.authorize(&mut req).await.unwrap();
     }
 
-    let expires_at = authorizer
-        .expires_at()
-        .expect("short-lived token expiry should be projected");
     assert!(
-        expires_at > Utc::now(),
-        "cached expiry should carry the token endpoint's expires_in"
+        authorizer.expires_at().is_none(),
+        "provider-local expiry must not be projected without AuthMachine lease truth"
     );
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
         2,
-        "token inside the canonical refresh window must be refetched"
+        "token without AuthMachine lease truth must be refetched"
     );
 }
 
@@ -844,6 +904,12 @@ async fn token_endpoint_transient_failure_keeps_auth_lease_retryable() {
     assert!(
         matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
         "token endpoint outage should still fail the caller visibly, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "refresh failure must not fall back to the stale provider-local token"
     );
 
     let snapshot = handle.snapshot(&lease_key);

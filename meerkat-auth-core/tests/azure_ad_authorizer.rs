@@ -183,6 +183,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,
@@ -234,6 +235,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: Some(new_expires_at),
             credential_present: true,
             generation,
+            credential_published_at_millis: None,
         };
         Ok(AuthLeaseTransition {
             generation,
@@ -377,8 +379,8 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
         .unwrap();
     assert_eq!(auth.1, "Bearer azure-access-token-xyz");
     assert!(
-        authorizer.expires_at().is_some(),
-        "Azure AD token expiry must be observable through HttpAuthorizer"
+        authorizer.expires_at().is_none(),
+        "Azure AD expiry is only projected from AuthMachine lease truth"
     );
 
     let captured = mock.captured.lock().unwrap();
@@ -393,7 +395,7 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
 }
 
 #[tokio::test]
-async fn token_is_cached_between_authorize_calls() {
+async fn provider_local_cache_without_auth_lease_is_not_reused_as_fresh() {
     let mock = start_mock("cached-token", 3600).await;
     let authorizer = AzureAdAuthorizer::new(
         "https://cognitiveservices.azure.com/.default",
@@ -412,14 +414,56 @@ async fn token_is_cached_between_authorize_calls() {
     }
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
-        1,
-        "expected 1 token fetch, got {}",
+        5,
+        "provider-local cache must not decide freshness without AuthMachine lease truth; got {} token fetches",
         mock.counter.load(Ordering::SeqCst),
     );
 }
 
 #[tokio::test]
-async fn short_lived_token_expiry_is_observable_and_refetched() {
+async fn provider_local_cache_without_auth_lease_fails_closed_instead_of_reuse() {
+    let mock = start_mock_with_failure("cached-without-lease", 3600, Some(2)).await;
+    let authorizer = AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds(&mock.base_url),
+    )
+    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+
+    assert!(
+        matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
+        "second authorize must refetch and fail without lease freshness, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "stale provider-local cache must not attach an authorization header without AuthMachine lease truth"
+    );
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "second authorize must reach the token endpoint instead of treating the private cache as fresh"
+    );
+}
+
+#[tokio::test]
+async fn short_lived_token_without_auth_lease_refetches_without_expiry_projection() {
     let mock = start_mock("short-lived-token", 30).await;
     let authorizer = AzureAdAuthorizer::new(
         "https://cognitiveservices.azure.com/.default",
@@ -437,17 +481,14 @@ async fn short_lived_token_expiry_is_observable_and_refetched() {
         authorizer.authorize(&mut req).await.unwrap();
     }
 
-    let expires_at = authorizer
-        .expires_at()
-        .expect("short-lived token expiry should be projected");
     assert!(
-        expires_at > Utc::now(),
-        "cached expiry should carry the token endpoint's expires_in"
+        authorizer.expires_at().is_none(),
+        "provider-local expiry must not be projected without AuthMachine lease truth"
     );
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
         2,
-        "token inside the canonical refresh window must be refetched"
+        "token without AuthMachine lease truth must be refetched"
     );
 }
 
@@ -666,6 +707,12 @@ async fn refresh_failure_is_visible_on_auth_lease_snapshot() {
     assert!(
         matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
         "token endpoint failure should still surface as refresh failure, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "refresh failure must not fall back to the stale provider-local token"
     );
 
     let snapshot = handle.snapshot(&lease_key);

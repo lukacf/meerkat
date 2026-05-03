@@ -130,21 +130,11 @@ pub use realtime::{
 };
 pub use result::WireRunResult;
 pub use runtime::{
-    InputListParams,
-    InputListResult,
-    InputStateParams,
-    InputStateResult,
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams,
     RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusParams,
     RuntimeRealtimeAttachmentStatusResult,
-    RuntimeResetParams,
-    RuntimeResetResult,
-    RuntimeRetireParams,
-    RuntimeRetireResult,
-    RuntimeStateParams,
     RuntimeStateResult,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,

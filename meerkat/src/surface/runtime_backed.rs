@@ -520,7 +520,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
+            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

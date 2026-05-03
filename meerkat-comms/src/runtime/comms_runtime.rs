@@ -1331,6 +1331,33 @@ impl CommsRuntime {
         config: ResolvedCommsConfig,
         silent_intents: Arc<HashSet<String>>,
     ) -> Result<Self, CommsRuntimeError> {
+        Self::new_with_silent_intents_and_machine_authority_requirement(
+            config,
+            silent_intents,
+            false,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_machine_authority_required_with_silent_intents(
+        config: ResolvedCommsConfig,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
+        Self::new_with_silent_intents_and_machine_authority_requirement(
+            config,
+            silent_intents,
+            true,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn new_with_silent_intents_and_machine_authority_requirement(
+        config: ResolvedCommsConfig,
+        silent_intents: Arc<HashSet<String>>,
+        require_machine_authority: bool,
+    ) -> Result<Self, CommsRuntimeError> {
         // Always load keypair and trusted peers — outbound routing needs them
         // regardless of auth mode. The auth mode only affects the external
         // event listener, not the signed agent-to-agent path.
@@ -1347,7 +1374,8 @@ impl CommsRuntime {
 
         // Build classified inbox using the same trusted_peers Arc
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
-        let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(false));
+        let require_peer_comms_machine_authority =
+            Arc::new(AtomicBool::new(require_machine_authority));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
             trusted_peers: trusted_peers.clone(),
@@ -1691,6 +1719,11 @@ impl CommsRuntime {
     pub fn require_peer_comms_machine_authority(&self) {
         self.require_peer_comms_machine_authority
             .store(true, Ordering::SeqCst);
+    }
+
+    pub fn peer_comms_machine_authority_required(&self) -> bool {
+        self.require_peer_comms_machine_authority
+            .load(Ordering::SeqCst)
     }
 
     pub fn peer_comms_handle(&self) -> Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>> {
@@ -3223,6 +3256,70 @@ mod tests {
             require_peer_auth: true,
             allow_external_unauthenticated: false,
         }
+    }
+
+    #[tokio::test]
+    async fn machine_required_tcp_runtime_rejects_ingress_before_handle_or_listener_start() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("pre-authority-sender-{suffix}");
+        let receiver_name = format!("pre-authority-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let mut config = test_runtime_config(&receiver_name, &tmp);
+        config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
+        let receiver = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(receiver.peer_comms_machine_authority_required());
+        assert!(receiver.peer_comms_handle().is_none());
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: peer_route(&receiver_name, receiver.public_key()),
+                body: "must not pass local classifier".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::ClassificationRejected
+            })
+        ));
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert!(
+            interactions.is_empty(),
+            "runtime-required ingress without a machine handle must not reach the inbox"
+        );
     }
 
     fn signed_envelope(from: &Keypair, to: PubKey, kind: MessageKind) -> Envelope {

@@ -270,12 +270,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         load_managed_store_tokens_with_lifecycle(env, binding).await?;
                     let lifecycle = managed.lifecycle;
                     let persisted = managed.tokens.clone();
-                    use chrono::{Duration, Utc};
-                    let fresh = persisted
-                        .expires_at
-                        .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
                     let effective_tokens = if lifecycle == ManagedStoreLifecycle::Authorized
-                        && fresh
                         && persisted.primary_secret.is_some()
                         && !env.force_refresh
                     {

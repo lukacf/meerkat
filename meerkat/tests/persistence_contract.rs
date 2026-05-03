@@ -386,6 +386,7 @@ mod tests {
             .expect("persisted session should exist");
         let persisted_state = persisted
             .tool_visibility_state()
+            .expect("persisted visibility state should decode")
             .expect("catalog-load run should persist visibility state");
         assert!(
             persisted_state
@@ -431,6 +432,7 @@ mod tests {
             .expect("resumed live session should export");
         let resumed_state = resumed_live
             .tool_visibility_state()
+            .expect("resumed visibility state should decode")
             .expect("resumed session should carry visibility state");
         assert_eq!(
             resumed_state

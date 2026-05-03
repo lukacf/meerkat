@@ -19,6 +19,8 @@ use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
 
+use crate::error;
+use crate::protocol::RpcError;
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
 #[cfg(feature = "mob")]
@@ -33,6 +35,14 @@ pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_service: Arc<dyn SessionService>,
     session_id: SessionId,
+}
+
+fn rpc_error_to_core_executor_error(err: RpcError) -> CoreExecutorError {
+    if err.code == error::REQUEST_CANCELLED {
+        CoreExecutorError::cancelled()
+    } else {
+        CoreExecutorError::apply_failed_runtime_turn(err.message)
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -421,7 +431,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         Some(pre_admission),
                     )
                     .await
-                    .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.message))
+                    .map_err(rpc_error_to_core_executor_error)
             }
             (_, pre_admission) => {
                 drop(pre_admission);
@@ -445,7 +455,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         primitive.contributing_input_ids().to_vec(),
                     )
                     .await
-                    .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
+                    .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
             }
         };
 

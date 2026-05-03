@@ -4058,6 +4058,7 @@ async fn commit_runtime_turn_text(
             match completion_handle.wait().await {
                 meerkat_runtime::completion::CompletionOutcome::Completed(_)
                 | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+                | meerkat_runtime::completion::CompletionOutcome::Cancelled
                 | meerkat_runtime::completion::CompletionOutcome::Abandoned(_)
                 | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_) => {
                     frames.push(channel_event(RealtimeEvent::TurnCompleted));

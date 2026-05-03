@@ -17,11 +17,10 @@ use crate::classify::IngressClassificationContext;
 use crate::classify::PreparedIngressItem;
 use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
-use crate::types::{Envelope, InboxItem, MessageKind};
+use crate::types::{Envelope, InboxItem};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
-    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
-    PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressKind, PeerIngressMachinePolicy,
+    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressFact, PeerIngressKind,
     PeerIngressQueueSnapshot, PeerInputClass, TerminalityClass,
 };
 
@@ -595,7 +594,11 @@ impl InboxSender {
             return self.send_classified(InboxItem::External { envelope });
         }
 
-        let auth = ingress_auth_decision(&envelope.kind);
+        // Raw inbox ingress is transport mechanics only. It must not reconstruct
+        // auth exemptions, lifecycle intent, or response terminality from the
+        // compatibility classifier; those facts exist only on the classified
+        // runtime/machine path.
+        let auth = PeerIngressAuthDecision::Required;
         if require_peer_auth
             && !auth.is_exempt()
             && !trusted_peers.read().is_trusted(&envelope.from)
@@ -793,44 +796,6 @@ impl Drop for Inbox {
             queue.lock().close();
         }
     }
-}
-
-fn ingress_auth_decision(kind: &MessageKind) -> PeerIngressAuthDecision {
-    let facts = PeerIngressEnvelopeFacts {
-        item_id: String::new(),
-        from_peer: String::new(),
-        from_peer_id: meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::nil()),
-        kind: match kind {
-            MessageKind::Message { body, .. } => {
-                PeerIngressEnvelopeKind::Message { body: body.clone() }
-            }
-            MessageKind::Request { intent, params, .. } => PeerIngressEnvelopeKind::Request {
-                intent: intent.clone(),
-                params: params.clone(),
-            },
-            MessageKind::Lifecycle { kind, params } => PeerIngressEnvelopeKind::Lifecycle {
-                kind: *kind,
-                params: params.clone(),
-            },
-            MessageKind::Response {
-                in_reply_to,
-                status,
-                result,
-                ..
-            } => PeerIngressEnvelopeKind::Response {
-                in_reply_to: in_reply_to.to_string(),
-                status: (*status).into(),
-                result: result.clone(),
-            },
-            MessageKind::Ack { in_reply_to } => PeerIngressEnvelopeKind::Ack {
-                in_reply_to: in_reply_to.to_string(),
-            },
-        },
-    };
-    PeerIngressMachinePolicy::default()
-        .classify_external_envelope(&facts)
-        .classification
-        .auth
 }
 
 fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
@@ -1123,6 +1088,7 @@ mod tests {
 
     use crate::classify::IngressClassificationContext;
     use crate::trust::{TrustedPeer, TrustedPeers};
+    use meerkat_core::PeerIngressMachinePolicy;
     use std::sync::atomic::AtomicUsize;
 
     fn make_classification_context(
@@ -1708,6 +1674,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_runtime_required_response_without_machine_authority_fails_closed() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
+        ctx.require_machine_authority.store(true, Ordering::SeqCst);
+        let (mut inbox, sender) = Inbox::new_classified(ctx);
+
+        let outcome = sender.send_classified(InboxItem::External {
+            envelope: make_response_envelope(Uuid::new_v4()),
+        });
+
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            },
+            "runtime-backed peer response must not be accepted or terminalized by the compatibility classifier"
+        );
+        assert_eq!(inbox.dropped_count(), Some(1));
+        assert_eq!(inbox.try_drain_classified().len(), 0);
+    }
+
+    #[tokio::test]
     async fn test_classified_full_queue_returns_typed_drop_reason() {
         // InboxFull drops surface as typed `Dropped { InboxFull }` with the
         // counter bumped. We build a classified queue at capacity 1 by using
@@ -1752,10 +1740,10 @@ mod tests {
     }
 
     #[test]
-    fn test_raw_connection_ingress_allows_auth_exempt_bridge_request() {
-        // DOGMA-12 defensive scan: raw transport ingress must not invent its
-        // own "drop bridge bootstrap traffic" rule. Auth-exempt bridge
-        // requests still flow through the canonical inbox admission seam.
+    fn test_raw_connection_ingress_rejects_untrusted_bridge_without_machine_authority() {
+        // Raw transport ingress is not a classification authority. Without the
+        // classified runtime/machine path, it cannot infer supervisor-bridge
+        // auth exemption from a local compatibility policy.
         let receiver = crate::identity::Keypair::generate();
         let sender = crate::identity::Keypair::generate();
         let trusted = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
@@ -1773,23 +1761,16 @@ mod tests {
             sig: crate::identity::Signature::new([0u8; 64]),
         };
         envelope.sign(&sender);
-        let envelope_id = envelope.id;
 
         let outcome = inbox_sender.send_connection_ingress(envelope, true, &trusted);
-        assert_eq!(outcome, AdmissionOutcome::Admitted);
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::UntrustedSender
+            }
+        );
 
         let items = inbox.try_drain();
-        assert_eq!(items.len(), 1, "auth-exempt ingress must reach the inbox");
-        match &items[0] {
-            InboxItem::External { envelope } => {
-                assert_eq!(envelope.id, envelope_id);
-                assert!(matches!(
-                    envelope.kind,
-                    MessageKind::Request { ref intent, .. }
-                        if intent == meerkat_core::SUPERVISOR_BRIDGE_INTENT
-                ));
-            }
-            _ => panic!("expected External ingress item"),
-        }
+        assert!(items.is_empty(), "raw ingress must fail closed");
     }
 }

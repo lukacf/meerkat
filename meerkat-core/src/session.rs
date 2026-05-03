@@ -1004,10 +1004,13 @@ impl Session {
     }
 
     /// Load durable tool-visibility control state from the session metadata map.
-    pub fn tool_visibility_state(&self) -> Option<SessionToolVisibilityState> {
+    pub fn tool_visibility_state(
+        &self,
+    ) -> Result<Option<SessionToolVisibilityState>, serde_json::Error> {
         self.metadata
             .get(SESSION_TOOL_VISIBILITY_STATE_KEY)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
     }
 
     /// Store typed mob operator authority inside canonical build-state metadata.
@@ -1577,7 +1580,25 @@ mod tests {
         session
             .set_tool_visibility_state(state.clone())
             .expect("tool visibility state should serialize");
-        assert_eq!(session.tool_visibility_state(), Some(state));
+        assert_eq!(session.tool_visibility_state().unwrap(), Some(state));
+    }
+
+    #[test]
+    fn test_session_tool_visibility_state_malformed_returns_error() {
+        let mut session = Session::new();
+        session.set_metadata(
+            SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::json!({
+                "active_filter": {
+                    "unexpected_filter_kind": ["secret"]
+                }
+            }),
+        );
+
+        assert!(
+            session.tool_visibility_state().is_err(),
+            "malformed canonical visibility metadata must not decode as absent/default"
+        );
     }
 
     #[test]

@@ -399,6 +399,28 @@ fn write_user_adc(dir: &std::path::Path, token_url: &str) -> std::path::PathBuf 
     path
 }
 
+fn with_recording_auth_lease(
+    authorizer: GoogleAuthAuthorizer,
+    profile_id: &str,
+) -> (
+    GoogleAuthAuthorizer,
+    Arc<RecordingAuthLeaseHandle>,
+    LeaseKey,
+) {
+    let handle = Arc::new(RecordingAuthLeaseHandle::default());
+    let lease_key = LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("gemini").unwrap(),
+        Some(ProfileId::parse(profile_id).unwrap()),
+    );
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    (
+        authorizer.with_auth_lease_observer(lease_handle, lease_key.clone()),
+        handle,
+        lease_key,
+    )
+}
+
 // --- Service account path ---------------------------------------------
 
 #[tokio::test]
@@ -418,9 +440,12 @@ async fn service_account_path_signs_jwt_and_gets_token() {
         }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
     };
 
-    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
-        .with_home_dir(tempdir.path()) // empty home, no user ADC
-        .with_token_url_override(format!("{}/token", mock.base_url));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+            .with_home_dir(tempdir.path()) // empty home, no user ADC
+            .with_token_url_override(format!("{}/token", mock.base_url)),
+        "google_adc",
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -437,7 +462,7 @@ async fn service_account_path_signs_jwt_and_gets_token() {
     assert_eq!(auth.1, "Bearer sa-access-token");
     assert!(
         authorizer.expires_at().is_some(),
-        "service-account token expiry must be observable through HttpAuthorizer"
+        "Google token expiry must be projected from AuthMachine lease truth"
     );
     assert_eq!(mock.counter.load(Ordering::SeqCst), 1);
     let captured = mock.captured.lock().unwrap();
@@ -462,9 +487,12 @@ async fn user_adc_path_uses_refresh_token_flow() {
     let env_lookup =
         Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
-        .with_home_dir(tempdir.path())
-        .with_token_url_override(format!("{}/token", mock.base_url));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+            .with_home_dir(tempdir.path())
+            .with_token_url_override(format!("{}/token", mock.base_url)),
+        "google_user_adc",
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -499,12 +527,14 @@ async fn compute_only_chain_uses_metadata_server() {
     let env_lookup =
         Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-    let authorizer =
+    let (authorizer, _, _) = with_recording_auth_lease(
         GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::ComputeOnly, env_lookup)
             .with_metadata_url_override(format!(
                 "{}/computeMetadata/v1/instance/service-accounts/default/token",
                 mock.base_url
-            ));
+            )),
+        "google_metadata",
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -530,12 +560,15 @@ async fn default_chain_falls_through_to_metadata_when_no_sa_and_no_user_adc() {
     let env_lookup =
         Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
-        .with_home_dir(tempdir.path())
-        .with_metadata_url_override(format!(
-            "{}/computeMetadata/v1/instance/service-accounts/default/token",
-            mock.base_url
-        ));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+            .with_home_dir(tempdir.path())
+            .with_metadata_url_override(format!(
+                "{}/computeMetadata/v1/instance/service-accounts/default/token",
+                mock.base_url
+            )),
+        "google_default_metadata",
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -552,7 +585,7 @@ async fn default_chain_falls_through_to_metadata_when_no_sa_and_no_user_adc() {
 }
 
 #[tokio::test]
-async fn token_is_cached_between_calls() {
+async fn authorize_without_auth_lease_observer_fails_closed_before_token_fetch() {
     let mock = start_mock("cached-sa-token").await;
     let tempdir = tempfile::tempdir().unwrap();
     let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
@@ -570,19 +603,28 @@ async fn token_is_cached_between_calls() {
         .with_home_dir(tempdir.path())
         .with_token_url_override(format!("{}/token", mock.base_url));
 
-    for _ in 0..4 {
-        let mut headers = Vec::new();
-        let mut req = HttpAuthorizationRequest {
-            method: "POST",
-            url: "https://x.googleapis.com/",
-            headers: &mut headers,
-        };
-        authorizer.authorize(&mut req).await.unwrap();
-    }
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+
+    assert!(
+        matches!(err, meerkat_core::AuthError::HostOwnedUnavailable),
+        "cloud authorizer must fail closed without AuthMachine ownership, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "observer-absent cloud authorizer must not attach an authorization header"
+    );
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
-        1,
-        "expected single fetch with caching"
+        0,
+        "observer-absent cloud authorizer must not fetch a provider-local token"
     );
 }
 
@@ -750,49 +792,6 @@ async fn observer_failure_fails_closed_without_authorization_header() {
 }
 
 #[tokio::test]
-async fn short_lived_token_expiry_is_observable_and_refetched() {
-    let mock = start_mock_with_expiry("short-lived-sa-token", 30).await;
-    let tempdir = tempfile::tempdir().unwrap();
-    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
-    let env_lookup = {
-        let sa_path = sa_path.clone();
-        Arc::new(move |k: &str| {
-            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
-                Some(sa_path.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
-    };
-    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
-        .with_home_dir(tempdir.path())
-        .with_token_url_override(format!("{}/token", mock.base_url));
-
-    for _ in 0..2 {
-        let mut headers = Vec::new();
-        let mut req = HttpAuthorizationRequest {
-            method: "POST",
-            url: "https://x.googleapis.com/",
-            headers: &mut headers,
-        };
-        authorizer.authorize(&mut req).await.unwrap();
-    }
-
-    let expires_at = authorizer
-        .expires_at()
-        .expect("short-lived token expiry should be projected");
-    assert!(
-        expires_at > Utc::now(),
-        "cached expiry should carry the token endpoint's expires_in"
-    );
-    assert_eq!(
-        mock.counter.load(Ordering::SeqCst),
-        2,
-        "token inside the canonical refresh window must be refetched"
-    );
-}
-
-#[tokio::test]
 async fn token_endpoint_transient_failure_keeps_auth_lease_retryable() {
     let mock = start_mock_with_config(
         "google-transient-token",
@@ -846,6 +845,12 @@ async fn token_endpoint_transient_failure_keeps_auth_lease_retryable() {
     assert!(
         matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
         "token endpoint outage should still fail the caller visibly, got {err:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "refresh failure must not fall back to the stale provider-local token"
     );
 
     let snapshot = handle.snapshot(&lease_key);
@@ -1005,11 +1010,14 @@ async fn missing_credentials_surface_missing_secret() {
     let tempdir = tempfile::tempdir().unwrap();
     let env_lookup =
         Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
-        .with_home_dir(tempdir.path())
-        .with_metadata_url_override(format!(
-            "http://{addr}/computeMetadata/v1/instance/service-accounts/default/token"
-        ));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+            .with_home_dir(tempdir.path())
+            .with_metadata_url_override(format!(
+                "http://{addr}/computeMetadata/v1/instance/service-accounts/default/token"
+            )),
+        "google_missing",
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {

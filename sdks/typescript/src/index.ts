@@ -128,8 +128,6 @@ export type {
 export { CONTRACT_VERSION } from "./generated/types.js";
 export type {
   CatalogModelEntry,
-  InputListParams,
-  InputListResult,
   McpAddParams,
   ModelsCatalogResponse,
   McpRemoveParams,
@@ -199,14 +197,8 @@ export type {
   RealtimeTextDelta,
   RealtimeTurningMode,
   RealtimeVideoChunk,
-  RuntimeAcceptParams,
   RuntimeAcceptResult,
   RuntimeRealtimeAttachmentStatusResult,
-  RuntimeResetParams,
-  RuntimeResetResult,
-  RuntimeRetireParams,
-  RuntimeRetireResult,
-  RuntimeStateParams,
   RuntimeStateResult,
   WireModelProfile,
   WireModelTier,

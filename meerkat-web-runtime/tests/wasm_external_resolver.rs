@@ -34,9 +34,9 @@ use wasm_bindgen_test::wasm_bindgen_test;
 
 fn test_binding() -> ValidatedBinding {
     let backend = BackendProfile {
-        id: "chatgpt-backend".into(),
+        id: "openai-backend".into(),
         provider: Provider::OpenAI,
-        backend_kind: "chatgpt_backend".into(),
+        backend_kind: "openai_api".into(),
         base_url: None,
         options: serde_json::Value::Null,
     };
@@ -53,14 +53,14 @@ fn test_binding() -> ValidatedBinding {
     ProviderRuntimeCatalog::validate_binding(
         &ConnectionRef {
             realm: RealmId::parse("browser").expect("realm"),
-            binding: BindingId::parse("chatgpt").expect("binding"),
+            binding: BindingId::parse("openai").expect("binding"),
             profile: Some(ProfileId::parse("primary").expect("profile")),
         },
         &backend,
         &auth,
         &BindingPolicy::default(),
     )
-    .expect("chatgpt external authorizer binding")
+    .expect("openai external authorizer binding")
 }
 
 fn register_eval_callback(source: &str) {
@@ -164,7 +164,7 @@ async fn resolver_preserves_typed_inline_secret_expiration_and_metadata() {
             (function (connectionRef) {
                 if (
                     connectionRef.realm !== "browser" ||
-                    connectionRef.binding !== "chatgpt" ||
+                    connectionRef.binding !== "openai" ||
                     connectionRef.profile !== "primary"
                 ) {
                     return Promise.reject({

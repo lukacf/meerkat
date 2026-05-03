@@ -12,7 +12,8 @@
 //!   2. Environment variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
 //!   3. `AZURE_AUTHORITY_HOST` override (defaults to `login.microsoftonline.com`)
 //!
-//! Tokens are cached as a private implementation detail; reuse requires
+//! Tokens are cached as a private implementation detail; every authorize
+//! path requires AuthMachine lease observation, and cache reuse requires
 //! AuthMachine lease freshness. Refresh is single-flight via an internal
 //! mutex.
 
@@ -96,7 +97,7 @@ struct CachedToken {
     access_token: String,
     expires_at: DateTime<Utc>,
     // Private cache provenance only; freshness is decided by the
-    // AuthMachine lease snapshot when an observer is installed.
+    // required AuthMachine lease snapshot.
     lease_generation: Option<u64>,
 }
 
@@ -198,10 +199,11 @@ impl AzureAdAuthorizer {
             .and_then(LeaseFreshnessObserver::expires_at)
     }
 
-    fn fresh_cached_token(&self, now: DateTime<Utc>) -> Result<Option<String>, AuthError> {
-        let Some(observer) = &self.lease_observer else {
-            return Ok(None);
-        };
+    fn fresh_cached_token(
+        &self,
+        observer: &LeaseFreshnessObserver,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, AuthError> {
         let Some((access_token, expires_at, lease_generation)) = ({
             let guard = self.cache.lock();
             guard
@@ -217,42 +219,38 @@ impl AzureAdAuthorizer {
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
+        let Some(observer) = &self.lease_observer else {
+            return Err(AuthError::HostOwnedUnavailable);
+        };
+
         // Check cache without taking the refresh path.
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
             return Ok(access_token);
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
             return Ok(access_token);
         }
 
-        let lifecycle = if let Some(observer) = &self.lease_observer {
-            Some(observer.begin_refresh(&self.label).await?)
-        } else {
-            None
-        };
+        let lifecycle = observer.begin_refresh(&self.label).await?;
 
         // Miss — fetch a fresh token.
         let mut new_token = match self.fetch_token().await {
             Ok(token) => token,
             Err(err) => {
-                if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        azure_refresh_failure_is_permanent(&err),
-                    )?;
-                }
+                observer.refresh_failed(
+                    &self.label,
+                    lifecycle,
+                    azure_refresh_failure_is_permanent(&err),
+                )?;
                 return Err(err.into());
             }
         };
         let access = new_token.access_token.clone();
         let expires_at = new_token.expires_at;
-        if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            new_token.lease_generation =
-                Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
-        }
+        new_token.lease_generation =
+            Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
         *self.cache.lock() = Some(new_token);
         Ok(access)
     }

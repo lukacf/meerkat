@@ -356,14 +356,33 @@ fn creds(token_url_host: &str) -> AzureClientCredentials {
     }
 }
 
+fn with_recording_auth_lease(
+    authorizer: AzureAdAuthorizer,
+) -> (AzureAdAuthorizer, Arc<RecordingAuthLeaseHandle>, LeaseKey) {
+    let handle = Arc::new(RecordingAuthLeaseHandle::default());
+    let lease_key = LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("azure_foundry").unwrap(),
+        Some(ProfileId::parse("foundry_azure_ad").unwrap()),
+    );
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    (
+        authorizer.with_auth_lease_observer(lease_handle, lease_key.clone()),
+        handle,
+        lease_key,
+    )
+}
+
 #[tokio::test]
 async fn authorize_adds_bearer_header_from_token_endpoint() {
     let mock = start_mock("azure-access-token-xyz", 3600).await;
-    let authorizer = AzureAdAuthorizer::new(
-        "https://cognitiveservices.azure.com/.default",
-        creds(&mock.base_url),
-    )
-    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        AzureAdAuthorizer::new(
+            "https://cognitiveservices.azure.com/.default",
+            creds(&mock.base_url),
+        )
+        .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url)),
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -379,8 +398,8 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
         .unwrap();
     assert_eq!(auth.1, "Bearer azure-access-token-xyz");
     assert!(
-        authorizer.expires_at().is_none(),
-        "Azure AD expiry is only projected from AuthMachine lease truth"
+        authorizer.expires_at().is_some(),
+        "Azure AD expiry must be projected from AuthMachine lease truth"
     );
 
     let captured = mock.captured.lock().unwrap();
@@ -395,47 +414,13 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
 }
 
 #[tokio::test]
-async fn provider_local_cache_without_auth_lease_is_not_reused_as_fresh() {
+async fn authorize_without_auth_lease_observer_fails_closed_before_token_fetch() {
     let mock = start_mock("cached-token", 3600).await;
     let authorizer = AzureAdAuthorizer::new(
         "https://cognitiveservices.azure.com/.default",
         creds(&mock.base_url),
     )
     .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
-
-    for _ in 0..5 {
-        let mut headers = Vec::new();
-        let mut req = HttpAuthorizationRequest {
-            method: "POST",
-            url: "https://example.foundry.azure.com/v1/messages",
-            headers: &mut headers,
-        };
-        authorizer.authorize(&mut req).await.unwrap();
-    }
-    assert_eq!(
-        mock.counter.load(Ordering::SeqCst),
-        5,
-        "provider-local cache must not decide freshness without AuthMachine lease truth; got {} token fetches",
-        mock.counter.load(Ordering::SeqCst),
-    );
-}
-
-#[tokio::test]
-async fn provider_local_cache_without_auth_lease_fails_closed_instead_of_reuse() {
-    let mock = start_mock_with_failure("cached-without-lease", 3600, Some(2)).await;
-    let authorizer = AzureAdAuthorizer::new(
-        "https://cognitiveservices.azure.com/.default",
-        creds(&mock.base_url),
-    )
-    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
-
-    let mut headers = Vec::new();
-    let mut req = HttpAuthorizationRequest {
-        method: "POST",
-        url: "https://example.foundry.azure.com/v1/messages",
-        headers: &mut headers,
-    };
-    authorizer.authorize(&mut req).await.unwrap();
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
@@ -446,49 +431,19 @@ async fn provider_local_cache_without_auth_lease_fails_closed_instead_of_reuse()
     let err = authorizer.authorize(&mut req).await.unwrap_err();
 
     assert!(
-        matches!(err, meerkat_core::AuthError::RefreshFailed(_)),
-        "second authorize must refetch and fail without lease freshness, got {err:?}"
+        matches!(err, meerkat_core::AuthError::HostOwnedUnavailable),
+        "cloud authorizer must fail closed without AuthMachine ownership, got {err:?}"
     );
     assert!(
         headers
             .iter()
             .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
-        "stale provider-local cache must not attach an authorization header without AuthMachine lease truth"
+        "observer-absent cloud authorizer must not attach an authorization header"
     );
     assert_eq!(
         mock.counter.load(Ordering::SeqCst),
-        2,
-        "second authorize must reach the token endpoint instead of treating the private cache as fresh"
-    );
-}
-
-#[tokio::test]
-async fn short_lived_token_without_auth_lease_refetches_without_expiry_projection() {
-    let mock = start_mock("short-lived-token", 30).await;
-    let authorizer = AzureAdAuthorizer::new(
-        "https://cognitiveservices.azure.com/.default",
-        creds(&mock.base_url),
-    )
-    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
-
-    for _ in 0..2 {
-        let mut headers = Vec::new();
-        let mut req = HttpAuthorizationRequest {
-            method: "POST",
-            url: "https://example.foundry.azure.com/v1/messages",
-            headers: &mut headers,
-        };
-        authorizer.authorize(&mut req).await.unwrap();
-    }
-
-    assert!(
-        authorizer.expires_at().is_none(),
-        "provider-local expiry must not be projected without AuthMachine lease truth"
-    );
-    assert_eq!(
-        mock.counter.load(Ordering::SeqCst),
-        2,
-        "token without AuthMachine lease truth must be refetched"
+        0,
+        "observer-absent cloud authorizer must not fetch a provider-local token"
     );
 }
 
@@ -1002,11 +957,13 @@ async fn token_endpoint_error_propagates_as_refresh_failed() {
     });
 
     let base_url = format!("http://{addr}");
-    let authorizer = AzureAdAuthorizer::new(
-        "https://cognitiveservices.azure.com/.default",
-        creds(&base_url),
-    )
-    .with_token_url_override(format!("{base_url}/tenant-id/oauth2/v2.0/token"));
+    let (authorizer, _, _) = with_recording_auth_lease(
+        AzureAdAuthorizer::new(
+            "https://cognitiveservices.azure.com/.default",
+            creds(&base_url),
+        )
+        .with_token_url_override(format!("{base_url}/tenant-id/oauth2/v2.0/token")),
+    );
 
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {

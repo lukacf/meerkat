@@ -1210,6 +1210,7 @@ class DogmaCleanupGateTest(unittest.TestCase):
         self.assertIn("github.event.pull_request.head.repo.full_name", workflow)
         self.assertIn("github.event.pull_request.head.sha", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("persist-credentials: false", workflow)
         self.assertIn("Drop checkout credentials", workflow)
         self.assertIn(
             "git -C \"$repo\" config --local --unset-all http.https://github.com/.extraheader",
@@ -1240,7 +1241,7 @@ class DogmaCleanupGateTest(unittest.TestCase):
             'DOGMA_GATE_WORKFLOW_EXEC_ROOT="$GITHUB_WORKSPACE/dogma-gate-source"',
             workflow,
         )
-        self.assertIn('DOGMA_GATE_SCRIPT="$pr_gate_script"', workflow)
+        self.assertIn('DOGMA_GATE_SCRIPT="${pr_gate_script}"', workflow)
         self.assertIn('DOGMA_GATE_FIXTURE_DIR="$base_fixture_dir"', workflow)
         self.assertIn('DOGMA_GATE_FIXTURE_DIR="$pr_fixture_dir"', workflow)
         self.assertIn('python3 "$base_test_script" -v', workflow)

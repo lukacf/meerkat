@@ -216,6 +216,7 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 def test_generated_mob_spawn_many_preserves_nested_contract_types():
     from meerkat.generated.types import (
         MobSpawnManyFailedResult as GeneratedMobSpawnManyFailedResult,
+        MobSpawnManyFailureCause as GeneratedMobSpawnManyFailureCause,
         MobSpawnManyParams as GeneratedMobSpawnManyParams,
         MobSpawnManyResult as GeneratedMobSpawnManyResult,
         MobSpawnManyResultEntry as GeneratedMobSpawnManyResultEntry,
@@ -243,6 +244,10 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
         GeneratedMobSpawnManySpawnedResult,
         GeneratedMobSpawnManyFailedResult,
     )
+    failure_hints = get_type_hints(GeneratedMobSpawnManyFailedResult)
+    assert get_origin(failure_hints["cause"]) is Literal
+    assert "profile_not_found" in get_args(failure_hints["cause"])
+    assert GeneratedMobSpawnManyFailureCause == failure_hints["cause"]
 
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
@@ -261,10 +266,14 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     )
     failure = GeneratedMobSpawnManyResultEntry(
         status="failed",
-        result=GeneratedMobSpawnManyFailedResult(message="profile missing"),
+        result=GeneratedMobSpawnManyFailedResult(
+            cause="profile_not_found",
+            message="profile missing",
+        ),
     )
     result = GeneratedMobSpawnManyResult(results=[entry, failure])
     assert result.results[0].result.member_ref == "opaque-member-ref"
+    assert result.results[1].result.cause == "profile_not_found"
     assert result.results[1].result.message == "profile missing"
 
 
@@ -299,7 +308,10 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
                 },
                 {
                     "status": "failed",
-                    "result": {"message": "profile missing"},
+                    "result": {
+                        "cause": "profile_not_found",
+                        "message": "profile missing",
+                    },
                 },
             ]
         }
@@ -315,6 +327,7 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     assert [entry.status for entry in result.results] == ["spawned", "failed"]
     assert result.results[0].result.agent_identity == "worker-1"
     assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
+    assert result.results[1].result.cause == "profile_not_found"
     assert result.results[1].result.message == "profile missing"
 
 
@@ -332,6 +345,15 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
             ]
         },
         {"results": [{"status": "spawned", "result": {"agent_identity": "worker-1"}}]},
+        {"results": [{"status": "failed", "result": {"message": "profile missing"}}]},
+        {
+            "results": [
+                {
+                    "status": "failed",
+                    "result": {"cause": "future_failure", "message": "profile missing"},
+                }
+            ]
+        },
         {"results": [{"status": "failed", "result": {"message": ""}}]},
         {
             "results": [
@@ -349,7 +371,7 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
             "results": [
                 {
                     "status": "failed",
-                    "result": {"message": "profile missing"},
+                    "result": {"cause": "profile_not_found", "message": "profile missing"},
                     "error": "legacy profile missing",
                 }
             ]
@@ -371,6 +393,7 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
                 {
                     "status": "failed",
                     "result": {
+                        "cause": "profile_not_found",
                         "message": "profile missing",
                         "error": "legacy profile missing",
                     },

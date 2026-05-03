@@ -1692,7 +1692,10 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.to_string()),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(
+                e.spawn_many_failure_cause(),
+                e.to_string(),
+            ),
         })
         .collect();
 
@@ -2859,11 +2862,15 @@ capabilities = [{capability_values}]
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_member_failure_payload_uses_typed_result_message() {
-        let entry = meerkat_contracts::MobSpawnManyResultEntry::failed("profile missing");
+    fn spawn_member_failure_payload_uses_typed_result_cause() {
+        let entry = meerkat_contracts::MobSpawnManyResultEntry::failed(
+            meerkat_contracts::MobSpawnManyFailureCause::ProfileNotFound,
+            "profile missing",
+        );
         let payload = serde_json::to_value(&entry).expect("serialize failed spawn_many result");
 
         assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["result"]["cause"], "profile_not_found");
         assert_eq!(payload["result"]["message"], "profile missing");
         assert!(
             payload.get("error").is_none(),

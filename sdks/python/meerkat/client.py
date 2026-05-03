@@ -121,6 +121,42 @@ from .types import (
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+_MOB_SPAWN_MANY_FAILURE_CAUSES = {
+    "profile_not_found",
+    "member_not_found",
+    "member_already_exists",
+    "not_externally_addressable",
+    "invalid_transition",
+    "wiring_error",
+    "bridge_command_rejected",
+    "member_restore_failed",
+    "kickoff_wait_timed_out",
+    "ready_wait_timed_out",
+    "definition_error",
+    "flow_not_found",
+    "flow_failed",
+    "run_not_found",
+    "run_canceled",
+    "flow_turn_timed_out",
+    "frame_depth_limit_exceeded",
+    "frame_atomic_persistence_unavailable",
+    "spec_revision_conflict",
+    "schema_validation",
+    "insufficient_targets",
+    "topology_violation",
+    "bridge_delivery_rejected",
+    "supervisor_escalation",
+    "unsupported_for_mode",
+    "reset_barrier",
+    "storage_error",
+    "session_error",
+    "comms_error",
+    "callback_pending",
+    "stale_fence_token",
+    "stale_event_cursor",
+    "work_not_found",
+    "internal",
+}
 
 RenderClass = Literal[
     "user_prompt",
@@ -1375,10 +1411,16 @@ class MeerkatClient:
                 )
                 continue
 
-            if set(payload.keys()) - {"message"}:
+            if set(payload.keys()) - {"cause", "message"}:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: failed result has unknown fields",
+                )
+            cause = payload.get("cause")
+            if not isinstance(cause, str) or cause not in _MOB_SPAWN_MANY_FAILURE_CAUSES:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: failed result has invalid cause",
                 )
             message = payload.get("message")
             if not isinstance(message, str) or not message:
@@ -1389,7 +1431,7 @@ class MeerkatClient:
             normalized.append(
                 MobSpawnManyResultEntry(
                     status="failed",
-                    result=MobSpawnManyFailedResult(message=message),
+                    result=MobSpawnManyFailedResult(cause=cause, message=message),
                 )
             )
         return MobSpawnManyResult(results=normalized)

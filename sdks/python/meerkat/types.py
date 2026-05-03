@@ -41,6 +41,7 @@ from .generated.types import (
     MobReconcileReportWire as MobReconcileReportWire,
     MobReconcileResult as MobReconcileResult,
     MobSpawnManyFailedResult as MobSpawnManyFailedResult,
+    MobSpawnManyFailureCause as MobSpawnManyFailureCause,
     MobSpawnManyParams as MobSpawnManyParams,
     MobSpawnManyResult as MobSpawnManyResult,
     MobSpawnManyResultEntry as MobSpawnManyResultEntry,

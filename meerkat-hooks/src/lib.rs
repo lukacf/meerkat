@@ -415,7 +415,7 @@ impl DefaultHookEngine {
                 }
             }
             Ok(Ok(response)) => {
-                outcome.decision = response.decision;
+                outcome.decision = canonicalize_runtime_decision(response.decision, &entry.id);
                 outcome.patches = response.patches;
             }
         }
@@ -742,6 +742,26 @@ impl DefaultHookEngine {
                 reason: format!("invalid HTTP hook response: {err}"),
             }
         })
+    }
+}
+
+fn canonicalize_runtime_decision(
+    decision: Option<HookDecision>,
+    hook_id: &HookId,
+) -> Option<HookDecision> {
+    match decision {
+        Some(HookDecision::Deny {
+            reason_code,
+            message,
+            payload,
+            ..
+        }) => Some(HookDecision::Deny {
+            hook_id: hook_id.clone(),
+            reason_code,
+            message,
+            payload,
+        }),
+        decision => decision,
     }
 }
 
@@ -1425,6 +1445,74 @@ mod tests {
         assert!(matches!(report.decision, Some(HookDecision::Deny { .. })));
         assert_eq!(report.outcomes.len(), 1);
         assert_eq!(observed_runs.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn deny_decision_uses_configured_hook_id_over_runtime_payload() {
+        let configured_hook_id = HookId::new("configured-guardrail");
+        let returned_hook_id = HookId::new("runtime-payload-identity");
+
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: configured_hook_id.clone(),
+            point: HookPoint::PreToolExecution,
+            capability: HookCapability::Guardrail,
+            runtime: runtime_in_process("guardrail"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        engine
+            .register_in_process_handler(
+                "guardrail",
+                static_handler(RuntimeHookResponse {
+                    decision: Some(HookDecision::deny(
+                        returned_hook_id,
+                        HookReasonCode::PolicyViolation,
+                        "deny",
+                        None,
+                    )),
+                    patches: Vec::new(),
+                }),
+            )
+            .await;
+
+        let report = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt_input: None,
+                    prompt: None,
+                    error_report: None,
+                    error_class: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        match report.decision {
+            Some(HookDecision::Deny { hook_id, .. }) => {
+                assert_eq!(hook_id, configured_hook_id);
+            }
+            decision => panic!("expected deny decision, got {decision:?}"),
+        }
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].hook_id, configured_hook_id);
+        match &report.outcomes[0].decision {
+            Some(HookDecision::Deny { hook_id, .. }) => {
+                assert_eq!(hook_id, &configured_hook_id);
+            }
+            decision => panic!("expected outcome deny decision, got {decision:?}"),
+        }
     }
 
     #[tokio::test]

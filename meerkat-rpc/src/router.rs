@@ -68,10 +68,51 @@ fn compose_rpc_mob_external_tools(
 }
 
 #[cfg(all(feature = "mob", feature = "mcp"))]
+pub(crate) struct ConfiguredRpcMobMcpDispatcher {
+    pub(crate) dispatcher: Arc<dyn AgentToolDispatcher>,
+    pub(crate) keepalive: ConfiguredRpcMobMcpKeepalive,
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+pub(crate) struct ConfiguredRpcMobMcpKeepalive {
+    shutdown_tx: std::sync::mpsc::SyncSender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+impl ConfiguredRpcMobMcpKeepalive {
+    fn signal_shutdown(&self) {
+        // Capacity is 1; a second send is a no-op once the first lands.
+        let _ = self.shutdown_tx.try_send(());
+    }
+
+    /// Block until the keepalive runtime thread has exited and the adapter has
+    /// finished its graceful shutdown. Used by tests; production callers rely
+    /// on `Drop` to fire the shutdown signal without blocking.
+    #[cfg(test)]
+    fn shutdown_and_join(mut self) {
+        self.signal_shutdown();
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+impl Drop for ConfiguredRpcMobMcpKeepalive {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        // Detach the join handle: callers on hot drop paths must not block
+        // waiting for the loader runtime to finish `adapter.shutdown()`. The
+        // signal above guarantees the thread will exit on its own.
+    }
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
 fn load_configured_mcp_tools_for_rpc_mob(
     context_root: Option<PathBuf>,
     user_root: Option<PathBuf>,
-) -> Option<Arc<dyn AgentToolDispatcher>> {
+) -> Option<ConfiguredRpcMobMcpDispatcher> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = tokio::runtime::Builder::new_current_thread()
@@ -113,9 +154,10 @@ fn load_configured_mcp_tools_for_rpc_mob(
     }
     let adapter = Arc::new(meerkat::McpRouterAdapter::new(router));
     let adapter_for_poll = adapter.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread_tx = tx.clone();
-    if let Err(error) = std::thread::Builder::new()
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let thread_ready_tx = ready_tx.clone();
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let join = match std::thread::Builder::new()
         .name("rpc-mob-mcp-runtime".to_string())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -124,7 +166,8 @@ fn load_configured_mcp_tools_for_rpc_mob(
             {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    let _ = thread_tx.send(Err(format!("build MCP connect runtime: {error}")));
+                    let _ =
+                        thread_ready_tx.send(Err(format!("build MCP connect runtime: {error}")));
                     return;
                 }
             };
@@ -154,17 +197,25 @@ fn load_configured_mcp_tools_for_rpc_mob(
                     }
                 }
                 .await;
-                let should_keep_alive = result.is_ok();
-                let _ = thread_tx.send(result);
-                if should_keep_alive {
-                    futures::future::pending::<()>().await;
+                let connected = result.is_ok();
+                let _ = thread_ready_tx.send(result);
+                if connected {
+                    // Park the runtime thread on the shutdown signal so that
+                    // configured MCP transports stay open for the lifetime of
+                    // the holder. When the holder drops, the sender is dropped
+                    // and `recv` returns Err, which is the cue to wind down.
+                    let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
                 }
+                adapter_for_poll.shutdown().await;
             });
-        })
-    {
-        let _ = tx.send(Err(format!("spawn MCP connect runtime thread: {error}")));
-    }
-    match rx.recv() {
+        }) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            let _ = ready_tx.send(Err(format!("spawn MCP connect runtime thread: {error}")));
+            None
+        }
+    };
+    match ready_rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(error = %error, "configured MCP tools for RPC mob members did not fully connect before serving");
@@ -173,7 +224,11 @@ fn load_configured_mcp_tools_for_rpc_mob(
             tracing::warn!(error = %error, "MCP connect thread exited without a result");
         }
     }
-    Some(adapter)
+    let keepalive = ConfiguredRpcMobMcpKeepalive { shutdown_tx, join };
+    Some(ConfiguredRpcMobMcpDispatcher {
+        dispatcher: adapter as Arc<dyn AgentToolDispatcher>,
+        keepalive,
+    })
 }
 
 #[cfg(feature = "comms")]
@@ -482,9 +537,18 @@ impl MethodRouter {
             existing
         } else {
             #[cfg(feature = "mcp")]
-            let configured_mcp_tools = {
+            let (configured_mcp_tools, configured_mcp_keepalive): (
+                Option<Arc<dyn AgentToolDispatcher>>,
+                Option<Arc<ConfiguredRpcMobMcpKeepalive>>,
+            ) = {
                 let (context_root, user_root) = runtime.skill_identity_roots();
-                load_configured_mcp_tools_for_rpc_mob(context_root, user_root)
+                match load_configured_mcp_tools_for_rpc_mob(context_root, user_root) {
+                    Some(ConfiguredRpcMobMcpDispatcher {
+                        dispatcher,
+                        keepalive,
+                    }) => (Some(dispatcher), Some(Arc::new(keepalive))),
+                    None => (None, None),
+                }
             };
             #[cfg(not(feature = "mcp"))]
             let configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>> = None;
@@ -502,6 +566,8 @@ impl MethodRouter {
                 let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
                     let runtime = runtime.clone();
                     let configured_mcp_tools = configured_mcp_tools.clone();
+                    #[cfg(feature = "mcp")]
+                    let _configured_mcp_keepalive = configured_mcp_keepalive.clone();
                     move || {
                         let callback_tools: Option<Arc<dyn AgentToolDispatcher>> =
                             runtime.callback_request_tx().map(|tx| {
@@ -2708,9 +2774,12 @@ args = [{}]
         )
         .unwrap();
 
-        let dispatcher =
-            load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
-                .expect("configured MCP dispatcher");
+        let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
+            .expect("configured MCP dispatcher");
+        let ConfiguredRpcMobMcpDispatcher {
+            dispatcher,
+            keepalive,
+        } = bundle;
         assert!(
             dispatcher.tools().iter().any(|tool| tool.name == "echo"),
             "configured MCP tool should be visible before the mob member turn"
@@ -2727,6 +2796,79 @@ args = [{}]
             .expect("configured MCP tool call should remain callable after loader returns");
 
         assert_eq!(outcome.result.text_content(), "runtime is alive");
+
+        drop(dispatcher);
+        keepalive.shutdown_and_join();
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_mob_configured_mcp_keepalive_thread_terminates_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        std::fs::create_dir_all(&rkat_dir).unwrap();
+        let server_path = temp.path().join("server.py");
+        std::fs::write(
+            &server_path,
+            r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "echo-server", "version": "1"}
+        }}), flush=True)
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "tools": [{"name": "echo", "description": "echoes", "inputSchema": {"type": "object"}}]
+        }}), flush=True)
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "not found"}}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rkat_dir.join("mcp.toml"),
+            format!(
+                r#"[[servers]]
+name = "echo-server"
+command = "python3"
+args = [{}]
+"#,
+                serde_json::to_string(server_path.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
+            .expect("configured MCP dispatcher");
+        let ConfiguredRpcMobMcpDispatcher {
+            dispatcher,
+            keepalive,
+        } = bundle;
+
+        // Drop the dispatcher first; then signal + join the keepalive thread.
+        // If shutdown signalling were missing, the thread would park on
+        // `pending()` forever and `join` would hang the test (well past the
+        // tokio runtime worker timeouts).
+        drop(dispatcher);
+        let join_started = std::time::Instant::now();
+        let keepalive_join = std::thread::spawn(move || keepalive.shutdown_and_join());
+        while !keepalive_join.is_finished() {
+            assert!(
+                join_started.elapsed() < std::time::Duration::from_secs(10),
+                "MCP keepalive thread did not terminate within 10s of shutdown signal"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        keepalive_join
+            .join()
+            .expect("keepalive shutdown thread must not panic");
     }
 
     #[cfg(feature = "comms")]

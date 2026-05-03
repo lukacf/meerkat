@@ -23,6 +23,7 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   EventEnvelope,
+  AgentRuntimeId,
   SubscriptionLaggedEvent,
 } from './types.js';
 
@@ -177,6 +178,31 @@ function requireNumberField(
   return value;
 }
 
+function normalizeAgentRuntimeId(raw: unknown): AgentRuntimeId {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid mob subscription event: missing source');
+  }
+  requireOnlyKeys(
+    raw,
+    ['identity', 'generation'],
+    'Invalid mob subscription event: malformed source',
+  );
+  const identity = requireStringField(
+    raw,
+    'identity',
+    'Invalid mob subscription event: source missing identity',
+  );
+  const generation = requireNumberField(
+    raw,
+    'generation',
+    'Invalid mob subscription event: source missing generation',
+  );
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new Error('Invalid mob subscription event: source generation must be a non-negative integer');
+  }
+  return { identity, generation };
+}
+
 function normalizeLaggedEvent(record: Record<string, unknown>): SubscriptionLaggedEvent {
   const skipped = record.skipped;
   if (typeof skipped !== 'number' || !Number.isFinite(skipped)) {
@@ -246,11 +272,7 @@ function normalizeAttributedEvent(raw: unknown): AttributedEventItem {
   }
 
   const attributed = {
-    source: requireStringField(
-      record,
-      'source',
-      'Invalid mob subscription event: missing source',
-    ),
+    source: normalizeAgentRuntimeId(record.source),
     role: requireStringField(
       record,
       'role',

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
+import { Session } from '../dist/session.js';
 
 function makeSubscriptionRuntime(overrides = {}) {
   return {
@@ -65,6 +66,17 @@ function makeSubscriptionMob(pollSubscription) {
     poll_subscription: pollSubscription,
     close_subscription: () => undefined,
   });
+}
+
+function makeDirectSession(pollEvents) {
+  return new Session(
+    7,
+    async () => '{}',
+    () => JSON.stringify({ session_id: 'session-web-unit', phase: 'idle' }),
+    () => undefined,
+    pollEvents,
+    async () => '{}',
+  );
 }
 
 test('Mob.spawn strips legacy generation and projects typed wasm spawn rows', async () => {
@@ -221,7 +233,10 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
     mob_id: 'mob-web-unit',
   });
   const attributed = {
-    source: 'worker-runtime',
+    source: {
+      identity: 'worker-runtime',
+      generation: 0,
+    },
     source_fence_token: 3,
     role: 'worker',
     envelope,
@@ -235,6 +250,7 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
   const items = subscription.poll();
 
   assert.deepEqual(items, [attributed]);
+  assert.deepEqual(items[0].source, { identity: 'worker-runtime', generation: 0 });
   assert.equal(items[0].envelope.payload.type, 'text_delta');
   assert.equal('event' in items[0].envelope, false);
 });
@@ -256,7 +272,10 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
     }
     return JSON.stringify([
       {
-        source: 'worker-runtime',
+        source: {
+          identity: 'worker-runtime',
+          generation: 0,
+        },
         role: 'worker',
         envelope: legacyMemberEnvelope,
       },
@@ -268,6 +287,46 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
 
   const mobSubscription = await mob.subscribeEvents();
   assert.throws(() => mobSubscription.poll(), /missing payload/);
+});
+
+test('Mob.subscribeEvents rejects legacy string sources instead of hiding runtime generation', async () => {
+  const mob = makeSubscriptionMob((handle) => {
+    assert.equal(handle, 2);
+    return JSON.stringify([
+      {
+        source: 'worker-runtime',
+        role: 'worker',
+        envelope: canonicalEnvelope({ mob_id: 'mob-web-unit' }),
+      },
+    ]);
+  });
+
+  const subscription = await mob.subscribeEvents();
+  assert.throws(() => subscription.poll(), /missing source/);
+});
+
+test('Session direct polling projects valid agent events', () => {
+  const event = {
+    type: 'text_delta',
+    delta: 'hello',
+  };
+  const session = makeDirectSession(() => JSON.stringify([event]));
+
+  assert.deepEqual(session.pollEvents(), [event]);
+  assert.deepEqual(session.subscribe().poll(), [event]);
+});
+
+test('Session direct polling rejects malformed output instead of clean empty success', () => {
+  const session = makeDirectSession(() => JSON.stringify({ events: [] }));
+
+  assert.throws(() => session.pollEvents(), /expected event array/);
+});
+
+test('Session direct polling rejects malformed event items', () => {
+  const session = makeDirectSession(() => JSON.stringify([{}]));
+
+  assert.throws(() => session.pollEvents(), /missing type/);
+  assert.throws(() => session.subscribe().poll(), /missing type/);
 });
 
 test('MeerkatRuntime keeps a clean empty subscription poll as empty success', async () => {

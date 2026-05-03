@@ -437,9 +437,15 @@ export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
 /** Member subscription item from the browser runtime. */
 export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 
+/** Runtime identity for one mob member incarnation. */
+export interface AgentRuntimeId {
+  identity: string;
+  generation: number;
+}
+
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
-  source: string;
+  source: AgentRuntimeId;
   source_fence_token?: number;
   role: string;
   envelope: EventEnvelope;

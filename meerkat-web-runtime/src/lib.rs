@@ -3083,6 +3083,42 @@ capabilities = [{capability_values}]
         );
     }
 
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn attributed_subscription_item_serializes_runtime_id_source_shape() {
+        let source = meerkat_mob::AgentRuntimeId::new(
+            meerkat_mob::AgentIdentity::from("worker-runtime"),
+            meerkat_mob::Generation::new(3),
+        );
+        let attributed = meerkat_mob::AttributedEvent {
+            source,
+            source_fence_token: meerkat_mob::FenceToken::new(9),
+            role: meerkat_mob::ProfileName::from("worker"),
+            envelope: meerkat_core::EventEnvelope::new(
+                "worker-runtime",
+                7,
+                Some("mob-web-unit".to_string()),
+                meerkat_core::AgentEvent::TextDelta {
+                    delta: "hello".to_string(),
+                },
+            ),
+        };
+
+        let parsed = serialize_subscription_item(&attributed, "subscription attributed event")
+            .expect("canonical attributed subscription event should serialize");
+
+        assert!(
+            parsed["source"].as_str().is_none(),
+            "AgentRuntimeId source must not be projected as a lossy string"
+        );
+        assert_eq!(parsed["source"]["identity"], "worker-runtime");
+        assert_eq!(parsed["source"]["generation"], 3);
+        assert_eq!(parsed["source_fence_token"], 9);
+        assert_eq!(parsed["role"], "worker");
+        assert_eq!(parsed["envelope"]["payload"]["type"], "text_delta");
+        assert_eq!(parsed["envelope"]["payload"]["delta"], "hello");
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     #[allow(clippy::expect_used)]

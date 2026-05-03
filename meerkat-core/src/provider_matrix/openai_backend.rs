@@ -7,6 +7,8 @@ pub enum OpenAiBackendKind {
 }
 
 impl OpenAiBackendKind {
+    pub const ALL: &'static [Self] = &[Self::OpenAiApi, Self::ChatGptBackend];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "openai_api" => Some(Self::OpenAiApi),
@@ -37,10 +39,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip() {
-        for v in [
-            OpenAiBackendKind::OpenAiApi,
-            OpenAiBackendKind::ChatGptBackend,
-        ] {
+        for v in OpenAiBackendKind::ALL {
+            let v = *v;
             assert_eq!(OpenAiBackendKind::parse(v.as_str()), Some(v));
         }
     }

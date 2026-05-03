@@ -8,6 +8,8 @@ pub enum GoogleBackendKind {
 }
 
 impl GoogleBackendKind {
+    pub const ALL: &'static [Self] = &[Self::GoogleGenAi, Self::VertexAi, Self::GoogleCodeAssist];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "google_genai" => Some(Self::GoogleGenAi),
@@ -41,11 +43,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            GoogleBackendKind::GoogleGenAi,
-            GoogleBackendKind::VertexAi,
-            GoogleBackendKind::GoogleCodeAssist,
-        ] {
+        for v in GoogleBackendKind::ALL {
+            let v = *v;
             assert_eq!(GoogleBackendKind::parse(v.as_str()), Some(v));
         }
     }

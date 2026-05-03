@@ -20,6 +20,19 @@ pub enum AnthropicAuthMethod {
 }
 
 impl AnthropicAuthMethod {
+    pub const ALL: &'static [Self] = &[
+        Self::ApiKey,
+        Self::StaticBearer,
+        Self::ClaudeAiOauth,
+        Self::OauthToApiKey,
+        Self::ExternalAuthorizer,
+        Self::BedrockBearer,
+        Self::BedrockAwsSigv4,
+        Self::VertexGoogleAuth,
+        Self::FoundryApiKey,
+        Self::FoundryAzureAd,
+    ];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
@@ -58,18 +71,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            AnthropicAuthMethod::ApiKey,
-            AnthropicAuthMethod::StaticBearer,
-            AnthropicAuthMethod::ClaudeAiOauth,
-            AnthropicAuthMethod::OauthToApiKey,
-            AnthropicAuthMethod::ExternalAuthorizer,
-            AnthropicAuthMethod::BedrockBearer,
-            AnthropicAuthMethod::BedrockAwsSigv4,
-            AnthropicAuthMethod::VertexGoogleAuth,
-            AnthropicAuthMethod::FoundryApiKey,
-            AnthropicAuthMethod::FoundryAzureAd,
-        ] {
+        for v in AnthropicAuthMethod::ALL {
+            let v = *v;
             assert_eq!(AnthropicAuthMethod::parse(v.as_str()), Some(v));
         }
     }

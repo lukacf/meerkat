@@ -13,6 +13,13 @@ pub enum AnthropicBackendKind {
 }
 
 impl AnthropicBackendKind {
+    pub const ALL: &'static [Self] = &[
+        Self::AnthropicApi,
+        Self::Bedrock,
+        Self::Vertex,
+        Self::Foundry,
+    ];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "anthropic_api" => Some(Self::AnthropicApi),
@@ -51,12 +58,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip() {
-        for v in [
-            AnthropicBackendKind::AnthropicApi,
-            AnthropicBackendKind::Bedrock,
-            AnthropicBackendKind::Vertex,
-            AnthropicBackendKind::Foundry,
-        ] {
+        for v in AnthropicBackendKind::ALL {
+            let v = *v;
             assert_eq!(AnthropicBackendKind::parse(v.as_str()), Some(v));
         }
         assert_eq!(AnthropicBackendKind::parse("other"), None);

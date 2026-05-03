@@ -28,4 +28,12 @@ export type {
   AuthLoginReady,
   AuthStatus,
   OAuthLoginStart,
+  AuthDeviceStart,
+  AuthDeviceCompleteResult,
+  AuthProvisionApiKeyResult,
+  WireAuthMethod,
+  WireAuthProvider,
+  WireBackendKind,
+  WireCredentialSourceKind,
+  WireAuthStatusState,
 } from './auth.js';

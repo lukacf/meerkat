@@ -2,11 +2,10 @@
  * Web SDK auth bindings — plan §4c.10 + §4d.wasm.3.
  *
  * This module provides:
- *   - `Auth` — TypeScript wrapper for the `auth/*` RPC methods
- *     (`auth/profile/create`, `auth/login/*`,
- *     `auth/status/get`, `auth/logout`). Surfaces targeting the JSON-RPC
- *     stdio server or the REST API over fetch should instantiate this
- *     class with the appropriate transport.
+ *   - `Auth` — TypeScript wrapper for the generated `auth/*` RPC method
+ *     family. Surfaces targeting the JSON-RPC stdio server or the REST API
+ *     over fetch should instantiate this class with the appropriate
+ *     transport.
  *   - `registerExternalAuthResolver` — wraps the WASM-bundled
  *     `register_external_auth_resolver` binding so a browser host page
  *     can install an OAuth-backed resolver callback that hands Meerkat a
@@ -22,7 +21,58 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import {
+  AUTH_RPC_METHODS,
+  parseCreateProfileParams,
+  parseDeviceCompleteParams,
+  parseDeviceStartParams,
+  parseLoginCompleteParams,
+  parseLoginStartParams,
+  parseProvisionApiKeyParams,
+  parseWireAuthProfileCleared,
+  parseWireAuthProfileCreated,
+  parseWireAuthProfileDetail,
+  parseWireAuthProfilesList,
+  parseWireAuthStatusDetail,
+  parseWireDeviceCompleteResult,
+  parseWireDeviceStart,
+  parseWireLoginReady,
+  parseWireLoginStart,
+  parseWireProvisionApiKeyResult,
+} from './generated/auth.js';
+import type {
+  AuthRpcMethod,
+  CreateProfileParams,
+  DeviceCompleteParams,
+  DeviceStartParams,
+  LoginCompleteParams,
+  LoginStartParams,
+  ProvisionApiKeyParams,
+  WireAuthMethod,
+  WireAuthProfile,
+  WireAuthProfileCleared,
+  WireAuthProfileCreated,
+  WireAuthProfileDetail,
+  WireAuthProfilesList,
+  WireAuthProvider,
+  WireAuthStatusDetail,
+  WireBackendKind,
+  WireBindingIdentity,
+  WireDeviceCompleteResult,
+  WireDeviceStart,
+  WireLoginReady,
+  WireLoginStart,
+  WireProvisionApiKeyResult,
+} from './generated/auth.js';
 import type { ConnectionRef, SessionConfig } from './types.js';
+
+export type {
+  WireAuthMethod,
+  WireAuthProvider,
+  WireBackendKind,
+  WireCredentialSourceKind,
+  WireAuthStatusState,
+} from './generated/auth.js';
 
 /** Canonical WASM external-auth resolver handle for host-owned browser auth. */
 export const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE = 'wasm_host' as const;
@@ -65,7 +115,7 @@ export type ExternalAuthLease =
 /** Structured auth failure shape that host resolvers may reject with. */
 export type ExternalAuthFailure =
   | { kind: 'missing_secret' }
-  | { kind: 'unsupported_combination'; backend: string; auth: string }
+  | { kind: 'unsupported_combination'; backend: WireBackendKind; auth: WireAuthMethod }
   | { kind: 'missing_required_metadata'; field: string }
   | { kind: 'workspace_mismatch' }
   | { kind: 'expired' }
@@ -91,80 +141,33 @@ export type ExternalAuthResolver = (
 /** JSON-RPC-style transport used by the `Auth` class. Minimal: just
  * async request/response of (method, params) -> result. */
 export interface AuthTransport {
-  request<P = unknown, R = unknown>(method: string, params?: P): Promise<R>;
+  request<P = unknown, R = unknown>(method: AuthRpcMethod, params?: P): Promise<R>;
 }
 
 /** Wire projection of a configured auth profile. */
-export interface AuthProfile {
-  id: string;
-  provider: string;
-  auth_method: string;
-  source_kind: string;
-}
-
+export type AuthProfile = WireAuthProfile;
 /** Binding-scoped identity returned by auth write/status calls. */
-export interface AuthBindingIdentity {
-  realm_id: string;
-  binding_id: string;
-  connection_ref: ConnectionRef;
-  profile_id: string;
-}
-
+export type AuthBindingIdentity = WireBindingIdentity & { profile_id: string };
 /** Auth profile list result returned by `auth/profile/list`. */
-export interface AuthProfilesList {
-  realm_id: string;
-  auth_profiles: AuthProfile[];
-}
-
+export type AuthProfilesList = WireAuthProfilesList;
 /** Result returned by `auth/profile/get`. */
-export interface AuthProfileDetail extends AuthBindingIdentity {
-  auth_profile: AuthProfile;
-}
-
-/** Result returned by `auth/profile/create`. */
-export interface AuthProfileCreated extends AuthBindingIdentity {
-  provider: string;
-  auth_method: string;
-  stored: boolean;
-}
-
-/** Result returned by `auth/profile/delete` / `auth/logout`. */
-export interface AuthCredentialsCleared extends AuthBindingIdentity {
-  cleared: boolean;
-}
-
+export type AuthProfileDetail = WireAuthProfileDetail;
+/** Result returned by profile creation. */
+export type AuthProfileCreated = WireAuthProfileCreated;
+/** Result returned by profile deletion / logout. */
+export type AuthCredentialsCleared = WireAuthProfileCleared;
 /** OAuth credential persistence result returned by login completion calls. */
-export interface AuthLoginReady extends AuthBindingIdentity {
-  provider: string;
-  expires_at: string | null;
-  has_refresh_token: boolean;
-  scopes: string[];
-}
-
-/** Auth status returned by `auth/status/get`. */
-export interface AuthStatus extends AuthBindingIdentity {
-  provider: string;
-  auth_method: string;
-  state:
-    | 'valid'
-    | 'expiring'
-    | 'expired'
-    | 'reauth_required'
-    | 'refresh_failed'
-    | 'unknown';
-  expires_at?: string;
-  last_refresh_at?: string;
-  account_id?: string;
-  has_refresh_token: boolean;
-}
-
-/** OAuth login-start payload returned by `auth/login/start`. */
-export interface OAuthLoginStart {
-  authorize_url: string;
-  state: string;
-  redirect_uri: string;
-  provider: string;
-}
+export type AuthLoginReady = WireLoginReady;
+/** Binding credential status. */
+export type AuthStatus = WireAuthStatusDetail;
+/** OAuth login-start payload. */
+export type OAuthLoginStart = WireLoginStart;
+/** Device-code login start payload returned by `auth/login/device_start`. */
+export type AuthDeviceStart = WireDeviceStart;
+/** Device-code login poll result returned by `auth/login/device_complete`. */
+export type AuthDeviceCompleteResult = WireDeviceCompleteResult;
+/** Anthropic Console-OAuth to API-key provisioning result. */
+export type AuthProvisionApiKeyResult = WireProvisionApiKeyResult;
 
 /**
  * Typed wrapper over the meerkat RPC `auth/*` method family. Works
@@ -175,129 +178,101 @@ export interface OAuthLoginStart {
 export class Auth {
   constructor(private readonly transport: AuthTransport) {}
 
-  /** `auth/profile/create` — persist credentials for a managed-store binding. */
-  async createProfile(params: {
-    realm_id: string;
-    binding_id: string;
-    auth_method: 'api_key' | 'static_bearer' | string;
-    secret: string;
-  }): Promise<AuthProfileCreated> {
-    return this.transport.request<typeof params, AuthProfileCreated>(
-      'auth/profile/create',
-      params,
+  /** Persist credentials for a managed-store binding. */
+  async createProfile(params: CreateProfileParams): Promise<AuthProfileCreated> {
+    const result = await this.transport.request<CreateProfileParams, unknown>(
+      AUTH_RPC_METHODS.profileCreate,
+      parseCreateProfileParams(params),
     );
+    return parseWireAuthProfileCreated(result);
   }
 
-  /** `auth/profile/list` — enumerate configured auth profiles for a realm. */
+  /** Enumerate configured auth profiles for a realm. */
   async listProfiles(realm_id: string): Promise<AuthProfilesList> {
-    return this.transport.request<{ realm_id: string }, AuthProfilesList>(
-      'auth/profile/list',
+    const result = await this.transport.request<{ realm_id: string }, unknown>(
+      AUTH_RPC_METHODS.profileList,
       { realm_id },
     );
+    return parseWireAuthProfilesList(result);
   }
 
-  /** `auth/profile/get` — fetch the profile resolved by a binding. */
+  /** Fetch the profile resolved by a binding. */
   async getProfile(realm_id: string, binding_id: string): Promise<AuthProfileDetail> {
-    return this.transport.request<
+    const result = await this.transport.request<
       { realm_id: string; binding_id: string },
-      AuthProfileDetail
+      unknown
     >(
-      'auth/profile/get',
+      AUTH_RPC_METHODS.profileGet,
       { realm_id, binding_id },
     );
+    return parseWireAuthProfileDetail(result);
   }
 
-  /** `auth/profile/delete` — clear credentials for a binding. */
+  /** Clear credentials for a binding. */
   async deleteProfile(
     realm_id: string,
     binding_id: string,
   ): Promise<AuthCredentialsCleared> {
-    return this.transport.request<
+    const result = await this.transport.request<
       { realm_id: string; binding_id: string },
-      AuthCredentialsCleared
+      unknown
     >(
-      'auth/profile/delete',
+      AUTH_RPC_METHODS.profileDelete,
       { realm_id, binding_id },
     );
+    return parseWireAuthProfileCleared(result);
   }
 
-  /** `auth/login/start` — begin an OAuth browser flow. */
-  async loginStart(params: {
-    provider: string;
-    redirect_uri: string;
-  }): Promise<OAuthLoginStart> {
-    return this.transport.request<typeof params, OAuthLoginStart>(
-      'auth/login/start',
-      params,
+  /** Begin an OAuth browser flow. */
+  async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
+    const result = await this.transport.request<LoginStartParams, unknown>(
+      AUTH_RPC_METHODS.loginStart,
+      parseLoginStartParams(params),
     );
+    return parseWireLoginStart(result);
   }
 
-  /** `auth/login/complete` — finalize an OAuth browser flow. */
-  async loginComplete(params: {
-    provider: string;
-    code: string;
-    state: string;
-    redirect_uri: string;
-    realm_id?: string;
-    binding_id?: string;
-  }): Promise<AuthLoginReady> {
-    return this.transport.request<typeof params, AuthLoginReady>(
-      'auth/login/complete',
-      params,
+  /** Finalize an OAuth browser flow. */
+  async loginComplete(params: LoginCompleteParams): Promise<AuthLoginReady> {
+    const result = await this.transport.request<LoginCompleteParams, unknown>(
+      AUTH_RPC_METHODS.loginComplete,
+      parseLoginCompleteParams(params),
     );
+    return parseWireLoginReady(result);
   }
 
-  /** `auth/login/device_start` — device-code flow for keyboardless
-   * hosts. */
-  async loginDeviceStart(params: {
-    provider: string;
-  }): Promise<{
-    device_code: string;
-    user_code: string;
-    verification_uri: string;
-    verification_uri_complete?: string;
-    expires_in: number;
-    interval: number;
-    provider: string;
-  }> {
-    return this.transport.request('auth/login/device_start', params);
+  /** Start a device-code flow for keyboardless hosts. */
+  async loginDeviceStart(params: DeviceStartParams): Promise<AuthDeviceStart> {
+    const result = await this.transport.request<DeviceStartParams, unknown>(
+      AUTH_RPC_METHODS.loginDeviceStart,
+      parseDeviceStartParams(params),
+    );
+    return parseWireDeviceStart(result);
   }
 
-  /** `auth/login/device_complete` — single-poll completion leg for the
-   * device-code flow. Call on the cadence returned by
-   * `loginDeviceStart` (interval seconds). Returns `{ state: "pending"
-   * | "slow_down" | "access_denied" | "expired" }` while the user has
-   * not yet approved, and `{ state: "ready", binding_id, ... }` once
-   * tokens are persisted. */
-  async loginDeviceComplete(params: {
-    provider: string;
-    device_code: string;
-    realm_id?: string;
-    binding_id?: string;
-  }): Promise<
-    | { state: 'pending' | 'slow_down' | 'access_denied' | 'expired' }
-    | ({ state: 'ready' } & AuthLoginReady)
-  > {
-    return this.transport.request('auth/login/device_complete', params);
+  /** Single-poll completion leg for the device-code flow. */
+  async loginDeviceComplete(
+    params: DeviceCompleteParams,
+  ): Promise<AuthDeviceCompleteResult> {
+    const result = await this.transport.request<DeviceCompleteParams, unknown>(
+      AUTH_RPC_METHODS.loginDeviceComplete,
+      parseDeviceCompleteParams(params),
+    );
+    return parseWireDeviceCompleteResult(result);
   }
 
-  /** `auth/login/provision_api_key` — Anthropic Console-OAuth to API-key provisioning. */
-  async loginProvisionApiKey(params: {
-    access_token: string;
-    realm_id?: string;
-    binding_id?: string;
-  }): Promise<
-    {
-      provider: 'anthropic';
-      auth_mode: 'oauth_to_api_key';
-      has_api_key: boolean;
-      scopes: string[];
-    } & AuthBindingIdentity
-  > {
-    return this.transport.request('auth/login/provision_api_key', params);
+  /** Anthropic Console-OAuth to API-key provisioning. */
+  async loginProvisionApiKey(
+    params: ProvisionApiKeyParams,
+  ): Promise<AuthProvisionApiKeyResult> {
+    const result = await this.transport.request<ProvisionApiKeyParams, unknown>(
+      AUTH_RPC_METHODS.loginProvisionApiKey,
+      parseProvisionApiKeyParams(params),
+    );
+    return parseWireProvisionApiKeyResult(result);
   }
 
-  /** `auth/status/get` — current status for a binding's stored credentials. */
+  /** Current status for a binding's stored credentials. */
   async status(
     realm_id: string,
     binding_id: string,
@@ -308,16 +283,17 @@ export class Auth {
       binding_id,
     };
     if (profile_id !== undefined) params.profile_id = profile_id;
-    return this.transport.request<
+    const result = await this.transport.request<
       typeof params,
-      AuthStatus
+      unknown
     >(
-      'auth/status/get',
+      AUTH_RPC_METHODS.statusGet,
       params,
     );
+    return parseWireAuthStatusDetail(result);
   }
 
-  /** `auth/logout` — revoke + delete credentials for a binding. */
+  /** Revoke and delete credentials for a binding. */
   async logout(
     realm_id: string,
     binding_id: string,
@@ -328,13 +304,14 @@ export class Auth {
       binding_id,
     };
     if (profile_id !== undefined) params.profile_id = profile_id;
-    return this.transport.request<
+    const result = await this.transport.request<
       typeof params,
-      AuthCredentialsCleared
+      unknown
     >(
-      'auth/logout',
+      AUTH_RPC_METHODS.logout,
       params,
     );
+    return parseWireAuthProfileCleared(result);
   }
 }
 

@@ -24,10 +24,8 @@ use meerkat_client::{
     AnthropicClient, GeminiClient, LlmDoneOutcome, LlmEvent, LlmRequest, OpenAiClient,
     types::LlmClient,
 };
-use meerkat_core::{Message, UserMessage};
-use meerkat_models::{
-    CatalogEntry, ModelCapabilities, ThinkingSupport, all_capabilities, capabilities_for, catalog,
-};
+use meerkat_core::{Message, Provider, UserMessage};
+use meerkat_models::{CatalogEntry, ModelCapabilities, ThinkingSupport, capabilities_for, catalog};
 
 // ---------------------------------------------------------------------------
 // API key resolution
@@ -96,7 +94,9 @@ fn for_each_catalog_model_with_key() -> impl Iterator<Item = (&'static CatalogEn
 }
 
 fn caps_for(entry: &CatalogEntry) -> &'static ModelCapabilities {
-    capabilities_for(entry.provider, entry.id)
+    let provider = Provider::parse_strict(entry.provider)
+        .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
+    capabilities_for(provider, entry.id)
         .unwrap_or_else(|| panic!("no capability row for {}", entry.id))
 }
 
@@ -380,22 +380,13 @@ async fn thinking_modes_per_capability() {
 #[ignore = "lane:e2e-models"]
 fn every_catalog_model_has_capability_row() {
     for entry in catalog() {
-        let caps = capabilities_for(entry.provider, entry.id);
+        let provider = Provider::parse_strict(entry.provider)
+            .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
+        let caps = capabilities_for(provider, entry.id);
         assert!(
             caps.is_some(),
             "catalog model {} has no capability row",
             entry.id
-        );
-    }
-    // Every capability row also maps back to a catalog entry.
-    for caps in all_capabilities() {
-        let entry = catalog()
-            .iter()
-            .find(|e| e.provider == caps.provider && e.id == caps.id);
-        assert!(
-            entry.is_some(),
-            "capability row {} has no catalog entry",
-            caps.id
         );
     }
 }

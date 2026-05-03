@@ -10,11 +10,23 @@
 //! broad model groups (e.g. "opus 4.6 bucket" served both Opus 4.6 and 4.7;
 //! "standard" served everything else), flattening real differences such as
 //! Opus 4.7's `xhigh` effort tier or Sonnet 4.5's 1M context beta.
+//!
+//! Public callers must cross the typed [`crate::Provider`] boundary before
+//! reading capability truth; raw row iteration is intentionally crate-private:
+//!
+//! ```compile_fail
+//! let _ = meerkat_core::model_profile::capabilities::all_capabilities();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = meerkat_core::model_profile::capabilities::gemini::CAPABILITIES;
+//! ```
 
-pub mod anthropic;
-pub mod gemini;
-pub mod openai;
+mod anthropic;
+mod gemini;
+mod openai;
 
+use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 /// Full per-model capability record.
@@ -34,8 +46,8 @@ pub struct ModelCapabilities {
     // ── Identity ──────────────────────────────────────────────────────
     /// Model identifier (e.g. `"claude-opus-4-7"`).
     pub id: &'static str,
-    /// Canonical provider string (`"anthropic"`, `"openai"`, `"gemini"`).
-    pub provider: &'static str,
+    /// Typed provider that owns this capability row.
+    pub provider: Provider,
     /// Human-readable display name.
     pub display_name: &'static str,
     /// Recommendation tier.
@@ -146,23 +158,35 @@ pub enum ThinkingSupport {
     GeminiThinkingLevel,
 }
 
-/// Lookup a model's capabilities by provider + id.
+/// Lookup a model's capabilities by typed provider + id.
 ///
 /// Returns `None` when the provider/model pair has no capability row.
 /// Callers must treat `None` as unknown capability truth; uncatalogued model
 /// IDs must not synthesize semantic facts from model-name folklore.
-pub fn capabilities_for(provider: &str, model_id: &str) -> Option<&'static ModelCapabilities> {
+///
+/// Provider/display strings are intentionally rejected at compile time:
+///
+/// ```compile_fail
+/// let _ = meerkat_core::model_profile::capabilities::capabilities_for(
+///     "gemini",
+///     "gemini-3-flash-preview",
+/// );
+/// ```
+pub fn capabilities_for(provider: Provider, model_id: &str) -> Option<&'static ModelCapabilities> {
     let table: &'static [ModelCapabilities] = match provider {
-        "anthropic" => anthropic::CAPABILITIES,
-        "openai" => openai::CAPABILITIES,
-        "gemini" => gemini::CAPABILITIES,
+        Provider::Anthropic => anthropic::CAPABILITIES,
+        Provider::OpenAI => openai::CAPABILITIES,
+        Provider::Gemini => gemini::CAPABILITIES,
         _ => return None,
     };
     table.iter().find(|c| c.id == model_id)
 }
 
 /// Iterate every known capability record across all providers.
-pub fn all_capabilities() -> impl Iterator<Item = &'static ModelCapabilities> {
+///
+/// This is crate-internal so public callers cannot obtain semantic capability
+/// rows through provider/model string filtering or model-only row scans.
+pub(crate) fn all_capabilities() -> impl Iterator<Item = &'static ModelCapabilities> {
     anthropic::CAPABILITIES
         .iter()
         .chain(openai::CAPABILITIES.iter())
@@ -177,34 +201,38 @@ mod tests {
     #[test]
     fn every_capability_matches_a_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id);
+            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id);
             assert!(
                 entry.is_some(),
                 "capability row '{}' (provider '{}') has no catalog entry",
                 caps.id,
-                caps.provider,
+                caps.provider.as_str(),
             );
         }
     }
 
     #[test]
     fn no_duplicate_capability_ids_within_provider() {
-        for provider in crate::model_profile::catalog::provider_names() {
+        for provider_name in crate::model_profile::catalog::provider_names() {
+            let provider = Provider::parse_strict(provider_name)
+                .unwrap_or_else(|| panic!("catalog provider '{provider_name}' must parse"));
             let ids: Vec<&str> = all_capabilities()
-                .filter(|c| c.provider == *provider)
+                .filter(|c| c.provider == provider)
                 .map(|c| c.id)
                 .collect();
             let mut unique: Vec<&str> = ids.clone();
             unique.sort_unstable();
             unique.dedup();
-            assert_eq!(ids.len(), unique.len(), "duplicate ids in {provider}");
+            assert_eq!(ids.len(), unique.len(), "duplicate ids in {provider_name}");
         }
     }
 
     #[test]
     fn every_catalog_entry_has_capabilities() {
         for entry in crate::model_profile::catalog::catalog() {
-            let caps = capabilities_for(entry.provider, entry.id);
+            let provider = Provider::parse_strict(entry.provider)
+                .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
+            let caps = capabilities_for(provider, entry.id);
             assert!(
                 caps.is_some(),
                 "catalog model '{}' (provider '{}') has no capability row",
@@ -217,7 +245,7 @@ mod tests {
     #[test]
     fn tier_matches_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
+            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id)
                 .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
             assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
         }
@@ -226,7 +254,7 @@ mod tests {
     #[test]
     fn claude_haiku_45_is_cataloged_with_official_limits() {
         for model in ["claude-haiku-4-5-20251001", "claude-haiku-4-5"] {
-            let caps = capabilities_for("anthropic", model)
+            let caps = capabilities_for(Provider::Anthropic, model)
                 .unwrap_or_else(|| panic!("{model} must be in the Anthropic catalog"));
             assert_eq!(caps.model_family, "claude-haiku-4");
             assert_eq!(caps.context_window, 200_000);
@@ -234,5 +262,22 @@ mod tests {
             assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
             assert!(!caps.supports_compaction);
         }
+    }
+
+    #[test]
+    fn typed_provider_mismatch_fails_closed() {
+        assert!(capabilities_for(Provider::Anthropic, "gpt-5.4").is_none());
+        assert!(capabilities_for(Provider::OpenAI, "gemini-3-flash-preview").is_none());
+        assert!(capabilities_for(Provider::Other, "gpt-5.4").is_none());
+    }
+
+    #[test]
+    fn display_provider_string_cannot_be_promoted_to_capability_owner() {
+        let display_provider = Provider::parse_strict("Gemini").unwrap_or(Provider::Other);
+        assert_eq!(display_provider, Provider::Other);
+        assert!(
+            capabilities_for(display_provider, "gemini-3-flash-preview").is_none(),
+            "display provider strings must fail closed at the typed capability boundary"
+        );
     }
 }

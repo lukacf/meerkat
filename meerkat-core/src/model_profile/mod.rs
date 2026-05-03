@@ -22,6 +22,7 @@ pub mod gemini;
 pub mod openai;
 pub mod schema_builder;
 
+use crate::Provider;
 use crate::model_profile::capabilities::{
     BetaHeader, ModelCapabilities, ThinkingSupport, capabilities_for,
 };
@@ -90,29 +91,28 @@ impl From<&BetaHeader> for ModelBetaHeader {
     }
 }
 
-/// Look up the profile for a model by provider string and model ID.
+/// Look up the profile for a model by typed provider and model ID.
 ///
 /// Catalog models project directly from their capability row. Uncatalogued
 /// model IDs return `None`; semantic capability facts must come from the
 /// capability catalog, not model-name prefixes.
 ///
-/// Returns `None` if the provider is unknown or the model doesn't match any
-/// recognized family.
-pub fn profile_for(provider: &str, model: &str) -> Option<ModelProfile> {
+/// Returns `None` if the provider/model pair has no catalog capability row.
+pub fn profile_for(provider: Provider, model: &str) -> Option<ModelProfile> {
     capabilities_for(provider, model).map(project_to_profile)
 }
 
-/// Look up whether a model accepts inline video by provider string and model ID.
+/// Look up whether a model accepts inline video by typed provider and model ID.
 ///
 /// Returns `None` when the provider/model pair has no capability row.
-pub fn inline_video_support_for(provider: &str, model: &str) -> Option<bool> {
+pub fn inline_video_support_for(provider: Provider, model: &str) -> Option<bool> {
     capabilities_for(provider, model).map(|caps| caps.inline_video)
 }
 
 /// Project a capability record into the [`ModelProfile`] surface.
 pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
     ModelProfile {
-        provider: caps.provider.to_string(),
+        provider: caps.provider.as_str().to_string(),
         model_family: caps.model_family.to_string(),
         supports_temperature: caps.supports_temperature,
         supports_thinking: caps.thinking != ThinkingSupport::None,
@@ -137,10 +137,15 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
 mod tests {
     use super::*;
 
+    fn provider_from_catalog(provider: &str) -> Provider {
+        Provider::parse_strict(provider)
+            .unwrap_or_else(|| panic!("catalog provider '{provider}' must parse"))
+    }
+
     #[test]
     fn profile_for_all_catalog_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(entry.provider, entry.id);
+            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
             assert!(
                 profile.is_some(),
                 "catalog model '{}' (provider '{}') must have a profile",
@@ -152,19 +157,42 @@ mod tests {
 
     #[test]
     fn unknown_provider_returns_none() {
-        assert!(profile_for("unknown", "some-model").is_none());
+        assert!(profile_for(Provider::Other, "some-model").is_none());
     }
 
     #[test]
     fn uncatalogued_model_returns_none_for_known_provider() {
-        assert!(profile_for("openai", "gpt-5.9-future").is_none());
-        assert!(profile_for("anthropic", "claude-opus-4-7-20260501-preview").is_none());
-        assert!(profile_for("gemini", "gemini-4-future").is_none());
+        assert!(profile_for(Provider::OpenAI, "gpt-5.9-future").is_none());
+        assert!(profile_for(Provider::Anthropic, "claude-opus-4-7-20260501-preview").is_none());
+        assert!(profile_for(Provider::Gemini, "gemini-4-future").is_none());
+    }
+
+    #[test]
+    fn wrong_typed_provider_for_known_model_returns_none() {
+        assert!(profile_for(Provider::Anthropic, "gpt-5.4").is_none());
+        assert!(profile_for(Provider::OpenAI, "gemini-3-flash-preview").is_none());
+    }
+
+    #[test]
+    fn unknown_provider_model_pairs_fail_closed_without_defaults() {
+        assert!(profile_for(Provider::Other, "gpt-5.4").is_none());
+        assert!(profile_for(Provider::Other, "uncatalogued-gpt-compatible").is_none());
+        assert!(inline_video_support_for(Provider::Other, "gemini-3-flash-preview").is_none());
+    }
+
+    #[test]
+    fn display_provider_strings_cannot_select_capability_without_typed_provider() {
+        let display_provider = Provider::parse_strict("Gemini").unwrap_or(Provider::Other);
+        assert_eq!(display_provider, Provider::Other);
+        assert_eq!(
+            inline_video_support_for(display_provider, "gemini-3-flash-preview"),
+            None
+        );
     }
 
     #[test]
     fn claude_profile_vision_and_image_tool_results_true() {
-        let profile = profile_for("anthropic", "claude-opus-4-6")
+        let profile = profile_for(Provider::Anthropic, "claude-opus-4-6")
             .expect("claude-opus-4-6 must have a profile");
         assert!(profile.vision, "Anthropic models must support vision");
         assert!(
@@ -176,7 +204,7 @@ mod tests {
             "Anthropic models must NOT support inline video"
         );
 
-        let profile = profile_for("anthropic", "claude-sonnet-4-5")
+        let profile = profile_for(Provider::Anthropic, "claude-sonnet-4-5")
             .expect("claude-sonnet-4-5 must have a profile");
         assert!(profile.vision);
         assert!(profile.image_tool_results);
@@ -184,7 +212,8 @@ mod tests {
 
     #[test]
     fn gpt_profile_vision_true_image_tool_results_false() {
-        let profile = profile_for("openai", "gpt-5.4").expect("gpt-5.4 must have a profile");
+        let profile =
+            profile_for(Provider::OpenAI, "gpt-5.4").expect("gpt-5.4 must have a profile");
         assert!(profile.vision, "OpenAI models must support vision");
         assert!(
             !profile.image_tool_results,
@@ -198,7 +227,7 @@ mod tests {
 
     #[test]
     fn gemini_profile_vision_and_image_tool_results_true() {
-        let profile = profile_for("gemini", "gemini-3-flash-preview")
+        let profile = profile_for(Provider::Gemini, "gemini-3-flash-preview")
             .expect("gemini-3-flash-preview must have a profile");
         assert!(profile.vision, "Gemini models must support vision");
         assert!(
@@ -218,7 +247,7 @@ mod tests {
             .filter(|entry| entry.provider == "gemini")
         {
             assert!(
-                profile_for(entry.provider, entry.id)
+                profile_for(provider_from_catalog(entry.provider), entry.id)
                     .as_ref()
                     .is_some_and(|profile| profile.inline_video),
                 "Gemini model '{}' must support inline video",
@@ -230,17 +259,23 @@ mod tests {
     #[test]
     fn inline_video_support_for_reads_capability_truth() {
         assert_eq!(
-            inline_video_support_for("gemini", "gemini-3-flash-preview"),
+            inline_video_support_for(Provider::Gemini, "gemini-3-flash-preview"),
             Some(true)
         );
-        assert_eq!(inline_video_support_for("openai", "gpt-5.4"), Some(false));
-        assert_eq!(inline_video_support_for("gemini", "gemini-4-future"), None);
+        assert_eq!(
+            inline_video_support_for(Provider::OpenAI, "gpt-5.4"),
+            Some(false)
+        );
+        assert_eq!(
+            inline_video_support_for(Provider::Gemini, "gemini-4-future"),
+            None
+        );
     }
 
     #[test]
     fn params_schema_non_empty_for_all_profiles() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(entry.provider, entry.id);
+            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
             if let Some(p) = profile {
                 assert!(
                     p.params_schema.is_object(),
@@ -255,7 +290,7 @@ mod tests {
     #[test]
     fn call_timeout_secs_populated_for_known_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(entry.provider, entry.id);
+            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
             if let Some(p) = profile {
                 assert!(
                     p.call_timeout_secs.is_some(),
@@ -270,8 +305,8 @@ mod tests {
 
     #[test]
     fn anthropic_opus_has_longer_timeout_than_haiku() {
-        let opus = profile_for("anthropic", "claude-opus-4-6").unwrap();
-        let haiku = profile_for("anthropic", "claude-haiku-4-5-20251001").unwrap();
+        let opus = profile_for(Provider::Anthropic, "claude-opus-4-6").unwrap();
+        let haiku = profile_for(Provider::Anthropic, "claude-haiku-4-5-20251001").unwrap();
         assert!(
             opus.call_timeout_secs.unwrap() > haiku.call_timeout_secs.unwrap(),
             "Opus should have a longer default timeout than Haiku"
@@ -280,8 +315,8 @@ mod tests {
 
     #[test]
     fn openai_pro_has_longer_timeout_than_standard_gpt5() {
-        let pro = profile_for("openai", "gpt-5.5-pro").unwrap();
-        let standard = profile_for("openai", "gpt-5.5").unwrap();
+        let pro = profile_for(Provider::OpenAI, "gpt-5.5-pro").unwrap();
+        let standard = profile_for(Provider::OpenAI, "gpt-5.5").unwrap();
         assert!(
             pro.call_timeout_secs.unwrap() > standard.call_timeout_secs.unwrap(),
             "gpt-5.5-pro ({}) should have a much longer timeout than gpt-5.5 ({})",
@@ -292,8 +327,8 @@ mod tests {
 
     #[test]
     fn gemini_flash_has_shorter_timeout_than_pro() {
-        let flash = profile_for("gemini", "gemini-3.1-flash-lite-preview").unwrap();
-        let pro = profile_for("gemini", "gemini-3.1-pro-preview").unwrap();
+        let flash = profile_for(Provider::Gemini, "gemini-3.1-flash-lite-preview").unwrap();
+        let pro = profile_for(Provider::Gemini, "gemini-3.1-pro-preview").unwrap();
         assert!(
             flash.call_timeout_secs.unwrap() < pro.call_timeout_secs.unwrap(),
             "gemini flash ({}) should have shorter timeout than gemini pro ({})",
@@ -304,13 +339,13 @@ mod tests {
 
     #[test]
     fn unknown_provider_call_timeout_is_none() {
-        assert!(profile_for("unknown", "model").is_none());
+        assert!(profile_for(Provider::Other, "model").is_none());
     }
 
     #[test]
     fn web_search_flag_populated_for_all_catalog_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(entry.provider, entry.id);
+            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
             assert!(
                 profile.is_some(),
                 "catalog model '{}' (provider '{}') must have a profile",
@@ -322,19 +357,19 @@ mod tests {
 
     #[test]
     fn anthropic_supports_web_search() {
-        let profile = profile_for("anthropic", "claude-opus-4-6").unwrap();
+        let profile = profile_for(Provider::Anthropic, "claude-opus-4-6").unwrap();
         assert!(profile.supports_web_search);
     }
 
     #[test]
     fn openai_supports_web_search() {
-        let profile = profile_for("openai", "gpt-5.4").unwrap();
+        let profile = profile_for(Provider::OpenAI, "gpt-5.4").unwrap();
         assert!(profile.supports_web_search);
     }
 
     #[test]
     fn gemini_supports_web_search() {
-        let profile = profile_for("gemini", "gemini-3-flash-preview").unwrap();
+        let profile = profile_for(Provider::Gemini, "gemini-3-flash-preview").unwrap();
         assert!(profile.supports_web_search);
     }
 }

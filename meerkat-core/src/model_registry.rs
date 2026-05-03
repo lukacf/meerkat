@@ -24,19 +24,20 @@ pub struct ModelRegistryEntry {
     pub tier: ModelTier,
     pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
-    pub profile: ModelProfile,
     pub self_hosted: Option<SelfHostedServerRef>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
     entries: BTreeMap<String, ModelRegistryEntry>,
+    profiles: BTreeMap<(Provider, String), ModelProfile>,
     defaults: BTreeMap<Provider, String>,
 }
 
 impl ModelRegistry {
     pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
         let mut entries = BTreeMap::new();
+        let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
         for provider_name in crate::model_profile::catalog::provider_names() {
@@ -55,8 +56,8 @@ impl ModelRegistry {
                 .iter()
                 .filter(|entry| entry.provider == *provider_name)
             {
-                let profile = crate::model_profile::profile_for(entry.provider, entry.id)
-                    .ok_or_else(|| {
+                let profile =
+                    crate::model_profile::profile_for(provider, entry.id).ok_or_else(|| {
                         ConfigError::InternalError(format!(
                             "missing built-in profile for {}:{}",
                             entry.provider, entry.id
@@ -64,6 +65,7 @@ impl ModelRegistry {
                     })?;
                 insert_unique(
                     &mut entries,
+                    &mut profiles,
                     ModelRegistryEntry {
                         id: entry.id.to_string(),
                         display_name: entry.display_name.to_string(),
@@ -71,18 +73,46 @@ impl ModelRegistry {
                         tier: entry.tier,
                         context_window: entry.context_window,
                         max_output_tokens: entry.max_output_tokens,
-                        profile,
                         self_hosted: None,
                     },
+                    profile,
                 )?;
             }
         }
 
-        append_self_hosted(&mut entries, &mut defaults, &config.self_hosted)?;
+        append_self_hosted(
+            &mut entries,
+            &mut profiles,
+            &mut defaults,
+            &config.self_hosted,
+        )?;
 
-        Ok(Self { entries, defaults })
+        Ok(Self {
+            entries,
+            profiles,
+            defaults,
+        })
     }
 
+    /// Returns model projection metadata by id.
+    ///
+    /// This model-only lookup intentionally does not expose `ModelProfile` or
+    /// capability fields. Capability decisions must use typed provider-aware
+    /// lookup through [`ModelRegistry::profile_for_provider`].
+    ///
+    /// ```compile_fail
+    /// let registry = meerkat_core::Config::default().model_registry().unwrap();
+    /// let entry = registry.entry("gemini-3-flash-preview").unwrap();
+    /// let _inline_video = entry.profile.inline_video;
+    /// ```
+    ///
+    /// ```
+    /// let registry = meerkat_core::Config::default().model_registry().unwrap();
+    /// let profile = registry
+    ///     .profile_for_provider(meerkat_core::Provider::Gemini, "gemini-3-flash-preview")
+    ///     .unwrap();
+    /// assert!(profile.inline_video);
+    /// ```
     pub fn entry(&self, model_id: &str) -> Option<&ModelRegistryEntry> {
         self.entries.get(model_id)
     }
@@ -113,13 +143,11 @@ impl ModelRegistry {
         ))
     }
 
-    pub fn profile_for(&self, model_id: &str) -> Option<ModelProfile> {
-        self.entry(model_id).map(|entry| entry.profile.clone())
-    }
-
     pub fn profile_for_provider(&self, provider: Provider, model_id: &str) -> Option<ModelProfile> {
-        self.entry_for_provider(provider, model_id)
-            .map(|entry| entry.profile.clone())
+        self.entry_for_provider(provider, model_id)?;
+        self.profiles
+            .get(&(provider, model_id.to_string()))
+            .cloned()
     }
 
     pub fn default_model(&self, provider: Provider) -> Option<&str> {
@@ -144,6 +172,7 @@ impl ModelRegistry {
 
 fn append_self_hosted(
     entries: &mut BTreeMap<String, ModelRegistryEntry>,
+    profiles: &mut BTreeMap<(Provider, String), ModelProfile>,
     defaults: &mut BTreeMap<Provider, String>,
     config: &SelfHostedConfig,
 ) -> Result<(), ConfigError> {
@@ -195,6 +224,7 @@ fn append_self_hosted(
 
         insert_unique(
             entries,
+            profiles,
             ModelRegistryEntry {
                 id: model_id.clone(),
                 display_name: model.display_name.clone(),
@@ -202,9 +232,9 @@ fn append_self_hosted(
                 tier: model.tier,
                 context_window: model.context_window,
                 max_output_tokens: model.max_output_tokens,
-                profile,
                 self_hosted: Some(self_hosted),
             },
+            profile,
         )?;
     }
 
@@ -213,13 +243,18 @@ fn append_self_hosted(
 
 fn insert_unique(
     entries: &mut BTreeMap<String, ModelRegistryEntry>,
+    profiles: &mut BTreeMap<(Provider, String), ModelProfile>,
     entry: ModelRegistryEntry,
+    profile: ModelProfile,
 ) -> Result<(), ConfigError> {
-    if entries.insert(entry.id.clone(), entry).is_some() {
+    let model_id = entry.id.clone();
+    let provider = entry.provider;
+    if entries.insert(model_id.clone(), entry).is_some() {
         return Err(ConfigError::Validation(
             "model id must be unique across built-in and self-hosted entries".to_string(),
         ));
     }
+    profiles.insert((provider, model_id), profile);
     Ok(())
 }
 
@@ -392,9 +427,21 @@ mod tests {
             Ok(registry) => registry,
             Err(err) => panic!("registry construction failed: {err}"),
         };
-        assert!(registry.profile_for("gpt-unknown-preview").is_none());
-        assert!(registry.profile_for("claude-unknown-preview").is_none());
-        assert!(registry.profile_for("gemini-unknown-preview").is_none());
+        assert!(
+            registry
+                .profile_for_provider(Provider::OpenAI, "gpt-unknown-preview")
+                .is_none()
+        );
+        assert!(
+            registry
+                .profile_for_provider(Provider::Anthropic, "claude-unknown-preview")
+                .is_none()
+        );
+        assert!(
+            registry
+                .profile_for_provider(Provider::Gemini, "gemini-unknown-preview")
+                .is_none()
+        );
     }
 
     #[test]
@@ -416,8 +463,67 @@ mod tests {
             "provider-aware lookup must not share OpenAI defaults with Anthropic"
         );
         assert!(
-            registry.profile_for("gpt-5.4").is_some(),
-            "legacy unambiguous model-id lookup remains available"
+            registry
+                .profile_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+                .is_none(),
+            "provider-aware lookup must not let provider strings select another provider's capabilities"
+        );
+    }
+
+    #[test]
+    fn model_only_entries_are_projection_metadata_not_capability_authority() {
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        let entry = registry
+            .entry("gemini-3-flash-preview")
+            .expect("catalog entry must exist");
+        assert_eq!(entry.provider, Provider::Gemini);
+        assert_eq!(entry.id, "gemini-3-flash-preview");
+        let rendered = format!("{entry:?}");
+        assert!(
+            !rendered.contains("inline_video") && !rendered.contains("supports_temperature"),
+            "model-only projection entry must not expose capability fields: {rendered}"
+        );
+
+        let profile = registry
+            .profile_for_provider(Provider::Gemini, "gemini-3-flash-preview")
+            .expect("typed provider-aware capability lookup should resolve");
+        assert!(profile.inline_video);
+        assert!(
+            registry
+                .profile_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+                .is_none(),
+            "display/catalog lookup must not let another typed provider read capability truth"
+        );
+    }
+
+    #[test]
+    fn provider_aware_profile_lookup_fails_closed_for_unknown_pairs() {
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        assert!(
+            registry
+                .profile_for_provider(Provider::Other, "gpt-5.4")
+                .is_none(),
+            "unknown typed provider must not receive known model defaults"
+        );
+        assert!(
+            registry
+                .profile_for_provider(Provider::Other, "uncatalogued-gpt-compatible")
+                .is_none(),
+            "unknown provider/model pairs must fail closed"
+        );
+        assert!(
+            registry
+                .profile_for_provider(Provider::OpenAI, "uncatalogued-gpt-compatible")
+                .is_none(),
+            "known provider plus uncatalogued model must fail closed"
         );
     }
 

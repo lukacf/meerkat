@@ -76,7 +76,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
             .map(|c| CatalogEntry {
                 id: c.id,
                 display_name: c.display_name,
-                provider: c.provider,
+                provider: c.provider.as_str(),
                 tier: c.tier,
                 context_window: Some(c.context_window),
                 max_output_tokens: Some(c.max_output_tokens),
@@ -252,10 +252,12 @@ mod tests {
     #[test]
     fn catalog_matches_capability_table() {
         for entry in catalog() {
-            let caps = capabilities::capabilities_for(entry.provider, entry.id)
+            let provider = crate::Provider::parse_strict(entry.provider)
+                .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
+            let caps = capabilities::capabilities_for(provider, entry.id)
                 .expect("catalog entry must have a capability row");
             assert_eq!(entry.id, caps.id);
-            assert_eq!(entry.provider, caps.provider);
+            assert_eq!(entry.provider, caps.provider.as_str());
             assert_eq!(entry.display_name, caps.display_name);
             assert_eq!(entry.tier, caps.tier);
             assert_eq!(entry.context_window, Some(caps.context_window));

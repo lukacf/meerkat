@@ -366,10 +366,7 @@ pub trait SessionAgentBuilder: Send + Sync {
     /// Implementations with a richer configured model registry can override
     /// this; the default uses the built-in model capability catalog.
     async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
-        meerkat_core::model_profile::inline_video_support_for(
-            identity.provider.as_str(),
-            &identity.model,
-        )
+        meerkat_core::model_profile::inline_video_support_for(identity.provider, &identity.model)
     }
 
     /// Build an agent for a new session.

@@ -5,6 +5,7 @@
 //! and `ai.google.dev/gemini-api/docs/gemini-3`.
 
 use super::{ModelCapabilities, ThinkingSupport};
+use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 /// Capability rows for Gemini catalog models.
@@ -23,7 +24,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (thinking_budget accepted for backward compatibility)
     ModelCapabilities {
         id: "gemini-3-flash-preview",
-        provider: "gemini",
+        provider: Provider::Gemini,
         display_name: "Gemini 3 Flash Preview",
         tier: ModelTier::Recommended,
         model_family: "gemini-3",
@@ -65,7 +66,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     migrate to 3.1 Pro
     ModelCapabilities {
         id: "gemini-3.1-pro-preview",
-        provider: "gemini",
+        provider: Provider::Gemini,
         display_name: "Gemini 3.1 Pro Preview",
         tier: ModelTier::Supported,
         model_family: "gemini-3",
@@ -103,7 +104,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     (thinking_level default "minimal")
     ModelCapabilities {
         id: "gemini-3.1-flash-lite-preview",
-        provider: "gemini",
+        provider: Provider::Gemini,
         display_name: "Gemini 3.1 Flash Lite Preview",
         tier: ModelTier::Supported,
         model_family: "gemini-3",

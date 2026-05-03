@@ -1429,6 +1429,62 @@ def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
     (output_dir / "events.ts").write_text("\n".join(lines))
 
 
+def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
+    emitted: set[str] = set()
+    lines: list[str] = [
+        "// Generated mob wire types for @rkat/web",
+        "// Source: artifacts/schemas/wire-types.json",
+        "",
+    ]
+
+    def append_interface(name: str) -> None:
+        if name in emitted:
+            return
+        schema = _lookup_named_schema(wire_schema, name)
+        if not schema:
+            raise KeyError(f"schema for generated web mob type {name} not found")
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        lines.append(f"export interface {name} {{")
+        for field_name, field_schema in properties.items():
+            field_type, optional_by_type = _typescript_type_from_schema(
+                schema_root,
+                field_schema,
+                local_defs,
+            )
+            optional = "?" if (field_name not in required or optional_by_type) else ""
+            lines.append(f"  {field_name}{optional}: {field_type};")
+        lines.append("}")
+        lines.append("")
+        emitted.add(name)
+
+    def append_alias(name: str) -> None:
+        if name in emitted:
+            return
+        schema = _lookup_named_schema(wire_schema, name)
+        if not schema:
+            raise KeyError(f"schema for generated web mob alias {name} not found")
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
+        lines.append(f"export type {name} = {alias_type};")
+        lines.append("")
+        emitted.add(name)
+
+    append_alias("WireMobMemberStatus")
+    append_interface("MobStatusResult")
+    append_interface("MobRespawnResult")
+    append_interface("MobEventsResult")
+    append_interface("MobMemberStatusResult")
+    append_interface("MobAppendSystemContextResult")
+
+    (output_dir / "mob.ts").write_text("\n".join(lines))
+
+
 def load_available_capabilities(artifacts_dir: Path) -> set[str]:
     """Load available capability IDs from capabilities.json."""
     caps_file = artifacts_dir / "capabilities.json"
@@ -1500,6 +1556,8 @@ def main():
     web_events_output = output_root / "sdks" / "web" / "src" / "generated"
     generate_web_event_types(schemas, web_events_output)
     print(f"Generated web event types in {web_events_output}")
+    generate_web_mob_types(schemas, web_events_output)
+    print(f"Generated web mob types in {web_events_output}")
 
 
 if __name__ == "__main__":

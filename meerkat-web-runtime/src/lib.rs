@@ -1576,7 +1576,7 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
 
 /// Get the status of a mob.
 ///
-/// Returns JSON with the mob state.
+/// Returns JSON with the generated mob status plus the legacy state projection.
 #[wasm_bindgen]
 pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1584,6 +1584,7 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
     let result = serde_json::json!({
         "mob_id": mob_id,
+        "status": state.as_str(),
         "state": state.as_str(),
     });
     Ok(JsValue::from_str(&result.to_string()))
@@ -1591,7 +1592,7 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 
 /// List all mobs.
 ///
-/// Returns JSON array of `{ mob_id, state }`.
+/// Returns JSON array of `{ mob_id, status, state }`.
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1601,6 +1602,7 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
         .map(|(id, state)| {
             serde_json::json!({
                 "mob_id": id.to_string(),
+                "status": state.as_str(),
                 "state": state.as_str(),
             })
         })
@@ -2111,9 +2113,16 @@ pub async fn mob_respawn(
     });
     match mob_state.mob_respawn(&id, mid, initial_message).await {
         Ok(receipt) => {
+            let identity_str = receipt.identity.to_string();
             let result = serde_json::json!({
                 "status": "completed",
-                "receipt": receipt,
+                "receipt": {
+                    "identity": identity_str,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        id.as_str(),
+                        &identity_str,
+                    ),
+                },
             });
             Ok(JsValue::from_str(&result.to_string()))
         }
@@ -2121,9 +2130,16 @@ pub async fn mob_respawn(
             receipt,
             failed_peer_ids,
         }) => {
+            let identity_str = receipt.identity.to_string();
             let result = serde_json::json!({
                 "status": "topology_restore_failed",
-                "receipt": receipt,
+                "receipt": {
+                    "identity": identity_str,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        id.as_str(),
+                        &identity_str,
+                    ),
+                },
                 "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
             });
             Ok(JsValue::from_str(&result.to_string()))

@@ -51,15 +51,19 @@ fn is_transport_internal(message: &str) -> bool {
 
 #[cfg(feature = "mob")]
 fn compose_rpc_mob_external_tools(
-    callback_tools: Arc<dyn AgentToolDispatcher>,
+    callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
     configured_tools: Option<Arc<dyn AgentToolDispatcher>>,
-) -> Arc<dyn AgentToolDispatcher> {
-    match configured_tools {
-        Some(configured_tools) => Arc::new(DynamicToolComposite::new(vec![
-            callback_tools,
-            configured_tools,
-        ])),
-        None => callback_tools,
+) -> Option<Arc<dyn AgentToolDispatcher>> {
+    match (callback_tools, configured_tools) {
+        (Some(callback_tools), Some(configured_tools)) => {
+            Some(Arc::new(DynamicToolComposite::new(vec![
+                callback_tools,
+                configured_tools,
+            ])))
+        }
+        (Some(callback_tools), None) => Some(callback_tools),
+        (None, Some(configured_tools)) => Some(configured_tools),
+        (None, None) => None,
     }
 }
 
@@ -499,18 +503,16 @@ impl MethodRouter {
                     let runtime = runtime.clone();
                     let configured_mcp_tools = configured_mcp_tools.clone();
                     move || {
-                        let tx = runtime.callback_request_tx()?;
-                        let callback_tools: Arc<dyn AgentToolDispatcher> =
-                            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                                runtime.registered_tools(),
-                                tx,
-                                runtime.callback_id_counter(),
-                                vec![],
-                            ));
-                        Some(compose_rpc_mob_external_tools(
-                            callback_tools,
-                            configured_mcp_tools.clone(),
-                        ))
+                        let callback_tools: Option<Arc<dyn AgentToolDispatcher>> =
+                            runtime.callback_request_tx().map(|tx| {
+                                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                                    runtime.registered_tools(),
+                                    tx,
+                                    runtime.callback_id_counter(),
+                                    vec![],
+                                )) as Arc<dyn AgentToolDispatcher>
+                            });
+                        compose_rpc_mob_external_tools(callback_tools, configured_mcp_tools.clone())
                     }
                 });
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
@@ -2602,7 +2604,8 @@ mod tests {
         let configured_tools: Arc<dyn AgentToolDispatcher> =
             Arc::new(StaticDispatcher::new("linear_add_comment"));
 
-        let merged = compose_rpc_mob_external_tools(callback_tools, Some(configured_tools));
+        let merged = compose_rpc_mob_external_tools(Some(callback_tools), Some(configured_tools))
+            .expect("merged dispatcher");
         let names: std::collections::BTreeSet<String> = merged
             .tools()
             .iter()
@@ -2611,6 +2614,27 @@ mod tests {
 
         assert!(names.contains("callback_tool"));
         assert!(names.contains("linear_add_comment"));
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn rpc_mob_external_tools_keep_configured_mcp_without_callback_transport() {
+        let configured_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("linear_upsert_workpad"));
+
+        let merged = compose_rpc_mob_external_tools(None, Some(configured_tools))
+            .expect("configured MCP dispatcher must remain visible");
+        let names: std::collections::BTreeSet<String> = merged
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert!(
+            names.contains("linear_upsert_workpad"),
+            "RPC mob members launched over TCP may not have a callback transport, \
+             but configured MCP tools from .rkat/mcp.toml must still be exposed"
+        );
     }
 
     #[cfg(all(feature = "mob", feature = "mcp"))]

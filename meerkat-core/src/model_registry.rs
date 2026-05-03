@@ -5,7 +5,9 @@ use crate::config::{
     Config, ConfigError, SelfHostedApiStyle, SelfHostedConfig, SelfHostedTransport,
 };
 use crate::model_profile::{ModelProfile, catalog::ModelTier};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedServerRef {
@@ -32,6 +34,92 @@ pub struct ModelRegistry {
     entries: BTreeMap<String, ModelRegistryEntry>,
     profiles: BTreeMap<(Provider, String), ModelProfile>,
     defaults: BTreeMap<Provider, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    InlineVideo,
+}
+
+impl ModelCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InlineVideo => "inline_video",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::InlineVideo => "inline video",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsupportedModelCapabilityReason {
+    CapabilityDisabled,
+    ProviderModelProfileMissing,
+    CapabilityRegistryUnavailable,
+}
+
+impl UnsupportedModelCapabilityReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityDisabled => "capability_disabled",
+            Self::ProviderModelProfileMissing => "provider_model_profile_missing",
+            Self::CapabilityRegistryUnavailable => "capability_registry_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsupportedModelCapabilityEvidence {
+    pub capability: ModelCapability,
+    pub provider: Provider,
+    pub model: String,
+    pub reason: UnsupportedModelCapabilityReason,
+}
+
+impl UnsupportedModelCapabilityEvidence {
+    pub fn inline_video(
+        provider: Provider,
+        model: impl Into<String>,
+        reason: UnsupportedModelCapabilityReason,
+    ) -> Self {
+        Self {
+            capability: ModelCapability::InlineVideo,
+            provider,
+            model: model.into(),
+            reason,
+        }
+    }
+
+    pub fn details(&self) -> serde_json::Value {
+        serde_json::json!({
+            "unsupported_capability": {
+                "capability": self.capability.as_str(),
+                "provider": self.provider.as_str(),
+                "model": self.model.as_str(),
+                "reason": self.reason.as_str(),
+            },
+        })
+    }
+}
+
+impl fmt::Display for UnsupportedModelCapabilityEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} input is not supported by model '{}' on provider '{}' (capability: {}, reason: {})",
+            self.capability.display_name(),
+            self.model,
+            self.provider.as_str(),
+            self.capability.as_str(),
+            self.reason.as_str()
+        )
+    }
 }
 
 impl ModelRegistry {
@@ -148,6 +236,30 @@ impl ModelRegistry {
         self.profiles
             .get(&(provider, model_id.to_string()))
             .cloned()
+    }
+
+    pub fn require_inline_video_for_provider(
+        &self,
+        provider: Provider,
+        model_id: &str,
+    ) -> Result<(), UnsupportedModelCapabilityEvidence> {
+        let Some(profile) = self.profile_for_provider(provider, model_id) else {
+            return Err(UnsupportedModelCapabilityEvidence::inline_video(
+                provider,
+                model_id,
+                UnsupportedModelCapabilityReason::ProviderModelProfileMissing,
+            ));
+        };
+
+        if profile.inline_video {
+            Ok(())
+        } else {
+            Err(UnsupportedModelCapabilityEvidence::inline_video(
+                provider,
+                model_id,
+                UnsupportedModelCapabilityReason::CapabilityDisabled,
+            ))
+        }
     }
 
     pub fn default_model(&self, provider: Provider) -> Option<&str> {
@@ -524,6 +636,62 @@ mod tests {
                 .profile_for_provider(Provider::OpenAI, "uncatalogued-gpt-compatible")
                 .is_none(),
             "known provider plus uncatalogued model must fail closed"
+        );
+    }
+
+    #[test]
+    fn inline_video_capability_requires_typed_provider_owner() {
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        registry
+            .require_inline_video_for_provider(Provider::Gemini, "gemini-3-flash-preview")
+            .expect("Gemini catalog owner should authorize inline video");
+
+        let err = registry
+            .require_inline_video_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
+            .expect_err("same model name under another provider must fail closed");
+        assert_eq!(err.capability, ModelCapability::InlineVideo);
+        assert_eq!(err.provider, Provider::OpenAI);
+        assert_eq!(err.model, "gemini-3-flash-preview");
+        assert_eq!(
+            err.reason,
+            UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+    }
+
+    #[test]
+    fn inline_video_capability_evidence_distinguishes_disabled_and_unknown() {
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        let disabled = registry
+            .require_inline_video_for_provider(Provider::OpenAI, "gpt-5.4")
+            .expect_err("known OpenAI model has catalog-owned inline video disabled");
+        assert_eq!(
+            disabled.reason,
+            UnsupportedModelCapabilityReason::CapabilityDisabled
+        );
+
+        let unknown = registry
+            .require_inline_video_for_provider(Provider::Other, "uncatalogued-video-model")
+            .expect_err("unknown provider/model pair must fail closed");
+        assert_eq!(
+            unknown.reason,
+            UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        let details = unknown.details();
+        assert_eq!(
+            details["unsupported_capability"]["capability"],
+            serde_json::json!("inline_video")
+        );
+        assert_eq!(
+            details["unsupported_capability"]["reason"],
+            serde_json::json!("provider_model_profile_missing")
         );
     }
 

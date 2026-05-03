@@ -127,7 +127,7 @@ struct InteractionStream {
     /// transition. Without a handle, the stream is a local transport-only
     /// channel and owns direct cleanup.
     registry: InteractionStreamRegistry,
-    source_id: String,
+    source: meerkat_core::EventSourceIdentity,
     seq: u64,
 }
 
@@ -272,8 +272,12 @@ impl Stream for InteractionStream {
                 }
                 Poll::Ready(Some(event)) => {
                     this.seq = this.seq.saturating_add(1);
-                    let envelope =
-                        meerkat_core::EventEnvelope::new(&this.source_id, this.seq, None, event);
+                    let envelope = meerkat_core::EventEnvelope::new_with_source(
+                        this.source.clone(),
+                        this.seq,
+                        None,
+                        event,
+                    );
                     Poll::Ready(Some(envelope))
                 }
                 Poll::Pending => Poll::Pending,
@@ -473,7 +477,9 @@ impl CoreCommsRuntime for CommsRuntime {
                     receiver: Some(receiver),
                     stream_handle,
                     registry: self.interaction_stream_registry.clone(),
-                    source_id: format!("interaction:{id}"),
+                    source: meerkat_core::EventSourceIdentity::interaction(
+                        meerkat_core::InteractionId(id),
+                    ),
                     seq: 0,
                 }))
             }

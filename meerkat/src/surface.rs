@@ -578,7 +578,7 @@ pub async fn validate_reload_target(
 #[cfg(feature = "mcp")]
 pub async fn emit_mcp_lifecycle_events(
     event_tx: &mpsc::Sender<meerkat_core::EventEnvelope<AgentEvent>>,
-    source_id: &str,
+    source: &meerkat_core::EventSourceIdentity,
     prompt: &mut String,
     turn_number: u32,
     actions: Vec<meerkat_mcp::McpLifecycleAction>,
@@ -596,6 +596,7 @@ pub async fn emit_mcp_lifecycle_events(
     static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<McpSeqState>> = OnceLock::new();
 
     for action in actions {
+        let source_id = source.legacy_source_id();
         let mut payload = action.to_tool_config_changed_payload();
         payload.applied_at_turn = Some(turn_number);
         let target = payload.target.clone();
@@ -605,8 +606,8 @@ pub async fn emit_mcp_lifecycle_events(
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if !guard.seq_by_source.contains_key(source_id) {
-                let source_key = source_id.to_string();
+            if !guard.seq_by_source.contains_key(&source_id) {
+                let source_key = source_id.clone();
                 guard.source_order.push_back(source_key.clone());
                 guard.seq_by_source.insert(source_key, 0);
 
@@ -619,16 +620,13 @@ pub async fn emit_mcp_lifecycle_events(
                 }
             }
 
-            let entry = guard
-                .seq_by_source
-                .entry(source_id.to_string())
-                .or_insert(0);
+            let entry = guard.seq_by_source.entry(source_id).or_insert(0);
             *entry += 1;
             *entry
         };
         let _ = event_tx
-            .send(meerkat_core::EventEnvelope::new(
-                source_id,
+            .send(meerkat_core::EventEnvelope::new_with_source(
+                source.clone(),
                 seq,
                 None,
                 AgentEvent::ToolConfigChanged {

@@ -67,23 +67,36 @@ fn compose_rpc_mob_external_tools(
     }
 }
 
+/// Bundle returned by [`load_configured_mcp_tools_for_rpc_mob`]: the dispatcher
+/// callers wire into mob members, plus a keepalive guard that owns the loader
+/// runtime thread's lifetime.
 #[cfg(all(feature = "mob", feature = "mcp"))]
-pub(crate) struct ConfiguredRpcMobMcpDispatcher {
+pub(crate) struct LoadedRpcMobMcp {
     pub(crate) dispatcher: Arc<dyn AgentToolDispatcher>,
     pub(crate) keepalive: ConfiguredRpcMobMcpKeepalive,
 }
 
+/// Owns the loader runtime thread that keeps configured MCP transports alive.
+///
+/// Dropping the guard signals the thread to call
+/// `McpRouterAdapter::shutdown()` and exit, releasing every MCP transport and
+/// child process the loader opened. The guard is held by the same closure that
+/// captures the dispatcher `Arc`, so the thread exits the moment the dispatcher
+/// itself becomes unreachable.
 #[cfg(all(feature = "mob", feature = "mcp"))]
 pub(crate) struct ConfiguredRpcMobMcpKeepalive {
-    shutdown_tx: std::sync::mpsc::SyncSender<()>,
+    shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(all(feature = "mob", feature = "mcp"))]
 impl ConfiguredRpcMobMcpKeepalive {
     fn signal_shutdown(&self) {
-        // Capacity is 1; a second send is a no-op once the first lands.
-        let _ = self.shutdown_tx.try_send(());
+        if let Ok(mut guard) = self.shutdown_tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(());
+        }
     }
 
     /// Block until the keepalive runtime thread has exited and the adapter has
@@ -108,11 +121,36 @@ impl Drop for ConfiguredRpcMobMcpKeepalive {
     }
 }
 
+/// Load `.rkat/mcp.toml` servers, connect them, and hand back a dispatcher
+/// plus a keepalive guard.
+///
+/// `MethodRouter::new` is synchronous (it cannot await), so the loader runs on
+/// dedicated OS threads:
+///
+/// 1. **Config-load thread:** builds a one-shot `tokio` current-thread runtime
+///    purely to drive `McpConfig::load_with_scopes_from_roots`, then exits.
+///    Its runtime is torn down before we touch any MCP transports, so it
+///    cannot host long-lived I/O.
+/// 2. **Connect / keepalive thread (`rpc-mob-mcp-runtime`):** owns a second
+///    current-thread runtime that runs `apply_staged` + `poll_external_updates`
+///    until every server has connected (or the 60s deadline trips). On success
+///    it parks on a `tokio::sync::oneshot` shutdown channel so the MCP child
+///    processes stay alive for the lifetime of the [`LoadedRpcMobMcp`] holder.
+///    Dropping the holder fires the channel; the thread then calls
+///    `McpRouterAdapter::shutdown()` and exits.
+///
+/// The two runtimes are intentionally separate: collapsing them into one would
+/// either tie the lifetime of the transports to a startup-only runtime (and
+/// kill them as soon as we exit), or force the config-load step to share a
+/// long-lived runtime even when no servers are configured.
+///
+/// Returns `None` when no servers are configured or the config could not be
+/// loaded; pre-existing log lines warn on every recoverable failure.
 #[cfg(all(feature = "mob", feature = "mcp"))]
 fn load_configured_mcp_tools_for_rpc_mob(
     context_root: Option<PathBuf>,
     user_root: Option<PathBuf>,
-) -> Option<ConfiguredRpcMobMcpDispatcher> {
+) -> Option<LoadedRpcMobMcp> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = tokio::runtime::Builder::new_current_thread()
@@ -156,7 +194,7 @@ fn load_configured_mcp_tools_for_rpc_mob(
     let adapter_for_poll = adapter.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let thread_ready_tx = ready_tx.clone();
-    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let join = match std::thread::Builder::new()
         .name("rpc-mob-mcp-runtime".to_string())
         .spawn(move || {
@@ -200,11 +238,12 @@ fn load_configured_mcp_tools_for_rpc_mob(
                 let connected = result.is_ok();
                 let _ = thread_ready_tx.send(result);
                 if connected {
-                    // Park the runtime thread on the shutdown signal so that
-                    // configured MCP transports stay open for the lifetime of
-                    // the holder. When the holder drops, the sender is dropped
-                    // and `recv` returns Err, which is the cue to wind down.
-                    let _ = tokio::task::spawn_blocking(move || shutdown_rx.recv()).await;
+                    // Park on the oneshot shutdown channel so configured MCP
+                    // transports stay open for the lifetime of the holder.
+                    // `await` resolves either when the holder explicitly sends
+                    // (Drop / shutdown_and_join) or when the sender is dropped
+                    // without sending; both paths cue us to wind down.
+                    let _ = shutdown_rx.await;
                 }
                 adapter_for_poll.shutdown().await;
             });
@@ -224,8 +263,11 @@ fn load_configured_mcp_tools_for_rpc_mob(
             tracing::warn!(error = %error, "MCP connect thread exited without a result");
         }
     }
-    let keepalive = ConfiguredRpcMobMcpKeepalive { shutdown_tx, join };
-    Some(ConfiguredRpcMobMcpDispatcher {
+    let keepalive = ConfiguredRpcMobMcpKeepalive {
+        shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+        join,
+    };
+    Some(LoadedRpcMobMcp {
         dispatcher: adapter as Arc<dyn AgentToolDispatcher>,
         keepalive,
     })
@@ -543,7 +585,7 @@ impl MethodRouter {
             ) = {
                 let (context_root, user_root) = runtime.skill_identity_roots();
                 match load_configured_mcp_tools_for_rpc_mob(context_root, user_root) {
-                    Some(ConfiguredRpcMobMcpDispatcher {
+                    Some(LoadedRpcMobMcp {
                         dispatcher,
                         keepalive,
                     }) => (Some(dispatcher), Some(Arc::new(keepalive))),
@@ -566,6 +608,11 @@ impl MethodRouter {
                 let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
                     let runtime = runtime.clone();
                     let configured_mcp_tools = configured_mcp_tools.clone();
+                    // Captured for its `Drop` side effect — keeps the loader
+                    // thread + MCP transports alive while the closure (and
+                    // therefore the dispatcher Arc) is reachable. Removing
+                    // this capture leaks the thread; see
+                    // `ConfiguredRpcMobMcpKeepalive`.
                     #[cfg(feature = "mcp")]
                     let _configured_mcp_keepalive = configured_mcp_keepalive.clone();
                     move || {
@@ -2776,7 +2823,7 @@ args = [{}]
 
         let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
             .expect("configured MCP dispatcher");
-        let ConfiguredRpcMobMcpDispatcher {
+        let LoadedRpcMobMcp {
             dispatcher,
             keepalive,
         } = bundle;
@@ -2847,7 +2894,7 @@ args = [{}]
 
         let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
             .expect("configured MCP dispatcher");
-        let ConfiguredRpcMobMcpDispatcher {
+        let LoadedRpcMobMcp {
             dispatcher,
             keepalive,
         } = bundle;

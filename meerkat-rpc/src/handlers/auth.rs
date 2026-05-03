@@ -250,6 +250,11 @@ fn oauth_device_state_error(id: Option<RpcId>, err: OAuthFlowError) -> RpcRespon
             error::INVALID_PARAMS,
             "oauth device code is missing or expired",
         ),
+        OAuthFlowError::RegistryProjectionMissing { .. } => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("oauth device registry projection failed: {err}"),
+        ),
         other => RpcResponse::error(
             id,
             error::INVALID_PARAMS,
@@ -582,6 +587,13 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
 ) -> Option<RpcResponse> {
+    if !poll_lease.terminal_flow_state_is_authmachine_owned() {
+        return Some(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "consume_oauth_device_flow requires an AuthMachine-owned OAuth device poll lease",
+        ));
+    }
     if let Some(resp) = verify_terminal_device_flow(id.clone(), &poll_lease) {
         return Some(resp);
     }
@@ -643,6 +655,13 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     tokens: &PersistedTokens,
     flow: BrowserFlowConsume<'_>,
 ) -> Result<(), RpcResponse> {
+    if !flow.authority.terminal_flow_state_is_authmachine_owned() {
+        return Err(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "consume_oauth_browser_flow requires an AuthMachine-owned OAuth flow authority",
+        ));
+    }
     let prepared = prepare_token_commit_unlocked(id.clone(), store, connection_ref).await?;
     flow.authority
         .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
@@ -1136,6 +1155,13 @@ pub async fn handle_auth_login_complete(
                 id,
                 error::INVALID_PARAMS,
                 "oauth state is missing or expired",
+            );
+        }
+        Err(e @ OAuthFlowError::RegistryProjectionMissing { .. }) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("oauth registry projection failed: {e}"),
             );
         }
         Err(e) => {
@@ -2357,6 +2383,10 @@ mod tests {
     struct RejectDeviceConsumeLifecycle;
 
     impl meerkat_providers::oauth_flow::OAuthDevicePollLifecycle for RejectDeviceConsumeLifecycle {
+        fn device_flow_state_is_authmachine_owned(&self) -> bool {
+            true
+        }
+
         fn finish_device_poll(
             &self,
             _target: &ConnectionRef,
@@ -2389,6 +2419,10 @@ mod tests {
     struct RejectBrowserConsumeAuthority;
 
     impl meerkat_providers::oauth_flow::OAuthFlowAuthority for RejectBrowserConsumeAuthority {
+        fn terminal_flow_state_is_authmachine_owned(&self) -> bool {
+            true
+        }
+
         fn start(
             &self,
             _target: ConnectionRef,
@@ -2635,7 +2669,10 @@ mod tests {
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             ),
-            Err(OAuthFlowError::Missing)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
         ));
         let flow = runtime
             .oauth_flow_authority()
@@ -3026,7 +3063,10 @@ mod tests {
                 &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
-            Err(OAuthFlowError::DevicePollInProgress)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "begin_oauth_device_poll",
+                ..
+            })
         ));
 
         drop(poll);
@@ -3074,7 +3114,10 @@ mod tests {
                 &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
-            Err(OAuthFlowError::DevicePollInProgress)
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "begin_oauth_device_poll",
+                ..
+            })
         ));
 
         task.abort();
@@ -3538,7 +3581,12 @@ mod tests {
                 &connection_ref,
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
-            Err(meerkat_providers::oauth_flow::OAuthFlowError::Missing)
+            Err(
+                meerkat_providers::oauth_flow::OAuthFlowError::LifecycleRejected {
+                    operation: "begin_oauth_device_poll",
+                    ..
+                }
+            )
         ));
     }
 
@@ -3676,6 +3724,134 @@ mod tests {
         );
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
+    async fn raw_registry_browser_success_cannot_commit_tokens() {
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        let store = runtime.token_store().expect("test token store");
+        let auth_lease = runtime.auth_lease_handle();
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let redirect_uri = "http://127.0.0.1/callback";
+        let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
+            std::time::Duration::from_secs(600),
+        );
+        let state = registry
+            .start(
+                connection_ref.clone(),
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri.to_string(),
+                "registry-only-verifier".to_string(),
+            )
+            .expect("raw registry admits browser flow");
+
+        let resp = save_tokens_and_consume_browser_flow(
+            Some(RpcId::Num(1)),
+            &store,
+            &runtime,
+            &connection_ref,
+            &PersistedTokens::api_key("sk-new"),
+            BrowserFlowConsume {
+                authority: &registry,
+                state: &state,
+                provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            },
+        )
+        .await
+        .expect_err("raw registry must not commit tokens");
+
+        let error = resp.error.expect("consume should return RPC error");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error
+                .message
+                .contains("AuthMachine-owned OAuth flow authority")
+        );
+        assert!(store.load(&key).await.unwrap().is_none());
+        assert_eq!(
+            auth_lease
+                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .phase,
+            None
+        );
+        registry
+            .verify(
+                &state,
+                &connection_ref,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("raw registry success path is inert and remains unconsumed");
+    }
+
+    #[tokio::test]
+    async fn raw_registry_device_success_cannot_commit_tokens() {
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        let store = runtime.token_store().expect("test token store");
+        let auth_lease = runtime.auth_lease_handle();
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
+            std::time::Duration::from_secs(600),
+        );
+        registry
+            .admit_device_code(
+                connection_ref.clone(),
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "registry-only-device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("raw registry admits device flow");
+        let poll_lease = registry
+            .begin_device_code_poll(
+                "registry-only-device-code",
+                &connection_ref,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("raw registry begins device poll");
+
+        let resp = save_tokens_and_consume_device_flow(
+            Some(RpcId::Num(1)),
+            &store,
+            &runtime,
+            &connection_ref,
+            &PersistedTokens::api_key("sk-new"),
+            poll_lease,
+        )
+        .await
+        .expect("raw registry must not commit tokens");
+
+        let error = resp.error.expect("consume should return RPC error");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error
+                .message
+                .contains("AuthMachine-owned OAuth device poll lease")
+        );
+        assert!(store.load(&key).await.unwrap().is_none());
+        assert_eq!(
+            auth_lease
+                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .phase,
+            None
+        );
+        registry
+            .verify_device_code(
+                "registry-only-device-code",
+                &connection_ref,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("raw registry device success path is inert and remains unconsumed");
     }
 
     #[tokio::test]
@@ -3981,7 +4157,12 @@ mod tests {
 
         let error = resp.error.expect("consume should return RPC error");
         assert_eq!(error.code, crate::error::INTERNAL_ERROR);
-        assert!(error.message.contains("oauth state is missing or expired"));
+        assert!(
+            error
+                .message
+                .contains("oauth state terminal consume failed")
+        );
+        assert!(error.message.contains("verify_oauth_browser_flow"));
         assert!(store.load(&key).await.unwrap().is_none());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, None);

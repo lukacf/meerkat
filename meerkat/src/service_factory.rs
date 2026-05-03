@@ -516,12 +516,6 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
             .map(|profile| profile.inline_video)
-            .or_else(|| {
-                meerkat_core::model_profile::inline_video_support_for(
-                    identity.provider,
-                    &identity.model,
-                )
-            })
     }
 
     async fn build_agent(

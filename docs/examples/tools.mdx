@@ -181,9 +181,8 @@ CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.
       "method": "mcp/add",
       "params": {
         "session_id": "01936f8a-...",
-        "server_name": "my-tools",
         "server_config": {
-          "transport": "stdio",
+          "name": "my-tools",
           "command": "npx",
           "args": ["-y", "@my/mcp-server"]
         },
@@ -221,8 +220,7 @@ CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.
     curl -X POST http://localhost:8080/sessions/01936f8a-.../mcp/add \
       -H "Content-Type: application/json" \
       -d '{
-        "server_name": "my-tools",
-        "server_config": {"transport": "stdio", "command": "npx", "args": ["-y", "@my/mcp-server"]},
+        "server_config": {"name": "my-tools", "command": "npx", "args": ["-y", "@my/mcp-server"]},
         "persisted": false
       }'
 
@@ -257,8 +255,7 @@ CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.
     ```python
     await client.mcp_add(
         session_id="01936f8a-...",
-        server_name="my-tools",
-        server_config={"transport": "stdio", "command": "npx", "args": ["-y", "@my/mcp-server"]},
+        server_config={"name": "my-tools", "command": "npx", "args": ["-y", "@my/mcp-server"]},
         persisted=False,
     )
 
@@ -269,14 +266,13 @@ CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.
   <Tab title="TypeScript">
     ```typescript
     await client.mcpAdd({
-      sessionId: "01936f8a-...",
-      serverName: "my-tools",
-      serverConfig: { transport: "stdio", command: "npx", args: ["-y", "@my/mcp-server"] },
+      session_id: "01936f8a-...",
+      server_config: { name: "my-tools", command: "npx", args: ["-y", "@my/mcp-server"] },
       persisted: false,
     });
 
-    await client.mcpRemove({ sessionId: "01936f8a-...", serverName: "my-tools", persisted: false });
-    await client.mcpReload({ sessionId: "01936f8a-...", serverName: "my-tools" });
+    await client.mcpRemove({ session_id: "01936f8a-...", server_name: "my-tools", persisted: false });
+    await client.mcpReload({ session_id: "01936f8a-...", server_name: "my-tools" });
     ```
   </Tab>
 </Tabs>

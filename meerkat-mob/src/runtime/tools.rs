@@ -812,6 +812,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 Err(error) => {
                                     results.push(json!(
                                         meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                            error.spawn_many_failure_cause(),
                                             error.to_string()
                                         )
                                     ));
@@ -839,6 +840,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 }
                                 Err(error) => {
                                     json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                        error.spawn_many_failure_cause(),
                                         error.to_string()
                                     ))
                                 }

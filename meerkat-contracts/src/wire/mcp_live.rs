@@ -23,12 +23,12 @@ pub enum McpLiveOperation {
 }
 
 /// Request payload for `mcp/add`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct McpAddParams {
     pub session_id: String,
-    pub server_name: String,
-    pub server_config: serde_json::Value,
+    pub server_config: meerkat_core::McpServerConfig,
     #[serde(default)]
     pub persisted: bool,
 }
@@ -75,10 +75,18 @@ mod tests {
 
     #[test]
     fn mcp_add_params_roundtrip() {
+        let server_config = meerkat_core::McpServerConfig::stdio(
+            "filesystem",
+            "npx",
+            vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
+            std::collections::HashMap::new(),
+        );
         let params = McpAddParams {
             session_id: "s_123".to_string(),
-            server_name: "filesystem".to_string(),
-            server_config: serde_json::json!({"cmd":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}),
+            server_config,
             persisted: true,
         };
         let json = serde_json::to_value(&params).expect("serialize");
@@ -130,7 +138,6 @@ mod tests {
     #[test]
     fn mcp_add_params_rejects_malformed_payload() {
         let missing = serde_json::json!({
-            "server_name": "filesystem",
             "server_config": {}
         });
         let err = serde_json::from_value::<McpAddParams>(missing).expect_err("missing session_id");
@@ -138,12 +145,56 @@ mod tests {
 
         let wrong_type = serde_json::json!({
             "session_id": "s_123",
-            "server_name": "filesystem",
-            "server_config": {},
+            "server_config": {
+                "name": "filesystem",
+                "command": "npx",
+                "args": [],
+                "env": {}
+            },
             "persisted": "not-bool"
         });
         let err =
             serde_json::from_value::<McpAddParams>(wrong_type).expect_err("invalid persisted");
+        assert!(err.to_string().contains("invalid type"));
+
+        let malformed_config = serde_json::json!({
+            "session_id": "s_123",
+            "server_config": {}
+        });
+        let err =
+            serde_json::from_value::<McpAddParams>(malformed_config).expect_err("invalid config");
+        let message = err.to_string();
+        assert!(
+            message.contains("missing field") || message.contains("data did not match any variant"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mcp_add_params_rejects_legacy_server_name_mirror() {
+        let legacy = serde_json::json!({
+            "session_id": "s_123",
+            "server_name": "filesystem",
+            "server_config": {
+                "name": "filesystem",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                "env": {}
+            }
+        });
+        let err = serde_json::from_value::<McpAddParams>(legacy)
+            .expect_err("legacy server_name mirror must be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn mcp_add_params_rejects_unknown_config_string() {
+        let legacy = serde_json::json!({
+            "session_id": "s_123",
+            "server_config": "filesystem"
+        });
+        let err = serde_json::from_value::<McpAddParams>(legacy)
+            .expect_err("server_config must be typed object");
         assert!(err.to_string().contains("invalid type"));
     }
 }

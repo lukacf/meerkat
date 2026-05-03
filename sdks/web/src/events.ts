@@ -3,12 +3,12 @@ export class EventSubscription<T> {
   private closed = false;
   private readonly pollSource: () => string;
   private readonly closeSource: () => void;
-  private readonly parseEvents: (raw: unknown) => T[];
+  private readonly parseEvents: (raw: unknown[]) => T[];
 
   /** @internal — use Session.subscribe(), Member.subscribe(), Mob.subscribeMemberEvents(), or Mob.subscribeEvents(). */
   constructor(
     pollSource: () => string,
-    parseEvents: (raw: unknown) => T[],
+    parseEvents: (raw: unknown[]) => T[],
     closeSource: () => void = () => {},
   ) {
     this.pollSource = pollSource;
@@ -21,6 +21,9 @@ export class EventSubscription<T> {
     if (this.closed) return [];
     const json = this.pollSource();
     const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) {
+      throw new Error('Invalid subscription poll response: expected event array');
+    }
     return this.parseEvents(parsed);
   }
 

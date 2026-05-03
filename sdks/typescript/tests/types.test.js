@@ -65,10 +65,11 @@ describe("Contract Version", () => {
     );
 
     assert.match(generated, /export interface RealtimeOpenInfo/);
-    assert.match(generated, /supported_protocol_versions\??: string\[]/);
-    assert.match(generated, /default_protocol_version: string/);
+    assert.match(generated, /export type RealtimeProtocolVersion = "2"/);
+    assert.match(generated, /supported_protocol_versions\??: RealtimeProtocolVersion\[]/);
+    assert.match(generated, /default_protocol_version: RealtimeProtocolVersion/);
     assert.match(generated, /export interface RealtimeChannelOpenFrame/);
-    assert.match(generated, /protocol_version: string/);
+    assert.match(generated, /protocol_version: RealtimeProtocolVersion/);
     assert.match(generated, /export interface RuntimeStateResult \{\n  state: WireRuntimeState;\n\}/);
   });
 });
@@ -461,6 +462,51 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse skills_resolved with typed skill identities", () => {
+    const sourceUuid = "00000000-0000-4b11-8111-000000000001";
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: [{ source_uuid: sourceUuid, skill_name: "email-extractor" }],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "skills_resolved");
+    if (event.type === "skills_resolved") {
+      assert.deepEqual(event.skills, [
+        { sourceUuid, skillName: "email-extractor" },
+      ]);
+      assert.equal(event.injectionBytes, 128);
+    }
+  });
+
+  it("should reject legacy string-only skills_resolved payloads", () => {
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: ["legacy/ref"],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.rawType, "skills_resolved");
+      assert.match(event.error, /SkillKey/);
+    }
+  });
+
+  it("should reject skills_resolved missing typed skill identity fields", () => {
+    const event = parseEvent({
+      type: "skills_resolved",
+      skills: [{ source_uuid: "00000000-0000-4b11-8111-000000000001" }],
+      injection_bytes: 128,
+    });
+
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.rawType, "skills_resolved");
+      assert.match(event.error, /SkillKey/);
+    }
+  });
+
   it("should parse skill_resolution_failed with typed key and reason", () => {
     const sourceUuid = "00000000-0000-4b11-8111-000000000001";
     const event = parseEvent({
@@ -518,6 +564,40 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "skill_resolution_failed");
     if (event.type === "skill_resolution_failed") {
+      assert.equal(event.reason, undefined);
+    }
+  });
+
+  it("should preserve unknown skill resolution reason types as typed unknown", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: "future_status", message: "future details" },
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.skillKey, undefined);
+      assert.deepEqual(event.reason, {
+        reasonType: "unknown",
+        message: "future details",
+        rawReasonType: "future_status",
+      });
+    }
+  });
+
+  it("should not fabricate empty skill keys for keyed failure reasons", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: "not_found" },
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.skillKey, undefined);
       assert.equal(event.reason, undefined);
     }
   });
@@ -822,6 +902,33 @@ describe("Typed Events", () => {
     assert.equal(envelope.seq, undefined);
     assert.equal(envelope.timestampMs, undefined);
     assert.equal(envelope.payload, undefined);
+  });
+
+  it("should use typed event source without trusting legacy source id", () => {
+    const envelope = MeerkatClient.parseAgentEventEnvelope({
+      source: {
+        type: "session",
+        session_id: "00000000-0000-4000-8000-000000000001",
+      },
+      source_id: "session:not-a-uuid",
+      payload: { type: "text_delta", delta: "hi" },
+    });
+
+    assert.deepEqual(envelope.source, {
+      type: "session",
+      sessionId: "00000000-0000-4000-8000-000000000001",
+    });
+    assert.equal(envelope.sourceId, "session:not-a-uuid");
+  });
+
+  it("should not classify source from legacy session strings", () => {
+    const envelope = MeerkatClient.parseAgentEventEnvelope({
+      source_id: "session:00000000-0000-4000-8000-000000000001",
+      payload: { type: "text_delta", delta: "hi" },
+    });
+
+    assert.equal(envelope.source, undefined);
+    assert.equal(envelope.sourceId, "session:00000000-0000-4000-8000-000000000001");
   });
 });
 
@@ -1293,8 +1400,7 @@ describe("Comms methods", () => {
 
     await client.mcpAdd({
       session_id: "s1",
-      server_name: "filesystem",
-      server_config: { cmd: "npx" },
+      server_config: { name: "filesystem", command: "npx" },
       persisted: false,
     });
     await client.mcpRemove({
@@ -1309,7 +1415,8 @@ describe("Comms methods", () => {
     });
 
     assert.deepEqual(calls.map((c) => c.method), ["mcp/add", "mcp/remove", "mcp/reload"]);
-    assert.equal(calls[0].params.server_name, "filesystem");
+    assert.equal(calls[0].params.server_config.name, "filesystem");
+    assert.equal(Object.hasOwn(calls[0].params, "server_name"), false);
     assert.equal(calls[1].params.persisted, true);
   });
 
@@ -1320,7 +1427,7 @@ describe("Comms methods", () => {
     };
 
     await assert.rejects(
-      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      () => client.mcpAdd({ session_id: "s1", server_config: { name: "fs", command: "npx" } }),
       /boom/,
     );
     await assert.rejects(
@@ -1343,7 +1450,7 @@ describe("Comms methods", () => {
     });
 
     await assert.rejects(
-      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      () => client.mcpAdd({ session_id: "s1", server_config: { name: "fs", command: "npx" } }),
       /persisted must be boolean/,
     );
   });
@@ -1598,6 +1705,12 @@ describe("Parity wrappers", () => {
               agent_identity: "worker-1",
               member_ref: makeMemberRef(params.mob_id, "worker-1"),
             },
+          }, {
+            status: "failed",
+            result: {
+              cause: "profile_not_found",
+              message: "profile missing",
+            },
           }],
         };
       }
@@ -1694,6 +1807,9 @@ describe("Parity wrappers", () => {
     assert.equal(spawned[0].status, "spawned");
     assert.equal(spawned[0].result.agent_identity, "worker-1");
     assert.equal(spawned[0].result.member_ref, makeMemberRef("mob-1", "worker-1"));
+    assert.equal(spawned[1].status, "failed");
+    assert.equal(spawned[1].result.cause, "profile_not_found");
+    assert.equal(spawned[1].result.message, "profile missing");
     assert.equal(append.agent_identity, "worker-1");
     assert.equal(events.events.length, 1);
     assert.equal(created.notFound, false);
@@ -1781,6 +1897,13 @@ describe("Parity wrappers", () => {
         ],
       },
       { results: [{ status: "spawned", result: { agent_identity: "worker-1" } }] },
+      { results: [{ status: "failed", result: { message: "profile missing" } }] },
+      {
+        results: [{
+          status: "failed",
+          result: { cause: "future_failure", message: "profile missing" },
+        }],
+      },
       { results: [{ status: "failed", result: { message: "" } }] },
       {
         results: [{
@@ -1792,7 +1915,7 @@ describe("Parity wrappers", () => {
       {
         results: [{
           status: "failed",
-          result: { message: "profile missing" },
+          result: { cause: "profile_not_found", message: "profile missing" },
           error: "legacy profile missing",
         }],
       },
@@ -1805,7 +1928,11 @@ describe("Parity wrappers", () => {
       {
         results: [{
           status: "failed",
-          result: { message: "profile missing", error: "legacy profile missing" },
+          result: {
+            cause: "profile_not_found",
+            message: "profile missing",
+            error: "legacy profile missing",
+          },
         }],
       },
       {},

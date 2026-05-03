@@ -844,16 +844,120 @@
     "type": "object"
   },
   "McpAddParams": {
+    "$defs": {
+      "McpHttpConfig": {
+        "additionalProperties": false,
+        "description": "HTTP transport configuration (streamable HTTP or legacy SSE)",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Extra headers to include on requests",
+            "type": "object"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/McpHttpTransport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "HTTP transport selection (default: streamable-http)"
+          },
+          "url": {
+            "description": "Server URL",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "McpHttpTransport": {
+        "description": "HTTP transport selection for URL-based servers",
+        "enum": [
+          "streamable-http",
+          "sse"
+        ],
+        "type": "string"
+      },
+      "McpServerConfig": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/McpStdioConfig"
+          },
+          {
+            "$ref": "#/$defs/McpHttpConfig"
+          }
+        ],
+        "description": "Configuration for a single MCP server",
+        "properties": {
+          "connect_timeout_secs": {
+            "description": "Connection timeout in seconds (connect + handshake + list_tools).\nDefaults to 10 seconds when not specified.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Server name (must be unique within scope)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "McpStdioConfig": {
+        "additionalProperties": false,
+        "description": "Stdio transport configuration",
+        "properties": {
+          "args": {
+            "default": [],
+            "description": "Arguments to pass to the command",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "Command to spawn the server",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Environment variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `mcp/add`.",
     "properties": {
       "persisted": {
         "default": false,
         "type": "boolean"
       },
-      "server_config": true,
-      "server_name": {
-        "type": "string"
+      "server_config": {
+        "$ref": "#/$defs/McpServerConfig"
       },
       "session_id": {
         "type": "string"
@@ -861,7 +965,6 @@
     },
     "required": [
       "session_id",
-      "server_name",
       "server_config"
     ],
     "title": "McpAddParams",

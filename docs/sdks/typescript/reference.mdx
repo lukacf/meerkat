@@ -443,7 +443,7 @@ interface HookPatchPublishedEvent { type: "hook_patch_published";  hookId: strin
 ### Skill events
 
 ```typescript
-interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly string[]; injectionBytes: number }
+interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly SkillKey[]; injectionBytes: number }
 interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; skillKey?: SkillKey; reason: SkillResolutionFailureReason; reference: string; error: string }
 ```
 

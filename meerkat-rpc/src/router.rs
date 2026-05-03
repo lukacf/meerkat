@@ -20,6 +20,8 @@ use meerkat_core::service::SessionHistoryQuery;
 #[cfg(not(feature = "mini-surface"))]
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
+#[cfg(feature = "mob")]
+use meerkat_core::{AgentToolDispatcher, DynamicToolComposite};
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 #[cfg(not(feature = "mini-surface"))]
 use serde::Deserialize;
@@ -45,6 +47,230 @@ const REALTIME_TARGET_TYPE_MOB_MEMBER: &str = "mob_member";
 
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
+#[cfg(feature = "mob")]
+fn compose_rpc_mob_external_tools(
+    callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    configured_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> Option<Arc<dyn AgentToolDispatcher>> {
+    match (callback_tools, configured_tools) {
+        (Some(callback_tools), Some(configured_tools)) => {
+            Some(Arc::new(DynamicToolComposite::new(vec![
+                callback_tools,
+                configured_tools,
+            ])))
+        }
+        (Some(callback_tools), None) => Some(callback_tools),
+        (None, Some(configured_tools)) => Some(configured_tools),
+        (None, None) => None,
+    }
+}
+
+/// Bundle returned by [`load_configured_mcp_tools_for_rpc_mob`]: the dispatcher
+/// callers wire into mob members, plus a keepalive guard that owns the loader
+/// runtime thread's lifetime.
+#[cfg(all(feature = "mob", feature = "mcp"))]
+pub(crate) struct LoadedRpcMobMcp {
+    pub(crate) dispatcher: Arc<dyn AgentToolDispatcher>,
+    pub(crate) keepalive: ConfiguredRpcMobMcpKeepalive,
+}
+
+/// Owns the loader runtime thread that keeps configured MCP transports alive.
+///
+/// Dropping the guard signals the thread to call
+/// `McpRouterAdapter::shutdown()` and exit, releasing every MCP transport and
+/// child process the loader opened. The guard is held by the same closure that
+/// captures the dispatcher `Arc`, so the thread exits the moment the dispatcher
+/// itself becomes unreachable.
+#[cfg(all(feature = "mob", feature = "mcp"))]
+pub(crate) struct ConfiguredRpcMobMcpKeepalive {
+    shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+impl ConfiguredRpcMobMcpKeepalive {
+    fn signal_shutdown(&self) {
+        if let Ok(mut guard) = self.shutdown_tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Block until the keepalive runtime thread has exited and the adapter has
+    /// finished its graceful shutdown. Used by tests; production callers rely
+    /// on `Drop` to fire the shutdown signal without blocking.
+    #[cfg(test)]
+    fn shutdown_and_join(mut self) {
+        self.signal_shutdown();
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+impl Drop for ConfiguredRpcMobMcpKeepalive {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        // Detach the join handle: callers on hot drop paths must not block
+        // waiting for the loader runtime to finish `adapter.shutdown()`. The
+        // signal above guarantees the thread will exit on its own.
+    }
+}
+
+/// Load `.rkat/mcp.toml` servers, connect them, and hand back a dispatcher
+/// plus a keepalive guard.
+///
+/// `MethodRouter::new` is synchronous (it cannot await), so the loader runs on
+/// dedicated OS threads:
+///
+/// 1. **Config-load thread:** builds a one-shot `tokio` current-thread runtime
+///    purely to drive `McpConfig::load_with_scopes_from_roots`, then exits.
+///    Its runtime is torn down before we touch any MCP transports, so it
+///    cannot host long-lived I/O.
+/// 2. **Connect / keepalive thread (`rpc-mob-mcp-runtime`):** owns a second
+///    current-thread runtime that runs `apply_staged` + `poll_external_updates`
+///    until every server has connected (or the 60s deadline trips). On success
+///    it parks on a `tokio::sync::oneshot` shutdown channel so the MCP child
+///    processes stay alive for the lifetime of the [`LoadedRpcMobMcp`] holder.
+///    Dropping the holder fires the channel; the thread then calls
+///    `McpRouterAdapter::shutdown()` and exits.
+///
+/// The two runtimes are intentionally separate: collapsing them into one would
+/// either tie the lifetime of the transports to a startup-only runtime (and
+/// kill them as soon as we exit), or force the config-load step to share a
+/// long-lived runtime even when no servers are configured.
+///
+/// Returns `None` when no servers are configured or the config could not be
+/// loaded; pre-existing log lines warn on every recoverable failure.
+#[cfg(all(feature = "mob", feature = "mcp"))]
+fn load_configured_mcp_tools_for_rpc_mob(
+    context_root: Option<PathBuf>,
+    user_root: Option<PathBuf>,
+) -> Option<LoadedRpcMobMcp> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("build MCP loader runtime: {error}"))
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    meerkat_core::mcp_config::McpConfig::load_with_scopes_from_roots(
+                        context_root.as_deref(),
+                        user_root.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| format!("load MCP config: {error}"))
+                })
+            });
+        let _ = tx.send(result);
+    });
+    let servers = match rx.recv() {
+        Ok(Ok(servers)) => servers,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to load configured MCP tools for RPC mob members");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "MCP tool loader thread exited without a result");
+            return None;
+        }
+    };
+    if servers.is_empty() {
+        return None;
+    }
+
+    let mut router = meerkat::McpRouter::new();
+    for scoped in &servers {
+        if let Err(error) = router.stage_add(scoped.server.clone()) {
+            tracing::warn!(error = %error, "failed to stage configured MCP server for RPC mob members");
+        }
+    }
+    let adapter = Arc::new(meerkat::McpRouterAdapter::new(router));
+    let adapter_for_poll = adapter.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let thread_ready_tx = ready_tx.clone();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let join = match std::thread::Builder::new()
+        .name("rpc-mob-mcp-runtime".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ =
+                        thread_ready_tx.send(Err(format!("build MCP connect runtime: {error}")));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let result = async {
+                    let apply = adapter_for_poll
+                        .apply_staged()
+                        .await
+                        .map_err(|error| format!("apply staged MCP servers: {error}"))?;
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    loop {
+                        let update = adapter_for_poll.poll_external_updates().await;
+                        if apply.pending_count == 0 || update.pending.is_empty() {
+                            adapter_for_poll
+                                .refresh_tools()
+                                .await
+                                .map_err(|error| format!("refresh MCP tools: {error}"))?;
+                            return Ok(());
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return Err(format!(
+                                "timed out waiting for {} MCP server(s)",
+                                update.pending.len()
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+                .await;
+                let connected = result.is_ok();
+                let _ = thread_ready_tx.send(result);
+                if connected {
+                    // Park on the oneshot shutdown channel so configured MCP
+                    // transports stay open for the lifetime of the holder.
+                    // `await` resolves either when the holder explicitly sends
+                    // (Drop / shutdown_and_join) or when the sender is dropped
+                    // without sending; both paths cue us to wind down.
+                    let _ = shutdown_rx.await;
+                }
+                adapter_for_poll.shutdown().await;
+            });
+        }) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            let _ = ready_tx.send(Err(format!("spawn MCP connect runtime thread: {error}")));
+            None
+        }
+    };
+    match ready_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "configured MCP tools for RPC mob members did not fully connect before serving");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "MCP connect thread exited without a result");
+        }
+    }
+    let keepalive = ConfiguredRpcMobMcpKeepalive {
+        shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+        join,
+    };
+    Some(LoadedRpcMobMcp {
+        dispatcher: adapter as Arc<dyn AgentToolDispatcher>,
+        keepalive,
+    })
 }
 
 #[cfg(feature = "comms")]
@@ -352,6 +578,22 @@ impl MethodRouter {
         let mob_state = if let Some(existing) = runtime.mob_state() {
             existing
         } else {
+            #[cfg(feature = "mcp")]
+            let (configured_mcp_tools, configured_mcp_keepalive): (
+                Option<Arc<dyn AgentToolDispatcher>>,
+                Option<Arc<ConfiguredRpcMobMcpKeepalive>>,
+            ) = {
+                let (context_root, user_root) = runtime.skill_identity_roots();
+                match load_configured_mcp_tools_for_rpc_mob(context_root, user_root) {
+                    Some(LoadedRpcMobMcp {
+                        dispatcher,
+                        keepalive,
+                    }) => (Some(dispatcher), Some(Arc::new(keepalive))),
+                    None => (None, None),
+                }
+            };
+            #[cfg(not(feature = "mcp"))]
+            let configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>> = None;
             let persistent_mob_root = config_store
                 .metadata()
                 .and_then(|metadata| metadata.resolved_paths)
@@ -365,17 +607,25 @@ impl MethodRouter {
                 });
                 let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
                     let runtime = runtime.clone();
+                    let configured_mcp_tools = configured_mcp_tools.clone();
+                    // Captured for its `Drop` side effect — keeps the loader
+                    // thread + MCP transports alive while the closure (and
+                    // therefore the dispatcher Arc) is reachable. Removing
+                    // this capture leaks the thread; see
+                    // `ConfiguredRpcMobMcpKeepalive`.
+                    #[cfg(feature = "mcp")]
+                    let _configured_mcp_keepalive = configured_mcp_keepalive.clone();
                     move || {
-                        let tx = runtime.callback_request_tx()?;
-                        Some(
-                            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                                runtime.registered_tools(),
-                                tx,
-                                runtime.callback_id_counter(),
-                                vec![],
-                            ))
-                                as Arc<dyn meerkat_core::AgentToolDispatcher>,
-                        )
+                        let callback_tools: Option<Arc<dyn AgentToolDispatcher>> =
+                            runtime.callback_request_tx().map(|tx| {
+                                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                                    runtime.registered_tools(),
+                                    tx,
+                                    runtime.callback_id_counter(),
+                                    vec![],
+                                )) as Arc<dyn AgentToolDispatcher>
+                            });
+                        compose_rpc_mob_external_tools(callback_tools, configured_mcp_tools.clone())
                     }
                 });
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
@@ -2413,10 +2663,260 @@ mod tests {
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
-    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, Message, StopReason};
+    use meerkat_core::types::ContentInput;
+    use meerkat_core::{
+        Config, ConfigRuntime, MemoryConfigStore, Message, StopReason, ToolCallView, ToolDef,
+        ToolDispatchOutcome, ToolError,
+    };
     use serde::Serialize;
+    use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
+
+    #[cfg(feature = "mob")]
+    struct StaticDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[cfg(feature = "mob")]
+    impl StaticDispatcher {
+        fn new(name: &str) -> Self {
+            let tool = Arc::new(ToolDef {
+                name: name.into(),
+                description: format!("tool {name}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+                provenance: None,
+            });
+            Self {
+                tools: Arc::from([tool]),
+            }
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn rpc_mob_external_tools_keep_callbacks_and_configured_mcp_tools() {
+        let callback_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("callback_tool"));
+        let configured_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("linear_add_comment"));
+
+        let merged = compose_rpc_mob_external_tools(Some(callback_tools), Some(configured_tools))
+            .expect("merged dispatcher");
+        let names: std::collections::BTreeSet<String> = merged
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert!(names.contains("callback_tool"));
+        assert!(names.contains("linear_add_comment"));
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn rpc_mob_external_tools_keep_configured_mcp_without_callback_transport() {
+        let configured_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("linear_upsert_workpad"));
+
+        let merged = compose_rpc_mob_external_tools(None, Some(configured_tools))
+            .expect("configured MCP dispatcher must remain visible");
+        let names: std::collections::BTreeSet<String> = merged
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert!(
+            names.contains("linear_upsert_workpad"),
+            "RPC mob members launched over TCP may not have a callback transport, \
+             but configured MCP tools from .rkat/mcp.toml must still be exposed"
+        );
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_mob_configured_mcp_tools_remain_callable_after_loader_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        std::fs::create_dir_all(&rkat_dir).unwrap();
+        let server_path = temp.path().join("echo_mcp.py");
+        std::fs::write(
+            &server_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "echo-mcp", "version": "test"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "echo",
+                "description": "Echoes the input message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                },
+            }]
+        }
+    elif method == "tools/call":
+        arguments = request.get("params", {}).get("arguments", {})
+        result = {
+            "content": [{
+                "type": "text",
+                "text": arguments.get("message", ""),
+            }],
+            "isError": False,
+        }
+    else:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "error": {"code": -32601, "message": "not found"},
+        }), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rkat_dir.join("mcp.toml"),
+            format!(
+                r#"[[servers]]
+name = "echo-server"
+command = "python3"
+args = [{}]
+"#,
+                serde_json::to_string(server_path.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
+            .expect("configured MCP dispatcher");
+        let LoadedRpcMobMcp {
+            dispatcher,
+            keepalive,
+        } = bundle;
+        assert!(
+            dispatcher.tools().iter().any(|tool| tool.name == "echo"),
+            "configured MCP tool should be visible before the mob member turn"
+        );
+
+        let args = RawValue::from_string(r#"{"message":"runtime is alive"}"#.to_string()).unwrap();
+        let outcome = dispatcher
+            .dispatch(ToolCallView {
+                id: "call-1",
+                name: "echo",
+                args: &args,
+            })
+            .await
+            .expect("configured MCP tool call should remain callable after loader returns");
+
+        assert_eq!(outcome.result.text_content(), "runtime is alive");
+
+        drop(dispatcher);
+        keepalive.shutdown_and_join();
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_mob_configured_mcp_keepalive_thread_terminates_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        std::fs::create_dir_all(&rkat_dir).unwrap();
+        let server_path = temp.path().join("server.py");
+        std::fs::write(
+            &server_path,
+            r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "echo-server", "version": "1"}
+        }}), flush=True)
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "tools": [{"name": "echo", "description": "echoes", "inputSchema": {"type": "object"}}]
+        }}), flush=True)
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "not found"}}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rkat_dir.join("mcp.toml"),
+            format!(
+                r#"[[servers]]
+name = "echo-server"
+command = "python3"
+args = [{}]
+"#,
+                serde_json::to_string(server_path.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let bundle = load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
+            .expect("configured MCP dispatcher");
+        let LoadedRpcMobMcp {
+            dispatcher,
+            keepalive,
+        } = bundle;
+
+        // Drop the dispatcher first; then signal + join the keepalive thread.
+        // If shutdown signalling were missing, the thread would park on
+        // `pending()` forever and `join` would hang the test (well past the
+        // tokio runtime worker timeouts).
+        drop(dispatcher);
+        let join_started = std::time::Instant::now();
+        let keepalive_join = std::thread::spawn(move || keepalive.shutdown_and_join());
+        while !keepalive_join.is_finished() {
+            assert!(
+                join_started.elapsed() < std::time::Duration::from_secs(10),
+                "MCP keepalive thread did not terminate within 10s of shutdown signal"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        keepalive_join
+            .join()
+            .expect("keepalive shutdown thread must not panic");
+    }
 
     #[cfg(feature = "comms")]
     #[test]

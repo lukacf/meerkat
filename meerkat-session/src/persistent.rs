@@ -1393,14 +1393,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "runtime snapshot persistence failed: {err}"
                     )))
                 })?;
-            self.store.save(&session).await.map_err(|error| {
+            if let Err(error) = self.store.save(&session).await {
                 tracing::warn!(
                     session_id = %session.id(),
                     error = %error,
                     "failed to update session-store projection after runtime authority commit"
                 );
-                SessionError::Store(Box::new(error))
-            })?;
+                match self.discard_live_session(session.id()).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(discard_error) => {
+                        tracing::warn!(
+                            session_id = %session.id(),
+                            error = %discard_error,
+                            "failed to discard live session after runtime-backed projection update failure"
+                        );
+                    }
+                }
+                return Err(SessionError::Store(Box::new(error)));
+            }
         } else {
             self.store
                 .save(&session)
@@ -6913,11 +6923,13 @@ mod tests {
             raw_message_count,
             "failed projection update must not be silently refreshed"
         );
-
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("test should be able to force list through the durable projection");
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed after projection failure"),
+            "post-commit projection failure must evict stale live state"
+        );
         let listed = service
             .list(SessionQuery::default())
             .await
@@ -6935,6 +6947,136 @@ mod tests {
             summary.message_count,
             raw_after.messages().len(),
             "list() must not present stale projection state as fresh canonical state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_control_projection_save_failure_discards_live_state() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let append_result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed before projection failures");
+
+        fail_store.set_fail_save(true);
+        let append_error = service
+            .append_system_context(
+                &append_result.session_id,
+                AppendSystemContextRequest {
+                    text: "runtime-backed control context".to_string(),
+                    source: Some("test".to_string()),
+                    idempotency_key: Some("control-projection-failure".to_string()),
+                },
+            )
+            .await
+            .expect_err("control projection save failure must fail closed");
+        assert!(
+            matches!(
+                append_error,
+                SessionControlError::Session(SessionError::Store(_))
+            ),
+            "projection failure should surface as a store error, got {append_error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&append_result.session_id)
+                .await
+                .expect("status should succeed after append projection failure"),
+            "append projection failure after runtime commit must evict stale live state"
+        );
+        let append_authoritative = service
+            .load_authoritative_session(&append_result.session_id)
+            .await
+            .expect("authoritative load should succeed after append failure")
+            .expect("runtime authority should retain the committed append");
+        let append_state = append_authoritative
+            .system_context_state()
+            .expect("runtime authority should carry the committed append");
+        assert_eq!(append_state.pending.len(), 1);
+        assert_eq!(
+            append_state.pending[0].text,
+            "runtime-backed control context"
+        );
+        let append_raw = store
+            .load(&append_result.session_id)
+            .await
+            .expect("raw projection load should succeed after append failure")
+            .expect("stale append projection should remain present");
+        let raw_pending_context_count = append_raw
+            .system_context_state()
+            .map_or(0, |state| state.pending.len());
+        assert_eq!(
+            raw_pending_context_count, 0,
+            "failed append projection update must not silently refresh raw store state"
+        );
+
+        fail_store.set_fail_save(false);
+        let stage_result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("second create_session should succeed before projection failures");
+
+        fail_store.set_fail_save(true);
+        let stage_error = service
+            .stage_tool_results(
+                &stage_result.session_id,
+                StageToolResultsRequest {
+                    results: vec![ToolResult::new(
+                        "tool-call-1".to_string(),
+                        "callback result".to_string(),
+                        false,
+                    )],
+                },
+            )
+            .await
+            .expect_err("staged tool-result projection save failure must fail closed");
+        assert!(
+            matches!(stage_error, SessionError::Store(_)),
+            "projection failure should surface as a store error, got {stage_error:?}"
+        );
+        assert!(
+            !service
+                .has_live_session(&stage_result.session_id)
+                .await
+                .expect("status should succeed after stage projection failure"),
+            "stage projection failure after runtime commit must evict stale live state"
+        );
+        let stage_authoritative = service
+            .load_authoritative_session(&stage_result.session_id)
+            .await
+            .expect("authoritative load should succeed after stage failure")
+            .expect("runtime authority should retain the staged tool results");
+        let stage_deferred = stage_authoritative
+            .deferred_turn_state()
+            .expect("runtime authority should carry staged tool results");
+        assert_eq!(stage_deferred.pending_tool_results.len(), 1);
+        let stage_raw = store
+            .load(&stage_result.session_id)
+            .await
+            .expect("raw projection load should succeed after stage failure")
+            .expect("stale stage projection should remain present");
+        let raw_tool_result_count = stage_raw
+            .deferred_turn_state()
+            .map_or(0, |state| state.pending_tool_results.len());
+        assert_eq!(
+            raw_tool_result_count, 0,
+            "failed stage projection update must not silently refresh raw store state"
         );
     }
 

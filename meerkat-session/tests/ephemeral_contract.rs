@@ -458,18 +458,19 @@ impl SessionAgent for RealSessionAgent {
                 .await
                 .map_err(
                     |error| meerkat_core::error::AgentError::HookExecutionFailed {
-                        hook_id: "test-pre-llm".to_string(),
+                        hook_id: meerkat_core::HookId::new("test-pre-llm"),
                         reason: error.to_string(),
                     },
                 )?;
             if let Some(HookDecision::Deny {
+                hook_id,
                 reason_code,
                 message,
                 payload,
-                ..
             }) = report.decision
             {
                 return Err(meerkat_core::error::AgentError::HookDenied {
+                    hook_id,
                     point: HookPoint::PreLlmRequest,
                     reason_code,
                     message,

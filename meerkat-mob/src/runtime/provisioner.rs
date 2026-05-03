@@ -445,6 +445,9 @@ fn runtime_completion_to_mob_result(
                 args,
             })
         }
+        meerkat_runtime::completion::CompletionOutcome::Cancelled => {
+            Err(MobError::Internal("turn cancelled".to_string()))
+        }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(MobError::Internal(format!("turn abandoned: {reason}")))
         }

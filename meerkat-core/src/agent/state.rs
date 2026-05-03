@@ -550,13 +550,14 @@ where
             )
             .await?;
         if let Some(HookDecision::Deny {
+            hook_id,
             reason_code,
             message,
             payload,
-            ..
         }) = turn_boundary_report.decision
         {
             return Err(AgentError::HookDenied {
+                hook_id,
                 point: HookPoint::TurnBoundary,
                 reason_code,
                 message,
@@ -1509,13 +1510,14 @@ where
                         .await?;
 
                     if let Some(HookDecision::Deny {
+                        hook_id,
                         reason_code,
                         message,
                         payload,
-                        ..
                     }) = pre_llm_report.decision
                     {
                         let error = AgentError::HookDenied {
+                            hook_id,
                             point: HookPoint::PreLlmRequest,
                             reason_code,
                             message,
@@ -1535,7 +1537,7 @@ where
                             } = patch
                             {
                                 emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.to_string(),
+                                    hook_id: outcome.hook_id.clone(),
                                     point: HookPoint::PreLlmRequest,
                                     patch: HookPatch::LlmRequest {
                                         max_tokens: *max_tokens,
@@ -1685,13 +1687,14 @@ where
                         .await?;
 
                     if let Some(HookDecision::Deny {
+                        hook_id,
                         reason_code,
                         message,
                         payload,
-                        ..
                     }) = post_llm_report.decision
                     {
                         let error = AgentError::HookDenied {
+                            hook_id,
                             point: HookPoint::PostLlmResponse,
                             reason_code,
                             message,
@@ -1706,7 +1709,7 @@ where
                         for patch in &outcome.patches {
                             if let HookPatch::AssistantText { text } = patch {
                                 emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.to_string(),
+                                    hook_id: outcome.hook_id.clone(),
                                     point: HookPoint::PostLlmResponse,
                                     patch: HookPatch::AssistantText { text: text.clone() },
                                 });
@@ -1797,13 +1800,14 @@ where
                             let pre_tool_report = pre_tool_report?;
 
                             if let Some(HookDecision::Deny {
+                                hook_id,
                                 reason_code,
                                 message,
                                 payload,
-                                ..
                             }) = pre_tool_report.decision
                             {
                                 let error = AgentError::HookDenied {
+                                    hook_id,
                                     point: HookPoint::PreToolExecution,
                                     reason_code,
                                     message,
@@ -1820,7 +1824,7 @@ where
                                 for patch in &outcome.patches {
                                     if let HookPatch::ToolArgs { args } = patch {
                                         emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.to_string(),
+                                            hook_id: outcome.hook_id.clone(),
                                             point: HookPoint::PreToolExecution,
                                             patch: HookPatch::ToolArgs { args: args.clone() },
                                         });
@@ -1932,13 +1936,14 @@ where
                                 .await?;
 
                             if let Some(HookDecision::Deny {
+                                hook_id,
                                 reason_code,
                                 message,
                                 payload,
-                                ..
                             }) = post_tool_report.decision
                             {
                                 let error = AgentError::HookDenied {
+                                    hook_id,
                                     point: HookPoint::PostToolExecution,
                                     reason_code,
                                     message,
@@ -1955,7 +1960,7 @@ where
                                 for patch in &outcome.patches {
                                     if let HookPatch::ToolResult { content, is_error } = patch {
                                         emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.to_string(),
+                                            hook_id: outcome.hook_id.clone(),
                                             point: HookPoint::PostToolExecution,
                                             patch: HookPatch::ToolResult {
                                                 content: content.clone(),
@@ -2359,21 +2364,8 @@ where
         use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
 
         let outcome = self.turn_terminal_outcome()?;
-        let classification = classify_terminal(&outcome);
-        match classification {
-            Some(SurfaceResultClass::HardFailure) => {
-                // Consume the pending diagnostic once — prefer the originating
-                // typed error over a generic TerminalFailure so that
-                // provider/reason/message truth is preserved on the surface.
-                if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
-                    Err(diagnostic)
-                } else {
-                    Err(AgentError::TerminalFailure { outcome })
-                }
-            }
-            _ => {
-                // Success, Cancelled, or no terminal outcome yet (early exit).
-                // Clear any stale diagnostic so it cannot bleed into a later run.
+        match classify_terminal(&outcome) {
+            SurfaceResultClass::Success => {
                 self.pending_fatal_diagnostic = None;
                 Ok(RunResult {
                     text: self.session.last_assistant_text().unwrap_or_default(),
@@ -2386,6 +2378,25 @@ where
                     skill_diagnostics: self.collect_skill_diagnostics().await,
                 })
             }
+            SurfaceResultClass::HardFailure => {
+                // Consume the pending diagnostic once — prefer the originating
+                // typed error over a generic TerminalFailure so that
+                // provider/reason/message truth is preserved on the surface.
+                if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
+                    Err(diagnostic)
+                } else {
+                    Err(AgentError::TerminalFailure { outcome })
+                }
+            }
+            SurfaceResultClass::Cancelled => {
+                self.pending_fatal_diagnostic = None;
+                Err(AgentError::Cancelled)
+            }
+            SurfaceResultClass::MissingTerminal => Err(AgentError::InternalError(
+                "terminal result invariant violated: build_result() called without a \
+                     machine terminal outcome"
+                    .to_string(),
+            )),
         }
     }
 
@@ -2480,6 +2491,8 @@ mod tests {
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
+    use crate::event::AgentErrorClass;
+    use crate::lifecycle::RunId;
     use crate::memory::{
         MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexScope, MemoryMetadata, MemoryResult,
         MemorySearchScope, MemoryStore, MemoryStoreError,
@@ -2492,6 +2505,9 @@ mod tests {
     use crate::state::LoopState;
     use crate::tool_scope::{
         EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter,
+    };
+    use crate::turn_execution_authority::{
+        ContentShape, TurnFailureReason, TurnPrimitiveKind, TurnTerminalOutcome,
     };
     use crate::types::{
         AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCall, ToolCallView,
@@ -3826,6 +3842,20 @@ mod tests {
             .await
     }
 
+    fn start_test_conversation_turn(handle: &dyn crate::TurnStateHandle) {
+        handle
+            .start_conversation_run(
+                RunId::new(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied().unwrap();
+    }
+
     #[tokio::test]
     async fn reused_session_follow_up_run_can_compact_before_first_llm_call() {
         let client = Arc::new(CompactionAwareLlmClient::new());
@@ -4237,9 +4267,10 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
+                                hook_id: Some(hook_id),
                                 point: HookPoint::TurnBoundary,
                                 reason_code: HookReasonCode::PolicyViolation,
-                            })
+                            }) if hook_id == &crate::hooks::HookId::new("deny-turn-boundary")
                         );
                 }
                 crate::event::AgentEvent::ToolExecutionCompleted { .. }
@@ -4665,6 +4696,7 @@ mod tests {
         let visibility_state = agent
             .session()
             .tool_visibility_state()
+            .expect("session visibility state should decode")
             .expect("session effects should publish canonical visibility state");
         assert!(
             visibility_state
@@ -4996,9 +5028,10 @@ mod tests {
                                 .as_ref()
                                 .and_then(|report| report.reason.as_ref()),
                             Some(crate::event::AgentErrorReason::HookDenied {
+                                hook_id: Some(hook_id),
                                 point: crate::hooks::HookPoint::PostToolExecution,
                                 reason_code: crate::hooks::HookReasonCode::PolicyViolation,
-                            })
+                            }) if hook_id == &crate::hooks::HookId::new("deny-image-tool")
                         );
                 }
                 crate::event::AgentEvent::RunCompleted { .. }
@@ -5280,6 +5313,7 @@ mod tests {
         let visibility_state = agent
             .session()
             .tool_visibility_state()
+            .expect("boundary visibility state should decode")
             .expect("boundary visibility apply should persist committed state");
         let expected_filter = crate::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
         assert_eq!(visibility_state.active_filter, expected_filter);
@@ -5407,6 +5441,7 @@ mod tests {
         let visibility_state = agent
             .session()
             .tool_visibility_state()
+            .expect("canonical visibility state should decode")
             .expect("canonical visibility state should be present after restore");
         assert_eq!(
             visibility_state.active_filter,
@@ -5442,6 +5477,78 @@ mod tests {
         assert_eq!(result.text, "done");
         // The inherited base filter restricts to only "visible"
         assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
+    }
+
+    #[tokio::test]
+    async fn build_result_cancelled_terminal_does_not_return_success() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+
+        {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            start_test_conversation_turn(handle);
+            handle.cancel_now().unwrap();
+            handle.cancellation_observed().unwrap();
+        }
+
+        let error = agent
+            .build_result(1, 0)
+            .await
+            .expect_err("cancelled terminal outcome must not return RunResult success");
+
+        assert!(matches!(error, AgentError::Cancelled));
+        assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn build_result_missing_terminal_outcome_fails_closed() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+
+        let error = agent
+            .build_result(0, 0)
+            .await
+            .expect_err("missing terminal outcome must not return RunResult success");
+
+        match &error {
+            AgentError::InternalError(message) => assert!(
+                message.contains("without a machine terminal outcome"),
+                "unexpected invariant error message: {message}"
+            ),
+            other => panic!("expected InternalError for missing terminal outcome, got {other:?}"),
+        }
+        assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Internal);
+    }
+
+    #[tokio::test]
+    async fn build_result_hard_failure_remains_typed_terminal_failure() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+
+        {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            start_test_conversation_turn(handle);
+            handle
+                .fatal_failure(TurnFailureReason::terminal_outcome(
+                    TurnTerminalOutcome::Failed,
+                ))
+                .unwrap();
+        }
+
+        let error = agent
+            .build_result(1, 0)
+            .await
+            .expect_err("hard failure terminal outcome must remain an error");
+
+        match error {
+            AgentError::TerminalFailure { outcome } => {
+                assert_eq!(outcome, TurnTerminalOutcome::Failed);
+            }
+            other => panic!("expected typed TerminalFailure, got {other:?}"),
+        }
     }
 
     /// Mock LLM client that returns high usage, causing budget exhaustion

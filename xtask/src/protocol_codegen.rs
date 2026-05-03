@@ -1162,6 +1162,7 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     writeln!(&mut out, "    Success,")?;
     writeln!(&mut out, "    HardFailure,")?;
     writeln!(&mut out, "    Cancelled,")?;
+    writeln!(&mut out, "    MissingTerminal,")?;
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
 
@@ -1176,37 +1177,36 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     )?;
     writeln!(
         &mut out,
-        "/// Returns `None` when no terminal outcome has been recorded yet."
-    )?;
-    writeln!(
-        &mut out,
-        "pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> Option<SurfaceResultClass> {{"
+        "pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> SurfaceResultClass {{"
     )?;
     writeln!(&mut out, "    match outcome {{")?;
-    writeln!(&mut out, "        TurnTerminalOutcome::None => None,")?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Completed => Some(SurfaceResultClass::Success),"
+        "        TurnTerminalOutcome::None => SurfaceResultClass::MissingTerminal,"
     )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Failed => Some(SurfaceResultClass::HardFailure),"
+        "        TurnTerminalOutcome::Completed => SurfaceResultClass::Success,"
     )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Cancelled => Some(SurfaceResultClass::Cancelled),"
+        "        TurnTerminalOutcome::Failed => SurfaceResultClass::HardFailure,"
     )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::BudgetExhausted => Some(SurfaceResultClass::Success),"
+        "        TurnTerminalOutcome::Cancelled => SurfaceResultClass::Cancelled,"
     )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::TimeBudgetExceeded => Some(SurfaceResultClass::HardFailure),"
+        "        TurnTerminalOutcome::BudgetExhausted => SurfaceResultClass::Success,"
     )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::StructuredOutputValidationFailed => Some(SurfaceResultClass::HardFailure),"
+        "        TurnTerminalOutcome::TimeBudgetExceeded => SurfaceResultClass::HardFailure,"
+    )?;
+    writeln!(
+        &mut out,
+        "        TurnTerminalOutcome::StructuredOutputValidationFailed => SurfaceResultClass::HardFailure,"
     )?;
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "}}")?;

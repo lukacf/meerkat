@@ -103,7 +103,7 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
 #[test]
 fn hook_event_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
     let event = AgentEvent::HookDenied {
-        hook_id: "guard-pre-tool".to_string(),
+        hook_id: HookId::new("guard-pre-tool"),
         point: HookPoint::PreToolExecution,
         reason_code: HookReasonCode::PolicyViolation,
         message: "tool denied".to_string(),
@@ -118,6 +118,107 @@ fn hook_event_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
 
     let parsed: AgentEvent = serde_json::from_value(value.clone())?;
     assert_eq!(serde_json::to_value(parsed)?, value);
+    Ok(())
+}
+
+#[test]
+fn hook_denied_event_and_error_preserve_typed_hook_id() -> Result<(), Box<dyn std::error::Error>> {
+    let hook_id = HookId::new("guard-pre-tool");
+    let event = AgentEvent::HookDenied {
+        hook_id: hook_id.clone(),
+        point: HookPoint::PreToolExecution,
+        reason_code: HookReasonCode::PolicyViolation,
+        message: "tool denied".to_string(),
+        payload: Some(json!({"tool": "shell"})),
+    };
+    let parsed: AgentEvent = serde_json::from_value(serde_json::to_value(&event)?)?;
+    match parsed {
+        AgentEvent::HookDenied {
+            hook_id: parsed_id,
+            point,
+            reason_code,
+            ..
+        } => {
+            assert_eq!(parsed_id, hook_id);
+            assert_eq!(point, HookPoint::PreToolExecution);
+            assert_eq!(reason_code, HookReasonCode::PolicyViolation);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let error = meerkat_core::error::AgentError::HookDenied {
+        hook_id: hook_id.clone(),
+        point: HookPoint::PreToolExecution,
+        reason_code: HookReasonCode::PolicyViolation,
+        message: "tool denied".to_string(),
+        payload: None,
+    };
+    let report = AgentErrorReport::from_agent_error(&error);
+    assert_eq!(
+        report.reason,
+        Some(meerkat_core::event::AgentErrorReason::HookDenied {
+            hook_id: Some(hook_id),
+            point: HookPoint::PreToolExecution,
+            reason_code: HookReasonCode::PolicyViolation,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_hook_denied_error_reason_without_hook_id_is_unresolved()
+-> Result<(), Box<dyn std::error::Error>> {
+    let report: AgentErrorReport = serde_json::from_value(json!({
+        "class": "hook",
+        "message": "Hook denied at TurnBoundary: PolicyViolation - blocked",
+        "reason": {
+            "reason_type": "hook_denied",
+            "point": "turn_boundary",
+            "reason_code": "policy_violation"
+        }
+    }))?;
+
+    assert_eq!(
+        report.reason,
+        Some(meerkat_core::event::AgentErrorReason::HookDenied {
+            hook_id: None,
+            point: HookPoint::TurnBoundary,
+            reason_code: HookReasonCode::PolicyViolation,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_string_hook_id_mirror_is_not_canonical_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let legacy_only = json!({
+        "type": "hook_denied",
+        "hook_id_string": "legacy-only",
+        "point": "pre_tool_execution",
+        "reason_code": "policy_violation",
+        "message": "tool denied"
+    });
+    let legacy_only_result = serde_json::from_value::<AgentEvent>(legacy_only);
+    assert!(
+        legacy_only_result.is_err(),
+        "legacy string-only hook id mirrors must not satisfy canonical hook_id"
+    );
+
+    let with_legacy_mirror = json!({
+        "type": "hook_denied",
+        "hook_id": "canonical",
+        "hook_id_string": "legacy-only",
+        "point": "pre_tool_execution",
+        "reason_code": "policy_violation",
+        "message": "tool denied"
+    });
+    match serde_json::from_value::<AgentEvent>(with_legacy_mirror)? {
+        AgentEvent::HookDenied { hook_id, .. } => {
+            assert_eq!(hook_id, HookId::new("canonical"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
     Ok(())
 }
 

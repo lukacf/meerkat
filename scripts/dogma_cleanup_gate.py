@@ -361,7 +361,10 @@ NON_PRODUCTION_WORKSPACE_MEMBERS = {
 DOGMA_GATE_OWNING_PATHS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^Makefile$"), "dogma gate-owning path"),
     (
-        re.compile(r"^\.github/(?:PULL_REQUEST_TEMPLATE\.md|workflows/ci\.yml)$"),
+        re.compile(
+            r"^\.github/(?:PULL_REQUEST_TEMPLATE\.md|workflows/"
+            r"(?:ci|dogma-cleanup-immutable-gate)\.yml)$"
+        ),
         "dogma gate-owning path",
     ),
     (

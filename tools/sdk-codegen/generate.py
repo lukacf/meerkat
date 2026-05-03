@@ -274,7 +274,7 @@ def _promote_nested_schema_def(name: str) -> bool:
 def _runtime_state_result_root(wire_schema: dict[str, Any]) -> dict[str, Any]:
     root = dict(wire_schema)
     root["RuntimeStateResult"] = {
-        "description": "Response payload for runtime/session_status.",
+        "description": "Response payload for runtime-backed session status projections.",
         "properties": {
             "state": {
                 "$ref": "#/$defs/WireRuntimeState",
@@ -762,7 +762,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
-    append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for runtime/session_status.")
     append_python_dataclass(
         "RuntimeRealtimeAttachmentStatusParams",
         params_schema,
@@ -771,11 +770,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeOpenRequest", params_schema, "Request payload for realtime/open_info.")
     append_python_dataclass("RealtimeStatusParams", params_schema, "Request payload for realtime/status.")
     append_python_dataclass("RealtimeCapabilitiesParams", params_schema, "Request payload for realtime/capabilities.")
-    append_python_dataclass("RuntimeAcceptParams", params_schema, "Request payload for runtime/session_submit.")
-    append_python_dataclass("RuntimeRetireParams", params_schema, "Request payload for runtime/session_retire.")
-    append_python_dataclass("RuntimeResetParams", params_schema, "Request payload for runtime/session_reset.")
-    append_python_dataclass("InputStateParams", params_schema, "Request payload for runtime/session_submission.")
-    append_python_dataclass("InputListParams", params_schema, "Request payload for runtime/session_submissions.")
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
@@ -789,7 +783,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass(
         "RuntimeStateResult",
         runtime_state_result_root,
-        "Response payload for runtime/session_status.",
+        "Response payload for runtime-backed session status projections.",
     )
     append_python_dataclass(
         "RuntimeRealtimeAttachmentStatusResult",
@@ -818,12 +812,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeChannelEventFrame", wire_schema, "Payload for channel.event.")
     append_python_dataclass("RealtimeChannelErrorFrame", wire_schema, "Payload for channel.error.")
     append_python_dataclass("RealtimeChannelClosedFrame", wire_schema, "Payload for channel.closed.")
-    append_python_dataclass("RuntimeAcceptResult", wire_schema, "Response payload for runtime/session_submit.")
-    append_python_dataclass("RuntimeRetireResult", wire_schema, "Response payload for runtime/session_retire.")
-    append_python_dataclass("RuntimeResetResult", wire_schema, "Response payload for runtime/session_reset.")
+    append_python_dataclass(
+        "RuntimeAcceptResult",
+        wire_schema,
+        "Response payload for runtime-backed input submission.",
+    )
     append_python_dataclass("WireInputStateHistoryEntry", wire_schema, "Input transition history entry.")
     append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
-    append_python_dataclass("InputListResult", wire_schema, "Response payload for runtime/session_submissions.")
     append_python_dataclass("ScheduleListResult", wire_schema, "Response payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesResult", wire_schema, "Response payload for schedule/occurrences.")
     append_python_dataclass("WireSessionInfo", wire_schema, "Detailed session metadata payload.")
@@ -889,7 +884,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("RealtimeEvent", wire_schema, "Realtime event union.")
     append_python_alias("RealtimeClientFrame", wire_schema, "Realtime client frame union.")
     append_python_alias("RealtimeServerFrame", wire_schema, "Realtime server frame union.")
-    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for runtime/session_submit responses.")
+    append_python_alias(
+        "RuntimeAcceptOutcomeType",
+        wire_schema,
+        "Discriminator for runtime-backed input submission responses.",
+    )
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
@@ -904,8 +903,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
         root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
         append_python_alias(name, root_schema, f"Comms/session-stream RPC contract for {name}.")
-    types_content += "\n# Response payload for `runtime/session_submission`.\nInputStateResult = Optional[WireInputState]\n"
-
     (output_dir / "types.py").write_text(types_content)
 
     # Generate error types
@@ -1113,22 +1110,15 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
-    append_typescript_interface("RuntimeStateParams", params_schema)
     append_typescript_interface("RuntimeRealtimeAttachmentStatusParams", params_schema)
     append_typescript_interface("RealtimeOpenRequest", params_schema)
     append_typescript_interface("RealtimeStatusParams", params_schema)
     append_typescript_interface("RealtimeCapabilitiesParams", params_schema)
-    append_typescript_interface("RuntimeAcceptParams", params_schema)
-    append_typescript_interface("RuntimeRetireParams", params_schema)
-    append_typescript_interface("RuntimeResetParams", params_schema)
-    append_typescript_interface("InputStateParams", params_schema)
-    append_typescript_interface("InputListParams", params_schema)
     append_typescript_interface("ScheduleIdParams", params_schema)
     append_typescript_interface("ListSchedulesParams", params_schema)
     append_typescript_interface("ScheduleOccurrencesParams", params_schema)
     append_typescript_interface("UpdateScheduleParams", params_schema)
     append_typescript_interface("McpLiveOpResponse", wire_schema)
-    types_content += "\nexport type InputStateResult = WireInputState | null;\n"
     append_typescript_alias("WireContentBlock", wire_schema)
     append_typescript_alias("WireContentInput", wire_schema)
     for name in MOB_RPC_CONTRACT_ALIAS_TYPES:
@@ -1193,11 +1183,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("RealtimeChannelErrorFrame", wire_schema)
     append_typescript_interface("RealtimeChannelClosedFrame", wire_schema)
     append_typescript_interface("RuntimeAcceptResult", wire_schema)
-    append_typescript_interface("RuntimeRetireResult", wire_schema)
-    append_typescript_interface("RuntimeResetResult", wire_schema)
     append_typescript_interface("WireInputStateHistoryEntry", wire_schema)
     append_typescript_interface("WireInputState", wire_schema)
-    append_typescript_interface("InputListResult", wire_schema)
     append_typescript_interface("ScheduleListResult", wire_schema)
     append_typescript_interface("ScheduleOccurrencesResult", wire_schema)
     append_typescript_interface("WireSessionInfo", wire_schema)
@@ -1429,6 +1416,71 @@ def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
     (output_dir / "events.ts").write_text("\n".join(lines))
 
 
+def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
+    emitted: set[str] = set()
+    lines: list[str] = [
+        "// Generated mob wire types for @rkat/web",
+        "// Source: artifacts/schemas/wire-types.json",
+        "",
+    ]
+
+    def append_interface(name: str) -> None:
+        if name in emitted:
+            return
+        schema = _lookup_named_schema(wire_schema, name)
+        if not schema:
+            raise KeyError(f"schema for generated web mob type {name} not found")
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        lines.append(f"export interface {name} {{")
+        for field_name, field_schema in properties.items():
+            field_type, optional_by_type = _typescript_type_from_schema(
+                schema_root,
+                field_schema,
+                local_defs,
+            )
+            optional = "?" if (field_name not in required or optional_by_type) else ""
+            lines.append(f"  {field_name}{optional}: {field_type};")
+        lines.append("}")
+        lines.append("")
+        emitted.add(name)
+
+    def append_alias(name: str) -> None:
+        if name in emitted:
+            return
+        schema = _lookup_named_schema(wire_schema, name)
+        if not schema:
+            raise KeyError(f"schema for generated web mob alias {name} not found")
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
+        lines.append(f"export type {name} = {alias_type};")
+        lines.append("")
+        emitted.add(name)
+
+    append_alias("WireMobMemberStatus")
+    append_alias("WireMemberRef")
+    append_interface("MobStatusResult")
+    lines.append("export interface MobListResult {")
+    lines.append("  mobs: MobStatusResult[];")
+    lines.append("}")
+    lines.append("")
+    emitted.add("MobListResult")
+    append_interface("MobRespawnResult")
+    append_interface("MobEventsResult")
+    append_interface("MobMemberSendResult")
+    append_interface("MobFlowStatusResult")
+    append_interface("MobHelperResult")
+    append_interface("MobMemberStatusResult")
+    append_interface("MobAppendSystemContextResult")
+
+    (output_dir / "mob.ts").write_text("\n".join(lines))
+
+
 def load_available_capabilities(artifacts_dir: Path) -> set[str]:
     """Load available capability IDs from capabilities.json."""
     caps_file = artifacts_dir / "capabilities.json"
@@ -1500,6 +1552,8 @@ def main():
     web_events_output = output_root / "sdks" / "web" / "src" / "generated"
     generate_web_event_types(schemas, web_events_output)
     print(f"Generated web event types in {web_events_output}")
+    generate_web_mob_types(schemas, web_events_output)
+    print(f"Generated web mob types in {web_events_output}")
 
 
 if __name__ == "__main__":

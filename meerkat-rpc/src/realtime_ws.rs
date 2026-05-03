@@ -4531,7 +4531,7 @@ mod tests {
         assert_eq!(info.target, request.target);
         let accepted_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: info.default_protocol_version.clone(),
+                protocol_version: info.default_protocol_version,
                 open_token: info.open_token.clone(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -5093,7 +5093,7 @@ mod tests {
 
     fn realm_open_frame(info: &RealtimeOpenInfo) -> RealtimeChannelOpenFrame {
         RealtimeChannelOpenFrame {
-            protocol_version: info.default_protocol_version.clone(),
+            protocol_version: info.default_protocol_version,
             open_token: info.open_token.clone(),
             role: RealtimeChannelRole::Primary,
             turning_mode: RealtimeTurningMode::ProviderManaged,

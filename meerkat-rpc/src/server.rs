@@ -1343,7 +1343,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: open_info.default_protocol_version.clone(),
+                        protocol_version: open_info.default_protocol_version,
                         open_token: open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1573,7 +1573,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        protocol_version: first_open_info.default_protocol_version,
                         open_token: first_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1601,7 +1601,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        protocol_version: second_open_info.default_protocol_version,
                         open_token: second_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1687,7 +1687,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: open_info.default_protocol_version.clone(),
+                        protocol_version: open_info.default_protocol_version,
                         open_token: open_info.open_token.clone(),
                         role: RealtimeChannelRole::Observer,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1822,7 +1822,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        protocol_version: first_open_info.default_protocol_version,
                         open_token: first_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1849,7 +1849,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        protocol_version: second_open_info.default_protocol_version,
                         open_token: second_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,

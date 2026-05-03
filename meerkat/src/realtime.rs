@@ -76,7 +76,7 @@ impl RealtimeChannel {
             return Err(RealtimeConnectionError::TargetMismatch);
         }
         let open_frame = RealtimeChannelOpenFrame {
-            protocol_version: open_info.default_protocol_version.clone(),
+            protocol_version: open_info.default_protocol_version,
             open_token: open_info.open_token.clone(),
             role: self.role,
             turning_mode: self.turning_mode,

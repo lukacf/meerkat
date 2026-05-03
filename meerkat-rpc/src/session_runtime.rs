@@ -1548,6 +1548,16 @@ fn registered_model_provider_mismatch_reason(
     registry.provider_override_mismatch_reason(provider, model)
 }
 
+fn unsupported_model_capability_rpc_error(
+    evidence: meerkat_core::UnsupportedModelCapabilityEvidence,
+) -> RpcError {
+    RpcError {
+        code: error::INVALID_PARAMS,
+        message: evidence.to_string(),
+        data: Some(evidence.details()),
+    }
+}
+
 fn profile_to_capability_surface(
     profile: &meerkat_models::profile::ModelProfile,
 ) -> SessionLlmCapabilitySurface {
@@ -3815,12 +3825,24 @@ impl SessionRuntime {
     }
 
     async fn provider_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
-        self.model_registry()
-            .await
-            .ok()
-            .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
-            .map(|profile| profile.inline_video)
-            .unwrap_or(false)
+        self.require_inline_video_support(identity).await.is_ok()
+    }
+
+    async fn require_inline_video_support(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+        let Ok(registry) = self.model_registry().await else {
+            return Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::CapabilityRegistryUnavailable,
+                ),
+            );
+        };
+
+        registry.require_inline_video_for_provider(identity.provider, &identity.model)
     }
 
     async fn validate_prompt_video_input(
@@ -3839,16 +3861,10 @@ impl SessionRuntime {
             data: None,
         })?;
 
-        if meerkat_core::has_video(blocks) && !self.provider_supports_inline_video(identity).await {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!(
-                    "inline video input is not supported by model '{}' on provider '{}'",
-                    identity.model,
-                    identity.provider.as_str()
-                ),
-                data: None,
-            });
+        if meerkat_core::has_video(blocks)
+            && let Err(evidence) = self.require_inline_video_support(identity).await
+        {
+            return Err(unsupported_model_capability_rpc_error(evidence));
         }
 
         Ok(())
@@ -10467,6 +10483,43 @@ mod tests {
                 .provider_supports_inline_video(&gemini_video_model_on_gemini)
                 .await,
             "owned Gemini inline-video capability should still resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_video_validation_returns_typed_unsupported_capability_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let identity = SessionLlmIdentity {
+            model: "gemini-3-flash-preview".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+
+        let err = runtime
+            .validate_prompt_video_input(&inline_video_prompt(), &identity)
+            .await
+            .expect_err("same model name under incompatible provider must fail closed");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        let data = err.data.expect("unsupported capability evidence data");
+        assert_eq!(
+            data["unsupported_capability"]["capability"],
+            serde_json::json!("inline_video")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["reason"],
+            serde_json::json!("provider_model_profile_missing")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["provider"],
+            serde_json::json!("openai")
+        );
+        assert_eq!(
+            data["unsupported_capability"]["model"],
+            serde_json::json!("gemini-3-flash-preview")
         );
     }
 

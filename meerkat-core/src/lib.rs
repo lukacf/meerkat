@@ -116,7 +116,10 @@ pub use memory::{
     MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata,
     MemoryOwner, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
 };
-pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
+pub use model_registry::{
+    ModelCapability, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
+    UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,
+};
 pub use peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };

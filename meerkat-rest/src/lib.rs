@@ -959,39 +959,88 @@ async fn resolve_validation_identity(
     })
 }
 
+#[derive(Debug, Clone)]
+enum PromptVideoInputValidationError {
+    InvalidBlock(String),
+    UnsupportedCapability(meerkat_core::UnsupportedModelCapabilityEvidence),
+}
+
+impl PromptVideoInputValidationError {
+    #[cfg(test)]
+    fn unsupported_evidence(&self) -> Option<&meerkat_core::UnsupportedModelCapabilityEvidence> {
+        match self {
+            Self::UnsupportedCapability(evidence) => Some(evidence),
+            Self::InvalidBlock(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PromptVideoInputValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBlock(message) => f.write_str(message),
+            Self::UnsupportedCapability(evidence) => evidence.fmt(f),
+        }
+    }
+}
+
+fn inline_video_registry_unavailable_evidence(
+    identity: &SessionLlmIdentity,
+) -> meerkat_core::UnsupportedModelCapabilityEvidence {
+    meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+        identity.provider,
+        identity.model.clone(),
+        meerkat_core::UnsupportedModelCapabilityReason::CapabilityRegistryUnavailable,
+    )
+}
+
+async fn require_inline_video_support(
+    config_runtime: &meerkat_core::ConfigRuntime,
+    identity: &SessionLlmIdentity,
+) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+    let Ok(snapshot) = config_runtime.get().await else {
+        return Err(inline_video_registry_unavailable_evidence(identity));
+    };
+    let Ok(registry) = snapshot.config.model_registry() else {
+        return Err(inline_video_registry_unavailable_evidence(identity));
+    };
+
+    registry.require_inline_video_for_provider(identity.provider, &identity.model)
+}
+
 async fn validate_prompt_video_input(
     config_runtime: &meerkat_core::ConfigRuntime,
     prompt: &ContentInput,
     identity: &SessionLlmIdentity,
-) -> Result<(), String> {
+) -> Result<(), PromptVideoInputValidationError> {
     let blocks = match prompt {
         ContentInput::Text(_) => return Ok(()),
         ContentInput::Blocks(blocks) => blocks,
     };
 
-    meerkat_core::validate_inline_video_blocks(blocks)?;
+    meerkat_core::validate_inline_video_blocks(blocks)
+        .map_err(PromptVideoInputValidationError::InvalidBlock)?;
 
-    let supports_inline_video = config_runtime
-        .get()
-        .await
-        .ok()
-        .and_then(|state| state.config.model_registry().ok())
-        .and_then(|registry| {
-            registry
-                .profile_for_provider(identity.provider, &identity.model)
-                .map(|profile| profile.inline_video)
-        })
-        .unwrap_or(false);
-
-    if meerkat_core::has_video(blocks) && !supports_inline_video {
-        return Err(format!(
-            "inline video input is not supported by model '{}' on provider '{}'",
-            identity.model,
-            identity.provider.as_str()
-        ));
+    if meerkat_core::has_video(blocks) {
+        require_inline_video_support(config_runtime, identity)
+            .await
+            .map_err(PromptVideoInputValidationError::UnsupportedCapability)?;
     }
 
     Ok(())
+}
+
+fn prompt_video_input_error_to_api(error: PromptVideoInputValidationError) -> ApiError {
+    match error {
+        PromptVideoInputValidationError::InvalidBlock(message) => ApiError::BadRequest(message),
+        PromptVideoInputValidationError::UnsupportedCapability(evidence) => {
+            ApiError::BadRequestWithData {
+                message: evidence.to_string(),
+                code: "UNSUPPORTED_MODEL_CAPABILITY".to_string(),
+                details: evidence.details(),
+            }
+        }
+    }
 }
 
 async fn apply_runtime_turn(
@@ -1252,11 +1301,11 @@ async fn apply_runtime_turn(
                 .map(|metadata| metadata.llm_identity())
         });
     if let Some(identity) = session_identity
-        && let Err(message) =
+        && let Err(error) =
             validate_prompt_video_input(&context.config_runtime, &prompt, &identity).await
     {
         return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
-            message,
+            error.to_string(),
         )));
     }
 
@@ -3986,7 +4035,7 @@ async fn create_session_inner(
         cleanup_archived_session_runtime(state, &session_id).await;
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+        return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(err)));
     }
 
     let adapter = state.runtime_adapter.clone();
@@ -4804,7 +4853,9 @@ async fn continue_session_inner(
                 .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(
+                err,
+            )));
         }
         let create_result = match state
             .session_service
@@ -5034,7 +5085,9 @@ async fn continue_session_inner(
                 .await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+            return RequestTerminal::RespondWithoutPublish(Err(prompt_video_input_error_to_api(
+                err,
+            )));
         }
 
         // Install cancel action: interrupt the session.
@@ -5875,6 +5928,11 @@ pub async fn shutdown_all_mcp_sessions(state: &AppState) {
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    BadRequestWithData {
+        message: String,
+        code: String,
+        details: Value,
+    },
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
@@ -5908,6 +5966,11 @@ impl IntoResponse for ApiError {
                 msg,
                 None,
             ),
+            ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            } => (StatusCode::BAD_REQUEST, code, message, Some(details)),
             ApiError::Unauthorized(msg) => (
                 StatusCode::UNAUTHORIZED,
                 "UNAUTHORIZED".to_string(),
@@ -7923,9 +7986,19 @@ mod tests {
             .await
             .expect_err("wrong typed provider must not inherit Gemini inline-video support");
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("gemini-3-flash-preview"));
-        assert!(err.contains("anthropic"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("unsupported inline-video error should carry typed evidence");
+        assert_eq!(
+            evidence.capability,
+            meerkat_core::ModelCapability::InlineVideo
+        );
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Anthropic);
+        assert_eq!(evidence.model, "gemini-3-flash-preview");
     }
 
     #[tokio::test]
@@ -7941,9 +8014,15 @@ mod tests {
             .await
             .expect_err("unknown provider/model pair must fail closed without defaults");
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("uncatalogued-video-model"));
-        assert!(err.contains("other"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("unknown provider/model must carry typed unsupported evidence");
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Other);
+        assert_eq!(evidence.model, "uncatalogued-video-model");
     }
 
     #[tokio::test]
@@ -7961,9 +8040,15 @@ mod tests {
                 "known model/display strings must not select capability without typed provider",
             );
 
-        assert!(err.contains("inline video"));
-        assert!(err.contains("gemini-3-flash-preview"));
-        assert!(err.contains("other"));
+        let evidence = err
+            .unsupported_evidence()
+            .expect("providerless display/model strings must carry typed unsupported evidence");
+        assert_eq!(
+            evidence.reason,
+            meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing
+        );
+        assert_eq!(evidence.provider, Provider::Other);
+        assert_eq!(evidence.model, "gemini-3-flash-preview");
     }
 
     #[tokio::test]
@@ -9678,10 +9763,19 @@ mod tests {
         .await;
 
         match outcome {
-            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            })) => {
+                assert_eq!(code, "UNSUPPORTED_MODEL_CAPABILITY");
                 assert!(
                     message.contains("inline video"),
                     "expected inline video validation failure: {message}"
+                );
+                assert_eq!(
+                    details["unsupported_capability"]["capability"],
+                    serde_json::json!("inline_video")
                 );
             }
             other => panic!("expected bad request validation failure, got {other:?}"),
@@ -9755,10 +9849,19 @@ mod tests {
         .await;
 
         match outcome {
-            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+            RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequestWithData {
+                message,
+                code,
+                details,
+            })) => {
+                assert_eq!(code, "UNSUPPORTED_MODEL_CAPABILITY");
                 assert!(
                     message.contains("inline video"),
                     "expected inline video validation failure: {message}"
+                );
+                assert_eq!(
+                    details["unsupported_capability"]["capability"],
+                    serde_json::json!("inline_video")
                 );
             }
             other => panic!("expected bad request validation failure, got {other:?}"),

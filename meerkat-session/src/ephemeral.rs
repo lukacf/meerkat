@@ -655,6 +655,7 @@ pub trait SessionAgent: Send {
     }
 }
 
+#[cfg(test)]
 fn validate_prompt_video_input_against_capability(
     prompt: &ContentInput,
     identity: &SessionLlmIdentity,
@@ -782,11 +783,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
-        self.builder
-            .model_supports_inline_video(identity)
-            .await
-            .unwrap_or(false)
+    async fn require_inline_video_support(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+        match self.builder.model_supports_inline_video(identity).await {
+            Some(true) => Ok(()),
+            Some(false) => Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::CapabilityDisabled,
+                ),
+            ),
+            None => Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing,
+                ),
+            ),
+        }
     }
 
     async fn validate_prompt_video_input(
@@ -794,11 +811,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         prompt: &ContentInput,
         identity: &SessionLlmIdentity,
     ) -> Result<(), SessionError> {
-        validate_prompt_video_input_against_capability(
-            prompt,
-            identity,
-            self.model_supports_inline_video(identity).await,
-        )
+        let blocks = match prompt {
+            ContentInput::Text(_) => return Ok(()),
+            ContentInput::Blocks(blocks) => blocks,
+        };
+
+        meerkat_core::validate_inline_video_blocks(blocks)
+            .map_err(|err| SessionError::Agent(AgentError::ConfigError(err)))?;
+
+        if meerkat_core::has_video(blocks)
+            && let Err(evidence) = self.require_inline_video_support(identity).await
+        {
+            return Err(SessionError::Agent(AgentError::ConfigError(
+                evidence.to_string(),
+            )));
+        }
+
+        Ok(())
     }
 
     fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError> {

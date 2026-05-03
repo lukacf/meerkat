@@ -152,6 +152,59 @@ describe("Typed Events", () => {
     }
   });
 
+  it("preserves run_failed typed terminal cause report", () => {
+    const event = parseEvent({
+      type: "run_failed",
+      session_id: "s1",
+      error_class: "terminal",
+      error: "display text changed by caller",
+      error_report: {
+        class: "llm",
+        message: "machine terminalized LLM failure",
+        reason: {
+          reason_type: "turn_terminal_cause",
+          outcome: "failed",
+          cause_kind: "llm_failure",
+        },
+      },
+    });
+
+    assert.equal(event.type, "run_failed");
+    if (event.type === "run_failed") {
+      assert.equal(event.error, "display text changed by caller");
+      assert.equal(event.errorReport?.class, "llm");
+      assert.equal(event.errorReport?.message, "machine terminalized LLM failure");
+      assert.equal(event.errorReport?.reason?.reasonType, "turn_terminal_cause");
+      if (event.errorReport?.reason?.reasonType === "turn_terminal_cause") {
+        assert.equal(event.errorReport.reason.outcome, "failed");
+        assert.equal(event.errorReport.reason.causeKind, "llm_failure");
+      }
+    }
+  });
+
+  it("does not infer run_failed terminal cause from display fields", () => {
+    const event = parseEvent({
+      type: "run_failed",
+      session_id: "s1",
+      error_class: "llm",
+      error: "LLM failure terminal turn",
+      error_report: {
+        class: "llm",
+        message: "LLM failure terminal turn",
+        reason: {
+          reason_type: "turn_terminal_cause",
+          outcome: "failed",
+          cause_kind: "not_a_machine_cause",
+        },
+      },
+    });
+
+    assert.equal(event.type, "run_failed");
+    if (event.type === "run_failed") {
+      assert.equal(event.errorReport?.reason, undefined);
+    }
+  });
+
   it("preserves malformed known event payloads instead of fabricating semantics", () => {
     const cases = [
       {

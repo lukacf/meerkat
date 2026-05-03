@@ -59,6 +59,8 @@ from meerkat.errors import (
     SkillNotFoundError,
 )
 from meerkat.events import (
+    AgentErrorReason,
+    AgentErrorReport,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionStarted,
@@ -66,6 +68,7 @@ from meerkat.events import (
     HookDenied,
     Retrying,
     RunCompleted,
+    RunFailed,
     RunStarted,
     SkillResolutionFailed,
     SkillResolutionFailureReason,
@@ -1061,6 +1064,60 @@ def test_parse_turn_completed_with_usage():
     assert event.usage.input_tokens == 50
     assert event.usage.output_tokens == 20
     assert event.usage.cache_creation_tokens is None
+
+
+def test_parse_run_failed_preserves_typed_terminal_cause_report():
+    raw = {
+        "type": "run_failed",
+        "session_id": "s1",
+        "error_class": "terminal",
+        "error": "display text changed by caller",
+        "error_report": {
+            "class": "llm",
+            "message": "machine terminalized LLM failure",
+            "reason": {
+                "reason_type": "turn_terminal_cause",
+                "outcome": "failed",
+                "cause_kind": "llm_failure",
+            },
+        },
+    }
+
+    event = parse_event(raw)
+
+    assert isinstance(event, RunFailed)
+    assert event.error == "display text changed by caller"
+    assert isinstance(event.error_report, AgentErrorReport)
+    assert event.error_report.class_ == "llm"
+    assert event.error_report.message == "machine terminalized LLM failure"
+    assert isinstance(event.error_report.reason, AgentErrorReason)
+    assert event.error_report.reason.reason_type == "turn_terminal_cause"
+    assert event.error_report.reason.outcome == "failed"
+    assert event.error_report.reason.cause_kind == "llm_failure"
+
+
+def test_parse_run_failed_does_not_infer_terminal_cause_from_display_fields():
+    raw = {
+        "type": "run_failed",
+        "session_id": "s1",
+        "error_class": "llm",
+        "error": "LLM failure terminal turn",
+        "error_report": {
+            "class": "llm",
+            "message": "LLM failure terminal turn",
+            "reason": {
+                "reason_type": "turn_terminal_cause",
+                "outcome": "failed",
+                "cause_kind": "not_a_machine_cause",
+            },
+        },
+    }
+
+    event = parse_event(raw)
+
+    assert isinstance(event, RunFailed)
+    assert event.error_report is not None
+    assert event.error_report.reason is None
 
 
 def test_parse_malformed_known_events_preserves_raw_payload():

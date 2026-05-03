@@ -84,6 +84,51 @@ class RunCompleted(Event):
     usage: Usage = field(default_factory=Usage)
 
 
+TurnTerminalOutcome = Literal[
+    "none",
+    "completed",
+    "failed",
+    "cancelled",
+    "budget_exhausted",
+    "time_budget_exceeded",
+    "structured_output_validation_failed",
+]
+
+TurnTerminalCauseKind = Literal[
+    "unknown",
+    "hook_denied",
+    "hook_failure",
+    "llm_failure",
+    "tool_failure",
+    "structured_output_validation_failed",
+    "budget_exhausted",
+    "time_budget_exceeded",
+    "turn_limit_reached",
+    "runtime_apply_failure",
+    "fatal_failure",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentErrorReason:
+    """Structured machine-owned reason for an agent failure."""
+
+    reason_type: str = "unknown"
+    outcome: str | None = None
+    cause_kind: str | None = None
+    raw_reason_type: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentErrorReport:
+    """Structured agent failure report carried by run_failed events."""
+
+    class_: str = ""
+    message: str = ""
+    reason: AgentErrorReason | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RunFailed(Event):
     """Agent run failed."""
@@ -91,6 +136,7 @@ class RunFailed(Event):
     session_id: str = ""
     error_class: str = ""
     error: str = ""
+    error_report: AgentErrorReport | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +656,78 @@ def _parse_tool_config_operation(raw: Any) -> str | None:
     return raw if isinstance(raw, str) and raw in _TOOL_CONFIG_OPERATIONS else None
 
 
+_TURN_TERMINAL_OUTCOMES = {
+    "none",
+    "completed",
+    "failed",
+    "cancelled",
+    "budget_exhausted",
+    "time_budget_exceeded",
+    "structured_output_validation_failed",
+}
+
+_TURN_TERMINAL_CAUSE_KINDS = {
+    "unknown",
+    "hook_denied",
+    "hook_failure",
+    "llm_failure",
+    "tool_failure",
+    "structured_output_validation_failed",
+    "budget_exhausted",
+    "time_budget_exceeded",
+    "turn_limit_reached",
+    "runtime_apply_failure",
+    "fatal_failure",
+}
+
+
+def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
+    if not isinstance(raw, dict):
+        return None
+
+    reason_type = raw.get("reason_type", raw.get("reasonType"))
+    if not isinstance(reason_type, str):
+        return None
+
+    if reason_type == "turn_terminal_cause":
+        outcome = raw.get("outcome")
+        cause_kind = raw.get("cause_kind", raw.get("causeKind"))
+        if (
+            isinstance(outcome, str)
+            and isinstance(cause_kind, str)
+            and outcome in _TURN_TERMINAL_OUTCOMES
+            and cause_kind in _TURN_TERMINAL_CAUSE_KINDS
+        ):
+            return AgentErrorReason(
+                reason_type=reason_type,
+                outcome=outcome,
+                cause_kind=cause_kind,
+            )
+        return None
+
+    return AgentErrorReason(
+        reason_type="unknown",
+        raw_reason_type=reason_type,
+        raw=dict(raw),
+    )
+
+
+def _parse_agent_error_report(raw: Any) -> AgentErrorReport | None:
+    if not isinstance(raw, dict):
+        return None
+
+    class_ = raw.get("class")
+    message = raw.get("message")
+    if not isinstance(class_, str) or not isinstance(message, str):
+        return None
+
+    return AgentErrorReport(
+        class_=class_,
+        message=message,
+        reason=_parse_agent_error_reason(raw.get("reason")),
+    )
+
+
 def _parse_skill_resolution_failure_reason(
     raw: Any,
     fallback_message: str,
@@ -866,6 +984,8 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
             elif f == "duration_ms" and cls is ToolExecutionCompleted:
                 kwargs["duration_ms"] = _parse_optional_int(raw.get("duration_ms"))
+            elif f == "error_report" and cls is RunFailed:
+                kwargs["error_report"] = _parse_agent_error_report(raw.get("error_report"))
             elif f == "skill_key" and cls is SkillResolutionFailed:
                 kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
             elif f == "reason" and cls is SkillResolutionFailed:

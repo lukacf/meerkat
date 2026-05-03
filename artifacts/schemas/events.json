@@ -315,6 +315,26 @@
               "args"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "cause_kind": {
+                "$ref": "#/$defs/TurnTerminalCauseKind"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TurnTerminalOutcome"
+              },
+              "reason_type": {
+                "const": "turn_terminal_cause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "outcome",
+              "cause_kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1322,6 +1342,36 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "TurnTerminalCauseKind": {
+        "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
+        "enum": [
+          "unknown",
+          "hook_denied",
+          "hook_failure",
+          "llm_failure",
+          "tool_failure",
+          "structured_output_validation_failed",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "turn_limit_reached",
+          "runtime_apply_failure",
+          "fatal_failure"
+        ],
+        "type": "string"
+      },
+      "TurnTerminalOutcome": {
+        "description": "Terminal outcome of a turn.",
+        "enum": [
+          "none",
+          "completed",
+          "failed",
+          "cancelled",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "structured_output_validation_failed"
+        ],
+        "type": "string"
       },
       "Usage": {
         "description": "Token usage statistics",
@@ -2538,6 +2588,26 @@
               "reason_type",
               "tool_name",
               "args"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cause_kind": {
+                "$ref": "#/$defs/TurnTerminalCauseKind"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TurnTerminalOutcome"
+              },
+              "reason_type": {
+                "const": "turn_terminal_cause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "outcome",
+              "cause_kind"
             ],
             "type": "object"
           }
@@ -4453,6 +4523,36 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "TurnTerminalCauseKind": {
+        "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
+        "enum": [
+          "unknown",
+          "hook_denied",
+          "hook_failure",
+          "llm_failure",
+          "tool_failure",
+          "structured_output_validation_failed",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "turn_limit_reached",
+          "runtime_apply_failure",
+          "fatal_failure"
+        ],
+        "type": "string"
+      },
+      "TurnTerminalOutcome": {
+        "description": "Terminal outcome of a turn.",
+        "enum": [
+          "none",
+          "completed",
+          "failed",
+          "cancelled",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "structured_output_validation_failed"
+        ],
+        "type": "string"
       },
       "Usage": {
         "description": "Token usage statistics",

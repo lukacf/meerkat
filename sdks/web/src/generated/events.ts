@@ -56,6 +56,10 @@ export type AgentErrorReason = {
   args: unknown;
   reason_type: "callback_pending";
   tool_name: string;
+} | {
+  cause_kind: TurnTerminalCauseKind;
+  outcome: TurnTerminalOutcome;
+  reason_type: "turn_terminal_cause";
 };
 
 export type AgentErrorReport = {
@@ -257,6 +261,10 @@ export type ToolConfigChangedPayload = {
   status_info?: ToolConfigChangeStatus | null;
   target: string;
 };
+
+export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+
+export type TurnTerminalOutcome = "none" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "time_budget_exceeded" | "structured_output_validation_failed";
 
 export type Usage = {
   cache_creation_tokens?: number | null;

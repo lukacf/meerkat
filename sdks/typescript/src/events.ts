@@ -102,11 +102,56 @@ export interface RunCompletedEvent {
   readonly usage: Usage;
 }
 
+export type TurnTerminalOutcome =
+  | "none"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "budget_exhausted"
+  | "time_budget_exceeded"
+  | "structured_output_validation_failed";
+
+export type TurnTerminalCauseKind =
+  | "unknown"
+  | "hook_denied"
+  | "hook_failure"
+  | "llm_failure"
+  | "tool_failure"
+  | "structured_output_validation_failed"
+  | "budget_exhausted"
+  | "time_budget_exceeded"
+  | "turn_limit_reached"
+  | "runtime_apply_failure"
+  | "fatal_failure";
+
+export interface TurnTerminalCauseReason {
+  readonly reasonType: "turn_terminal_cause";
+  readonly outcome: TurnTerminalOutcome;
+  readonly causeKind: TurnTerminalCauseKind;
+}
+
+export interface UnknownAgentErrorReason {
+  readonly reasonType: "unknown";
+  readonly rawReasonType?: string;
+  readonly raw: Readonly<Record<string, unknown>>;
+}
+
+export type AgentErrorReason =
+  | TurnTerminalCauseReason
+  | UnknownAgentErrorReason;
+
+export interface AgentErrorReport {
+  readonly class: string;
+  readonly message: string;
+  readonly reason?: AgentErrorReason;
+}
+
 export interface RunFailedEvent {
   readonly type: "run_failed";
   readonly sessionId: string;
   readonly errorClass: string;
   readonly error: string;
+  readonly errorReport?: AgentErrorReport;
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +690,81 @@ function parseWireBoolean(raw: unknown): boolean | undefined {
   return typeof raw === "boolean" ? raw : undefined;
 }
 
+const TURN_TERMINAL_OUTCOMES = new Set<TurnTerminalOutcome>([
+  "none",
+  "completed",
+  "failed",
+  "cancelled",
+  "budget_exhausted",
+  "time_budget_exceeded",
+  "structured_output_validation_failed",
+]);
+
+const TURN_TERMINAL_CAUSE_KINDS = new Set<TurnTerminalCauseKind>([
+  "unknown",
+  "hook_denied",
+  "hook_failure",
+  "llm_failure",
+  "tool_failure",
+  "structured_output_validation_failed",
+  "budget_exhausted",
+  "time_budget_exceeded",
+  "turn_limit_reached",
+  "runtime_apply_failure",
+  "fatal_failure",
+]);
+
+function parseAgentErrorReason(raw: unknown): AgentErrorReason | undefined {
+  if (raw == null || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const value = raw as Record<string, unknown>;
+  const reasonType = parseWireString(value.reason_type ?? value.reasonType);
+  if (reasonType === undefined) {
+    return undefined;
+  }
+
+  if (reasonType === "turn_terminal_cause") {
+    const outcome = parseWireString(value.outcome);
+    const causeKind = parseWireString(value.cause_kind ?? value.causeKind);
+    if (
+      outcome !== undefined &&
+      causeKind !== undefined &&
+      TURN_TERMINAL_OUTCOMES.has(outcome as TurnTerminalOutcome) &&
+      TURN_TERMINAL_CAUSE_KINDS.has(causeKind as TurnTerminalCauseKind)
+    ) {
+      return {
+        reasonType,
+        outcome: outcome as TurnTerminalOutcome,
+        causeKind: causeKind as TurnTerminalCauseKind,
+      };
+    }
+    return undefined;
+  }
+
+  return { reasonType: "unknown", rawReasonType: reasonType, raw: value };
+}
+
+function parseAgentErrorReport(raw: unknown): AgentErrorReport | undefined {
+  if (raw == null || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const value = raw as Record<string, unknown>;
+  const errorClass = parseWireString(value.class);
+  const message = parseWireString(value.message);
+  if (errorClass === undefined || message === undefined) {
+    return undefined;
+  }
+
+  return {
+    class: errorClass,
+    message,
+    reason: parseAgentErrorReason(value.reason),
+  };
+}
+
 function parseSkillResolutionFailureReason(
   raw: unknown,
   fallbackMessage: string,
@@ -778,7 +898,14 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "run_completed":
       return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
     case "run_failed":
-      return { type, sessionId: requireStringField(raw, "session_id"), errorClass: requireStringField(raw, "error_class"), error: requireStringField(raw, "error") };
+      const errorReport = parseAgentErrorReport(raw.error_report);
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        errorClass: requireStringField(raw, "error_class"),
+        error: requireStringField(raw, "error"),
+        ...(errorReport !== undefined ? { errorReport } : {}),
+      };
 
     // Turn / LLM
     case "turn_started":

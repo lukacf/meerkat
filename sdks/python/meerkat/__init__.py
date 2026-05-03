@@ -197,6 +197,8 @@ from .errors import (
 
 # Typed event hierarchy — every event variant is a frozen dataclass
 from .events import (
+    AgentErrorReason,
+    AgentErrorReport,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionCompleted,
@@ -233,6 +235,8 @@ from .events import (
     ToolExecutionTimedOut,
     ToolResultReceived,
     TurnCompleted,
+    TurnTerminalCauseKind,
+    TurnTerminalOutcome,
     TurnStarted,
     UnknownEvent,
     WarningFailedClosedToolConfigChangeStatus,
@@ -408,6 +412,8 @@ __all__ = [
     "SkillNotFoundError",
     # Events (base + all variants)
     "Event",
+    "AgentErrorReason",
+    "AgentErrorReport",
     "RunStarted",
     "ScopedEvent",
     "RunCompleted",
@@ -418,6 +424,8 @@ __all__ = [
     "ToolCallRequested",
     "ToolResultReceived",
     "TurnCompleted",
+    "TurnTerminalCauseKind",
+    "TurnTerminalOutcome",
     "ToolExecutionStarted",
     "ToolExecutionCompleted",
     "ToolExecutionTimedOut",

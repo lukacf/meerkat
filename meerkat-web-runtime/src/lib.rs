@@ -24,7 +24,7 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/reset/destroy
+//! - `mob_lifecycle(mob_id, action)` — typed lifecycle action string carrier
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, agent_identity)`
@@ -1611,32 +1611,32 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 
 /// Perform a lifecycle action on a mob.
 ///
-/// `action`: one of "stop", "resume", "complete", "reset", "destroy".
+/// `action` is a compatibility string carrier that is immediately
+/// deserialized into the typed wire lifecycle action contract.
 #[wasm_bindgen]
 pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+    let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
+        err_js(
+            "invalid_action",
+            &format!("invalid lifecycle action: {err}"),
+        )
+    })?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    match action {
-        "stop" => mob_state.mob_stop(&id).await.map_err(err_mob)?,
-        "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
-        "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
-        "reset" => mob_state.mob_reset(&id).await.map_err(err_mob)?,
-        "destroy" => {
-            // WASM lifecycle wrapper is `() on success`; Rust/RPC callers
-            // that need the structured MobDestroyReport use the RPC
-            // mob/lifecycle handler directly.
-            let _report = mob_state.mob_destroy(&id).await.map_err(err_mob)?;
-        }
-        _ => {
-            return Err(err_js(
-                "invalid_action",
-                &format!(
-                    "unknown lifecycle action: {action} (expected stop/resume/complete/reset/destroy)"
-                ),
-            ));
-        }
-    }
+    // WASM lifecycle wrapper is `() on success`; the structured
+    // MobDestroyReport is available through public/RPC lifecycle result
+    // envelopes for consumers that need cleanup detail.
+    let _destroy_report = mob_state
+        .mob_lifecycle_action(&id, action)
+        .await
+        .map_err(err_mob)?;
     Ok(())
+}
+
+fn parse_mob_lifecycle_action_arg(
+    action: &str,
+) -> Result<meerkat_contracts::WireMobLifecycleAction, serde_json::Error> {
+    serde_json::from_value(serde_json::Value::String(action.to_string()))
 }
 
 /// Fetch mob events.
@@ -2469,7 +2469,8 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        merge_runtime_system_context_state, parse_mobpack, poll_subscription,
+        merge_runtime_system_context_state, parse_mob_lifecycle_action_arg, parse_mobpack,
+        poll_subscription,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2873,6 +2874,20 @@ capabilities = [{capability_values}]
             serde_json::from_value(payload)
                 .expect("typed failed spawn_many entry must deserialize");
         assert_eq!(round_trip, entry);
+    }
+
+    #[test]
+    fn mob_lifecycle_action_string_carrier_uses_typed_contract_boundary() {
+        let action = parse_mob_lifecycle_action_arg("resume")
+            .expect("valid lifecycle action must deserialize");
+        assert_eq!(action, meerkat_contracts::WireMobLifecycleAction::Resume);
+
+        let err = parse_mob_lifecycle_action_arg("explode")
+            .expect_err("unknown lifecycle action must fail typed deserialization");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

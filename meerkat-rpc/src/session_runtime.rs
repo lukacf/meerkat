@@ -471,6 +471,7 @@ async fn await_guarded_session_cleanup(
         })?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn await_guarded_staged_archive(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     staged_sessions: Arc<StagedSessionRegistry>,
@@ -3000,11 +3001,11 @@ impl SessionRuntime {
 
     #[cfg(test)]
     pub(crate) async fn wait_runtime_routed_pre_promotion_hook(&self, session_id: &SessionId) {
-        if !self
+        if self
             .staged_sessions
             .info(session_id)
             .await
-            .is_some_and(|info| !info.is_promoting)
+            .is_none_or(|info| info.is_promoting)
         {
             return;
         }

@@ -504,11 +504,8 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
     let named_bindings = collect_machine_named_bindings(schema);
-    let sample_cardinality = if !deep && schema.ci_step_limit == Some(1) {
-        0
-    } else {
-        default_sample_cardinality(deep)
-    };
+    let sample_cardinality = machine_cfg_sample_cardinality(schema, deep);
+    let operator_suffix = if deep { "Deep" } else { "Ci" };
 
     pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() {
@@ -520,19 +517,29 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
             ) {
                 continue;
             }
-            writeln!(
-                &mut out,
-                "  {} = {}",
-                name,
-                render_default_domain_assignment(
-                    &ty,
-                    sample_cardinality,
-                    &named_samples,
-                    &named_bindings,
-                    false,
+            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, operator_suffix),
                 )
-            )
-            .expect("write to string");
+                .expect("write to string");
+            } else {
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_default_domain_assignment(
+                        &ty,
+                        sample_cardinality,
+                        &named_samples,
+                        &named_bindings,
+                        false,
+                    )
+                )
+                .expect("write to string");
+            }
         }
     }
     if !schema.invariants.is_empty() {
@@ -576,6 +583,7 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples = collect_composition_named_type_samples(schema, &machine_by_instance);
     let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
+    let operator_suffix = if deep { "Deep" } else { "Ci" };
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
@@ -613,19 +621,29 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
             } else {
                 default_sample_cardinality(false)
             };
-            writeln!(
-                &mut out,
-                "  {} = {}",
-                name,
-                render_default_domain_assignment(
-                    &ty,
-                    cardinality,
-                    &named_samples,
-                    &named_bindings,
-                    false,
+            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, operator_suffix),
                 )
-            )
-            .expect("write to string");
+                .expect("write to string");
+            } else {
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_default_domain_assignment(
+                        &ty,
+                        cardinality,
+                        &named_samples,
+                        &named_bindings,
+                        false,
+                    )
+                )
+                .expect("write to string");
+            }
         }
     }
     let behavioral_invariants = schema
@@ -687,6 +705,7 @@ pub fn render_composition_witness_cfg(
     let witness_sample_cardinality = schema
         .witness_domain_cardinality
         .max(max_named_sample_cardinality(&named_samples));
+    let operator_suffix = witness_cfg_operator_suffix(witness);
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
@@ -720,19 +739,29 @@ pub fn render_composition_witness_cfg(
             ) {
                 continue;
             }
-            writeln!(
-                &mut out,
-                "  {} = {}",
-                name,
-                render_default_domain_assignment(
-                    &ty,
-                    witness_sample_cardinality,
-                    &named_samples,
-                    &named_bindings,
-                    true,
+            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+                writeln!(
+                    &mut out,
+                    "  {} <- {}",
+                    name,
+                    cfg_assignment_operator_name(&name, &operator_suffix),
                 )
-            )
-            .expect("write to string");
+                .expect("write to string");
+            } else {
+                writeln!(
+                    &mut out,
+                    "  {} = {}",
+                    name,
+                    render_default_domain_assignment(
+                        &ty,
+                        witness_sample_cardinality,
+                        &named_samples,
+                        &named_bindings,
+                        true,
+                    )
+                )
+                .expect("write to string");
+            }
         }
     }
     if !schema.invariants.is_empty() || !instance_invariants.is_empty() {
@@ -826,6 +855,134 @@ pub fn composition_scheduler_coverage_operator_name(rule: &SchedulerRule) -> Str
 
 fn max_named_sample_cardinality(named_samples: &BTreeMap<String, BTreeSet<String>>) -> usize {
     named_samples.values().map(BTreeSet::len).max().unwrap_or(1)
+}
+
+struct CfgAssignmentOperatorProfile<'a> {
+    suffix: String,
+    sample_cardinality: usize,
+    domain_overrides: Option<&'a BTreeMap<String, usize>>,
+    named_samples: &'a BTreeMap<String, BTreeSet<String>>,
+    include_string_samples: bool,
+}
+
+fn cfg_assignment_operator_name(domain_name: &str, suffix: impl AsRef<str>) -> String {
+    format!("{}{}", tla_ident(domain_name), tla_ident(suffix))
+}
+
+fn witness_cfg_operator_suffix(witness: &CompositionWitness) -> String {
+    format!("Witness{}", tla_ident(&witness.name))
+}
+
+fn profile_sample_cardinality(
+    profile: &CfgAssignmentOperatorProfile<'_>,
+    domain_name: &str,
+) -> usize {
+    profile
+        .domain_overrides
+        .and_then(|overrides| overrides.get(domain_name).copied())
+        .unwrap_or(profile.sample_cardinality)
+}
+
+fn profile_sample_cardinality_for_domain(
+    profile: &CfgAssignmentOperatorProfile<'_>,
+    domain_name: &str,
+    ty: &TypeRef,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> usize {
+    let sample_cardinality = profile_sample_cardinality(profile, domain_name);
+    if profile.suffix == "Ci" && cfg_assignment_requires_model_operator(ty, named_bindings) {
+        return 0;
+    }
+
+    sample_cardinality
+}
+
+fn machine_cfg_sample_cardinality(schema: &MachineSchema, deep: bool) -> usize {
+    if !deep && schema.ci_step_limit == Some(1) {
+        0
+    } else {
+        default_sample_cardinality(deep)
+    }
+}
+
+fn push_cfg_assignment_operator_definitions(
+    out: &mut String,
+    domains: &BTreeMap<String, TypeRef>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    profile: &CfgAssignmentOperatorProfile<'_>,
+) -> bool {
+    let mut wrote = false;
+    for (name, ty) in domains {
+        if cfg_domain_is_skipped_in_cfg(ty)
+            || !cfg_assignment_requires_model_operator(ty, named_bindings)
+        {
+            continue;
+        }
+        let sample_cardinality =
+            profile_sample_cardinality_for_domain(profile, name, ty, named_bindings);
+        let assignment = render_default_domain_assignment(
+            ty,
+            sample_cardinality,
+            profile.named_samples,
+            named_bindings,
+            profile.include_string_samples,
+        );
+        writeln!(
+            out,
+            "{} == {}",
+            cfg_assignment_operator_name(name, &profile.suffix),
+            assignment
+        )
+        .expect("write to string");
+        wrote = true;
+    }
+    if wrote {
+        pushln!(out);
+    }
+    wrote
+}
+
+fn cfg_domain_is_skipped_in_cfg(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+    )
+}
+
+fn cfg_assignment_requires_model_operator(
+    ty: &TypeRef,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> bool {
+    match ty {
+        TypeRef::Named(name) => {
+            require_named_binding(named_bindings, name.as_str()).renders_cfg_hostile_record()
+        }
+        TypeRef::Enum(name) => {
+            require_named_binding(named_bindings, name.as_str()).renders_cfg_hostile_record()
+        }
+        TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            cfg_assignment_requires_model_operator(inner, named_bindings)
+        }
+        TypeRef::Option(_) | TypeRef::Map(_, _) => true,
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => false,
+    }
+}
+
+trait CfgRecordRendering {
+    fn renders_cfg_hostile_record(&self) -> bool;
+}
+
+impl CfgRecordRendering for meerkat_machine_schema::RustTypeAtom {
+    fn renders_cfg_hostile_record(&self) -> bool {
+        match self {
+            meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. } => true,
+            meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+                structural_variants,
+                ..
+            } => !structural_variants.is_empty(),
+            _ => false,
+        }
+    }
 }
 
 pub fn composition_witness_cfg_name(name: impl AsRef<str>) -> String {
@@ -2566,7 +2723,7 @@ fn render_default_domain_assignment(
             } else if let Some(sample) = samples.first() {
                 format!("{{{{}}, {{{}}}}}", sample)
             } else {
-                "{{{}}}".into()
+                "{{}}".into()
             }
         }
         TypeRef::Option(inner) => {
@@ -2864,20 +3021,44 @@ fn string_enum_variant_samples(
         .collect()
 }
 
+fn render_named_variant_value(
+    enum_name: &str,
+    variant: &str,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    let label = tla_string(string_enum_wire_label(enum_name, variant));
+    if named_bindings
+        .get(enum_name)
+        .is_some_and(CfgRecordRendering::renders_cfg_hostile_record)
+    {
+        format!("[tag |-> {label}]")
+    } else {
+        label
+    }
+}
+
 fn type_path_enum_variant_samples(
     unit_variants: &[meerkat_machine_schema::identity::EnumVariantId],
     structural_variants: &[TypePathEnumStructuralVariant],
     sample_cardinality: usize,
 ) -> Vec<String> {
+    let unit_variants_are_records = !structural_variants.is_empty();
     let mut samples = unit_variants
         .iter()
-        .map(|variant| tla_string(variant.as_str()))
+        .map(|variant| {
+            let tag = tla_string(variant.as_str());
+            if unit_variants_are_records {
+                format!("[tag |-> {tag}]")
+            } else {
+                tag
+            }
+        })
         .collect::<Vec<_>>();
-    samples.extend(
-        structural_variants.iter().flat_map(|variant| {
+    if sample_cardinality > 0 {
+        samples.extend(structural_variants.iter().flat_map(|variant| {
             render_type_path_enum_structural_samples(variant, sample_cardinality)
-        }),
-    );
+        }));
+    }
     samples
 }
 
@@ -2910,28 +3091,35 @@ fn type_path_struct_samples(
     named_samples: &BTreeMap<String, BTreeSet<String>>,
     bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> Vec<String> {
-    let mut samples = vec![Vec::new()];
+    if sample_cardinality == 0 {
+        return Vec::new();
+    }
+    if fields.is_empty() {
+        return vec!["[]".to_owned()];
+    }
+
+    let limit = sample_cardinality.max(1);
+    let mut field_values = Vec::new();
     for field in fields {
         let values =
             type_path_struct_field_samples(field, sample_cardinality, named_samples, bindings);
         if values.is_empty() {
             return Vec::new();
         }
-
-        let mut next_samples = Vec::new();
-        for sample in &samples {
-            for value in &values {
-                let mut next = sample.clone();
-                next.push(format!("{} |-> {value}", field.name));
-                next_samples.push(next);
-            }
-        }
-        samples = next_samples;
+        field_values.push((field.name.as_str().to_owned(), values));
     }
 
-    samples
-        .into_iter()
-        .map(|fields| format!("[{}]", fields.join(", ")))
+    (0..limit)
+        .map(|idx| {
+            let fields = field_values
+                .iter()
+                .map(|(name, values)| {
+                    let value = &values[idx % values.len()];
+                    format!("{name} |-> {value}")
+                })
+                .collect::<Vec<_>>();
+            format!("[{}]", fields.join(", "))
+        })
         .collect()
 }
 
@@ -3267,6 +3455,7 @@ fn type_ref_name(ty: &TypeRef) -> String {
 struct CompositionTlaCompiler<'a> {
     schema: &'a CompositionSchema,
     machine_by_instance: BTreeMap<&'a str, &'a MachineSchema>,
+    named_bindings: BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     fallback_machine: &'a MachineSchema,
 }
 
@@ -3296,10 +3485,13 @@ impl<'a> CompositionTlaCompiler<'a> {
                 })?;
             machine_by_instance.insert(instance.instance_id.as_str(), machine);
         }
+        let named_bindings =
+            collect_composition_named_bindings(machine_by_instance.values().copied());
 
         Ok(Self {
             schema,
             machine_by_instance,
+            named_bindings,
             fallback_machine: machine_catalog.first().ok_or_else(|| {
                 format!(
                     "no machine catalog available for composition `{}`",
@@ -3328,6 +3520,8 @@ impl<'a> CompositionTlaCompiler<'a> {
     fn render(&self) -> std::result::Result<String, String> {
         let mut out = String::new();
         let constants = self.collect_binding_domains();
+        let named_samples =
+            collect_composition_named_type_samples(self.schema, &self.machine_by_instance);
         let machine_vars = self.machine_vars();
         let obligation_vars = self.obligation_vars();
         let mut machine_invariant_names = Vec::new();
@@ -3358,6 +3552,53 @@ impl<'a> CompositionTlaCompiler<'a> {
             writeln!(&mut out, "CONSTANTS {}", model_constants.join(", "))
                 .expect("write to string");
             pushln!(&mut out);
+        }
+
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &self.named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Ci".to_owned(),
+                sample_cardinality: default_sample_cardinality(false),
+                domain_overrides: None,
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &self.named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Deep".to_owned(),
+                sample_cardinality: self.schema.deep_domain_cardinality,
+                domain_overrides: Some(&self.schema.deep_domain_overrides),
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        for witness in &self.schema.witnesses {
+            let witness_samples = collect_composition_witness_named_type_samples(
+                self.schema,
+                witness,
+                &self.machine_by_instance,
+            );
+            push_cfg_assignment_operator_definitions(
+                &mut out,
+                &constants,
+                &self.named_bindings,
+                &CfgAssignmentOperatorProfile {
+                    suffix: witness_cfg_operator_suffix(witness),
+                    sample_cardinality: self
+                        .schema
+                        .witness_domain_cardinality
+                        .max(max_named_sample_cardinality(&witness_samples)),
+                    domain_overrides: None,
+                    named_samples: &witness_samples,
+                    include_string_samples: true,
+                },
+            );
         }
 
         writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
@@ -5054,9 +5295,11 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
-            Expr::NamedVariant { enum_name, variant } => {
-                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
-            }
+            Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
+                enum_name.as_str(),
+                variant.as_str(),
+                &self.named_bindings,
+            ),
             Expr::None => "None".into(),
             Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
             Expr::SeqLiteral(items) => {
@@ -5649,6 +5892,7 @@ impl<'a> CompositionTlaCompiler<'a> {
 
 struct MachineTlaCompiler<'a> {
     schema: &'a MachineSchema,
+    named_bindings: BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
     helper_defs: Vec<String>,
     helper_counter: usize,
     helper_prefix: Option<String>,
@@ -5660,6 +5904,7 @@ impl<'a> MachineTlaCompiler<'a> {
     fn new(schema: &'a MachineSchema) -> Self {
         Self {
             schema,
+            named_bindings: collect_machine_named_bindings(schema),
             helper_defs: Vec::new(),
             helper_counter: 0,
             helper_prefix: None,
@@ -5671,6 +5916,7 @@ impl<'a> MachineTlaCompiler<'a> {
     fn new_with_helper_prefix(schema: &'a MachineSchema, helper_prefix: impl Into<String>) -> Self {
         Self {
             schema,
+            named_bindings: collect_machine_named_bindings(schema),
             helper_defs: Vec::new(),
             helper_counter: 0,
             helper_prefix: Some(helper_prefix.into()),
@@ -5692,6 +5938,8 @@ impl<'a> MachineTlaCompiler<'a> {
     fn render(&mut self) -> String {
         let mut out = String::new();
         let constants = collect_binding_domains(self.schema);
+        let named_samples = collect_machine_named_type_samples(self.schema);
+        let named_bindings = collect_machine_named_bindings(self.schema);
 
         pushln!(&mut out, "---- MODULE model ----");
         pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
@@ -5720,6 +5968,31 @@ impl<'a> MachineTlaCompiler<'a> {
             writeln!(&mut out, "CONSTANTS {constant_list}");
             pushln!(&mut out);
         }
+
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Ci".to_owned(),
+                sample_cardinality: machine_cfg_sample_cardinality(self.schema, false),
+                domain_overrides: None,
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
+        push_cfg_assignment_operator_definitions(
+            &mut out,
+            &constants,
+            &named_bindings,
+            &CfgAssignmentOperatorProfile {
+                suffix: "Deep".to_owned(),
+                sample_cardinality: machine_cfg_sample_cardinality(self.schema, true),
+                domain_overrides: None,
+                named_samples: &named_samples,
+                include_string_samples: false,
+            },
+        );
 
         pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
@@ -6895,9 +7168,11 @@ impl<'a> MachineTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
-            Expr::NamedVariant { enum_name, variant } => {
-                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
-            }
+            Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
+                enum_name.as_str(),
+                variant.as_str(),
+                &self.named_bindings,
+            ),
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "[x \\in {} |-> None]".into(),
             Expr::SeqLiteral(items) => format!(
@@ -7007,10 +7282,14 @@ impl<'a> MachineTlaCompiler<'a> {
                 "SeqElements({})",
                 self.render_expr_with_types(inner, env, binding_env, binding_types)
             ),
-            Expr::Len(inner) => format!(
-                "Len({})",
-                self.render_expr_with_types(inner, env, binding_env, binding_types)
-            ),
+            Expr::Len(inner) => {
+                let rendered = self.render_expr_with_types(inner, env, binding_env, binding_types);
+                if self.expr_renders_as_set(inner, binding_types) {
+                    format!("Cardinality({rendered})")
+                } else {
+                    format!("Len({rendered})")
+                }
+            }
             Expr::Head(inner) => format!(
                 "Head({})",
                 self.render_expr_with_types(inner, env, binding_env, binding_types)
@@ -7082,6 +7361,48 @@ impl<'a> MachineTlaCompiler<'a> {
                     self.render_expr_with_types(body, env, &nested_bindings, &nested_binding_types)
                 )
             }
+        }
+    }
+
+    fn expr_renders_as_set(&self, expr: &Expr, binding_types: &BTreeMap<String, TypeRef>) -> bool {
+        self.infer_expr_type_for_render(expr, binding_types)
+            .is_some_and(|ty| self.type_renders_as_set(&ty))
+    }
+
+    fn infer_expr_type_for_render(
+        &self,
+        expr: &Expr,
+        binding_types: &BTreeMap<String, TypeRef>,
+    ) -> Option<TypeRef> {
+        let field_types = self
+            .schema
+            .state
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+            .collect::<BTreeMap<String, _>>();
+        let helper_returns = self
+            .schema
+            .helpers
+            .iter()
+            .chain(self.schema.derived.iter())
+            .map(|helper| (helper.name.clone(), helper.returns.clone()))
+            .collect::<BTreeMap<String, _>>();
+        infer_expr_type(expr, &field_types, &helper_returns, binding_types)
+    }
+
+    fn type_renders_as_set(&self, ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Set(_) => true,
+            TypeRef::Named(name) => matches!(
+                self.named_bindings.get(name.as_str()),
+                Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. })
+            ),
+            TypeRef::Enum(name) => matches!(
+                self.named_bindings.get(name.as_str()),
+                Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. })
+            ),
+            _ => false,
         }
     }
 

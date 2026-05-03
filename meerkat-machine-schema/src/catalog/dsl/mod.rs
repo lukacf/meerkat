@@ -635,6 +635,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
         ],
         input_variant_ids(MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
+    .with_ci_step_limit(1)
 }
 
 runtime_internal_inputs!(

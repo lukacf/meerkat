@@ -7,15 +7,23 @@ use meerkat_machine_schema::catalog::dsl::{
 };
 use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
 
-fn tool_filter_values_line(rendered: &str) -> &str {
+fn tool_filter_override_line(rendered: &str) -> &str {
     rendered
         .lines()
-        .find(|line| line.trim_start().starts_with("ToolFilterValues = "))
+        .find(|line| line.trim_start().starts_with("ToolFilterValues <- "))
         .map(str::trim)
-        .expect("ToolFilterValues assignment")
+        .expect("ToolFilterValues override")
 }
 
-fn tool_filter_domain(name_sets: &[&str]) -> String {
+fn tool_filter_operator_line<'a>(rendered: &'a str, operator: &str) -> &'a str {
+    let prefix = format!("{operator} == ");
+    rendered
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .expect("ToolFilterValues operator")
+}
+
+fn tool_filter_domain(operator: &str, name_sets: &[&str]) -> String {
     let structural_samples = ["Allow", "Deny"]
         .into_iter()
         .flat_map(|variant| {
@@ -25,9 +33,13 @@ fn tool_filter_domain(name_sets: &[&str]) -> String {
         })
         .collect::<Vec<_>>();
     format!(
-        "ToolFilterValues = {{\"All\", {}}}",
+        "{operator} == {{[tag |-> \"All\"], {}}}",
         structural_samples.join(", ")
     )
+}
+
+fn tool_filter_unit_domain(operator: &str) -> String {
+    format!("{operator} == {{[tag |-> \"All\"]}}")
 }
 
 #[test]
@@ -81,9 +93,14 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
         "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
     );
     assert_eq!(
-        tool_filter_values_line(&rendered),
-        tool_filter_domain(&[r"{}", r#"{"alpha"}"#]),
-        "ToolFilterValues must cover the canonical unit plus structural Allow/Deny set samples"
+        tool_filter_override_line(&rendered),
+        "ToolFilterValues <- ToolFilterValuesCi"
+    );
+    let model = render_machine_semantic_model(&meerkat_machine());
+    assert_eq!(
+        tool_filter_operator_line(&model, "ToolFilterValuesCi"),
+        tool_filter_unit_domain("ToolFilterValuesCi"),
+        "CI ToolFilterValues must stay on the canonical unit variant; deep covers structural payloads"
     );
     assert!(
         !rendered.contains("toolfilter_2"),
@@ -96,13 +113,58 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
     let rendered = render_machine_ci_cfg(&meerkat_machine(), true);
 
     assert_eq!(
-        tool_filter_values_line(&rendered),
-        tool_filter_domain(&[r"{}", r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]),
+        tool_filter_override_line(&rendered),
+        "ToolFilterValues <- ToolFilterValuesDeep"
+    );
+    let model = render_machine_semantic_model(&meerkat_machine());
+    assert_eq!(
+        tool_filter_operator_line(&model, "ToolFilterValuesDeep"),
+        tool_filter_domain(
+            "ToolFilterValuesDeep",
+            &[r"{}", r#"{"alpha"}"#, r#"{"alpha", "beta"}"#]
+        ),
         "deep ToolFilterValues must cover differing same-variant structural payloads"
     );
     assert!(
         !rendered.contains("toolfilter_2"),
         "deep ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_cfg_uses_model_operators_for_record_valued_domains() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
+    let model = render_machine_semantic_model(&meerkat_machine());
+
+    assert!(
+        rendered.contains("PeerEndpointValues <- PeerEndpointValuesCi"),
+        "record-valued PeerEndpointValues must be supplied through a model operator:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("SetOfPeerEndpointValues <- SetOfPeerEndpointValuesCi"),
+        "record-valued SetOfPeerEndpointValues must be supplied through a model operator:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("PeerEndpointValues = {["),
+        "cfg CONSTANTS must not contain TLC record literals:\n{rendered}"
+    );
+    assert!(
+        model.contains("PeerEndpointValuesCi == {}"),
+        "CI PeerEndpointValues must stay bounded while still using model operator substitution:\n{model}"
+    );
+    assert!(
+        model.contains("SetOfPeerEndpointValuesCi == {{}}"),
+        "CI SetOfPeerEndpointValues must stay bounded while still using model operator substitution:\n{model}"
+    );
+    assert!(
+        model.contains(
+            "PeerEndpointValuesDeep == {[name |-> \"peername_1\", peer_id |-> \"peerid_1\", address |-> \"peeraddress_1\", signing_key |-> \"peersigningkey_1\"]"
+        ),
+        "deep model operator must preserve typed PeerEndpoint record shape:\n{model}"
+    );
+    assert!(
+        model.contains("SetOfPeerEndpointValuesDeep == {{}, {[name |-> \"peername_1\""),
+        "deep model operator must preserve bounded set samples for PeerEndpoint records:\n{model}"
     );
 }
 

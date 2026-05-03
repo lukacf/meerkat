@@ -5,6 +5,7 @@ use crate::runtime::MobState;
 use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
 use crate::{MobId, RunId, StepId};
+use meerkat_contracts::MobSpawnManyFailureCause;
 use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRejectionReply};
 
 /// Errors returned by mob operations.
@@ -258,6 +259,54 @@ impl MobError {
             _ => None,
         }
     }
+
+    /// Typed failure cause for per-member `mob/spawn_many` result rows.
+    ///
+    /// This match intentionally has no wildcard arm. Adding a new `MobError`
+    /// variant must update the public spawn-many failure projection instead of
+    /// silently collapsing into string-only error semantics.
+    pub fn spawn_many_failure_cause(&self) -> MobSpawnManyFailureCause {
+        match self {
+            Self::ProfileNotFound(_) => MobSpawnManyFailureCause::ProfileNotFound,
+            Self::MemberNotFound(_) => MobSpawnManyFailureCause::MemberNotFound,
+            Self::MemberAlreadyExists(_) => MobSpawnManyFailureCause::MemberAlreadyExists,
+            Self::NotExternallyAddressable(_) => MobSpawnManyFailureCause::NotExternallyAddressable,
+            Self::InvalidTransition { .. } => MobSpawnManyFailureCause::InvalidTransition,
+            Self::WiringError(_) => MobSpawnManyFailureCause::WiringError,
+            Self::BridgeCommandRejected { .. } => MobSpawnManyFailureCause::BridgeCommandRejected,
+            Self::MemberRestoreFailed { .. } => MobSpawnManyFailureCause::MemberRestoreFailed,
+            Self::KickoffWaitTimedOut { .. } => MobSpawnManyFailureCause::KickoffWaitTimedOut,
+            Self::ReadyWaitTimedOut { .. } => MobSpawnManyFailureCause::ReadyWaitTimedOut,
+            Self::DefinitionError(_) => MobSpawnManyFailureCause::DefinitionError,
+            Self::FlowNotFound(_) => MobSpawnManyFailureCause::FlowNotFound,
+            Self::FlowFailed { .. } => MobSpawnManyFailureCause::FlowFailed,
+            Self::RunNotFound(_) => MobSpawnManyFailureCause::RunNotFound,
+            Self::RunCanceled(_) => MobSpawnManyFailureCause::RunCanceled,
+            Self::FlowTurnTimedOut => MobSpawnManyFailureCause::FlowTurnTimedOut,
+            Self::FrameDepthLimitExceeded { .. } => {
+                MobSpawnManyFailureCause::FrameDepthLimitExceeded
+            }
+            Self::FrameAtomicPersistenceUnavailable { .. } => {
+                MobSpawnManyFailureCause::FrameAtomicPersistenceUnavailable
+            }
+            Self::SpecRevisionConflict { .. } => MobSpawnManyFailureCause::SpecRevisionConflict,
+            Self::SchemaValidation { .. } => MobSpawnManyFailureCause::SchemaValidation,
+            Self::InsufficientTargets { .. } => MobSpawnManyFailureCause::InsufficientTargets,
+            Self::TopologyViolation { .. } => MobSpawnManyFailureCause::TopologyViolation,
+            Self::BridgeDeliveryRejected { .. } => MobSpawnManyFailureCause::BridgeDeliveryRejected,
+            Self::SupervisorEscalation(_) => MobSpawnManyFailureCause::SupervisorEscalation,
+            Self::UnsupportedForMode { .. } => MobSpawnManyFailureCause::UnsupportedForMode,
+            Self::ResetBarrier => MobSpawnManyFailureCause::ResetBarrier,
+            Self::StorageError(_) => MobSpawnManyFailureCause::StorageError,
+            Self::SessionError(_) => MobSpawnManyFailureCause::SessionError,
+            Self::CommsError(_) => MobSpawnManyFailureCause::CommsError,
+            Self::CallbackPending { .. } => MobSpawnManyFailureCause::CallbackPending,
+            Self::StaleFenceToken { .. } => MobSpawnManyFailureCause::StaleFenceToken,
+            Self::StaleEventCursor { .. } => MobSpawnManyFailureCause::StaleEventCursor,
+            Self::WorkNotFound(_) => MobSpawnManyFailureCause::WorkNotFound,
+            Self::Internal(_) => MobSpawnManyFailureCause::Internal,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +347,21 @@ mod tests {
                 "identity-first mob errors must not carry legacy 'meerkat' wording: {msg}",
             );
         }
+    }
+
+    #[test]
+    fn spawn_many_failure_cause_preserves_typed_mob_error_variant() {
+        let profile_missing = MobError::ProfileNotFound(ProfileName::from("missing"));
+        assert_eq!(
+            profile_missing.spawn_many_failure_cause(),
+            MobSpawnManyFailureCause::ProfileNotFound
+        );
+
+        let internal = MobError::Internal("unexpected".to_string());
+        assert_eq!(
+            internal.spawn_many_failure_cause(),
+            MobSpawnManyFailureCause::Internal
+        );
     }
 
     #[test]

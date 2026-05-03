@@ -616,6 +616,7 @@ pub async fn handle_public_tools_call(
                         ))
                     }
                     Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
+                        error.spawn_many_failure_cause(),
                         error.to_string(),
                     )),
                 }).collect::<Vec<_>>()
@@ -1478,5 +1479,52 @@ mod tests {
         )
         .await
         .expect("cleanup mob");
+    }
+
+    #[tokio::test]
+    async fn public_tools_spawn_many_returns_typed_failure_cause() {
+        let state = MobMcpState::new_in_memory();
+
+        let created = handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "typed-public-spawn-many",
+                    "profiles": {
+                        "worker": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("typed public create");
+
+        let spawned = handle_public_tools_call(
+            &state,
+            "meerkat_mob_spawn_many",
+            &json!({
+                "mob_id": created["mob_id"],
+                "specs": [{
+                    "profile": "missing",
+                    "agent_identity": "w-missing"
+                }]
+            }),
+        )
+        .await
+        .expect("spawn_many returns per-member failure row");
+        let row = &spawned["results"].as_array().expect("results array")[0];
+        assert_eq!(row["status"], "failed");
+        assert_eq!(row["result"]["cause"], "profile_not_found");
+        assert!(
+            row["result"]["message"].as_str().is_some_and(|msg| {
+                msg.contains("profile not found") && msg.contains("missing")
+            })
+        );
+        assert!(row.get("ok").is_none());
+        assert!(row.get("error").is_none());
     }
 }

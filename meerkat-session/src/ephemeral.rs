@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::error::AgentError;
-use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
@@ -655,6 +655,7 @@ pub trait SessionAgent: Send {
     }
 }
 
+#[cfg(test)]
 fn validate_prompt_video_input_against_capability(
     prompt: &ContentInput,
     identity: &SessionLlmIdentity,
@@ -782,11 +783,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
-        self.builder
-            .model_supports_inline_video(identity)
-            .await
-            .unwrap_or(false)
+    async fn require_inline_video_support(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
+        match self.builder.model_supports_inline_video(identity).await {
+            Some(true) => Ok(()),
+            Some(false) => Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::CapabilityDisabled,
+                ),
+            ),
+            None => Err(
+                meerkat_core::UnsupportedModelCapabilityEvidence::inline_video(
+                    identity.provider,
+                    identity.model.clone(),
+                    meerkat_core::UnsupportedModelCapabilityReason::ProviderModelProfileMissing,
+                ),
+            ),
+        }
     }
 
     async fn validate_prompt_video_input(
@@ -794,11 +811,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         prompt: &ContentInput,
         identity: &SessionLlmIdentity,
     ) -> Result<(), SessionError> {
-        validate_prompt_video_input_against_capability(
-            prompt,
-            identity,
-            self.model_supports_inline_video(identity).await,
-        )
+        let blocks = match prompt {
+            ContentInput::Text(_) => return Ok(()),
+            ContentInput::Blocks(blocks) => blocks,
+        };
+
+        meerkat_core::validate_inline_video_blocks(blocks)
+            .map_err(|err| SessionError::Agent(AgentError::ConfigError(err)))?;
+
+        if meerkat_core::has_video(blocks)
+            && let Err(evidence) = self.require_inline_video_support(identity).await
+        {
+            return Err(SessionError::Agent(AgentError::ConfigError(
+                evidence.to_string(),
+            )));
+        }
+
+        Ok(())
     }
 
     fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError> {
@@ -2699,12 +2728,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSes
 /// Long-lived task that exclusively owns a session agent and processes commands.
 fn stamp_event_envelope(
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
     event: AgentEvent,
 ) -> EventEnvelope<AgentEvent> {
     *next_seq += 1;
     // mob_id is optional and only set when a surface/runtime has mob context.
-    EventEnvelope::new(source_id, *next_seq, None, event)
+    EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
 fn render_runtime_system_context_event_prompt(
@@ -2742,7 +2771,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
     appends: &[PendingSystemContextAppend],
     control: &SessionTaskControl,
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
 ) {
     agent.apply_runtime_system_context(appends);
     let snap = agent.snapshot();
@@ -2757,7 +2786,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
         let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
                 prompt: ContentInput::Text(prompt),
@@ -2767,7 +2796,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
 
         let completed = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
@@ -2783,13 +2812,13 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
     appends: &[PendingSystemContextAppend],
     control: &SessionTaskControl,
     next_seq: &mut u64,
-    source_id: &str,
+    source: &EventSourceIdentity,
 ) {
     if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
         let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunStarted {
                 session_id: session_id.clone(),
                 prompt: ContentInput::Text(prompt),
@@ -2799,7 +2828,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
 
         let completed = stamp_event_envelope(
             next_seq,
-            source_id,
+            source,
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
@@ -3089,7 +3118,7 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
-    let source_id = format!("session:{}", agent.session_id());
+    let source = EventSourceIdentity::session(agent.session_id());
 
     loop {
         let Some(cmd) = commands.recv().await else {
@@ -3339,7 +3368,7 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                                let envelope = stamp_event_envelope(&mut next_seq, &source, event);
                                 let _ = control.session_event_tx.send(envelope.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
@@ -3358,7 +3387,7 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                        let envelope = stamp_event_envelope(&mut next_seq, &source, event);
                         let _ = control.session_event_tx.send(envelope.clone());
                         if event_stream_open
                             && let Some(ref tx) = event_tx
@@ -3455,7 +3484,7 @@ async fn session_task<A: SessionAgent>(
                     &appends,
                     &control,
                     &mut next_seq,
-                    &source_id,
+                    &source,
                 );
                 let _ = reply_tx.send(());
             }
@@ -3465,7 +3494,7 @@ async fn session_task<A: SessionAgent>(
                     &appends,
                     &control,
                     &mut next_seq,
-                    &source_id,
+                    &source,
                 );
                 let _ = reply_tx.send(());
             }
@@ -3512,7 +3541,7 @@ async fn session_task<A: SessionAgent>(
                     if !text_content.is_empty() {
                         let envelope = stamp_event_envelope(
                             &mut next_seq,
-                            &source_id,
+                            &source,
                             AgentEvent::TextComplete {
                                 content: text_content,
                             },
@@ -3521,7 +3550,7 @@ async fn session_task<A: SessionAgent>(
                     }
                     let envelope = stamp_event_envelope(
                         &mut next_seq,
-                        &source_id,
+                        &source,
                         AgentEvent::TurnCompleted {
                             stop_reason,
                             usage: usage_for_event,

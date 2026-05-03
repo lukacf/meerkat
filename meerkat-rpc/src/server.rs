@@ -1383,7 +1383,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: open_info.default_protocol_version.clone(),
+                        protocol_version: open_info.default_protocol_version,
                         open_token: open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_ws_listener_rejects_unsupported_protocol_version() {
+    async fn realtime_ws_listener_rejects_unknown_protocol_version_at_typed_boundary() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
         let session_id = create_registered_realtime_session(&runtime).await;
@@ -1476,14 +1476,13 @@ mod tests {
             .expect("websocket handshake should succeed");
         ws_stream
             .send(WsMessage::Text(
-                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
-                    RealtimeChannelOpenFrame {
-                        protocol_version: "999".to_string(),
-                        open_token: open_info.open_token.clone(),
-                        role: RealtimeChannelRole::Primary,
-                        turning_mode: RealtimeTurningMode::ProviderManaged,
-                    },
-                ))
+                serde_json::to_string(&serde_json::json!({
+                    "type": "channel.open",
+                    "protocol_version": "999",
+                    "open_token": open_info.open_token,
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }))
                 .expect("channel.open should serialize")
                 .into(),
             ))
@@ -1503,7 +1502,13 @@ mod tests {
             RealtimeServerFrame::ChannelError(frame) => {
                 assert_eq!(
                     frame.code,
-                    meerkat_contracts::RealtimeErrorCode::UnsupportedProtocolVersion
+                    meerkat_contracts::RealtimeErrorCode::InvalidFrame
+                );
+                assert!(
+                    frame.message.contains("unknown variant `999`")
+                        && frame.message.contains("expected `2`"),
+                    "invalid-frame message should identify the typed protocol boundary: {}",
+                    frame.message
                 );
             }
             other => panic!("expected channel.error, got {other:?}"),
@@ -1555,7 +1560,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        protocol_version: first_open_info.default_protocol_version,
                         open_token: first_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1583,7 +1588,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        protocol_version: second_open_info.default_protocol_version,
                         open_token: second_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1651,7 +1656,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: open_info.default_protocol_version.clone(),
+                        protocol_version: open_info.default_protocol_version,
                         open_token: open_info.open_token.clone(),
                         role: RealtimeChannelRole::Observer,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1750,7 +1755,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        protocol_version: first_open_info.default_protocol_version,
                         open_token: first_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -1777,7 +1782,7 @@ mod tests {
             .send(WsMessage::Text(
                 serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
                     RealtimeChannelOpenFrame {
-                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        protocol_version: second_open_info.default_protocol_version,
                         open_token: second_open_info.open_token.clone(),
                         role: RealtimeChannelRole::Primary,
                         turning_mode: RealtimeTurningMode::ProviderManaged,

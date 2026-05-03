@@ -39,14 +39,14 @@ pub async fn handle_add(
             Err(resp) => return resp,
         };
 
-        if params.server_name.trim().is_empty() {
+        let server_name = params.server_config.name.clone();
+        if server_name.trim().is_empty() {
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
         let persisted = match runtime
             .mcp_stage_add_with_persistence(
                 &session_id,
-                params.server_name.clone(),
                 params.server_config.clone(),
                 params.persisted,
             )
@@ -59,7 +59,7 @@ pub async fn handle_add(
         let response = meerkat::surface::mcp_live_response(
             params.session_id,
             meerkat_contracts::McpLiveOperation::Add,
-            Some(params.server_name),
+            Some(server_name),
             persisted,
         );
         RpcResponse::success(id, response)

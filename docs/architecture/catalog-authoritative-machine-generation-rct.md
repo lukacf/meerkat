@@ -104,7 +104,7 @@ forward and must not mark `REQ-101` complete.
 | Task | Owner | Requirement | Done When |
 | --- | --- | --- | --- |
 | P1-T1 | impl | CONTRACT-001, INV-002 | A schema parity gate compares catalog and production schema shape for every Phase 0 production body; the full-convergence assertion is unignored and the inventory test pins zero drift. |
-| P1-T2 | impl | INV-001, REQ-101 | A production-body audit rejects new handwritten canonical `machine!` bodies outside the catalog unless the file is generated kernel output or explicitly listed as a Phase 1 carry-forward production body; fixtures cover bare, spaced, and qualified macro paths. |
+| P1-T2 | impl | INV-001, REQ-101 | A production-owner schema relation audit proves every canonical generated kernel has typed production owner metadata; source-only `machine!` token matches do not certify ownership. |
 | P1-T3 | impl | REQ-102 | Generated kernel output drift is checked through existing `machine-check-drift` / generated-header mechanisms, preferably via BuildBuddy-backed lanes where available. |
 | P1-T4 | orchestrator | INV-001, INV-002 | A negative control proves the schema parity gate fails when a production-only state/effect/transition shape change is introduced in the test fixture. |
 | P1-T5 | orchestrator | INV-001 | The trace names zero carry-forward handwritten production bodies; any future body drift must be rejected or newly classified before landing. |
@@ -112,12 +112,13 @@ forward and must not mark `REQ-101` complete.
 
 ### Phase 1 Carry-Forward Dogma Debt
 
-There is no Phase 1 carry-forward dogma debt. `PHASE1_CARRY_FORWARD_PRODUCTION_BODIES`
-is empty, and the schema drift inventory expects no MeerkatMachine,
-MobMachine, AuthMachine, ScheduleLifecycleMachine, or OccurrenceLifecycleMachine
-rows. Reopening any production-only body drift requires a parity-ledger row,
-typed transition rule, invariant review, and TLC/runtime evidence before the
-schema parity gate may be updated.
+There is no Phase 1 carry-forward dogma debt. The old
+`collect_phase1_production_body_mismatches` source-string scanner has been
+removed from the authoritative drift gate; production ownership is now certified
+by `canonical_machine_production_owner_relations` and generated-kernel drift.
+Reopening any production-only body drift requires a parity-ledger row, typed
+transition rule, invariant review, and TLC/runtime evidence before the schema
+parity gate may be updated.
 
 Closed Phase 1 batches:
 

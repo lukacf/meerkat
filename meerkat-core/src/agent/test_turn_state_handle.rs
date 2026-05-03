@@ -72,7 +72,29 @@ struct LocalFields {
     llm_retry_attempt: u32,
     llm_retry_max_retries: u32,
     llm_retry_selected_delay_ms: u64,
-    force_next_llm_terminal_failed_cause_kind: Option<Option<TurnTerminalCauseKind>>,
+    force_next_llm_terminal_failed_cause_kind: Option<ForcedTerminalCauseKind>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ForcedTerminalCauseKind {
+    Present(TurnTerminalCauseKind),
+    Missing,
+}
+
+impl ForcedTerminalCauseKind {
+    fn from_optional(cause_kind: Option<TurnTerminalCauseKind>) -> Self {
+        match cause_kind {
+            Some(cause_kind) => Self::Present(cause_kind),
+            None => Self::Missing,
+        }
+    }
+
+    fn into_optional(self) -> Option<TurnTerminalCauseKind> {
+        match self {
+            Self::Present(cause_kind) => Some(cause_kind),
+            Self::Missing => None,
+        }
+    }
 }
 
 impl LocalFields {
@@ -218,7 +240,7 @@ impl LocalState {
                 fields.boundary_count += 1;
                 if let Some(cause_kind) = fields.force_next_llm_terminal_failed_cause_kind.take() {
                     fields.terminal_outcome = TurnTerminalOutcome::Failed;
-                    fields.terminal_cause_kind = cause_kind;
+                    fields.terminal_cause_kind = cause_kind.into_optional();
                     Failed
                 } else {
                     DrainingBoundary
@@ -650,12 +672,11 @@ impl TestTurnStateHandle {
     pub fn force_next_llm_terminal_failed_for_test(
         &self,
         cause_kind: Option<TurnTerminalCauseKind>,
-    ) {
-        let mut guard = self
-            .state
-            .lock()
-            .expect("test turn-state handle state mutex poisoned");
-        guard.fields.force_next_llm_terminal_failed_cause_kind = Some(cause_kind);
+    ) -> Result<(), DslTransitionError> {
+        let mut guard = self.lock_state()?;
+        guard.fields.force_next_llm_terminal_failed_cause_kind =
+            Some(ForcedTerminalCauseKind::from_optional(cause_kind));
+        Ok(())
     }
 }
 

@@ -5676,7 +5676,9 @@ mod tests {
             })
             .expect("primitive application should enter CallingLlm");
 
-        turn_handle.force_next_llm_terminal_failed_for_test(None);
+        turn_handle
+            .force_next_llm_terminal_failed_for_test(None)
+            .expect("force terminal failure without cause");
 
         let err = agent
             .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {

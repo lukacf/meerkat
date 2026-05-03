@@ -173,7 +173,7 @@ jobs:
 
   sdk-suites:
     name: SDK suites + parity gates
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -270,7 +270,7 @@ jobs:
 
   wasm-contract-tests:
     name: WASM contract tests
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -304,7 +304,7 @@ jobs:
 
   test-minimal:
     name: Minimal feature builds
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -321,7 +321,7 @@ jobs:
 
   test-feature-matrix-lib:
     name: Feature matrix (library)
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -338,7 +338,7 @@ jobs:
 
   test-feature-matrix-surface-checks:
     name: Feature matrix (surface checks)
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -355,7 +355,7 @@ jobs:
 
   wasm-check:
     name: WASM compilation check
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -372,7 +372,7 @@ jobs:
 
   audit:
     name: Security audit
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -413,7 +413,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
             echo "BuildBuddy CI failed"
             exit 1
           fi

@@ -1164,13 +1164,12 @@ where
                                 );
                             let status_str = terminal_status.as_str();
 
-                            emit_event!(AgentEvent::BackgroundJobCompleted {
-                                job_id: job_id.clone(),
-                                display_name: entry.display_name.clone(),
-                                status: status_str.to_string(),
-                                terminal_status: Some(terminal_status),
-                                detail: detail.clone(),
-                            });
+                            emit_event!(AgentEvent::background_job_completed(
+                                job_id.clone(),
+                                entry.display_name.clone(),
+                                terminal_status,
+                                detail.clone(),
+                            ));
 
                             let mut notice = format!(
                                 "Background job `{}` (id={}) {}: {}",
@@ -1208,13 +1207,12 @@ where
                         };
                         let status_str = terminal_status.as_str();
 
-                        emit_event!(AgentEvent::BackgroundJobCompleted {
-                            job_id: completion.job_id.clone(),
-                            display_name: completion.display_name.clone(),
-                            status: status_str.to_string(),
-                            terminal_status: Some(terminal_status),
-                            detail: completion.detail.clone(),
-                        });
+                        emit_event!(AgentEvent::background_job_completed(
+                            completion.job_id.clone(),
+                            completion.display_name.clone(),
+                            terminal_status,
+                            completion.detail.clone(),
+                        ));
                         let mut notice = format!(
                             "Background job `{}` (id={}) {}: {}",
                             completion.display_name,

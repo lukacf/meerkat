@@ -52,6 +52,15 @@ export type StopReason =
 /** Which budget dimension triggered a warning. */
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
+/** Terminal state for a completed background job. */
+export type BackgroundJobTerminalStatus =
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "cancelled"
+  | "retired"
+  | "terminated";
+
 /** Hook lifecycle points. */
 export type HookPoint =
   | "run_started"
@@ -392,6 +401,15 @@ export interface ToolConfigChangedEvent {
   readonly payload: ToolConfigChangedPayload;
 }
 
+export interface BackgroundJobCompletedEvent {
+  readonly type: "background_job_completed";
+  readonly jobId: string;
+  readonly displayName: string;
+  readonly legacyStatus: string;
+  readonly terminalStatus: BackgroundJobTerminalStatus;
+  readonly detail: string;
+}
+
 // ---------------------------------------------------------------------------
 // Unknown / forward-compat
 // ---------------------------------------------------------------------------
@@ -443,6 +461,7 @@ export type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
+  | BackgroundJobCompletedEvent
   | MalformedEvent
   | UnknownEvent;
 
@@ -907,6 +926,19 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         },
       };
     }
+    case "background_job_completed":
+      return {
+        type,
+        jobId: requireStringField(raw, "job_id"),
+        displayName: requireStringField(raw, "display_name"),
+        legacyStatus: requireStringField(raw, "status"),
+        terminalStatus: requireOneOf(
+          requireStringField(raw, "terminal_status"),
+          "terminal_status",
+          ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
+        ),
+        detail: requireStringField(raw, "detail"),
+      };
 
     // Unknown — forward-compat
     default:

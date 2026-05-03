@@ -35,4 +35,5 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "interaction_failed",
     "stream_truncated",
     "tool_config_changed",
+    "background_job_completed",
 ];

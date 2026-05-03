@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 
 ContentBlock = dict[str, Any]
 ContentInput = str | list[ContentBlock]
+BackgroundJobTerminalStatus = Literal[
+    "completed",
+    "failed",
+    "aborted",
+    "cancelled",
+    "retired",
+    "terminated",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +444,17 @@ class ToolConfigChanged(Event):
     payload: ToolConfigChangedPayload = field(default_factory=ToolConfigChangedPayload)
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundJobCompleted(Event):
+    """A background shell job reached a typed terminal state."""
+
+    job_id: str = ""
+    display_name: str = ""
+    legacy_status: str = ""
+    terminal_status: BackgroundJobTerminalStatus = "completed"
+    detail: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Scoped streaming attribution
 # ---------------------------------------------------------------------------
@@ -481,6 +500,14 @@ _STOP_REASONS = frozenset({
 })
 
 _TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
+_BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
+    "completed",
+    "failed",
+    "aborted",
+    "cancelled",
+    "retired",
+    "terminated",
+})
 
 _EVENT_MAP: dict[str, type[Event]] = {
     "run_started": RunStarted,
@@ -512,6 +539,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "interaction_failed": InteractionFailed,
     "stream_truncated": StreamTruncated,
     "tool_config_changed": ToolConfigChanged,
+    "background_job_completed": BackgroundJobCompleted,
 }
 
 
@@ -768,6 +796,15 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "interaction_failed": ("interaction_id", "error"),
         "stream_truncated": ("reason",),
     }
+    if event_type == "background_job_completed":
+        _require_str(raw, "job_id")
+        _require_str(raw, "display_name")
+        _require_str(raw, "status")
+        terminal_status = raw.get("terminal_status")
+        if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
+            raise ValueError("terminal_status must be a background job terminal status")
+        _require_str(raw, "detail")
+        return
     if event_type == "tool_config_changed":
         payload = raw.get("payload")
         if not isinstance(payload, dict):
@@ -890,6 +927,13 @@ def parse_event(raw: dict[str, Any]) -> Event:
                         if isinstance(applied_at_turn_raw, int)
                         else None
                     ),
+                )
+            elif f == "legacy_status" and cls is BackgroundJobCompleted:
+                kwargs["legacy_status"] = raw["status"]
+            elif f == "terminal_status" and cls is BackgroundJobCompleted:
+                kwargs["terminal_status"] = cast(
+                    BackgroundJobTerminalStatus,
+                    raw["terminal_status"],
                 )
             elif f in raw:
                 kwargs[f] = raw[f]

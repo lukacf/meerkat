@@ -708,6 +708,57 @@ describe("Typed Events", () => {
     assert.deepEqual(event.raw, raw);
   });
 
+  it("should parse background_job_completed from typed terminal status", () => {
+    const event = parseEvent({
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      terminal_status: "failed",
+      detail: "exit_code: 1",
+    });
+
+    assert.equal(event.type, "background_job_completed");
+    if (event.type === "background_job_completed") {
+      assert.equal(event.jobId, "j_123");
+      assert.equal(event.displayName, "sleep 2");
+      assert.equal(event.legacyStatus, "completed");
+      assert.equal(event.terminalStatus, "failed");
+      assert.equal(event.detail, "exit_code: 1");
+    }
+  });
+
+  it("should reject background_job_completed without typed terminal status", () => {
+    const raw = {
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      detail: "exit_code: 0",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "background_job_completed");
+    assert.deepEqual(event.raw, raw);
+  });
+
+  it("should reject unknown background_job_completed terminal status", () => {
+    const raw = {
+      type: "background_job_completed",
+      job_id: "j_123",
+      display_name: "sleep 2",
+      status: "completed",
+      terminal_status: "success",
+      detail: "exit_code: 0",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "background_job_completed");
+    assert.deepEqual(event.raw, raw);
+  });
+
   it("should not fabricate standalone event envelope metadata or payload", () => {
     const envelope = MeerkatClient.parseAgentEventEnvelope({
       event_id: 3,

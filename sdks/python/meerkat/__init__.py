@@ -201,6 +201,8 @@ from .errors import (
 
 # Typed event hierarchy — every event variant is a frozen dataclass
 from .events import (
+    BackgroundJobCompleted,
+    BackgroundJobTerminalStatus,
     BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionCompleted,
@@ -446,6 +448,8 @@ __all__ = [
     "InteractionComplete",
     "InteractionFailed",
     "StreamTruncated",
+    "BackgroundJobCompleted",
+    "BackgroundJobTerminalStatus",
     "BoundaryAppliedToolConfigChangeStatus",
     "DeferredCatalogDeltaToolConfigChangeStatus",
     "WarningFailedClosedToolConfigChangeStatus",

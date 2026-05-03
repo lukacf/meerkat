@@ -265,6 +265,8 @@ export type {
   InteractionCompleteEvent,
   InteractionFailedEvent,
   StreamTruncatedEvent,
+  BackgroundJobCompletedEvent,
+  BackgroundJobTerminalStatus,
   ToolConfigChangedEvent,
   ToolConfigChangedPayload,
   ToolConfigChangeOperation,

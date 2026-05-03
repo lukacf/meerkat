@@ -283,7 +283,7 @@ function handleEvent(event: AgentEvent): string {
     case 'tool_config_changed':
       return event.payload.target;
     case 'background_job_completed':
-      return `${event.display_name}:${event.status}`;
+      return `${event.display_name}:${event.terminal_status}`;
     case 'reasoning_delta':
       return event.delta;
     case 'reasoning_complete':

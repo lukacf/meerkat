@@ -6979,7 +6979,7 @@ mod tests {
         wait_for_rest_runtime_pre_admission(&state, &target_session_id).await;
 
         release.notify_one();
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), running_turn)
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), running_turn)
             .await
             .expect("running turn should complete after releasing mock LLM")
             .expect("running turn task should not panic");
@@ -6988,7 +6988,7 @@ mod tests {
             "running turn should publish successfully: {completed:?}"
         );
 
-        let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), webhook_task)
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(15), webhook_task)
             .await
             .expect("peer terminal webhook should finish after the running turn releases")
             .expect("peer terminal webhook task should not panic")

@@ -624,15 +624,14 @@ pub(crate) fn machine_begin_run(
     Ok(())
 }
 
-/// Disposition the runtime-loop apply produced — fed into the DSL as
-/// either `Commit { input_id, run_id }` (success) or `Fail { run_id }`
-/// (failure / unwind). Both transition families return
-/// `Running → {Idle, Attached, Retired}` based on `pre_run_phase`,
-/// clear `current_run_id` + `pre_run_phase`, and — for `Fail` — emit
-/// `RecordTerminalOutcome`.
+/// Disposition the runtime-loop apply produced. `Failed` is only used after the
+/// turn-state authority has recorded a typed failed terminal cause; `Rollback`
+/// is non-semantic cleanup for prepare/stage failures before turn failure
+/// exists.
 pub(crate) enum RunReturnDisposition<'a> {
     Commit { input_id: &'a InputId },
-    Fail,
+    Failed,
+    Rollback,
 }
 
 #[derive(Debug)]
@@ -740,9 +739,16 @@ pub(crate) fn machine_apply_run_return_projection(
                     run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
                 }
             }
-            RunReturnDisposition::Fail => crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
-                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-            },
+            RunReturnDisposition::Failed => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                }
+            }
+            RunReturnDisposition::Rollback => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RollbackRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                }
+            }
         };
         if crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input).is_err() {
             return Err(crate::runtime_state::RuntimeStateTransitionError {
@@ -2416,7 +2422,7 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
         if let Err(rollback_err) = machine_apply_run_return_projection(
             &mut driver,
             &run_id,
-            RunReturnDisposition::Fail,
+            RunReturnDisposition::Rollback,
             next_phase,
         ) {
             return Err(RuntimeDriverError::Internal(format!(
@@ -2453,7 +2459,7 @@ pub(crate) async fn commit_runtime_loop_run(
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let disposition = match commit_input_id.as_ref() {
         Some(input_id) => RunReturnDisposition::Commit { input_id },
-        None => RunReturnDisposition::Fail,
+        None => RunReturnDisposition::Rollback,
     };
     machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition, next_phase)
         .map_err(|err| {
@@ -2525,6 +2531,14 @@ async fn fail_runtime_loop_run_inner(
     terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<CoreApplyFailureCause>,
 ) -> Result<(), RuntimeLoopRunFailError> {
+    if !terminal_cause_kind.is_specific_failure_cause() {
+        return Err(RuntimeLoopRunFailError::Rejected(
+            RuntimeDriverError::Internal(
+                "machine run failure has unknown machine-owned terminal_cause_kind".to_string(),
+            ),
+        ));
+    }
+
     let mut driver = driver.lock().await;
     let next_phase =
         crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
@@ -2544,7 +2558,7 @@ async fn fail_runtime_loop_run_inner(
     machine_apply_run_return_projection(
         &mut driver,
         &failed_run_id,
-        RunReturnDisposition::Fail,
+        RunReturnDisposition::Failed,
         next_phase,
     )
     .map_err(|err| {

@@ -1950,6 +1950,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
+            RollbackRun { run_id: RunId },
             Recycle,
             StartConversationRun {
                 run_id: RunId,
@@ -5654,6 +5655,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input FatalFailure { terminal_cause_kind, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
+            guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
@@ -5832,6 +5834,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_cause_kind, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
@@ -6691,6 +6694,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_failed_with_cause" {
+                self.turn_phase == TurnPhase::Failed
+                && self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -6703,6 +6711,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_failed_with_cause" {
+                self.turn_phase == TurnPhase::Failed
+                && self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -6715,12 +6728,55 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_failed_with_cause" {
+                self.turn_phase == TurnPhase::Failed
+                && self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
             to Retired
             emit RecordTerminalOutcome
+        }
+
+        // 32b. RollbackRun: Running -> Idle/Attached/Retired for non-terminal
+        // runtime cleanup before a turn-level terminal failure exists. This is
+        // not a semantic terminal-failure path and intentionally emits no
+        // terminal outcome effect.
+        transition RollbackRunRunningToIdle {
+            on input RollbackRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition RollbackRunRunningToAttached {
+            on input RollbackRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Attached
+        }
+        transition RollbackRunRunningToRetired {
+            on input RollbackRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Retired
         }
 
         // 34. Recycle: from Idle/Retired → Idle, from Attached → Attached

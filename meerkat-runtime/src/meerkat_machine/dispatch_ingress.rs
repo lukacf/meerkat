@@ -446,7 +446,7 @@ impl MeerkatMachine {
                         if let Err(rollback_err) = machine_apply_run_return_projection(
                             &mut driver,
                             &run_id,
-                            crate::meerkat_machine::driver::RunReturnDisposition::Fail,
+                            crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
                             next_phase,
                         ) {
                             return Err(RuntimeDriverError::Internal(format!(
@@ -497,7 +497,7 @@ impl MeerkatMachine {
                             if let Err(rollback_err) = machine_apply_run_return_projection(
                                 &mut driver,
                                 &run_id,
-                                crate::meerkat_machine::driver::RunReturnDisposition::Fail,
+                                crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
                                 next_phase,
                             ) {
                                 return Err(RuntimeDriverError::Internal(format!(

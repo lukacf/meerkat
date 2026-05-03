@@ -3030,6 +3030,7 @@ RecoverableFailure(failure_kind, retry_attempt, max_retries, selected_delay_ms, 
 FatalFailure(arg_terminal_cause_kind, error) ==
     /\ phase = "Running"
     /\ ((turn_phase # "Completed") /\ (turn_phase # "Failed") /\ (turn_phase # "Cancelled"))
+    /\ (arg_terminal_cause_kind # "Unknown")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ turn_phase' = "Failed"
@@ -3161,6 +3162,7 @@ RunCompleted(run_id) ==
 RunFailed(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, arg_terminal_cause_kind, error) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
+    /\ (arg_terminal_cause_kind # "Unknown")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ turn_phase' = "Failed"
@@ -3794,6 +3796,7 @@ FailRunningToIdle(run_id) ==
     /\ phase = "Running"
     /\ (pre_run_phase = Some("Idle"))
     /\ (current_run_id = Some(run_id))
+    /\ ((turn_phase = "Failed") /\ (terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -3805,6 +3808,7 @@ FailRunningToAttached(run_id) ==
     /\ phase = "Running"
     /\ (pre_run_phase = Some("Attached"))
     /\ (current_run_id = Some(run_id))
+    /\ ((turn_phase = "Failed") /\ (terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -3813,6 +3817,40 @@ FailRunningToAttached(run_id) ==
 
 
 FailRunningToRetired(run_id) ==
+    /\ phase = "Running"
+    /\ (pre_run_phase = Some("Retired"))
+    /\ (current_run_id = Some(run_id))
+    /\ ((turn_phase = "Failed") /\ (terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown")))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, turn_phase, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, terminal_outcome, terminal_cause_kind, last_runtime_apply_failure_cause, last_runtime_apply_failure_message, extraction_attempts, max_extraction_retries, llm_retry_attempt, llm_retry_max_retries, llm_retry_selected_delay_ms, llm_retry_last_failure_kind, silent_intent_overrides, model_routing_baseline_model, model_routing_baseline_realtime, model_routing_topology_epoch, model_routing_turn_override_id, model_routing_turn_request_id, model_routing_turn_target_model, model_routing_turn_realtime, model_routing_turn_remaining_turns, model_routing_operation_override_id, model_routing_operation_target_model, model_routing_operation_realtime, model_routing_pending_switch_request_id, model_routing_pending_switch_target_model, model_routing_pending_switch_realtime, model_routing_pending_switch_turns, model_routing_pending_switch_phase, model_routing_switch_terminal, model_routing_switch_denials, model_routing_image_operation_phases, model_routing_image_operation_target_models, model_routing_image_operation_realtime, model_routing_image_operation_requires_scoped_override, model_routing_image_terminals, model_routing_image_terminal_payloads, model_routing_image_denials, model_routing_approval_phases, model_routing_approval_parent_kind, registration_phase, drain_phase, drain_mode, next_staged_visibility_revision, active_filter, staged_filter, active_visibility_revision, staged_visibility_revision, active_deferred_names, staged_deferred_names, active_deferred_authorities, staged_deferred_authorities, input_phases, input_terminal_kind, input_superseded_by, input_aggregate_id, input_abandon_reason, input_abandon_attempt_count, input_attempt_counts, input_run_associations, input_boundary_sequences, next_admission_seq, input_admission_seq, input_lane, op_statuses, op_completion_seq, op_terminal_outcomes, op_terminal_payload, op_kinds, op_peer_ready, op_progress_counts, active_op_count, wait_active, wait_request_id, wait_operation_ids, wait_operation_id_tokens, next_completion_seq, known_surfaces, active_surfaces, visible_surfaces, surface_base_state, surface_pending_op, surface_staged_op, reload_staged_surfaces, surface_staged_intent_sequence, next_staged_intent_sequence, surface_pending_task_sequence, next_pending_task_sequence, surface_pending_lineage_sequence, surface_inflight_calls, surface_last_delta_operation, surface_last_delta_phase, snapshot_epoch, snapshot_aligned_epoch, surface_draining_since_ms, surface_removal_timeout_at_ms, surface_removal_applied_at_turn, surface_phase, removal_timeout_ms, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_cycle_state, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RollbackRunRunningToIdle(run_id) ==
+    /\ phase = "Running"
+    /\ (pre_run_phase = Some("Idle"))
+    /\ (current_run_id = Some(run_id))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, turn_phase, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, terminal_outcome, terminal_cause_kind, last_runtime_apply_failure_cause, last_runtime_apply_failure_message, extraction_attempts, max_extraction_retries, llm_retry_attempt, llm_retry_max_retries, llm_retry_selected_delay_ms, llm_retry_last_failure_kind, silent_intent_overrides, model_routing_baseline_model, model_routing_baseline_realtime, model_routing_topology_epoch, model_routing_turn_override_id, model_routing_turn_request_id, model_routing_turn_target_model, model_routing_turn_realtime, model_routing_turn_remaining_turns, model_routing_operation_override_id, model_routing_operation_target_model, model_routing_operation_realtime, model_routing_pending_switch_request_id, model_routing_pending_switch_target_model, model_routing_pending_switch_realtime, model_routing_pending_switch_turns, model_routing_pending_switch_phase, model_routing_switch_terminal, model_routing_switch_denials, model_routing_image_operation_phases, model_routing_image_operation_target_models, model_routing_image_operation_realtime, model_routing_image_operation_requires_scoped_override, model_routing_image_terminals, model_routing_image_terminal_payloads, model_routing_image_denials, model_routing_approval_phases, model_routing_approval_parent_kind, registration_phase, drain_phase, drain_mode, next_staged_visibility_revision, active_filter, staged_filter, active_visibility_revision, staged_visibility_revision, active_deferred_names, staged_deferred_names, active_deferred_authorities, staged_deferred_authorities, input_phases, input_terminal_kind, input_superseded_by, input_aggregate_id, input_abandon_reason, input_abandon_attempt_count, input_attempt_counts, input_run_associations, input_boundary_sequences, next_admission_seq, input_admission_seq, input_lane, op_statuses, op_completion_seq, op_terminal_outcomes, op_terminal_payload, op_kinds, op_peer_ready, op_progress_counts, active_op_count, wait_active, wait_request_id, wait_operation_ids, wait_operation_id_tokens, next_completion_seq, known_surfaces, active_surfaces, visible_surfaces, surface_base_state, surface_pending_op, surface_staged_op, reload_staged_surfaces, surface_staged_intent_sequence, next_staged_intent_sequence, surface_pending_task_sequence, next_pending_task_sequence, surface_pending_lineage_sequence, surface_inflight_calls, surface_last_delta_operation, surface_last_delta_phase, snapshot_epoch, snapshot_aligned_epoch, surface_draining_since_ms, surface_removal_timeout_at_ms, surface_removal_applied_at_turn, surface_phase, removal_timeout_ms, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_cycle_state, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RollbackRunRunningToAttached(run_id) ==
+    /\ phase = "Running"
+    /\ (pre_run_phase = Some("Attached"))
+    /\ (current_run_id = Some(run_id))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, turn_phase, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, terminal_outcome, terminal_cause_kind, last_runtime_apply_failure_cause, last_runtime_apply_failure_message, extraction_attempts, max_extraction_retries, llm_retry_attempt, llm_retry_max_retries, llm_retry_selected_delay_ms, llm_retry_last_failure_kind, silent_intent_overrides, model_routing_baseline_model, model_routing_baseline_realtime, model_routing_topology_epoch, model_routing_turn_override_id, model_routing_turn_request_id, model_routing_turn_target_model, model_routing_turn_realtime, model_routing_turn_remaining_turns, model_routing_operation_override_id, model_routing_operation_target_model, model_routing_operation_realtime, model_routing_pending_switch_request_id, model_routing_pending_switch_target_model, model_routing_pending_switch_realtime, model_routing_pending_switch_turns, model_routing_pending_switch_phase, model_routing_switch_terminal, model_routing_switch_denials, model_routing_image_operation_phases, model_routing_image_operation_target_models, model_routing_image_operation_realtime, model_routing_image_operation_requires_scoped_override, model_routing_image_terminals, model_routing_image_terminal_payloads, model_routing_image_denials, model_routing_approval_phases, model_routing_approval_parent_kind, registration_phase, drain_phase, drain_mode, next_staged_visibility_revision, active_filter, staged_filter, active_visibility_revision, staged_visibility_revision, active_deferred_names, staged_deferred_names, active_deferred_authorities, staged_deferred_authorities, input_phases, input_terminal_kind, input_superseded_by, input_aggregate_id, input_abandon_reason, input_abandon_attempt_count, input_attempt_counts, input_run_associations, input_boundary_sequences, next_admission_seq, input_admission_seq, input_lane, op_statuses, op_completion_seq, op_terminal_outcomes, op_terminal_payload, op_kinds, op_peer_ready, op_progress_counts, active_op_count, wait_active, wait_request_id, wait_operation_ids, wait_operation_id_tokens, next_completion_seq, known_surfaces, active_surfaces, visible_surfaces, surface_base_state, surface_pending_op, surface_staged_op, reload_staged_surfaces, surface_staged_intent_sequence, next_staged_intent_sequence, surface_pending_task_sequence, next_pending_task_sequence, surface_pending_lineage_sequence, surface_inflight_calls, surface_last_delta_operation, surface_last_delta_phase, snapshot_epoch, snapshot_aligned_epoch, surface_draining_since_ms, surface_removal_timeout_at_ms, surface_removal_applied_at_turn, surface_phase, removal_timeout_ms, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, realtime_reconnect_cycle_state, realtime_reconnect_attempt_count, realtime_reconnect_next_retry_at_ms, realtime_reconnect_deadline_at_ms, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id, supervisor_binding_kind, supervisor_bound_name, supervisor_bound_peer_id, supervisor_bound_address, supervisor_bound_epoch, local_endpoint, direct_peer_endpoints, mob_overlay_peer_endpoints, peer_projection_epoch, mob_overlay_epoch >>
+
+
+RollbackRunRunningToRetired(run_id) ==
     /\ phase = "Running"
     /\ (pre_run_phase = Some("Retired"))
     /\ (current_run_id = Some(run_id))
@@ -9988,6 +10026,9 @@ Next ==
     \/ \E run_id \in RunIdValues : FailRunningToIdle(run_id)
     \/ \E run_id \in RunIdValues : FailRunningToAttached(run_id)
     \/ \E run_id \in RunIdValues : FailRunningToRetired(run_id)
+    \/ \E run_id \in RunIdValues : RollbackRunRunningToIdle(run_id)
+    \/ \E run_id \in RunIdValues : RollbackRunRunningToAttached(run_id)
+    \/ \E run_id \in RunIdValues : RollbackRunRunningToRetired(run_id)
     \/ RecycleFromIdleOrRetired
     \/ RecycleFromAttached
     \/ \E input_id \in StringValues : \E arg_phase \in InputPhaseValues : \E terminal_kind \in OptionInputTerminalKindValues : \E superseded_by \in OptionStringValues : \E aggregate_id \in OptionStringValues : \E abandon_reason \in OptionInputAbandonReasonValues : \E abandon_attempt_count \in 0..2 : \E attempt_count \in 0..2 : \E run_id \in OptionStringValues : \E boundary_sequence \in OptionU64Values : \E lane \in OptionInputLaneValues : RecoverInputLifecycleIdle(input_id, arg_phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)

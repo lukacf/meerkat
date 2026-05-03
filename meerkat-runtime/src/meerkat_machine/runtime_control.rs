@@ -239,7 +239,10 @@ impl MeerkatMachine {
                     MeerkatMachineCommand::Fail {
                         session_id: session_id.clone(),
                         run_id,
-                        failure: MeerkatMachineRunFailure::fatal(err.to_string()),
+                        failure: MeerkatMachineRunFailure::new(
+                            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                            err.to_string(),
+                        ),
                     },
                 )
                 .await

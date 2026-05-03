@@ -4447,6 +4447,10 @@ pub mod inputs {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RollbackRun {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Recycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartConversationRun {
@@ -5068,6 +5072,7 @@ pub enum Input {
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
+    RollbackRun(inputs::RollbackRun),
     Recycle(inputs::Recycle),
     StartConversationRun(inputs::StartConversationRun),
     StartImmediateAppend(inputs::StartImmediateAppend),
@@ -5264,6 +5269,7 @@ impl Input {
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
+            Self::RollbackRun(_) => InputKind::RollbackRun,
             Self::Recycle(_) => InputKind::Recycle,
             Self::StartConversationRun(_) => InputKind::StartConversationRun,
             Self::StartImmediateAppend(_) => InputKind::StartImmediateAppend,
@@ -5467,6 +5473,7 @@ pub enum InputKind {
     Prepare,
     Commit,
     Fail,
+    RollbackRun,
     Recycle,
     StartConversationRun,
     StartImmediateAppend,
@@ -6441,6 +6448,9 @@ pub enum TransitionId {
     FailRunningToIdle,
     FailRunningToAttached,
     FailRunningToRetired,
+    RollbackRunRunningToIdle,
+    RollbackRunRunningToAttached,
+    RollbackRunRunningToRetired,
     RecycleFromIdleOrRetired,
     RecycleFromAttached,
     RecoverInputLifecycleIdle,

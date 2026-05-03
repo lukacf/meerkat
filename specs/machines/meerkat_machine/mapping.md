@@ -934,6 +934,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FailRunningToRetired`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `RollbackRunRunningToIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`
+- `RollbackRunRunningToAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`
+- `RollbackRunRunningToRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`
 - `RecycleFromIdleOrRetired`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`

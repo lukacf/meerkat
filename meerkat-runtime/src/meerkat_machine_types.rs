@@ -549,10 +549,6 @@ impl MeerkatMachineRunFailure {
             error: error.into(),
         }
     }
-
-    pub(crate) fn fatal(error: impl Into<String>) -> Self {
-        Self::new(meerkat_core::TurnTerminalCauseKind::FatalFailure, error)
-    }
 }
 
 #[derive(Debug)]
@@ -766,6 +762,7 @@ meerkat_machine_runtime_internal_inputs!(
         ProductTurnInFlight,
         ProductTurnTerminal,
         RecordBoundarySeq,
+        RollbackRun,
         RunCompleted,
         RunFailed,
         RuntimeExecutorExited,

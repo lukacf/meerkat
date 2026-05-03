@@ -13334,7 +13334,10 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::fatal("unwind malformed commit"),
+                failure: MeerkatMachineRunFailure::new(
+                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                    "unwind malformed commit",
+                ),
             },
         )
         .await
@@ -13359,7 +13362,10 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: RunId::new(),
-                failure: MeerkatMachineRunFailure::fatal("reject the wrong run"),
+                failure: MeerkatMachineRunFailure::new(
+                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                    "reject the wrong run",
+                ),
             },
         )
         .await;
@@ -13390,6 +13396,94 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
 }
 
 #[tokio::test]
+async fn legacy_run_fail_unknown_terminal_cause_rejects_before_machine_apply() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "unknown fail cause").await;
+    let err = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Fail {
+                session_id: session_id.clone(),
+                run_id: prepared.run_id.clone(),
+                failure: MeerkatMachineRunFailure::new(
+                    meerkat_core::TurnTerminalCauseKind::Unknown,
+                    "display text must not classify runtime failure",
+                ),
+            },
+        )
+        .await
+        .expect_err("Unknown machine run failure cause should reject");
+
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("unknown machine-owned terminal_cause_kind"),
+        "unexpected rejection: {rendered}"
+    );
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Running,
+        "unknown failure cause must not mutate the active run"
+    );
+    let input_state = adapter
+        .input_state(&session_id, &prepared.input_id)
+        .await
+        .expect("input state read should succeed")
+        .expect("prepared input should remain visible");
+    assert_eq!(
+        input_state.seed.phase,
+        crate::input_state::InputLifecycleState::Staged,
+        "unknown failure cause must not roll back the active input"
+    );
+}
+
+#[tokio::test]
+async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "raw fail no cause").await;
+    let authority = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("session should exist")
+                .dsl_authority,
+        )
+    };
+
+    let err = {
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            mm_dsl::MeerkatMachineInput::Fail {
+                run_id: mm_dsl::RunId::from_domain(&prepared.run_id),
+            },
+        )
+        .expect_err("raw Fail without typed terminal cause should reject")
+    };
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("turn_failed_with_cause") || rendered.contains("GuardRejected"),
+        "unexpected raw Fail rejection: {rendered}"
+    );
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Running,
+        "raw causeless Fail must not clear the active run"
+    );
+}
+
+#[tokio::test]
 async fn legacy_run_fail_terminalizes_through_machine_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -13403,7 +13497,10 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::fatal("executor failed"),
+                failure: MeerkatMachineRunFailure::new(
+                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                    "executor failed",
+                ),
             },
         )
         .await
@@ -18691,7 +18788,10 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
             session_id: fixture.session_id.clone(),
             run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
-            failure: MeerkatMachineRunFailure::fatal("runtime parity failure"),
+            failure: MeerkatMachineRunFailure::new(
+                meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                "runtime parity failure",
+            ),
         },
         RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
             runtime_id: fixture.runtime_id.clone(),

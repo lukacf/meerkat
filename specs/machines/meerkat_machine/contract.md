@@ -204,6 +204,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
+- `RollbackRun`(run_id: RunId)
 - `Recycle`
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
 - `StartImmediateAppend`(run_id: RunId)
@@ -2427,6 +2428,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `FatalFailure`(terminal_cause_kind, error)
 - Guards:
   - `turn_not_terminal`
+  - `terminal_cause_known`
 - Emits: `TurnRunFailed`
 - To: `Running`
 
@@ -2512,6 +2514,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_cause_kind, error)
 - Guards:
   - `run_matches_binding`
+  - `terminal_cause_known`
 - To: `Running`
 
 ### `RunCancelled`
@@ -2875,6 +2878,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_idle`
   - `current_run_id_matches_binding`
+  - `turn_failed_with_cause`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -2884,6 +2888,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_attached`
   - `current_run_id_matches_binding`
+  - `turn_failed_with_cause`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -2893,7 +2898,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_retired`
   - `current_run_id_matches_binding`
+  - `turn_failed_with_cause`
 - Emits: `RecordTerminalOutcome`
+- To: `Retired`
+
+### `RollbackRunRunningToIdle`
+- From: `Running`
+- On: `RollbackRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_idle`
+  - `current_run_id_matches_binding`
+- To: `Idle`
+
+### `RollbackRunRunningToAttached`
+- From: `Running`
+- On: `RollbackRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_attached`
+  - `current_run_id_matches_binding`
+- To: `Attached`
+
+### `RollbackRunRunningToRetired`
+- From: `Running`
+- On: `RollbackRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_retired`
+  - `current_run_id_matches_binding`
 - To: `Retired`
 
 ### `RecycleFromIdleOrRetired`

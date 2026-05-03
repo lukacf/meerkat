@@ -101,16 +101,6 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         )
     }
 
-    fn fail(&self, run_id: &RunId) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::Fail {
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            "SessionAdmissionHandle::fail",
-        )
-    }
-
     fn recycle(&self) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(

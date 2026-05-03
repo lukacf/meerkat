@@ -920,7 +920,8 @@ pub trait PeerCommsHandle: Send + Sync {
 ///
 /// Covers the admission-adjacent inputs on the MeerkatMachine DSL: ingest an
 /// input into the session, accept it (with or without wake), prepare a run,
-/// and commit or fail the run. These inputs manage the input-lifecycle
+/// and commit the run. Failed run return is owned by the runtime turn-state
+/// path after a typed terminal cause is recorded. These inputs manage the input-lifecycle
 /// substate maps (`input_phases`, `input_run_associations`, etc.) and the
 /// top-level `current_run_id` / `pre_run_phase` fields.
 pub trait SessionAdmissionHandle: Send + Sync {
@@ -963,9 +964,6 @@ pub trait SessionAdmissionHandle: Send + Sync {
 
     /// Fire the `Commit { input_id, run_id }` input.
     fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError>;
-
-    /// Fire the `Fail { run_id }` input.
-    fn fail(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
 
     /// Fire the `Recycle` input — session transitions into the recycle path.
     fn recycle(&self) -> Result<(), DslTransitionError>;

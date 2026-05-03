@@ -14504,6 +14504,40 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
 }
 
 #[tokio::test]
+async fn replace_visibility_state_rejects_name_only_inherited_filter_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        inherited_base_filter: meerkat_core::ToolFilter::Allow(
+            ["secret".to_string()].into_iter().collect(),
+        ),
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must not install inherited names without witnesses");
+
+    assert!(
+        err.to_string().contains("secret"),
+        "rejection should name the missing inherited filter witness: {err}"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should still be readable"),
+        meerkat_core::SessionToolVisibilityState::default(),
+        "failed inherited authority restore must leave machine visibility unchanged"
+    );
+}
+
+#[tokio::test]
 async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

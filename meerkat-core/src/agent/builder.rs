@@ -15,6 +15,7 @@ use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolP
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY,
     LocalToolVisibilityOwner, ToolFilter, ToolScope, ToolVisibilityOwner,
+    validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
@@ -88,6 +89,8 @@ pub enum AgentBuildPolicyError {
     MissingToolVisibilityOwner,
     #[error("runtime-backed agent build received legacy inherited tool visibility metadata")]
     LegacyInheritedToolFilterMetadata,
+    #[error("runtime-backed agent build received inherited tool visibility without witnesses")]
+    MissingInheritedToolVisibilityWitnesses,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
     #[error("failed to restore canonical tool visibility state: {message}")]
@@ -559,6 +562,18 @@ impl AgentBuilder {
                 "runtime-backed agent build rejected legacy inherited tool visibility metadata"
             );
             return Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata);
+        }
+        if runtime_tool_visibility_owner_required
+            && let Err(err) = validate_inherited_filter_witnesses(
+                &visibility_state.inherited_base_filter,
+                &visibility_state.filter_witnesses,
+            )
+        {
+            tracing::error!(
+                error = %err,
+                "runtime-backed agent build rejected inherited tool visibility without witnesses"
+            );
+            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
         }
 
         if !has_canonical_visibility_state && !runtime_tool_visibility_owner_required {
@@ -1601,6 +1616,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backed_builder_rejects_name_only_canonical_inherited_visibility_state() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(SessionToolVisibilityState {
+                inherited_base_filter: ToolFilter::Allow(
+                    ["secret".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            })
+            .expect("visibility state should serialize");
+        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
+
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_tool_visibility_owner(owner_trait)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses)
+        ));
+        assert_eq!(
+            owner.visibility_state().unwrap(),
+            SessionToolVisibilityState::default(),
+            "failed name-only inherited restore must leave owner visibility unchanged"
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_backed_builder_restores_canonical_inherited_visibility_state() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
@@ -1610,6 +1660,15 @@ mod tests {
         session
             .set_tool_visibility_state(SessionToolVisibilityState {
                 inherited_base_filter: inherited_filter.clone(),
+                filter_witnesses: [(
+                    "secret".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("test-owner:secret".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .expect("visibility state should serialize");

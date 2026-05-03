@@ -250,7 +250,7 @@ pub use session::{
     SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionLlmRequestPolicy,
     SessionMeta, SessionMetadata, SessionSystemContextState, SessionToolVisibilityState,
     SessionTooling, SystemContextStageError, ToolCategoryOverride, ToolVisibilityWitness,
-    VIEW_IMAGE_TOOL_NAME, capability_base_filter_for_image_tool_results,
+    VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter, capability_base_filter_for_image_tool_results,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

@@ -14,6 +14,7 @@ use meerkat_core::RealmId;
 use meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY;
 use meerkat_core::Session;
 use meerkat_core::SessionToolVisibilityState;
+use meerkat_core::WitnessedToolFilter;
 use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
@@ -61,7 +62,7 @@ pub struct BuildAgentConfigParams<'a> {
     ///
     /// When set, stored in canonical session tool-visibility state so the
     /// runtime-backed core build restores it through the machine owner.
-    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    pub inherited_tool_filter: Option<WitnessedToolFilter>,
 }
 
 pub struct BuildResumedAgentConfigParams<'a> {
@@ -191,15 +192,23 @@ pub async fn build_agent_config(
 
     // Inherited tool filter: inject canonical visibility metadata so the
     // factory-backed core build restores it through the runtime owner.
-    if let Some(filter) = inherited_tool_filter
-        && let Ok(value) = serde_json::to_value(SessionToolVisibilityState {
-            inherited_base_filter: filter,
+    if let Some(authority) = inherited_tool_filter {
+        meerkat_core::tool_scope::validate_witnessed_filter_authority(
+            &authority.filter,
+            &authority.witnesses,
+        )
+        .map_err(|err| {
+            MobError::WiringError(format!("invalid inherited tool visibility: {err}"))
+        })?;
+        if let Ok(value) = serde_json::to_value(SessionToolVisibilityState {
+            inherited_base_filter: authority.filter,
+            filter_witnesses: authority.witnesses,
             ..Default::default()
-        })
-    {
-        config
-            .initial_metadata_entries
-            .insert(SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(), value);
+        }) {
+            config
+                .initial_metadata_entries
+                .insert(SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(), value);
+        }
     }
 
     Ok(config)
@@ -247,11 +256,16 @@ pub async fn build_resumed_agent_config(
 
 fn merge_inherited_filter_into_resumed_visibility(
     session: &mut Session,
-    inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    inherited_tool_filter: Option<WitnessedToolFilter>,
 ) -> Result<(), MobError> {
-    let Some(filter) = inherited_tool_filter else {
+    let Some(authority) = inherited_tool_filter else {
         return Ok(());
     };
+    meerkat_core::tool_scope::validate_witnessed_filter_authority(
+        &authority.filter,
+        &authority.witnesses,
+    )
+    .map_err(|err| MobError::Internal(format!("invalid inherited tool visibility: {err}")))?;
     let mut visibility_state = session
         .try_tool_visibility_state()
         .map_err(|err| {
@@ -260,7 +274,10 @@ fn merge_inherited_filter_into_resumed_visibility(
             ))
         })?
         .unwrap_or_default();
-    visibility_state.inherited_base_filter = filter;
+    visibility_state.inherited_base_filter = authority.filter;
+    visibility_state
+        .filter_witnesses
+        .extend(authority.witnesses);
     session
         .set_tool_visibility_state(visibility_state)
         .map_err(|err| {
@@ -478,6 +495,27 @@ mod tests {
                 true,
             )
             .with_managed_mob_scope(["test-mob"]),
+        )
+    }
+
+    fn witnessed_filter(
+        filter: meerkat_core::tool_scope::ToolFilter,
+        names: &[&str],
+    ) -> WitnessedToolFilter {
+        WitnessedToolFilter::new(
+            filter,
+            names
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        meerkat_core::ToolVisibilityWitness {
+                            stable_owner_key: Some(format!("test-owner:{name}")),
+                            last_seen_provenance: None,
+                        },
+                    )
+                })
+                .collect(),
         )
     }
 
@@ -721,6 +759,7 @@ mod tests {
             .unwrap();
         let inherited_filter =
             meerkat_core::tool_scope::ToolFilter::Deny(["shell".to_string()].into_iter().collect());
+        let inherited_authority = witnessed_filter(inherited_filter.clone(), &["shell"]);
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
@@ -733,7 +772,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
-            inherited_tool_filter: Some(inherited_filter.clone()),
+            inherited_tool_filter: Some(inherited_authority.clone()),
         })
         .await
         .expect("build_agent_config");
@@ -755,6 +794,44 @@ mod tests {
         assert_eq!(
             visibility_state.inherited_base_filter, inherited_filter,
             "inherited mob filter should flow through canonical visibility state"
+        );
+        assert_eq!(
+            visibility_state.filter_witnesses, inherited_authority.witnesses,
+            "inherited mob filter witnesses should flow through canonical visibility state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_rejects_name_only_inherited_filter() {
+        let def = sample_definition();
+        let profile = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let err = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &MeerkatId::from("lead-1"),
+            profile,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: Some(WitnessedToolFilter::new(
+                meerkat_core::tool_scope::ToolFilter::Allow(
+                    ["shell".to_string()].into_iter().collect(),
+                ),
+                Default::default(),
+            )),
+        })
+        .await
+        .expect_err("name-only inherited filter should fail closed");
+
+        assert!(
+            err.to_string().contains("shell"),
+            "rejection should name the missing inherited filter witness: {err}"
         );
     }
 
@@ -841,6 +918,7 @@ mod tests {
         let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
             ["parent_shell".to_string()].into_iter().collect(),
         );
+        let inherited_authority = witnessed_filter(inherited_filter.clone(), &["parent_shell"]);
         let original_state = SessionToolVisibilityState {
             inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
                 ["old_parent".to_string()].into_iter().collect(),
@@ -892,7 +970,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: MobToolAccessContext::None,
-                inherited_tool_filter: Some(inherited_filter.clone()),
+                inherited_tool_filter: Some(inherited_authority.clone()),
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -936,10 +1014,9 @@ mod tests {
             visibility_state.requested_witnesses,
             original_state.requested_witnesses
         );
-        assert_eq!(
-            visibility_state.filter_witnesses,
-            original_state.filter_witnesses
-        );
+        let mut expected_filter_witnesses = original_state.filter_witnesses.clone();
+        expected_filter_witnesses.extend(inherited_authority.witnesses);
+        assert_eq!(visibility_state.filter_witnesses, expected_filter_witnesses);
     }
 
     #[tokio::test]
@@ -968,8 +1045,11 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: MobToolAccessContext::None,
-                inherited_tool_filter: Some(meerkat_core::tool_scope::ToolFilter::Deny(
-                    ["parent_shell".to_string()].into_iter().collect(),
+                inherited_tool_filter: Some(witnessed_filter(
+                    meerkat_core::tool_scope::ToolFilter::Deny(
+                        ["parent_shell".to_string()].into_iter().collect(),
+                    ),
+                    &["parent_shell"],
                 )),
             },
             expected_session_id: &session_id,

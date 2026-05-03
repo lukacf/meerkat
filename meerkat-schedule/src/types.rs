@@ -2,7 +2,9 @@ use chrono::{DateTime, Duration, Utc};
 use meerkat_core::ops::ToolAccessPolicy;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::RenderMetadata;
-use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
+use meerkat_core::{
+    ContentInput, OutputSchema, PeerMeta, Provider, SessionId, ToolVisibilityWitness,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -707,6 +709,9 @@ impl ScheduleSpawnTooling {
 pub struct ResolvedSpawnSnapshot {
     /// The tool filter to apply as the child's inherited base filter.
     pub tool_filter: meerkat_core::tool_scope::ToolFilter,
+    /// Witnesses for every named tool in `tool_filter`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
     /// The model to use for the child agent.
     pub model: String,
     /// Optional provider-specific parameters for the child agent.
@@ -1313,6 +1318,7 @@ mod tests {
                 "shell".to_string(),
                 "read_file".to_string(),
             ])),
+            tool_filter_witnesses: Default::default(),
             model: "claude-opus-4-6".into(),
             provider_params: Some(serde_json::json!({"thinking_budget": 8192})),
         };
@@ -1327,6 +1333,7 @@ mod tests {
             tool_filter: meerkat_core::tool_scope::ToolFilter::Deny(ToolNameSet::from_iter([
                 "dangerous_tool".to_string(),
             ])),
+            tool_filter_witnesses: Default::default(),
             model: "gpt-5.4".into(),
             provider_params: None,
         };
@@ -1339,6 +1346,7 @@ mod tests {
     fn resolved_spawn_snapshot_roundtrip_all_filter() {
         let snapshot = ResolvedSpawnSnapshot {
             tool_filter: meerkat_core::tool_scope::ToolFilter::All,
+            tool_filter_witnesses: Default::default(),
             model: "gemini-3.1-pro-preview".into(),
             provider_params: None,
         };
@@ -1373,6 +1381,7 @@ mod tests {
                 tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
                     "shell".to_string(),
                 ])),
+                tool_filter_witnesses: Default::default(),
                 model: "claude-sonnet-4-6".into(),
                 provider_params: None,
             }),
@@ -1429,6 +1438,7 @@ mod tests {
                 tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
                     "shell".to_string(),
                 ])),
+                tool_filter_witnesses: Default::default(),
                 model: "claude-sonnet-4-6".into(),
                 provider_params: None,
             }),

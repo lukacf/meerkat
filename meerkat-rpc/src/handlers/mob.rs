@@ -335,10 +335,9 @@ pub struct MobSpawnParams {
     /// (maps to SpawnMemberSpec::budget_split_policy).
     #[serde(default)]
     pub budget_split_policy: Option<meerkat_mob::BudgetSplitPolicy>,
-    /// Pre-resolved inherited tool filter
-    /// (maps to SpawnMemberSpec::inherited_tool_filter). When set,
-    /// stored on child session metadata as
-    /// `INHERITED_TOOL_FILTER_METADATA_KEY`.
+    /// Legacy name-only inherited tool filter. Runtime-backed spawn rejects
+    /// this field because inherited visibility now requires witnesses from
+    /// agent-owned spawn tooling.
     #[serde(default)]
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
     /// Public profile override for `mob/spawn`. The handler converts this
@@ -402,8 +401,11 @@ pub async fn handle_spawn(
     if let Some(budget_split_policy) = params.budget_split_policy {
         spec.budget_split_policy = Some(budget_split_policy);
     }
-    if let Some(inherited_tool_filter) = params.inherited_tool_filter {
-        spec.inherited_tool_filter = Some(inherited_tool_filter);
+    if params.inherited_tool_filter.is_some() {
+        return invalid_params(
+            id,
+            "inherited_tool_filter is name-only and no longer accepted for runtime-backed mob spawn; use agent-owned spawn tooling so tool witnesses are captured",
+        );
     }
     if let Some(override_profile) = params.override_profile {
         spec.override_profile = Some(profile_from_wire(override_profile));

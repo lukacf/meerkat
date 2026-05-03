@@ -1852,16 +1852,27 @@ impl AgentFactory {
                 ))
             })?;
         let inherited_base_filter = incoming.inherited_base_filter.clone();
+        let inherited_filter_witnesses = incoming.filter_witnesses.clone();
         let inherited_only = SessionToolVisibilityState {
             inherited_base_filter: inherited_base_filter.clone(),
+            filter_witnesses: inherited_filter_witnesses.clone(),
             ..Default::default()
         };
         if incoming != inherited_only {
             return Err(BuildAgentError::Config(
-                "resumed initial canonical tool visibility state may only carry inherited_base_filter"
+                "resumed initial canonical tool visibility state may only carry inherited_base_filter and filter_witnesses"
                     .to_string(),
             ));
         }
+        meerkat_core::tool_scope::validate_witnessed_filter_authority(
+            &inherited_base_filter,
+            &inherited_filter_witnesses,
+        )
+        .map_err(|err| {
+            BuildAgentError::Config(format!(
+                "invalid initial inherited tool visibility authority: {err}"
+            ))
+        })?;
 
         let mut existing = session
             .try_tool_visibility_state()
@@ -1872,6 +1883,7 @@ impl AgentFactory {
             })?
             .unwrap_or_default();
         existing.inherited_base_filter = inherited_base_filter;
+        existing.filter_witnesses.extend(inherited_filter_witnesses);
         session
             .set_tool_visibility_state(existing)
             .map_err(|err| BuildAgentError::Config(err.to_string()))
@@ -5735,6 +5747,15 @@ mod tests {
         let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
             ["parent_shell".to_string()].into_iter().collect(),
         );
+        let inherited_filter_witnesses = [(
+            "parent_shell".to_string(),
+            meerkat_core::ToolVisibilityWitness {
+                stable_owner_key: Some("test-owner:parent_shell".to_string()),
+                last_seen_provenance: None,
+            },
+        )]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
         build.provider = Some(Provider::Anthropic);
         build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
@@ -5745,6 +5766,7 @@ mod tests {
             meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
             serde_json::to_value(SessionToolVisibilityState {
                 inherited_base_filter: inherited_filter.clone(),
+                filter_witnesses: inherited_filter_witnesses.clone(),
                 ..Default::default()
             })
             .expect("initial visibility value"),
@@ -5775,10 +5797,9 @@ mod tests {
             visibility_state.requested_witnesses,
             original_state.requested_witnesses
         );
-        assert_eq!(
-            visibility_state.filter_witnesses,
-            original_state.filter_witnesses
-        );
+        let mut expected_filter_witnesses = original_state.filter_witnesses.clone();
+        expected_filter_witnesses.extend(inherited_filter_witnesses);
+        assert_eq!(visibility_state.filter_witnesses, expected_filter_witnesses);
         let owner_state = bindings.tool_visibility_owner().visibility_state().unwrap();
         assert_eq!(owner_state.active_filter, original_state.active_filter);
         assert_eq!(owner_state.staged_filter, original_state.staged_filter);
@@ -5788,10 +5809,7 @@ mod tests {
             owner_state.requested_witnesses,
             original_state.requested_witnesses
         );
-        assert_eq!(
-            owner_state.filter_witnesses,
-            original_state.filter_witnesses
-        );
+        assert_eq!(owner_state.filter_witnesses, expected_filter_witnesses);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5821,6 +5839,15 @@ mod tests {
                 inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
                     ["parent_shell".to_string()].into_iter().collect(),
                 ),
+                filter_witnesses: [(
+                    "parent_shell".to_string(),
+                    meerkat_core::ToolVisibilityWitness {
+                        stable_owner_key: Some("test-owner:parent_shell".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .expect("initial visibility value"),

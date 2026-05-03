@@ -300,6 +300,13 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         mut visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
+        meerkat_core::tool_scope::validate_inherited_filter_witnesses(
+            &visibility_state.inherited_base_filter,
+            &visibility_state.filter_witnesses,
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: format!("invalid inherited visibility authority: {err}"),
+        })?;
         let deferred_authorities = self
             .canonical_deferred_authorities_for_visibility_state(&visibility_state)
             .map_err(|err| ToolScopeApplyError::Owner {

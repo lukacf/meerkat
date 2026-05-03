@@ -2,6 +2,7 @@
 
 use crate::session::{
     DeferredToolLoadAuthority, SessionToolVisibilityState, ToolVisibilityWitness,
+    WitnessedToolFilter,
 };
 use crate::tool_catalog::stable_owner_key_for_tool;
 use crate::types::{ToolDef, ToolNameSet};
@@ -183,8 +184,12 @@ pub enum ToolScopeStageError {
     UnknownTools { names: Vec<String> },
     #[error("Missing tool visibility witness(es) for deferred tool(s): {names:?}")]
     MissingWitnesses { names: Vec<String> },
+    #[error("Missing tool visibility witness(es) for filter tool(s): {names:?}")]
+    MissingFilterWitnesses { names: Vec<String> },
     #[error("Invalid tool visibility witness(es) for deferred tool(s): {names:?}")]
     InvalidWitnesses { names: Vec<String> },
+    #[error("Invalid tool visibility witness(es) for filter tool(s): {names:?}")]
+    InvalidFilterWitnesses { names: Vec<String> },
     #[error("Tool scope state lock poisoned")]
     LockPoisoned,
     #[error("Tool visibility owner error: {message}")]
@@ -764,7 +769,7 @@ impl ToolScope {
                 visibility_state,
                 &visibility_state.capability_base_filter,
             ),
-            Self::effective_filter_for_current_projection(
+            Self::effective_inherited_filter_for_current_projection(
                 state,
                 visibility_state,
                 &visibility_state.inherited_base_filter,
@@ -829,6 +834,22 @@ impl ToolScope {
         })
     }
 
+    fn inherited_filter_name_applies(
+        state: &ToolScopeState,
+        visibility_state: &SessionToolVisibilityState,
+        name: &str,
+    ) -> bool {
+        Self::current_projection_tool(state, name).is_none_or(|tool| {
+            match visibility_state.filter_witnesses.get(name) {
+                Some(witness) => {
+                    witness.has_identity_witness()
+                        && Self::witness_matches_tool(Some(witness), tool)
+                }
+                None => true,
+            }
+        })
+    }
+
     fn effective_filter_for_current_projection(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
@@ -850,6 +871,34 @@ impl ToolScope {
                     .iter()
                     .filter(|name| {
                         Self::filter_name_applies(state, visibility_state, name.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    fn effective_inherited_filter_for_current_projection(
+        state: &ToolScopeState,
+        visibility_state: &SessionToolVisibilityState,
+        filter: &ToolFilter,
+    ) -> ToolFilter {
+        match filter {
+            ToolFilter::All => ToolFilter::All,
+            ToolFilter::Allow(names) => ToolFilter::Allow(
+                names
+                    .iter()
+                    .filter(|name| {
+                        Self::inherited_filter_name_applies(state, visibility_state, name.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+            ),
+            ToolFilter::Deny(names) => ToolFilter::Deny(
+                names
+                    .iter()
+                    .filter(|name| {
+                        Self::inherited_filter_name_applies(state, visibility_state, name.as_str())
                     })
                     .cloned()
                     .collect(),
@@ -937,7 +986,7 @@ impl ToolScope {
                 &visibility_state,
                 &visibility_state.capability_base_filter,
             ),
-            Self::effective_filter_for_current_projection(
+            Self::effective_inherited_filter_for_current_projection(
                 &state,
                 &visibility_state,
                 &visibility_state.inherited_base_filter,
@@ -1209,6 +1258,88 @@ fn validate_filter(
     Err(ToolScopeStageError::UnknownTools { names: unknown })
 }
 
+pub fn witnessed_tool_filter_for_defs(
+    filter: ToolFilter,
+    tool_defs: &[ToolDef],
+) -> WitnessedToolFilter {
+    let witnesses = filter_witnesses_for_tool_defs(tool_defs, &filter);
+    WitnessedToolFilter::new(filter, witnesses)
+}
+
+pub fn filter_witnesses_for_tool_defs(
+    tool_defs: &[ToolDef],
+    filter: &ToolFilter,
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    let Some(filter_names) = filter.names() else {
+        return Default::default();
+    };
+
+    let mut witnesses = std::collections::BTreeMap::new();
+    for name in filter_names {
+        if let Some(tool) = tool_defs.iter().find(|tool| tool.name == name.as_str()) {
+            let witness = filter_witness_for_tool(tool);
+            if witness.has_identity_witness() {
+                witnesses.insert(name.as_str().to_string(), witness);
+            }
+        }
+    }
+    witnesses
+}
+
+pub fn validate_inherited_filter_witnesses(
+    filter: &ToolFilter,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<(), ToolScopeStageError> {
+    let Some(filter_names) = filter.names() else {
+        return Ok(());
+    };
+
+    let mut missing = filter_names
+        .iter()
+        .filter(|name| {
+            witnesses
+                .get(name.as_str())
+                .is_none_or(|witness| !witness.has_identity_witness())
+        })
+        .map(|name| name.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    missing.sort_unstable();
+    missing.dedup();
+    Err(ToolScopeStageError::MissingFilterWitnesses { names: missing })
+}
+
+pub fn validate_witnessed_filter_authority(
+    filter: &ToolFilter,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<(), ToolScopeStageError> {
+    validate_inherited_filter_witnesses(filter, witnesses)?;
+    let Some(filter_names) = filter.names() else {
+        if witnesses.is_empty() {
+            return Ok(());
+        }
+        let invalid = witnesses.keys().cloned().collect::<Vec<_>>();
+        return Err(ToolScopeStageError::InvalidFilterWitnesses { names: invalid });
+    };
+
+    let mut invalid = witnesses
+        .keys()
+        .filter(|name| !filter_names.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if invalid.is_empty() {
+        return Ok(());
+    }
+
+    invalid.sort_unstable();
+    invalid.dedup();
+    Err(ToolScopeStageError::InvalidFilterWitnesses { names: invalid })
+}
+
 fn deferred_authority_catalog_for_base_tools(
     base_tools: &[Arc<ToolDef>],
     deferred_tool_names: &ToolNameSet,
@@ -1347,14 +1478,15 @@ fn extend_filter_witnesses(
 
     for name in filter_names {
         if let Some(tool) = base_tools.iter().find(|tool| tool.name == name.as_str()) {
-            witnesses.insert(
-                name.as_str().to_string(),
-                ToolVisibilityWitness {
-                    stable_owner_key: stable_owner_key_for_tool(tool),
-                    last_seen_provenance: tool.provenance.clone(),
-                },
-            );
+            witnesses.insert(name.as_str().to_string(), filter_witness_for_tool(tool));
         }
+    }
+}
+
+fn filter_witness_for_tool(tool: &ToolDef) -> ToolVisibilityWitness {
+    ToolVisibilityWitness {
+        stable_owner_key: stable_owner_key_for_tool(tool),
+        last_seen_provenance: tool.provenance.clone(),
     }
 }
 
@@ -2212,6 +2344,85 @@ mod tests {
             scope.visible_tool_names().unwrap(),
             ["a".to_string(), "b".to_string()].into_iter().collect(),
             "a different owner must not inherit the dormant filter intent"
+        );
+    }
+
+    #[test]
+    fn empty_inherited_witness_does_not_become_authority() {
+        let original = tool_with_provenance("a", "owner-a");
+        let rebound = tool_with_provenance("a", "owner-b");
+        let scope = ToolScope::new(vec![Arc::clone(&original)].into());
+
+        scope
+            .set_visibility_state(crate::SessionToolVisibilityState {
+                inherited_base_filter: ToolFilter::Allow(set(&["a"])),
+                filter_witnesses: [("a".to_string(), crate::ToolVisibilityWitness::default())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(
+            scope.visible_tool_names().unwrap().is_empty(),
+            "empty inherited witness must fail closed even while the original name is present"
+        );
+
+        let current = scope.visibility_state().unwrap();
+        scope
+            .apply_staged_projection(
+                vec![Arc::clone(&rebound)].into(),
+                HashSet::new(),
+                HashSet::new(),
+                &current,
+            )
+            .unwrap();
+        assert!(
+            scope.visible_tool_names().unwrap().is_empty(),
+            "empty inherited witness must not rebind to a same-name replacement"
+        );
+    }
+
+    #[test]
+    fn inherited_filter_witness_mismatch_prevents_rebinding_a_dormant_name() {
+        let original = tool_with_provenance("a", "owner-a");
+        let rebound = tool_with_provenance("a", "owner-b");
+        let scope = ToolScope::new(vec![Arc::clone(&original)].into());
+
+        scope
+            .set_visibility_state(crate::SessionToolVisibilityState {
+                inherited_base_filter: ToolFilter::Allow(set(&["a"])),
+                filter_witnesses: [(
+                    "a".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:owner-a".to_string()),
+                        last_seen_provenance: original.provenance.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            ["a".to_string()].into_iter().collect(),
+            "matching inherited witness should keep the original tool visible"
+        );
+
+        let current = scope.visibility_state().unwrap();
+        scope
+            .apply_staged_projection(
+                vec![Arc::clone(&rebound)].into(),
+                HashSet::new(),
+                HashSet::new(),
+                &current,
+            )
+            .unwrap();
+        assert!(
+            scope.visible_tool_names().unwrap().is_empty(),
+            "a different owner must not inherit prior inherited-base visibility intent"
         );
     }
 

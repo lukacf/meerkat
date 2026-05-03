@@ -2143,6 +2143,7 @@ mod tests {
             usage: meerkat_core::types::Usage::default(),
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: None,

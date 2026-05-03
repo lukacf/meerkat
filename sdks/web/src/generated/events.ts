@@ -265,7 +265,7 @@ export type ToolConfigChangedPayload = {
   target: string;
 };
 
-export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 
 export type TurnTerminalOutcome = "none" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "time_budget_exceeded" | "structured_output_validation_failed";
 
@@ -285,6 +285,7 @@ export interface RunStartedEvent {
 export interface RunCompletedEvent {
   result: string;
   session_id: SessionId;
+  terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_completed";
   usage: Usage;
 }
@@ -294,6 +295,7 @@ export interface RunFailedEvent {
   error_class: AgentErrorClass;
   error_report?: AgentErrorReport | null;
   session_id: SessionId;
+  terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";
 }
 

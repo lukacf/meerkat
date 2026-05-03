@@ -117,6 +117,7 @@ export interface RunCompletedEvent {
   readonly sessionId: string;
   readonly result: string;
   readonly usage: Usage;
+  readonly terminalCauseKind?: TurnTerminalCauseKind;
 }
 
 export type TurnTerminalOutcome =
@@ -137,6 +138,7 @@ export type TurnTerminalCauseKind =
   | "structured_output_validation_failed"
   | "budget_exhausted"
   | "time_budget_exceeded"
+  | "retry_exhausted"
   | "turn_limit_reached"
   | "runtime_apply_failure"
   | "fatal_failure";
@@ -174,6 +176,7 @@ export interface RunFailedEvent {
   readonly sessionId: string;
   readonly errorClass: string;
   readonly error: string;
+  readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly errorReport?: AgentErrorReport | null;
 }
 
@@ -633,6 +636,24 @@ function hasOwn(raw: Record<string, unknown>, field: string): boolean {
   return Object.prototype.hasOwnProperty.call(raw, field);
 }
 
+function parseTerminalCauseKind(raw: Record<string, unknown>): TurnTerminalCauseKind | undefined {
+  const causeKind = parseWireString(raw.terminal_cause_kind ?? raw.terminalCauseKind);
+  if (
+    causeKind !== undefined &&
+    TURN_TERMINAL_CAUSE_KINDS.has(causeKind as TurnTerminalCauseKind)
+  ) {
+    return causeKind as TurnTerminalCauseKind;
+  }
+  return undefined;
+}
+
+function terminalCauseKindField(
+  raw: Record<string, unknown>,
+): { readonly terminalCauseKind: TurnTerminalCauseKind } | Record<string, never> {
+  const terminalCauseKind = parseTerminalCauseKind(raw);
+  return terminalCauseKind === undefined ? {} : { terminalCauseKind };
+}
+
 function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefined {
   if (raw === undefined) {
     return undefined;
@@ -865,6 +886,7 @@ const TURN_TERMINAL_CAUSE_KINDS = new Set<TurnTerminalCauseKind>([
   "structured_output_validation_failed",
   "budget_exhausted",
   "time_budget_exceeded",
+  "retry_exhausted",
   "turn_limit_reached",
   "runtime_apply_failure",
   "fatal_failure",
@@ -1008,13 +1030,20 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "run_started":
       return { type, sessionId: requireStringField(raw, "session_id"), prompt: parseContentInput(raw.prompt) };
     case "run_completed":
-      return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        result: requireStringField(raw, "result"),
+        usage: parseUsage(raw.usage),
+        ...terminalCauseKindField(raw),
+      };
     case "run_failed":
       return {
         type,
         sessionId: requireStringField(raw, "session_id"),
         errorClass: requireStringField(raw, "error_class"),
         error: requireStringField(raw, "error"),
+        ...terminalCauseKindField(raw),
         ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
       };
 

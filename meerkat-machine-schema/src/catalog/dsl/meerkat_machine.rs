@@ -842,6 +842,7 @@ pub enum TurnTerminalCauseKind {
     StructuredOutputValidationFailed,
     BudgetExhausted,
     TimeBudgetExceeded,
+    RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
     FatalFailure,
@@ -1998,6 +1999,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: RunId,
                 runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
                 runtime_apply_failure_message: Option<String>,
+                terminal_outcome: Enum<TurnTerminalOutcome>,
                 terminal_cause_kind: Enum<TurnTerminalCauseKind>,
                 error: String,
             },
@@ -5833,13 +5835,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RunFailed {
-            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_cause_kind, error }
+            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
+                self.terminal_outcome = Some(terminal_outcome);
                 self.terminal_cause_kind = Some(terminal_cause_kind);
                 self.last_runtime_apply_failure_cause = runtime_apply_failure_cause;
                 self.last_runtime_apply_failure_message = runtime_apply_failure_message;

@@ -5504,6 +5504,24 @@
           }
         ]
       },
+      "TurnTerminalCauseKind": {
+        "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
+        "enum": [
+          "unknown",
+          "hook_denied",
+          "hook_failure",
+          "llm_failure",
+          "tool_failure",
+          "structured_output_validation_failed",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "retry_exhausted",
+          "turn_limit_reached",
+          "runtime_apply_failure",
+          "fatal_failure"
+        ],
+        "type": "string"
+      },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
         "oneOf": [
@@ -6702,6 +6720,16 @@
             ]
           },
           "structured_output": true,
+          "terminal_cause_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnTerminalCauseKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "text": {
             "type": "string"
           },

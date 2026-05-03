@@ -375,6 +375,7 @@ mod tests {
                     session_id: sid.clone(),
                     result: "Hi there!".to_string(),
                     usage: Usage::default(),
+                    terminal_cause_kind: None,
                 },
             ],
         );

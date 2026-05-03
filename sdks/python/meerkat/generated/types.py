@@ -31,6 +31,7 @@ class WireRunResult:
     turns: int = 0
     tool_calls: int = 0
     usage: Optional[WireUsage] = None
+    terminal_cause_kind: Optional[str] = None
     structured_output: Optional[Any] = None
     schema_warnings: Optional[list[Any]] = None
     skill_diagnostics: Optional[dict] = None
@@ -338,6 +339,7 @@ class MobSpawnManySpawnedResult:
 @dataclass
 class MobSpawnManyFailedResult:
     """Failed per-member `mob/spawn_many` result payload."""
+    cause: MobSpawnManyFailureCause
     message: str
 
 
@@ -1452,12 +1454,12 @@ class RealtimeChannelStatus:
 class RealtimeOpenInfo:
     """Response payload for `realtime/open_info`."""
     capabilities: RealtimeCapabilities
-    default_protocol_version: str
+    default_protocol_version: RealtimeProtocolVersion
     expires_at: str
     open_token: str
     target: RealtimeChannelTarget
     ws_url: str
-    supported_protocol_versions: Optional[list[str]] = None
+    supported_protocol_versions: Optional[list[RealtimeProtocolVersion]] = None
 
 
 @dataclass
@@ -1537,7 +1539,7 @@ class ToolCallTimeoutContext:
 class RealtimeChannelOpenFrame:
     """Payload for `channel.open`."""
     open_token: str
-    protocol_version: str
+    protocol_version: RealtimeProtocolVersion
     role: RealtimeChannelRole
     turning_mode: RealtimeTurningMode
 
@@ -1552,7 +1554,7 @@ class RealtimeChannelInputFrame:
 class RealtimeChannelOpenedFrame:
     """Payload for `channel.opened`."""
     capabilities: RealtimeCapabilities
-    protocol_version: str
+    protocol_version: RealtimeProtocolVersion
     role: RealtimeChannelRole
     status: RealtimeChannelStatus
 
@@ -2119,8 +2121,8 @@ WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unkn
 # Mob RPC helper wire type for WireMobRuntimeMode.
 WireMobRuntimeMode = Literal['autonomous_host', 'turn_driven']
 
-# Mob RPC helper wire type for MobSpawnManyFailureCause.
-MobSpawnManyFailureCause = Any
+# Typed failure cause for one failed `mob/spawn_many` member row.
+MobSpawnManyFailureCause = Literal['profile_not_found', 'member_not_found', 'member_already_exists', 'not_externally_addressable', 'invalid_transition', 'wiring_error', 'bridge_command_rejected', 'member_restore_failed', 'kickoff_wait_timed_out', 'ready_wait_timed_out', 'definition_error', 'flow_not_found', 'flow_failed', 'run_not_found', 'run_canceled', 'flow_turn_timed_out', 'frame_depth_limit_exceeded', 'frame_atomic_persistence_unavailable', 'spec_revision_conflict', 'schema_validation', 'insufficient_targets', 'topology_violation', 'bridge_delivery_rejected', 'supervisor_escalation', 'unsupported_for_mode', 'reset_barrier', 'storage_error', 'session_error', 'comms_error', 'callback_pending', 'stale_fence_token', 'stale_event_cursor', 'work_not_found', 'internal']
 
 # Typed status for one `mob/spawn_many` row.
 MobSpawnManyResultStatus = Literal['spawned', 'failed']
@@ -2298,8 +2300,13 @@ RealtimeChannelRole = Literal['primary', 'observer']
 # Turning mode for a realtime channel.
 RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
 
-# Realtime protocol version.
-RealtimeProtocolVersion = Any
+# Canonical wire protocol version for realtime channels.
+#
+# The version is bumped every time the on-the-wire shape of
+# [`RealtimeAudioChunk`], frame enums, or other load-bearing realtime
+# contracts changes in an incompatible way. Clients and servers handshake on
+# the string form; this enum is the single typed owner of the set.
+RealtimeProtocolVersion = Literal['2']
 
 # Input modality kind supported by a realtime channel.
 RealtimeInputKind = Literal['text', 'audio', 'video']
@@ -2332,7 +2339,7 @@ class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
 class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
     kind: Required[Literal['unsupported_protocol_version']]
     requested: Required[str]
-    supported: Required[list[str]]
+    supported: Required[list[RealtimeProtocolVersion]]
 
 RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion
 
@@ -2445,7 +2452,7 @@ RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscri
 # Client-to-server realtime frame.
 class RealtimeClientFrameChannelOpen(TypedDict, total=False):
     open_token: Required[str]
-    protocol_version: Required[str]
+    protocol_version: Required[RealtimeProtocolVersion]
     role: Required[RealtimeChannelRole]
     turning_mode: Required[RealtimeTurningMode]
     type: Required[Literal['channel.open']]
@@ -2474,7 +2481,7 @@ RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChanne
 # Server-to-client realtime frame.
 class RealtimeServerFrameChannelOpened(TypedDict, total=False):
     capabilities: Required[RealtimeCapabilities]
-    protocol_version: Required[str]
+    protocol_version: Required[RealtimeProtocolVersion]
     role: Required[RealtimeChannelRole]
     status: Required[RealtimeChannelStatus]
     type: Required[Literal['channel.opened']]

@@ -1550,6 +1550,7 @@ pub enum TurnTerminalCauseKind {
     StructuredOutputValidationFailed,
     BudgetExhausted,
     TimeBudgetExceeded,
+    RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
     FatalFailure,
@@ -1582,6 +1583,9 @@ impl From<meerkat_core::turn_execution_authority::TurnTerminalCauseKind> for Tur
             meerkat_core::turn_execution_authority::TurnTerminalCauseKind::TimeBudgetExceeded => {
                 Self::TimeBudgetExceeded
             }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::RetryExhausted => {
+                Self::RetryExhausted
+            }
             meerkat_core::turn_execution_authority::TurnTerminalCauseKind::TurnLimitReached => {
                 Self::TurnLimitReached
             }
@@ -1608,6 +1612,7 @@ impl From<TurnTerminalCauseKind> for meerkat_core::turn_execution_authority::Tur
             }
             TurnTerminalCauseKind::BudgetExhausted => Self::BudgetExhausted,
             TurnTerminalCauseKind::TimeBudgetExceeded => Self::TimeBudgetExceeded,
+            TurnTerminalCauseKind::RetryExhausted => Self::RetryExhausted,
             TurnTerminalCauseKind::TurnLimitReached => Self::TurnLimitReached,
             TurnTerminalCauseKind::RuntimeApplyFailure => Self::RuntimeApplyFailure,
             TurnTerminalCauseKind::FatalFailure => Self::FatalFailure,

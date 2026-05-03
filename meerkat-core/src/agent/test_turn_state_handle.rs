@@ -678,6 +678,15 @@ impl TestTurnStateHandle {
             Some(ForcedTerminalCauseKind::from_optional(cause_kind));
         Ok(())
     }
+
+    pub fn force_terminal_cause_kind_for_test(
+        &self,
+        cause_kind: Option<TurnTerminalCauseKind>,
+    ) -> Result<(), DslTransitionError> {
+        let mut guard = self.lock_state()?;
+        guard.fields.terminal_cause_kind = cause_kind;
+        Ok(())
+    }
 }
 
 impl Default for TestTurnStateHandle {

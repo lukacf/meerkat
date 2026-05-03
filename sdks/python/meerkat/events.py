@@ -92,6 +92,7 @@ class RunCompleted(Event):
     session_id: str = ""
     result: str = ""
     usage: Usage = field(default_factory=Usage)
+    terminal_cause_kind: TurnTerminalCauseKind | None = None
 
 
 TurnTerminalOutcome = Literal[
@@ -113,6 +114,7 @@ TurnTerminalCauseKind = Literal[
     "structured_output_validation_failed",
     "budget_exhausted",
     "time_budget_exceeded",
+    "retry_exhausted",
     "turn_limit_reached",
     "runtime_apply_failure",
     "fatal_failure",
@@ -180,6 +182,7 @@ class RunFailed(Event):
     session_id: str = ""
     error_class: str = ""
     error: str = ""
+    terminal_cause_kind: TurnTerminalCauseKind | None = None
     error_report: AgentErrorReport | None = None
 
 
@@ -855,6 +858,7 @@ _TURN_TERMINAL_CAUSE_KINDS = {
     "structured_output_validation_failed",
     "budget_exhausted",
     "time_budget_exceeded",
+    "retry_exhausted",
     "turn_limit_reached",
     "runtime_apply_failure",
     "fatal_failure",
@@ -1065,6 +1069,10 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         raise ValueError("budget_type must be known")
     if event_type == "run_failed" and "error_report" in raw:
         _parse_agent_error_report(raw.get("error_report"))
+    if event_type in {"run_completed", "run_failed"} and raw.get("terminal_cause_kind") is not None:
+        terminal_cause_kind = raw.get("terminal_cause_kind")
+        if terminal_cause_kind not in _TURN_TERMINAL_CAUSE_KINDS:
+            raise ValueError("terminal_cause_kind must be known")
 
     for field_name in required.get(event_type, ()):
         if field_name == "usage":

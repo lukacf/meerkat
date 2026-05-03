@@ -2952,7 +2952,7 @@ async fn second_channel_open_frame_yields_unexpected_channel_open() {
 }
 
 #[tokio::test]
-async fn channel_close_detaches_runtime_binding_and_yields_channel_closed() {
+async fn channel_close_yields_channel_closed_without_detaching_runtime_binding() {
     let (_temp, runtime, config_store) = build_test_runtime();
     let session_id = create_registered_realtime_session(&runtime).await;
     let session_id_text = session_id.to_string();
@@ -3007,7 +3007,7 @@ async fn channel_close_detaches_runtime_binding_and_yields_channel_closed() {
         .expect("registered session should expose runtime live status");
     assert_eq!(
         runtime_status,
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
     );
 
     let _ = ws_stream.close(None).await;

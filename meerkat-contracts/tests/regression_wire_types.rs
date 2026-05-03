@@ -41,6 +41,7 @@ fn wire_run_result_required_fields() {
         turns: 3,
         tool_calls: 2,
         usage: WireUsage::default(),
+        terminal_cause_kind: None,
         structured_output: None,
         schema_warnings: None,
         skill_diagnostics: None,
@@ -67,12 +68,17 @@ fn wire_run_result_optional_omitted() {
         turns: 1,
         tool_calls: 0,
         usage: WireUsage::default(),
+        terminal_cause_kind: None,
         structured_output: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
     let value = serde_json::to_value(&wire).unwrap();
 
+    assert!(
+        value.get("terminal_cause_kind").is_none(),
+        "terminal_cause_kind should be absent when None"
+    );
     assert!(
         value.get("structured_output").is_none(),
         "structured_output should be absent when None"
@@ -106,6 +112,7 @@ fn wire_run_result_roundtrip() {
             cache_creation_tokens: Some(10),
             cache_read_tokens: Some(20),
         },
+        terminal_cause_kind: None,
         structured_output: Some(serde_json::json!({"key": "value"})),
         schema_warnings: None,
         skill_diagnostics: None,
@@ -361,12 +368,14 @@ fn agent_event_all_variants_roundtrip() {
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
             },
+            terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
             session_id,
             error_class: AgentErrorClass::Internal,
             error: "boom".to_string(),
             error_report: None,
+            terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {
             hook_id: HookId::new("h1"),
@@ -604,12 +613,14 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             session_id: SessionId::new(),
             result: "done".to_string(),
             usage: Usage::default(),
+            terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
             session_id: SessionId::new(),
             error_class: AgentErrorClass::Internal,
             error: "nope".to_string(),
             error_report: None,
+            terminal_cause_kind: None,
         },
         AgentEvent::HookStarted {
             hook_id: HookId::new("hook-1"),
@@ -797,6 +808,7 @@ fn wire_run_result_from_run_result_conversion() {
         },
         turns: 4,
         tool_calls: 7,
+        terminal_cause_kind: None,
         structured_output: Some(serde_json::json!({"answer": 42})),
         schema_warnings: None,
         skill_diagnostics: None,

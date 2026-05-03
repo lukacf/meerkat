@@ -245,6 +245,7 @@ class RunResult:
     turns: int = 0
     tool_calls: int = 0
     usage: Usage = field(default_factory=Usage)
+    terminal_cause_kind: str | None = None
     session_ref: str | None = None
     structured_output: Any = None
     schema_warnings: list[SchemaWarning] | None = None

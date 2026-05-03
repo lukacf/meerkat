@@ -29,9 +29,9 @@ import type {
   WireToolAccessPolicy,
   WireToolFilter,
 } from "./generated/types.js";
-import type { Usage } from "./events.js";
+import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
-export type { Usage } from "./events.js";
+export type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;
@@ -149,6 +149,7 @@ export interface RunResult {
   readonly turns: number;
   readonly toolCalls: number;
   readonly usage: Usage;
+  readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly structuredOutput?: unknown;
   readonly schemaWarnings?: readonly SchemaWarning[];
   readonly skillDiagnostics?: SkillRuntimeDiagnostics;

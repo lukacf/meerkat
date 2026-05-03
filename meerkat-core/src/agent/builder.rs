@@ -495,7 +495,6 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
-            pending_fatal_diagnostic: None,
             run_completed_hooks_applied: false,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,

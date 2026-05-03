@@ -1370,6 +1370,7 @@
           "structured_output_validation_failed",
           "budget_exhausted",
           "time_budget_exceeded",
+          "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
           "fatal_failure"
@@ -1459,6 +1460,16 @@
           "session_id": {
             "$ref": "#/$defs/SessionId"
           },
+          "terminal_cause_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnTerminalCauseKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "type": {
             "const": "run_completed",
             "type": "string"
@@ -1497,6 +1508,16 @@
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
+          },
+          "terminal_cause_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnTerminalCauseKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "type": {
             "const": "run_failed",
@@ -2696,6 +2717,16 @@
               "session_id": {
                 "$ref": "#/$defs/SessionId"
               },
+              "terminal_cause_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnTerminalCauseKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "run_completed",
                 "type": "string"
@@ -2734,6 +2765,16 @@
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
+              },
+              "terminal_cause_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnTerminalCauseKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "type": {
                 "const": "run_failed",
@@ -4565,6 +4606,7 @@
           "structured_output_validation_failed",
           "budget_exhausted",
           "time_budget_exceeded",
+          "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
           "fatal_failure"

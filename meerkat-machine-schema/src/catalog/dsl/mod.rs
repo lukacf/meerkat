@@ -621,6 +621,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "StructuredOutputValidationFailed",
                     "BudgetExhausted",
                     "TimeBudgetExceeded",
+                    "RetryExhausted",
                     "TurnLimitReached",
                     "RuntimeApplyFailure",
                     "FatalFailure",

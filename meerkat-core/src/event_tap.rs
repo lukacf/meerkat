@@ -205,6 +205,7 @@ mod tests {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
                 usage: crate::types::Usage::default(),
+                terminal_cause_kind: None,
             },
         )
         .await;
@@ -223,6 +224,7 @@ mod tests {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
                 usage: crate::types::Usage::default(),
+                terminal_cause_kind: None,
             },
         )
         .await;

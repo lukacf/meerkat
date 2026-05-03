@@ -2626,6 +2626,10 @@ export class MeerkatClient {
       turns: MeerkatClient.requireNumberField(data, "turns", context),
       toolCalls: MeerkatClient.requireNumberField(data, "tool_calls", context),
       usage,
+      terminalCauseKind:
+        typeof data.terminal_cause_kind === "string"
+          ? (data.terminal_cause_kind as RunResult["terminalCauseKind"])
+          : undefined,
       structuredOutput: data.structured_output,
       schemaWarnings,
       skillDiagnostics: MeerkatClient.parseSkillDiagnostics(data.skill_diagnostics),

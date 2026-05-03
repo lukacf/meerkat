@@ -18,6 +18,7 @@ export interface WireRunResult {
   turns: number;
   tool_calls: number;
   usage: WireUsage;
+  terminal_cause_kind?: string;
   structured_output?: unknown;
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
 }
@@ -240,6 +241,7 @@ export interface MobSpawnManySpawnedResult {
 }
 
 export interface MobSpawnManyFailedResult {
+  cause: MobSpawnManyFailureCause;
   message: string;
 }
 
@@ -1094,7 +1096,7 @@ export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed"
 
 export type WireMobRuntimeMode = "autonomous_host" | "turn_driven";
 
-export type MobSpawnManyFailureCause = unknown;
+export type MobSpawnManyFailureCause = "profile_not_found" | "member_not_found" | "member_already_exists" | "not_externally_addressable" | "invalid_transition" | "wiring_error" | "bridge_command_rejected" | "member_restore_failed" | "kickoff_wait_timed_out" | "ready_wait_timed_out" | "definition_error" | "flow_not_found" | "flow_failed" | "run_not_found" | "run_canceled" | "flow_turn_timed_out" | "frame_depth_limit_exceeded" | "frame_atomic_persistence_unavailable" | "spec_revision_conflict" | "schema_validation" | "insufficient_targets" | "topology_violation" | "bridge_delivery_rejected" | "supervisor_escalation" | "unsupported_for_mode" | "reset_barrier" | "storage_error" | "session_error" | "comms_error" | "callback_pending" | "stale_fence_token" | "stale_event_cursor" | "work_not_found" | "internal";
 
 export type MobSpawnManyResultStatus = "spawned" | "failed";
 
@@ -1246,7 +1248,7 @@ export type RealtimeChannelRole = "primary" | "observer";
 
 export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
 
-export type RealtimeProtocolVersion = unknown;
+export type RealtimeProtocolVersion = "2";
 
 export type RealtimeInputKind = "text" | "audio" | "video";
 
@@ -1272,7 +1274,7 @@ export interface RealtimeErrorDetailsToolCallTimeout {
 export interface RealtimeErrorDetailsUnsupportedProtocolVersion {
   kind: "unsupported_protocol_version";
   requested: string;
-  supported: string[];
+  supported: RealtimeProtocolVersion[];
 }
 
 export type RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion;
@@ -1404,7 +1406,7 @@ export type RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventI
 
 export interface RealtimeClientFrameChannelOpen {
   open_token: string;
-  protocol_version: string;
+  protocol_version: RealtimeProtocolVersion;
   role: RealtimeChannelRole;
   turning_mode: RealtimeTurningMode;
   type: "channel.open";
@@ -1438,7 +1440,7 @@ export type RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClien
 
 export interface RealtimeServerFrameChannelOpened {
   capabilities: RealtimeCapabilities;
-  protocol_version: string;
+  protocol_version: RealtimeProtocolVersion;
   role: RealtimeChannelRole;
   status: RealtimeChannelStatus;
   type: "channel.opened";
@@ -1902,10 +1904,10 @@ export interface RealtimeChannelStatus {
 
 export interface RealtimeOpenInfo {
   capabilities: RealtimeCapabilities;
-  default_protocol_version: string;
+  default_protocol_version: RealtimeProtocolVersion;
   expires_at: string;
   open_token: string;
-  supported_protocol_versions?: string[];
+  supported_protocol_versions?: RealtimeProtocolVersion[];
   target: RealtimeChannelTarget;
   ws_url: string;
 }
@@ -1957,7 +1959,7 @@ export interface ToolCallTimeoutContext {
 
 export interface RealtimeChannelOpenFrame {
   open_token: string;
-  protocol_version: string;
+  protocol_version: RealtimeProtocolVersion;
   role: RealtimeChannelRole;
   turning_mode: RealtimeTurningMode;
 }
@@ -1968,7 +1970,7 @@ export interface RealtimeChannelInputFrame {
 
 export interface RealtimeChannelOpenedFrame {
   capabilities: RealtimeCapabilities;
-  protocol_version: string;
+  protocol_version: RealtimeProtocolVersion;
   role: RealtimeChannelRole;
   status: RealtimeChannelStatus;
 }

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::WireUsage;
-use meerkat_core::{RunResult, SchemaWarning, SessionId};
+use meerkat_core::{RunResult, SchemaWarning, SessionId, TurnTerminalCauseKind};
 
 /// Typed tool-error classification carried on the wire.
 ///
@@ -62,6 +62,8 @@ pub struct WireRunResult {
     pub tool_calls: u32,
     pub usage: WireUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_warnings: Option<Vec<SchemaWarning>>,
@@ -78,6 +80,7 @@ impl From<RunResult> for WireRunResult {
             turns: r.turns,
             tool_calls: r.tool_calls,
             usage: r.usage.into(),
+            terminal_cause_kind: r.terminal_cause_kind,
             structured_output: r.structured_output,
             schema_warnings: r.schema_warnings,
             skill_diagnostics: r.skill_diagnostics,
@@ -99,6 +102,7 @@ mod tests {
             usage: Default::default(),
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: Some(SkillRuntimeDiagnostics {

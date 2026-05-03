@@ -93,6 +93,7 @@ pub enum TurnTerminalCauseKind {
     StructuredOutputValidationFailed,
     BudgetExhausted,
     TimeBudgetExceeded,
+    RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
     FatalFailure,
@@ -140,6 +141,7 @@ impl TurnTerminalCauseKind {
             Self::ToolFailure => AgentErrorClass::Tool,
             Self::StructuredOutputValidationFailed => AgentErrorClass::StructuredOutput,
             Self::BudgetExhausted | Self::TimeBudgetExceeded => AgentErrorClass::Budget,
+            Self::RetryExhausted => AgentErrorClass::Llm,
             Self::TurnLimitReached => AgentErrorClass::MaxTurns,
             Self::RuntimeApplyFailure | Self::Unknown => AgentErrorClass::Internal,
             Self::FatalFailure => AgentErrorClass::Terminal,
@@ -159,6 +161,7 @@ impl TurnTerminalCauseKind {
             Self::StructuredOutputValidationFailed => "structured output validation failed",
             Self::BudgetExhausted => "budget exhausted",
             Self::TimeBudgetExceeded => "time budget exceeded",
+            Self::RetryExhausted => "retry exhausted",
             Self::TurnLimitReached => "turn limit reached",
             Self::RuntimeApplyFailure => "runtime apply failure",
             Self::FatalFailure => "fatal turn failure",
@@ -199,6 +202,14 @@ impl TurnFailureReason {
     pub fn from_agent_error(error: &AgentError) -> Self {
         Self::with_cause(
             TurnTerminalCauseKind::from_agent_error(error),
+            AgentErrorClass::from(error),
+            error.to_string(),
+        )
+    }
+
+    pub fn retry_exhausted(error: &AgentError) -> Self {
+        Self::with_cause(
+            TurnTerminalCauseKind::RetryExhausted,
             AgentErrorClass::from(error),
             error.to_string(),
         )
@@ -479,6 +490,37 @@ mod tests {
     }
 
     #[test]
+    fn budget_success_classification_requires_matching_machine_cause() {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+
+        assert_eq!(
+            classify_terminal(
+                &TurnTerminalOutcome::BudgetExhausted,
+                Some(TurnTerminalCauseKind::BudgetExhausted),
+            ),
+            SurfaceResultClass::Success
+        );
+        assert_eq!(
+            classify_terminal(&TurnTerminalOutcome::BudgetExhausted, None),
+            SurfaceResultClass::HardFailure
+        );
+        assert_eq!(
+            classify_terminal(
+                &TurnTerminalOutcome::BudgetExhausted,
+                Some(TurnTerminalCauseKind::Unknown),
+            ),
+            SurfaceResultClass::HardFailure
+        );
+        assert_eq!(
+            classify_terminal(
+                &TurnTerminalOutcome::BudgetExhausted,
+                Some(TurnTerminalCauseKind::RetryExhausted),
+            ),
+            SurfaceResultClass::HardFailure
+        );
+    }
+
+    #[test]
     fn content_shape_is_closed_contract_with_stable_wire_labels() {
         let shapes = [
             (ContentShape::Conversation, "conversation"),
@@ -527,5 +569,20 @@ mod tests {
         assert_eq!(first.cause_kind, TurnTerminalCauseKind::HookDenied);
         assert_eq!(second.cause_kind, TurnTerminalCauseKind::HookDenied);
         assert_ne!(first.message, second.message);
+    }
+
+    #[test]
+    fn retry_exhaustion_reason_is_typed_cause_not_llm_display() {
+        let error = AgentError::llm(
+            "mock",
+            crate::error::LlmFailureReason::RateLimited { retry_after: None },
+            "display text changed",
+        );
+
+        let reason = TurnFailureReason::retry_exhausted(&error);
+
+        assert_eq!(reason.cause_kind, TurnTerminalCauseKind::RetryExhausted);
+        assert_ne!(reason.cause_kind, TurnTerminalCauseKind::LlmFailure);
+        assert_eq!(reason.message, error.to_string());
     }
 }

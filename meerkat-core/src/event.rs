@@ -1308,6 +1308,8 @@ pub enum AgentEvent {
         session_id: SessionId,
         result: String,
         usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_cause_kind: Option<TurnTerminalCauseKind>,
     },
 
     /// Agent run failed
@@ -1316,6 +1318,8 @@ pub enum AgentEvent {
         error_class: AgentErrorClass,
         /// Display projection of `error_report.message`.
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_cause_kind: Option<TurnTerminalCauseKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_report: Option<AgentErrorReport>,
     },
@@ -2243,11 +2247,13 @@ mod tests {
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
                 },
+                terminal_cause_kind: None,
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Budget,
                 error: "Budget exceeded".to_string(),
+                terminal_cause_kind: None,
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Budget,
                     reason: None,
@@ -2756,11 +2762,13 @@ mod tests {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
                 usage: Usage::default(),
+                terminal_cause_kind: None,
             },
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Internal,
                 error: "failed".to_string(),
+                terminal_cause_kind: None,
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Internal,
                     reason: None,

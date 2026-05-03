@@ -233,7 +233,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
-- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_cause_kind: TurnTerminalCauseKind, error: String)
+- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
@@ -2511,7 +2511,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RunFailed`
 - From: `Running`
-- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_cause_kind, error)
+- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, error)
 - Guards:
   - `run_matches_binding`
   - `terminal_cause_known`

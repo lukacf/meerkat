@@ -3801,6 +3801,8 @@ pub enum TurnTerminalCauseKind {
     BudgetExhausted,
     #[serde(rename = "TimeBudgetExceeded")]
     TimeBudgetExceeded,
+    #[serde(rename = "RetryExhausted")]
+    RetryExhausted,
     #[serde(rename = "TurnLimitReached")]
     TurnLimitReached,
     #[serde(rename = "RuntimeApplyFailure")]
@@ -3819,6 +3821,7 @@ impl TurnTerminalCauseKind {
             Self::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
             Self::BudgetExhausted => "BudgetExhausted",
             Self::TimeBudgetExceeded => "TimeBudgetExceeded",
+            Self::RetryExhausted => "RetryExhausted",
             Self::TurnLimitReached => "TurnLimitReached",
             Self::RuntimeApplyFailure => "RuntimeApplyFailure",
             Self::FatalFailure => "FatalFailure",
@@ -3837,6 +3840,7 @@ impl std::convert::TryFrom<&str> for TurnTerminalCauseKind {
             "StructuredOutputValidationFailed" => Ok(Self::StructuredOutputValidationFailed),
             "BudgetExhausted" => Ok(Self::BudgetExhausted),
             "TimeBudgetExceeded" => Ok(Self::TimeBudgetExceeded),
+            "RetryExhausted" => Ok(Self::RetryExhausted),
             "TurnLimitReached" => Ok(Self::TurnLimitReached),
             "RuntimeApplyFailure" => Ok(Self::RuntimeApplyFailure),
             "FatalFailure" => Ok(Self::FatalFailure),
@@ -4556,6 +4560,7 @@ pub mod inputs {
         pub run_id: RunId,
         pub runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
         pub runtime_apply_failure_message: Option<String>,
+        pub terminal_outcome: TurnTerminalOutcome,
         pub terminal_cause_kind: TurnTerminalCauseKind,
         pub error: String,
     }

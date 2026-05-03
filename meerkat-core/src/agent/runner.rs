@@ -17,7 +17,9 @@ use crate::tool_scope::{
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeRevision,
     ToolScopeStageError,
 };
-use crate::turn_execution_authority::{TurnPrimitiveKind, TurnTerminalOutcome};
+use crate::turn_execution_authority::{
+    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+};
 use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
@@ -727,6 +729,7 @@ where
                 session_id: self.session.id().clone(),
                 result: result.text.clone(),
                 usage: result.usage.clone(),
+                terminal_cause_kind: result.terminal_cause_kind,
             },
         )
         .await;
@@ -754,6 +757,17 @@ where
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let error_report = crate::event::AgentErrorReport::from_agent_error(error);
+        let terminal_cause_kind = match error {
+            AgentError::TerminalFailure { cause_kind, .. }
+                if cause_kind.is_specific_failure_cause() =>
+            {
+                Some(*cause_kind)
+            }
+            _ => self
+                .execution_snapshot()
+                .and_then(|snapshot| snapshot.terminal_cause_kind)
+                .filter(|cause_kind| *cause_kind != TurnTerminalCauseKind::Unknown),
+        };
         let _ = crate::event_tap::tap_emit(
             &self.event_tap,
             event_tx,
@@ -761,6 +775,7 @@ where
                 session_id: self.session.id().clone(),
                 error_class: error_report.class,
                 error: error_report.message.clone(),
+                terminal_cause_kind,
                 error_report: Some(error_report),
             },
         )

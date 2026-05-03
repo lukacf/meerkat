@@ -2814,6 +2814,9 @@ class MeerkatClient:
             turns=MeerkatClient._require_number_field(data, "turns", context),
             tool_calls=MeerkatClient._require_number_field(data, "tool_calls", context),
             usage=usage,
+            terminal_cause_kind=data.get("terminal_cause_kind")
+            if isinstance(data.get("terminal_cause_kind"), str)
+            else None,
             session_ref=data.get("session_ref"),
             structured_output=data.get("structured_output"),
             schema_warnings=schema_warnings,

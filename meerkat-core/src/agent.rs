@@ -959,14 +959,6 @@ where
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
-    /// Run-scoped display-message stash for originating hard-failure errors.
-    ///
-    /// When an exhausted hard LLM-call failure (e.g., CallTimeout, NetworkTimeout)
-    /// routes through machine-owned FatalFailure, the originating `AgentError` is
-    /// stashed here so `build_result()` can reuse its human-readable message.
-    /// Terminal class/cause come from the machine-owned terminal cause snapshot,
-    /// not from this ephemeral diagnostic.
-    pub(crate) pending_fatal_diagnostic: Option<AgentError>,
     /// True once the current run has accepted `RunCompleted` hooks.
     pub(crate) run_completed_hooks_applied: bool,
     /// Comms intents that should be silently injected into the session

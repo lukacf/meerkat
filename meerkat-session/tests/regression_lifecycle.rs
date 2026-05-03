@@ -82,6 +82,7 @@ impl SessionAgent for MockAgent {
                     error_class: meerkat_core::event::AgentErrorClass::Internal,
                     error: "simulated failure".to_string(),
                     error_report: None,
+                    terminal_cause_kind: None,
                 })
                 .await;
             return Err(meerkat_core::error::AgentError::InternalError(
@@ -112,6 +113,7 @@ impl SessionAgent for MockAgent {
                 session_id: self.session_id.clone(),
                 result: "Hello from mock".to_string(),
                 usage: usage.clone(),
+                terminal_cause_kind: None,
             })
             .await;
 
@@ -121,6 +123,7 @@ impl SessionAgent for MockAgent {
             usage,
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: None,
@@ -209,6 +212,7 @@ impl SessionAgent for SnapshotAgent {
             usage: Usage::default(),
             turns: 0,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: None,
@@ -424,6 +428,7 @@ impl SessionAgent for RecordingTurnAgent {
             usage: Usage::default(),
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: None,
@@ -451,6 +456,7 @@ impl SessionAgent for RecordingTurnAgent {
             usage: Usage::default(),
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: None,

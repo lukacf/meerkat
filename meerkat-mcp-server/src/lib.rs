@@ -4460,6 +4460,7 @@ mod tests {
             usage: Default::default(),
             turns: 1,
             tool_calls: 0,
+            terminal_cause_kind: None,
             structured_output: None,
             schema_warnings: None,
             skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {

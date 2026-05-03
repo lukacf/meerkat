@@ -342,12 +342,17 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         run_id: RunId,
         reason: TurnFailureReason,
     ) -> Result<(), DslTransitionError> {
+        let terminal_outcome = self
+            .snapshot()
+            .terminal_outcome
+            .unwrap_or(TurnTerminalOutcome::Failed);
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunFailed {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
                 runtime_apply_failure_cause: None,
                 runtime_apply_failure_message: None,
+                terminal_outcome: mm_dsl::TurnTerminalOutcome::from(terminal_outcome),
                 terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
                 error: reason.message,
             },

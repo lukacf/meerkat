@@ -1775,6 +1775,10 @@ pub struct RunResult {
     pub turns: u32,
     /// Number of tool calls made
     pub tool_calls: u32,
+    /// Machine-owned terminal cause when success represents a typed terminal
+    /// condition, such as budget exhaustion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_cause_kind: Option<crate::turn_execution_authority::TurnTerminalCauseKind>,
     /// Structured output (if output_schema was provided and extraction succeeded).
     ///
     /// This is the parsed JSON value corresponding to `text` when schema

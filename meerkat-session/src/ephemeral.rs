@@ -2178,6 +2178,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 turns: 0,
                 tool_calls: 0,
                 usage: Usage::default(),
+                terminal_cause_kind: None,
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
@@ -2801,6 +2802,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
                 session_id,
                 result: String::new(),
                 usage: Usage::default(),
+                terminal_cause_kind: None,
             },
         );
         let _ = control.session_event_tx.send(completed);
@@ -2833,6 +2835,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
                 session_id,
                 result: String::new(),
                 usage: Usage::default(),
+                terminal_cause_kind: None,
             },
         );
         let _ = control.session_event_tx.send(completed);
@@ -3692,6 +3695,7 @@ mod runtime_turn_metadata_tests {
                 usage: Usage::default(),
                 turns: 1,
                 tool_calls: 0,
+                terminal_cause_kind: None,
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
@@ -4115,6 +4119,7 @@ mod admission_window_tests {
                 usage: Usage::default(),
                 turns: 1,
                 tool_calls: 0,
+                terminal_cause_kind: None,
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
@@ -4506,6 +4511,7 @@ mod inline_video_admission_tests {
                 usage: Usage::default(),
                 turns: 1,
                 tool_calls: 0,
+                terminal_cause_kind: None,
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,

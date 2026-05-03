@@ -121,6 +121,12 @@ fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureRe
     }
 }
 
+fn public_terminal_cause_kind(
+    cause_kind: Option<TurnTerminalCauseKind>,
+) -> Option<TurnTerminalCauseKind> {
+    cause_kind.filter(|cause_kind| cause_kind.is_specific_failure_cause())
+}
+
 fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
     if let Some(reason) = turn_input_failure_reason(input)
         && !reason.cause_kind.is_specific_failure_cause()
@@ -1132,9 +1138,6 @@ where
 
             if let Some(exceeded) = self.budget.observe().exceeded() {
                 emit_event!(budget_warning_event(exceeded));
-                if matches!(exceeded.dimension, BudgetDimension::Time) {
-                    self.pending_fatal_diagnostic = Some(exceeded.to_agent_error());
-                }
                 self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                     run_id: run_id.clone(),
                     exceeded,
@@ -1670,9 +1673,6 @@ where
                         Err(e) => {
                             if let Some(exceeded) = BudgetExceeded::from_agent_error(&e) {
                                 emit_event!(budget_warning_event(exceeded));
-                                if matches!(exceeded.dimension, BudgetDimension::Time) {
-                                    self.pending_fatal_diagnostic = Some(e);
-                                }
                                 self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                                     run_id: run_id.clone(),
                                     exceeded,
@@ -1680,10 +1680,16 @@ where
                                 return self.build_result(turn_count, tool_call_count).await;
                             }
                             if matches!(&e, AgentError::Llm { .. }) {
-                                // Exhausted hard LLM-call failure — route through
-                                // machine-owned FatalFailure and preserve diagnostics.
-                                let reason = TurnFailureReason::from_agent_error(&e);
-                                self.pending_fatal_diagnostic = Some(e);
+                                // Recoverable LLM failures reaching this point have
+                                // exhausted retry authority; non-recoverable LLM
+                                // failures keep their typed LLM cause.
+                                let reason = if crate::retry::LlmRetryFailure::from_agent_error(&e)
+                                    .is_some()
+                                {
+                                    TurnFailureReason::retry_exhausted(&e)
+                                } else {
+                                    TurnFailureReason::from_agent_error(&e)
+                                };
                                 self.apply_turn_input(TurnExecutionInput::FatalFailure {
                                     run_id: run_id.clone(),
                                     reason,
@@ -2213,6 +2219,7 @@ where
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
+                            terminal_cause_kind: None,
                             structured_output: self.extraction_state.take_result(),
                             schema_warnings: self.extraction_state.take_schema_warnings(),
                             skill_diagnostics: None,
@@ -2299,6 +2306,7 @@ where
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
+                            terminal_cause_kind: None,
                             structured_output: None,
                             schema_warnings: None,
                             skill_diagnostics: self.collect_skill_diagnostics().await,
@@ -2416,45 +2424,33 @@ where
         use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
 
         let outcome = self.turn_terminal_outcome()?;
-        match classify_terminal(&outcome) {
-            SurfaceResultClass::Success => {
-                self.pending_fatal_diagnostic = None;
-                Ok(RunResult {
-                    text: self.session.last_assistant_text().unwrap_or_default(),
-                    session_id: self.session.id().clone(),
-                    usage: self.session.total_usage(),
-                    turns,
-                    tool_calls,
-                    structured_output: None,
-                    schema_warnings: None,
-                    skill_diagnostics: self.collect_skill_diagnostics().await,
-                })
-            }
+        let cause_kind = self.turn_terminal_cause_kind()?;
+        match classify_terminal(&outcome, cause_kind) {
+            SurfaceResultClass::Success => Ok(RunResult {
+                text: self.session.last_assistant_text().unwrap_or_default(),
+                session_id: self.session.id().clone(),
+                usage: self.session.total_usage(),
+                turns,
+                tool_calls,
+                terminal_cause_kind: public_terminal_cause_kind(cause_kind),
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: self.collect_skill_diagnostics().await,
+            }),
             SurfaceResultClass::HardFailure => {
                 let cause_kind = match self.require_machine_terminal_failure_cause_kind(format!(
                     "hard-failure terminal outcome {outcome:?}"
                 )) {
                     Ok(cause_kind) => cause_kind,
-                    Err(error) => {
-                        self.pending_fatal_diagnostic = None;
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 };
-                let message = self
-                    .pending_fatal_diagnostic
-                    .take()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .unwrap_or_else(|| cause_kind.default_message(outcome).to_string());
                 Err(AgentError::TerminalFailure {
                     outcome,
                     cause_kind,
-                    message,
+                    message: cause_kind.default_message(outcome).to_string(),
                 })
             }
-            SurfaceResultClass::Cancelled => {
-                self.pending_fatal_diagnostic = None;
-                Err(AgentError::Cancelled)
-            }
+            SurfaceResultClass::Cancelled => Err(AgentError::Cancelled),
             SurfaceResultClass::MissingTerminal => Err(AgentError::InternalError(
                 "terminal result invariant violated: build_result() called without a \
                      machine terminal outcome"
@@ -5601,7 +5597,12 @@ mod tests {
             } => {
                 assert_eq!(outcome, crate::TurnTerminalOutcome::Failed);
                 assert_eq!(cause_kind, crate::TurnTerminalCauseKind::LlmFailure);
-                assert!(message.contains("display-only LLM failure"));
+                assert_eq!(
+                    message,
+                    crate::TurnTerminalCauseKind::LlmFailure
+                        .default_message(outcome)
+                        .to_string()
+                );
             }
             other => panic!("expected machine-owned terminal failure, got {other:?}"),
         }
@@ -5621,7 +5622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_fatal_diagnostic_is_display_only_after_machine_terminalization() {
+    async fn display_failure_text_does_not_classify_after_machine_terminalization() {
         use crate::TurnExecutionInput;
         use crate::turn_execution_authority::TurnFailureReason;
 
@@ -5633,20 +5634,13 @@ mod tests {
             })
             .expect("start conversation run should apply");
 
-        agent.pending_fatal_diagnostic = Some(AgentError::HookDenied {
-            hook_id: crate::hooks::HookId::new("display-only-diagnostic"),
-            point: crate::hooks::HookPoint::RunCompleted,
-            reason_code: crate::hooks::HookReasonCode::PolicyViolation,
-            message: "misleading hook-denied display text".to_string(),
-            payload: None,
-        });
         agent
             .apply_turn_input(TurnExecutionInput::FatalFailure {
                 run_id,
                 reason: TurnFailureReason::with_cause(
                     crate::TurnTerminalCauseKind::LlmFailure,
                     crate::event::AgentErrorClass::Llm,
-                    "machine-owned LLM terminal cause",
+                    "misleading hook-denied display text",
                 ),
             })
             .expect("fatal failure with typed machine cause should apply");
@@ -5666,11 +5660,14 @@ mod tests {
                 assert_eq!(
                     cause_kind,
                     crate::TurnTerminalCauseKind::LlmFailure,
-                    "pending_fatal_diagnostic must not classify terminal cause"
+                    "display text must not classify terminal cause"
                 );
-                assert!(
-                    message.contains("misleading hook-denied display text"),
-                    "pending_fatal_diagnostic should remain display text only: {message}"
+                assert_eq!(
+                    message,
+                    crate::TurnTerminalCauseKind::LlmFailure
+                        .default_message(outcome)
+                        .to_string(),
+                    "display text must not become terminal failure authority"
                 );
             }
             other => panic!("expected terminal failure, got {other:?}"),
@@ -5682,10 +5679,6 @@ mod tests {
         assert_eq!(
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::LlmFailure)
-        );
-        assert!(
-            agent.pending_fatal_diagnostic.is_none(),
-            "build_result should consume the display-only diagnostic"
         );
     }
 
@@ -5773,6 +5766,57 @@ mod tests {
             snapshot.terminal_cause_kind, None,
             "fixture must prove the machine snapshot has no terminal cause"
         );
+    }
+
+    #[tokio::test]
+    async fn budget_exhausted_missing_or_unknown_machine_cause_fails_closed() {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        use crate::handles::TurnStateHandle;
+
+        for forced_cause in [None, Some(crate::TurnTerminalCauseKind::Unknown)] {
+            let turn_handle = Arc::new(TestTurnStateHandle::new());
+            let mut agent = AgentBuilder::new()
+                .with_turn_state_handle(turn_handle.clone())
+                .with_runtime_execution_kind_for_test(
+                    crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+                )
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(NoTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+
+            start_test_conversation_turn(turn_handle.as_ref());
+            turn_handle
+                .budget_exhausted()
+                .expect("budget exhausted transition should apply");
+            turn_handle
+                .force_terminal_cause_kind_for_test(forced_cause)
+                .expect("force budget terminal cause fixture");
+
+            let err = agent
+                .build_result(0, 0)
+                .await
+                .expect_err("ambiguous budget exhaustion cause must fail closed");
+
+            match err {
+                AgentError::InternalError(message) => {
+                    assert!(
+                        message.contains("machine-owned terminal_cause_kind"),
+                        "unexpected budget cause invariant error: {message}"
+                    );
+                    assert!(
+                        message.contains("BudgetExhausted"),
+                        "invariant error should name the budget terminal outcome: {message}"
+                    );
+                }
+                AgentError::TerminalFailure { cause_kind, .. } => panic!(
+                    "core shell must not publish ambiguous budget terminal semantics, got {cause_kind:?}"
+                ),
+                other => panic!("expected fail-closed invariant error, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -6167,12 +6211,13 @@ mod tests {
         });
 
         // Must be Ok (Success via BudgetExhausted), not Err(TokenBudgetExceeded).
-        let result = agent.run_loop(None).await;
-        assert!(
-            result.is_ok(),
+        let result = agent.run_loop(None).await.expect(
             "token budget exhaustion must route through BudgetExhausted (Success), \
-             not escape as raw AgentError: {:?}",
-            result.err()
+             not escape as raw AgentError",
+        );
+        assert_eq!(
+            result.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
         assert_eq!(agent.state(), LoopState::Completed);
     }
@@ -6189,12 +6234,13 @@ mod tests {
             max_tool_calls: Some(0),
         });
 
-        let result = agent.run_loop(None).await;
-        assert!(
-            result.is_ok(),
+        let result = agent.run_loop(None).await.expect(
             "tool-call budget exhaustion must route through BudgetExhausted (Success), \
-             not escape as raw AgentError: {:?}",
-            result.err()
+             not escape as raw AgentError",
+        );
+        assert_eq!(
+            result.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
         assert_eq!(agent.state(), LoopState::Completed);
     }
@@ -6310,6 +6356,34 @@ mod tests {
 
         fn model(&self) -> &'static str {
             "mock-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_surfaces_typed_terminal_failure() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(RateLimitThenSucceedClient::new(Duration::ZERO));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy::no_retry())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("test".to_string().into())
+            .await
+            .expect_err("retry exhaustion must surface the machine terminal cause");
+
+        match err {
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                ..
+            } => {
+                assert_eq!(outcome, TurnTerminalOutcome::Failed);
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::RetryExhausted);
+            }
+            other => panic!("expected typed TerminalFailure, got {other:?}"),
         }
     }
 

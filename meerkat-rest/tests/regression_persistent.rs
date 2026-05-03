@@ -31,6 +31,7 @@ use tower::ServiceExt;
 /// overridden by the caller through the returned struct.
 fn build_state(
     store: Arc<dyn SessionStore>,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     store_path: &std::path::Path,
     project_root: &std::path::Path,
     config: &Config,
@@ -44,8 +45,11 @@ fn build_state(
     let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let persistence =
-        PersistenceBundle::new(store, None, Arc::new(meerkat_store::MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        store,
+        Some(runtime_store),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
     let runtime_adapter = persistence.runtime_adapter();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
     #[cfg(feature = "mob")]
@@ -127,6 +131,7 @@ fn build_state(
 /// Scaffold: temp dir, project root with `.rkat/`, config, shared store.
 struct Scaffold {
     store: Arc<dyn SessionStore>,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     store_path: std::path::PathBuf,
     project_root: std::path::PathBuf,
     config: Config,
@@ -144,8 +149,11 @@ impl Scaffold {
         std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
         let store_path = temp_dir.path().join("sessions");
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         Self {
             store,
+            runtime_store,
             store_path,
             project_root,
             config,
@@ -156,6 +164,7 @@ impl Scaffold {
     fn state(&self) -> AppState {
         build_state(
             self.store.clone(),
+            self.runtime_store.clone(),
             &self.store_path,
             &self.project_root,
             &self.config,
@@ -171,6 +180,7 @@ impl Scaffold {
     ) -> AppState {
         build_state(
             self.store.clone(),
+            self.runtime_store.clone(),
             &self.store_path,
             &self.project_root,
             &self.config,
@@ -232,8 +242,8 @@ async fn resume_session(state: AppState, session_id: &str, payload: Value) -> (S
     (status, json)
 }
 
-/// DELETE /sessions/{id} to archive, return status.
-async fn archive_session(state: AppState, session_id: &str) -> StatusCode {
+/// DELETE /sessions/{id} to archive, return status and response body.
+async fn archive_session(state: AppState, session_id: &str) -> (StatusCode, Value) {
     let app = router(state);
     let request = Request::builder()
         .method("DELETE")
@@ -244,7 +254,15 @@ async fn archive_session(state: AppState, session_id: &str) -> StatusCode {
         .await
         .expect("archive timed out")
         .expect("archive request");
-    response.status()
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read archive body")
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    (status, json)
 }
 
 // ---------------------------------------------------------------------------
@@ -468,8 +486,8 @@ async fn resume_after_archive_fails() {
     .await;
 
     // Archive the session.
-    let delete_status = archive_session(s.state(), &sid).await;
-    assert_eq!(delete_status, StatusCode::OK);
+    let (delete_status, delete_body) = archive_session(s.state(), &sid).await;
+    assert_eq!(delete_status, StatusCode::OK, "{delete_body}");
 
     // Reconstruct and attempt to resume the archived session.
     let state2 = s.state();

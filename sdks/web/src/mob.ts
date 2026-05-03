@@ -85,6 +85,73 @@ function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireOnlyKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+  message: string,
+): void {
+  const allowed = new Set(allowedKeys);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new Error(message);
+    }
+  }
+}
+
+function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid mob spawn response: malformed result entry');
+  }
+  if ('ok' in raw) {
+    throw new Error('Invalid mob spawn response: legacy ok result row');
+  }
+  requireOnlyKeys(raw, ['status', 'result'], 'Invalid mob spawn response: malformed result entry');
+
+  const status = raw.status;
+  if (status !== 'spawned' && status !== 'failed') {
+    throw new Error('Invalid mob spawn response: invalid result status');
+  }
+  if (!isRecord(raw.result)) {
+    throw new Error('Invalid mob spawn response: missing result payload');
+  }
+
+  if (status === 'failed') {
+    requireOnlyKeys(
+      raw.result,
+      ['message'],
+      'Invalid mob spawn response: malformed failed result payload',
+    );
+    const message = raw.result.message;
+    if (typeof message !== 'string' || message.length === 0) {
+      throw new Error('Invalid mob spawn response: failed result missing message');
+    }
+    throw new Error(`Mob spawn failed: ${message}`);
+  }
+
+  requireOnlyKeys(
+    raw.result,
+    ['agent_identity', 'member_ref'],
+    'Invalid mob spawn response: malformed spawned result payload',
+  );
+  const agentIdentity = raw.result.agent_identity;
+  const memberRef = raw.result.member_ref;
+  if (typeof agentIdentity !== 'string' || agentIdentity.length === 0) {
+    throw new Error('Invalid mob spawn response: spawned result missing agent_identity');
+  }
+  if (typeof memberRef !== 'string' || memberRef.length === 0) {
+    throw new Error('Invalid mob spawn response: spawned result missing member_ref');
+  }
+  return {
+    mob_id: mobId,
+    agent_identity: agentIdentity,
+    member_ref: memberRef,
+  };
+}
+
 function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
   if (!raw || typeof raw !== 'object') {
     return raw as MemberEventItem;
@@ -203,22 +270,11 @@ export class Mob {
       this.mobId,
       JSON.stringify(specs.map(spawnSpecPayload)),
     );
-    return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry) => {
-      if ('ok' in entry) {
-        throw new Error('Invalid mob spawn response: legacy ok result row');
-      }
-      if (typeof entry.agent_identity !== 'string' || entry.agent_identity.length === 0) {
-        throw new Error('Invalid mob spawn response: missing agent_identity');
-      }
-      if (typeof entry.member_ref !== 'string' || entry.member_ref.length === 0) {
-        throw new Error('Invalid mob spawn response: missing member_ref');
-      }
-      return {
-        mob_id: typeof entry.mob_id === 'string' ? entry.mob_id : this.mobId,
-        agent_identity: entry.agent_identity,
-        member_ref: entry.member_ref,
-      };
-    });
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error('Invalid mob spawn response: results must be a list');
+    }
+    return parsed.map((entry) => normalizeSpawnManyEntry(entry, this.mobId));
   }
 
   /** Retire an agent from the mob. */

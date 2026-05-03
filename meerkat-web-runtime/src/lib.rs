@@ -501,23 +501,15 @@ where
     with_runtime_state(|state| f(state.mob_state.clone()))
 }
 
-fn spawn_result_payload(mob_id: &MobId, result: &meerkat_mob::SpawnResult) -> serde_json::Value {
-    let identity_str = result.agent_identity.to_string();
-    serde_json::json!({
-        "agent_identity": result.agent_identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
-    })
-}
-
 fn spawn_member_result_payload(
     mob_id: &MobId,
     result: &meerkat_mob::SpawnResult,
-) -> serde_json::Value {
-    let mut payload = spawn_result_payload(mob_id, result);
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("status".to_string(), serde_json::json!("ok"));
-    }
-    payload
+) -> meerkat_contracts::MobSpawnManyResultEntry {
+    let identity_str = result.agent_identity.to_string();
+    meerkat_contracts::MobSpawnManyResultEntry::spawned(
+        identity_str.clone(),
+        meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+    )
 }
 
 fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> serde_json::Value {
@@ -1670,7 +1662,7 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
 /// `specs_json`: JSON array of `{ "profile": "...", "agent_identity": "...", "initial_message"?: "...",
 ///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
 ///
-/// Returns JSON array of results per spec.
+/// Returns JSON array of typed result entries per spec.
 #[wasm_bindgen]
 pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1696,14 +1688,11 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .await
         .map_err(err_mob)?;
 
-    let result_json: Vec<serde_json::Value> = results
+    let result_json: Vec<meerkat_contracts::MobSpawnManyResultEntry> = results
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => serde_json::json!({
-                "status": "error",
-                "error": e.to_string(),
-            }),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.to_string()),
         })
         .collect();
 
@@ -2490,7 +2479,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{build_service_infrastructure, populate_realm_from_api_keys};
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{helper_result_payload, spawn_member_result_payload, spawn_result_payload};
+    use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat::SessionServiceControlExt;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2825,25 +2814,65 @@ capabilities = [{capability_values}]
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_member_result_payload_returns_identity_native_fields() {
+    fn spawn_member_result_payload_returns_typed_spawn_many_entry() {
         let identity = meerkat_mob::AgentIdentity::from("test-member");
         let runtime_id = meerkat_mob::AgentRuntimeId::initial(identity.clone());
         let fence = meerkat_mob::FenceToken::new(1);
         let result = meerkat_mob::SpawnResult::new(identity, runtime_id, fence);
         let mob_id = MobId::from("mob-test");
 
-        let payload = spawn_result_payload(&mob_id, &result);
-        assert_eq!(payload["agent_identity"], "test-member");
+        let entry = spawn_member_result_payload(&mob_id, &result);
+        let payload = serde_json::to_value(&entry).expect("serialize typed spawn_many result");
+        assert_eq!(payload["status"], "spawned");
+        assert_eq!(payload["result"]["agent_identity"], "test-member");
+        assert!(
+            payload.get("agent_identity").is_none(),
+            "spawn_many row must not retain flat agent_identity carrier"
+        );
+        assert!(
+            payload.get("member_ref").is_none(),
+            "spawn_many row must not retain flat member_ref carrier"
+        );
+        assert!(
+            payload.get("ok").is_none(),
+            "spawn_many row must not retain legacy ok carrier"
+        );
+        assert!(
+            payload.get("error").is_none(),
+            "spawn_many row must not retain string-error carrier"
+        );
         assert!(
             payload.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak to app-facing payloads"
         );
-        let member_ref = payload["member_ref"].as_str().expect("member_ref");
+        let member_ref = payload["result"]["member_ref"]
+            .as_str()
+            .expect("member_ref");
         assert!(!member_ref.is_empty(), "member_ref must be populated");
 
-        let spawn_payload = spawn_member_result_payload(&mob_id, &result);
-        assert_eq!(spawn_payload["status"], "ok");
-        assert_eq!(spawn_payload["agent_identity"], "test-member");
+        let round_trip: meerkat_contracts::MobSpawnManyResultEntry =
+            serde_json::from_value(payload).expect("typed spawn_many entry must deserialize");
+        assert_eq!(round_trip, entry);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn spawn_member_failure_payload_uses_typed_result_message() {
+        let entry = meerkat_contracts::MobSpawnManyResultEntry::failed("profile missing");
+        let payload = serde_json::to_value(&entry).expect("serialize failed spawn_many result");
+
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["result"]["message"], "profile missing");
+        assert!(
+            payload.get("error").is_none(),
+            "failed spawn_many row must not retain string-error carrier"
+        );
+
+        let round_trip: meerkat_contracts::MobSpawnManyResultEntry =
+            serde_json::from_value(payload)
+                .expect("typed failed spawn_many entry must deserialize");
+        assert_eq!(round_trip, entry);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

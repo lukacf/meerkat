@@ -451,9 +451,11 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       calls.push(["spawn", mobId, JSON.parse(specsJson)]);
       return JSON.stringify([
         {
-          mob_id: "mob-web-parity",
-          agent_identity: "worker-1",
-          member_ref: "ref-worker-1",
+          status: "spawned",
+          result: {
+            agent_identity: "worker-1",
+            member_ref: "ref-worker-1",
+          },
         },
       ]);
     },

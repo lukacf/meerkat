@@ -6,6 +6,7 @@ import type {
   SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
+  SubscriptionLaggedEvent,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -17,6 +18,41 @@ type AppendSystemContextFn = (
   handle: number,
   request_json: string,
 ) => Promise<string>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeSessionLaggedEvent(record: Record<string, unknown>): SubscriptionLaggedEvent {
+  const skipped = record.skipped;
+  if (typeof skipped !== 'number' || !Number.isFinite(skipped)) {
+    throw new Error('Invalid session event: lagged event missing skipped count');
+  }
+  return {
+    type: 'lagged',
+    skipped,
+  };
+}
+
+function normalizeSessionEvent(raw: unknown): SessionEvent {
+  if (!isRecord(raw)) {
+    throw new Error('Invalid session event: expected object');
+  }
+  if (raw.type === 'lagged') {
+    return normalizeSessionLaggedEvent(raw);
+  }
+  if (typeof raw.type !== 'string' || raw.type.length === 0) {
+    throw new Error('Invalid session event: missing type');
+  }
+  return raw as unknown as SessionEvent;
+}
+
+function normalizeSessionEvents(raw: unknown): SessionEvent[] {
+  if (!Array.isArray(raw)) {
+    throw new Error('Invalid session poll response: expected event array');
+  }
+  return raw.map((item) => normalizeSessionEvent(item));
+}
 
 /** A direct (non-mob) agent session. */
 export class Session {
@@ -89,7 +125,7 @@ export class Session {
     if (this.destroyed) return [];
     const json = this.pollFn(this.handle);
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? (parsed as SessionEvent[]) : [];
+    return normalizeSessionEvents(parsed);
   }
 
   /**
@@ -103,7 +139,7 @@ export class Session {
     if (this.destroyed) throw new Error('Session has been destroyed');
     return new EventSubscription<SessionEvent>(
       () => (this.destroyed ? '[]' : this.pollFn(this.handle)),
-      (raw) => (Array.isArray(raw) ? (raw as SessionEvent[]) : []),
+      (raw) => raw.map((item) => normalizeSessionEvent(item)),
     );
   }
 

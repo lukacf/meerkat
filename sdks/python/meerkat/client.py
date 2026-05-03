@@ -45,16 +45,10 @@ from .generated.types import (
     RealtimeOpenInfo,
     RealtimeOpenRequest,
     RealtimeStatusResult,
-    RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusResult,
-    RuntimeResetResult,
-    RuntimeRetireResult,
-    RuntimeStateResult,
     WireBudgetSplitPolicy,
     WireConnectionRef,
     WireContentInput,
-    WireInputState,
-    WireInputStateHistoryEntry,
     WireMemberLaunchMode,
     WireMobBackendKind,
     WireMobProfile,
@@ -2194,55 +2188,32 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
-    async def runtime_status(self, session_id: str) -> RuntimeStateResult:
-        raw = await self._request("runtime/session_status", {"session_id": session_id})
-        result = RuntimeStateResult()
-        for key, value in raw.items():
-            setattr(result, key, value)
-        return result
+    @staticmethod
+    def _retired_runtime_session_control_error() -> MeerkatError:
+        return MeerkatError(
+            "METHOD_NOT_FOUND",
+            "Retired runtime session control methods are no longer supported by the public RPC surface.",
+        )
+
+    async def runtime_status(self, session_id: str) -> None:
+        raise self._retired_runtime_session_control_error()
 
     async def runtime_submit(
         self, session_id: str, input: dict[str, Any] | ContentInput
-    ) -> RuntimeAcceptResult:
-        raw = await self._request(
-            "runtime/session_submit",
-            {"session_id": session_id, "input": input},
-        )
-        return RuntimeAcceptResult(**raw)
+    ) -> None:
+        raise self._retired_runtime_session_control_error()
 
-    async def runtime_submission(self, session_id: str, input_id: str) -> WireInputState:
-        raw = await self._request(
-            "runtime/session_submission",
-            {"session_id": session_id, "input_id": input_id},
-        )
-        return self._parse_wire_input_state(raw)
+    async def runtime_submission(self, session_id: str, input_id: str) -> None:
+        raise self._retired_runtime_session_control_error()
 
-    async def runtime_submissions(self, session_id: str) -> dict[str, list[WireInputState]]:
-        raw = await self._request("runtime/session_submissions", {"session_id": session_id})
-        inputs = raw.get("inputs", [])
-        if not isinstance(inputs, list):
-            raise MeerkatError("INVALID_RESPONSE", "Invalid runtime/session_submissions response")
-        return {
-            "inputs": [
-                self._parse_wire_input_state(item)
-                for item in inputs
-                if isinstance(item, dict)
-            ]
-        }
+    async def runtime_submissions(self, session_id: str) -> None:
+        raise self._retired_runtime_session_control_error()
 
-    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
-        raw = await self._request("runtime/session_retire", {"session_id": session_id})
-        result = RuntimeRetireResult()
-        for key, value in raw.items():
-            setattr(result, key, value)
-        return result
+    async def runtime_retire(self, session_id: str) -> None:
+        raise self._retired_runtime_session_control_error()
 
-    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
-        raw = await self._request("runtime/session_reset", {"session_id": session_id})
-        result = RuntimeResetResult()
-        for key, value in raw.items():
-            setattr(result, key, value)
-        return result
+    async def runtime_reset(self, session_id: str) -> None:
+        raise self._retired_runtime_session_control_error()
 
     async def runtime_realtime_attachment_status(
         self, session_id: str
@@ -2289,33 +2260,6 @@ class MeerkatClient:
             {"mob_id": mob_id, "filter": filter},
         )
 
-    async def runtime_status(self, session_id: str) -> RuntimeStateResult:
-        """Return the runtime state for a session via `runtime/session_status`."""
-        raw = await self._request("runtime/session_status", {"session_id": session_id})
-        return RuntimeStateResult(**raw)
-
-    async def runtime_submit(
-        self, session_id: str, input: dict[str, Any]
-    ) -> RuntimeAcceptResult:
-        """Submit a runtime input via `runtime/session_submit`."""
-        raw = await self._request(
-            "runtime/session_submit",
-            {"session_id": session_id, "input": input},
-        )
-        return RuntimeAcceptResult(**raw)
-
-    async def runtime_submission(
-        self, session_id: str, input_id: str
-    ) -> WireInputState | None:
-        """Read one runtime input state via `runtime/session_submission`."""
-        raw = await self._request(
-            "runtime/session_submission",
-            {"session_id": session_id, "input_id": input_id},
-        )
-        if raw is None:
-            return None
-        return self._parse_wire_input_state(raw)
-
     async def realtime_open_info(
         self, request: RealtimeOpenRequest | dict[str, Any]
     ) -> RealtimeOpenInfo:
@@ -2344,31 +2288,6 @@ class MeerkatClient:
         self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
         return await response_future
-
-    @staticmethod
-    def _parse_wire_input_state(raw: dict[str, Any]) -> WireInputState:
-        history_raw = raw.get("history", [])
-        history: list[WireInputStateHistoryEntry] = []
-        if isinstance(history_raw, list):
-            for entry in history_raw:
-                if not isinstance(entry, dict):
-                    continue
-                history.append(
-                    WireInputStateHistoryEntry(
-                        from_=str(entry.get("from", "")),
-                        reason=(
-                            str(entry["reason"])
-                            if entry.get("reason") is not None
-                            else None
-                        ),
-                        timestamp=str(entry.get("timestamp", "")),
-                        to=str(entry.get("to", "")),
-                    )
-                )
-
-        payload = dict(raw)
-        payload["history"] = history
-        return WireInputState(**payload)
 
     # -- Binary resolution (unchanged from original) -----------------------
 

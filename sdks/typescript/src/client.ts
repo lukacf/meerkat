@@ -48,13 +48,8 @@ import {
   type RealtimeOpenInfo,
   type RealtimeOpenRequest,
   type RealtimeStatusResult,
-  type RuntimeAcceptResult,
   type MobTurnStartParams,
   type RuntimeRealtimeAttachmentStatusResult,
-  type RuntimeResetResult,
-  type RuntimeRetireResult,
-  type RuntimeStateResult,
-  type WireInputState,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -1913,45 +1908,41 @@ export class MeerkatClient {
     await this.request("session/archive", { session_id: sessionId });
   }
 
-  /**
-   * Runtime-control surface wrappers.
-   *
-   * Thin pass-throughs to the canonical runtime RPC methods. Typed
-   * request/response shapes live on the Rust wire contracts
-   * (`meerkat-contracts/src/wire/runtime.rs`); callers that need typed
-   * parameter shapes consume the generated types from
-   * `sdks/typescript/src/generated/`. Exposed here so the
-   * rpc-surface-alignment + sdk-wrapper-freshness gates see the method
-   * names in the TS source tree.
-   * @internal
-   */
-  async _runtimeStatus(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_status", params);
+  private static retiredRuntimeSessionControlError(): MeerkatError {
+    return new MeerkatError(
+      "METHOD_NOT_FOUND",
+      "Retired runtime session control methods are no longer supported by the public RPC surface.",
+    );
   }
 
   /** @internal */
-  async _runtimeSubmit(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_submit", params);
+  async _runtimeStatus(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
   /** @internal */
-  async _runtimeSubmission(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_submission", params);
+  async _runtimeSubmit(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
   /** @internal */
-  async _runtimeSubmissions(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_submissions", params);
+  async _runtimeSubmission(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
   /** @internal */
-  async _runtimeRetire(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_retire", params);
+  async _runtimeSubmissions(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
   /** @internal */
-  async _runtimeReset(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("runtime/session_reset", params);
+  async _runtimeRetire(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
+  }
+
+  /** @internal */
+  async _runtimeReset(_params: Record<string, unknown>): Promise<never> {
+    throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
   /** @internal */

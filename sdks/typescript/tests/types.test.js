@@ -1341,6 +1341,38 @@ describe("Auth wrappers", () => {
 });
 
 describe("Parity wrappers", () => {
+  it("retired runtime session wrappers fail before transport", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      throw new Error("retired wrapper reached transport");
+    };
+
+    for (const methodName of [
+      "_runtimeStatus",
+      "_runtimeSubmit",
+      "_runtimeSubmission",
+      "_runtimeSubmissions",
+      "_runtimeRetire",
+      "_runtimeReset",
+    ]) {
+      await assert.rejects(
+        async () => {
+          await client[methodName]({ session_id: "session-1" });
+        },
+        (err) => {
+          assert.ok(err instanceof MeerkatError);
+          assert.equal(err.code, "METHOD_NOT_FOUND");
+          assert.match(err.message, /Retired runtime session control methods/);
+          return true;
+        },
+      );
+    }
+
+    assert.deepEqual(calls, []);
+  });
+
   it("adds wrappers for session external events and model catalog", async () => {
     const client = new MeerkatClient();
     const calls = [];

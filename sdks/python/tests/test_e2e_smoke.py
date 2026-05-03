@@ -19,7 +19,6 @@ from .live_smoke_support import (
     has_gemini_api_key,
     has_openai_api_key,
     live_client,
-    make_prompt_input,
     openai_model,
     raw_request,
     resolve_rkat_rpc_path,
@@ -307,14 +306,14 @@ if include_scenario(38):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 39: Persistent reconnect + session submit
+# Scenario 39: Persistent reconnect + turn/start
 # ---------------------------------------------------------------------------
 
 
 if include_scenario(39):
     @pytest.mark.asyncio
     @requires_live_llm
-    async def test_smoke_scenario_39_persistent_reconnect_and_session_submit(tmp_path: Path):
+    async def test_smoke_scenario_39_persistent_reconnect_and_turn_start(tmp_path: Path):
         realm = persistent_realm_kwargs(tmp_path)
         marker = f"python-runtime-{uuid4().hex[:8]}"
 
@@ -331,40 +330,17 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await client_b.runtime_status(session_id)
-            assert runtime_state.state in {
-                "attached",
-                "idle",
-                "running",
-                "initializing",
-            }
-
-            accepted = await client_b.runtime_submit(
+            result = await client_b._start_turn(  # noqa: SLF001
                 session_id,
-                make_prompt_input(
-                    f"Reply with PY-RUNTIME-39, PY-RUNTIME-OK, and the marker {marker}.",
-                    turn_metadata={
-                        "additional_instructions": [
-                            "Keep the response brief and include only the requested markers.",
-                        ],
-                    },
-                ),
+                f"Reply with PY-RUNTIME-39, PY-RUNTIME-OK, and the marker {marker}.",
+                additional_instructions=[
+                    "Keep the response brief and include only the requested markers.",
+                ],
             )
-            assert accepted.outcome_type == "accepted"
-            assert accepted.input_id is not None
-            input_id = accepted.input_id
-
-            input_state = await wait_for(
-                "runtime input to be consumed",
-                lambda: client_b.runtime_submission(session_id, input_id),
-                lambda state: state is not None and state.current_state == "consumed",
-                timeout_secs=120.0,
-            )
-            assert input_state is not None
-            assert input_state.current_state == "consumed"
+            assert result.session_id == session_id
 
             after_runtime = await wait_for(
-                "runtime-authored assistant reply",
+                "turn/start-authored assistant reply",
                 lambda: client_b.read_session(session_id),
                 lambda state: "py-runtime-39" in (state.last_assistant_text or "").lower()
                 and "py-runtime-ok" in (state.last_assistant_text or "").lower(),

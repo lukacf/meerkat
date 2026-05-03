@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from meerkat.client import MeerkatClient
+from meerkat.errors import MeerkatError
 from meerkat.mob import Mob
 from meerkat.session import DeferredSession, Session
 
@@ -40,13 +41,7 @@ CANONICAL_APP_RPC_METHODS = {
     "realtime/open_info",
     "realtime/status",
     "realtime/capabilities",
-    "runtime/session_status",
     "session/realtime_attachment_status",
-    "runtime/session_submission",
-    "runtime/session_submissions",
-    "runtime/session_submit",
-    "runtime/session_retire",
-    "runtime/session_reset",
     "mob/create",
     "mob/list",
     "mob/status",
@@ -110,13 +105,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "realtime/open_info": (MeerkatClient, "realtime_open_info"),
     "realtime/status": (MeerkatClient, "realtime_status"),
     "realtime/capabilities": (MeerkatClient, "realtime_capabilities"),
-    "runtime/session_status": (MeerkatClient, "runtime_status"),
     "session/realtime_attachment_status": (MeerkatClient, "runtime_realtime_attachment_status"),
-    "runtime/session_submission": (MeerkatClient, "runtime_submission"),
-    "runtime/session_submissions": (MeerkatClient, "runtime_submissions"),
-    "runtime/session_submit": (MeerkatClient, "runtime_submit"),
-    "runtime/session_retire": (MeerkatClient, "runtime_retire"),
-    "runtime/session_reset": (MeerkatClient, "runtime_reset"),
     "mob/create": (MeerkatClient, "create_mob"),
     "mob/list": (MeerkatClient, "list_mobs"),
     "mob/status": (Mob, "status"),
@@ -186,6 +175,30 @@ def test_parity_exclusion_set_is_small_and_justified():
         "mob/stream_open",
         "mob/stream_close",
     }
+
+
+@pytest.mark.asyncio
+async def test_python_retired_runtime_session_wrappers_fail_before_transport():
+    client = MeerkatClient()
+    client._process = MagicMock()
+    client._dispatcher = MagicMock()
+    client._request = AsyncMock(side_effect=AssertionError("retired wrapper reached transport"))
+
+    calls = [
+        lambda: client.runtime_status("session-1"),
+        lambda: client.runtime_submit("session-1", {"input_type": "prompt"}),
+        lambda: client.runtime_submission("session-1", "input-1"),
+        lambda: client.runtime_submissions("session-1"),
+        lambda: client.runtime_retire("session-1"),
+        lambda: client.runtime_reset("session-1"),
+    ]
+    for call in calls:
+        with pytest.raises(MeerkatError) as exc_info:
+            await call()
+        assert exc_info.value.code == "METHOD_NOT_FOUND"
+        assert "Retired runtime session control methods" in exc_info.value.message
+
+    client._request.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -497,6 +510,12 @@ def test_sdk_never_uses_retired_public_method_strings():
 
     retired_methods = [
         '"auth/profile/test"',
+        '"runtime/session_status"',
+        '"runtime/session_submission"',
+        '"runtime/session_submissions"',
+        '"runtime/session_submit"',
+        '"runtime/session_retire"',
+        '"runtime/session_reset"',
         '"session/realtime_attachment_statuses"',
         '"skills/inspect"',
     ]
@@ -507,6 +526,8 @@ def test_sdk_never_uses_retired_public_method_strings():
     for root in sdk_roots:
         for path in root.rglob("*"):
             if path.suffix not in {".py", ".ts"}:
+                continue
+            if "generated" in path.parts:
                 continue
             text = path.read_text()
             for needle in retired_methods:

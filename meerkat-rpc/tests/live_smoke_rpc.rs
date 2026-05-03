@@ -534,7 +534,7 @@ async fn e2e_scenario_16_kitchen_sink() {
         resp["result"]["contract_version"]
     );
 
-    // --- 2. Create a deferred session and drive it through runtime/* before any turn/start ---
+    // --- 2. Create a deferred session and drive it through turn/start ---
     let id = next_id();
     send_request(
         &mut writer,
@@ -559,41 +559,10 @@ async fn e2e_scenario_16_kitchen_sink() {
     send_request(
         &mut writer,
         &serde_json::json!({
-            "jsonrpc":"2.0","id":id,"method":"runtime/session_status",
-            "params":{"session_id": deferred_session}
-        }),
-    )
-    .await;
-    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(
-        resp["error"].is_null(),
-        "runtime/session_status failed for deferred session: {resp}"
-    );
-    // RPC surface eagerly attaches an executor for all sessions (including
-    // deferred ones), so the runtime state is Attached, not Idle.
-    assert_eq!(resp["result"]["state"].as_str(), Some("attached"));
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc":"2.0","id":id,"method":"runtime/session_submit",
+            "jsonrpc":"2.0","id":id,"method":"turn/start",
             "params":{
                 "session_id": deferred_session,
-                "input": {
-                    "input_type": "prompt",
-                    "header": {
-                        "id": meerkat_core::InputId::new(),
-                        "timestamp": "2026-03-12T00:00:00Z",
-                        "source": { "type": "operator" },
-                        "durability": "durable",
-                        "visibility": {
-                            "transcript_eligible": true,
-                            "operator_eligible": true
-                        }
-                    },
-                    "text": "Reply with RPC_RUNTIME_DEFERRED_16 and confirm the saved marker."
-                }
+                "prompt": "Reply with RPC_RUNTIME_DEFERRED_16 and confirm the saved marker."
             }
         }),
     )
@@ -601,36 +570,7 @@ async fn e2e_scenario_16_kitchen_sink() {
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(
         resp["error"].is_null(),
-        "runtime/session_submit failed for deferred session: {resp}"
-    );
-    assert_eq!(resp["result"]["outcome_type"].as_str(), Some("accepted"));
-    let deferred_input_id = resp["result"]["input_id"].as_str().unwrap().to_string();
-
-    let mut consumed = false;
-    for _ in 0..120 {
-        let id = next_id();
-        send_request(
-            &mut writer,
-            &serde_json::json!({
-                "jsonrpc":"2.0","id":id,"method":"runtime/session_submission",
-                "params":{"session_id": deferred_session, "input_id": deferred_input_id}
-            }),
-        )
-        .await;
-        let resp = timeout(t, read_response(&mut reader)).await.unwrap();
-        assert!(
-            resp["error"].is_null(),
-            "runtime/session_submission failed for deferred session: {resp}"
-        );
-        if resp["result"]["current_state"].as_str() == Some("consumed") {
-            consumed = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    assert!(
-        consumed,
-        "runtime/session_submit should fully consume the deferred-session input before continuing"
+        "turn/start failed for deferred session: {resp}"
     );
 
     let mut deferred_runtime_text = String::new();
@@ -663,7 +603,7 @@ async fn e2e_scenario_16_kitchen_sink() {
     assert!(
         deferred_runtime_text.contains("rpc_runtime_deferred_16")
             || deferred_runtime_text.contains("rpc runtime deferred 16"),
-        "deferred runtime turn should materialize an assistant reply via raw runtime/* methods, got: {deferred_runtime_text}"
+        "deferred turn/start should materialize an assistant reply, got: {deferred_runtime_text}"
     );
 
     // --- 3. Create session A: shell + builtins enabled ---

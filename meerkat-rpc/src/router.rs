@@ -1331,84 +1331,6 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_status" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_status(id, params, self.runtime_adapter.as_ref())
-                    .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_submit" => {
-                handlers::runtime::handle_runtime_submit(
-                    id,
-                    params,
-                    &self.runtime,
-                    &self.runtime_adapter,
-                )
-                .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_submission" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_submission(
-                    id,
-                    params,
-                    self.runtime_adapter.as_ref(),
-                )
-                .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_submissions" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_submissions(
-                    id,
-                    params,
-                    self.runtime_adapter.as_ref(),
-                )
-                .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_retire" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_retire(id, params, self.runtime_adapter.as_ref())
-                    .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "runtime/session_reset" => {
-                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
-                    Ok(session_id) => session_id,
-                    Err(response) => return Some(response),
-                };
-                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
-                    return Some(response.with_id(id));
-                }
-                handlers::runtime::handle_runtime_reset(id, params, self.runtime_adapter.as_ref())
-                    .await
-            }
-            #[cfg(not(feature = "mini-surface"))]
             "realtime/open_info" => {
                 let maybe_session_id = match self
                     .resolve_realtime_target_session_id(id.clone(), params)
@@ -2486,13 +2408,11 @@ mod tests {
     use meerkat::AgentFactory;
     use meerkat::surface::{RequestContext, SurfaceRequestExecutor, noop_request_action};
     use meerkat_client::{LlmClient, LlmError};
-    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
-    use meerkat_core::types::ContentInput;
     use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, Message, StopReason};
     use serde::Serialize;
 
@@ -5705,55 +5625,83 @@ mod tests {
         assert_eq!(error_code(&resp), error::METHOD_NOT_FOUND);
     }
 
-    /// Dispatch contract (dogma rule 1, 17): METHOD_NOT_FOUND is reserved for
-    /// "the server doesn't know this method name." Methods whose handlers may
-    /// reject for runtime-state reasons must still route to their handler so
-    /// the handler can return a typed application error — they must never
-    /// surface as METHOD_NOT_FOUND from the dispatch table.
-    ///
-    /// Regression test for the bug where state-gated dispatch arms returned
-    /// METHOD_NOT_FOUND, decoupling method existence from the dispatch table
-    /// and creating drift against the advertised method catalog.
     #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
-    async fn previously_state_gated_methods_dispatch_to_handlers() {
+    async fn retired_runtime_session_control_methods_fail_closed_and_leave_state_unchanged() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
-        let unknown_session_id = meerkat_core::SessionId::new().to_string();
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred retired-route fixture",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .expect("create response");
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            SessionId::parse(&session_id).expect("created session id should parse");
+        let before_registered = router
+            .runtime_adapter()
+            .contains_session(&parsed_session_id)
+            .await;
+        let before_read = router
+            .dispatch(make_request(
+                "session/read",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .expect("read response");
+        let before_session = result_value(&before_read).clone();
 
-        // Each of these dispatch arms used to short-circuit with
-        // METHOD_NOT_FOUND when `runtime_mode != V9Compliant`. The handler
-        // may reject for state reasons (e.g. unknown session), but the
-        // dispatcher must always recognize the method name.
-        let cases = [
+        let input_id = meerkat_core::InputId::new().to_string();
+        let cases = vec![
             (
                 "runtime/session_status",
-                serde_json::json!({ "session_id": unknown_session_id }),
+                serde_json::json!({ "session_id": &session_id }),
             ),
             (
                 "runtime/session_submit",
-                serde_json::json!({ "session_id": unknown_session_id }),
-            ),
-            (
-                "session/realtime_attachment_status",
-                serde_json::json!({ "session_id": unknown_session_id }),
-            ),
-            (
-                "realtime/open_info",
                 serde_json::json!({
-                    "target": { "type": "session_target", "session_id": unknown_session_id }
+                    "session_id": &session_id,
+                    "input": {
+                        "input_type": "prompt",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": { "type": "operator" },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "text": "must not enter runtime queue"
+                    }
                 }),
             ),
             (
-                "realtime/capabilities",
+                "runtime/session_submission",
                 serde_json::json!({
-                    "target": { "type": "session_target", "session_id": unknown_session_id }
+                    "session_id": &session_id,
+                    "input_id": input_id,
                 }),
             ),
             (
-                "realtime/status",
-                serde_json::json!({
-                    "target": { "type": "session_target", "session_id": unknown_session_id }
-                }),
+                "runtime/session_submissions",
+                serde_json::json!({ "session_id": &session_id }),
+            ),
+            (
+                "runtime/session_retire",
+                serde_json::json!({ "session_id": &session_id }),
+            ),
+            (
+                "runtime/session_reset",
+                serde_json::json!({ "session_id": &session_id }),
             ),
         ];
 
@@ -5762,12 +5710,38 @@ mod tests {
                 .dispatch(make_request(method, params))
                 .await
                 .expect("response");
-            assert_ne!(
+            assert_eq!(
                 error_code(&resp),
                 error::METHOD_NOT_FOUND,
-                "{method} must dispatch to its handler — METHOD_NOT_FOUND is reserved for unknown method names"
+                "{method} must fail closed after retirement"
             );
         }
+
+        let after_registered = router
+            .runtime_adapter()
+            .contains_session(&parsed_session_id)
+            .await;
+        assert_eq!(
+            after_registered, before_registered,
+            "retired runtime/session_* methods must not register or unregister runtime state"
+        );
+        let after_read = router
+            .dispatch(make_request(
+                "session/read",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .expect("read response");
+        let after_session = result_value(&after_read);
+        assert_eq!(after_session["session_id"], before_session["session_id"]);
+        assert_eq!(
+            after_session["message_count"],
+            before_session["message_count"]
+        );
+        assert_eq!(
+            after_session["last_assistant_text"],
+            before_session["last_assistant_text"]
+        );
     }
 
     /// 3. `session/create` happy path - creates session, runs first turn, returns result.
@@ -5925,232 +5899,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_session_runtime_endpoints_register_pending_session() {
-        let (router, _notif_rx) = test_router_with_v9_runtime().await;
-        let create_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({
-                    "prompt": "deferred",
-                    "initial_turn": "deferred"
-                }),
-            ))
-            .await
-            .unwrap();
-        let created = result_value(&create_resp);
-        let session_id = created["session_id"]
-            .as_str()
-            .expect("session_id")
-            .to_string();
-
-        let state_resp = router
-            .dispatch(make_request(
-                "runtime/session_status",
-                serde_json::json!({ "session_id": session_id }),
-            ))
-            .await
-            .unwrap();
-        let state = result_value(&state_resp);
-        // RPC surface eagerly attaches an executor for all sessions (including
-        // deferred ones), so the runtime state is Attached, not Idle.
-        assert_eq!(
-            state["state"].as_str(),
-            Some("attached"),
-            "deferred sessions should be routable through runtime/session_status before their first turn"
-        );
-
-        let accept_resp = router
-            .dispatch(make_request(
-                "runtime/session_submit",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "input": {
-                        "input_type": "prompt",
-                        "header": {
-                            "id": meerkat_core::InputId::new(),
-                            "timestamp": "2026-03-12T00:00:00Z",
-                            "source": { "type": "operator" },
-                            "durability": "durable",
-                            "visibility": {
-                                "transcript_eligible": true,
-                                "operator_eligible": true
-                            }
-                        },
-                        "text": "drive via runtime"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        let accepted = result_value(&accept_resp);
-        assert_eq!(
-            accepted["outcome_type"].as_str(),
-            Some("accepted"),
-            "deferred sessions should also be routable through runtime/session_submit before their first turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_submit_capacity_full_rejects_before_input_accept() {
-        let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
-        let first_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({ "prompt": "completed session" }),
-            ))
-            .await
-            .unwrap();
-        let first_session_id = SessionId::parse(
-            result_value(&first_resp)["session_id"]
-                .as_str()
-                .expect("first session id"),
-        )
-        .expect("valid first session id");
-        let first_active = router
-            .runtime_adapter()
-            .list_active_inputs(&first_session_id)
-            .await
-            .expect("list active inputs before rejection");
-        assert!(
-            first_active.is_empty(),
-            "completed first session should have no active runtime inputs"
-        );
-
-        let filler_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({
-                    "prompt": "capacity filler",
-                    "initial_turn": "deferred"
-                }),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            result_value(&filler_resp)["session_id"].is_string(),
-            "deferred filler should reserve active capacity"
-        );
-
-        let rejected = router
-            .dispatch(make_request(
-                "runtime/session_submit",
-                serde_json::json!({
-                    "session_id": first_session_id.to_string(),
-                    "input": {
-                        "input_type": "prompt",
-                        "header": {
-                            "id": meerkat_core::InputId::new(),
-                            "timestamp": "2026-03-12T00:00:00Z",
-                            "source": { "type": "operator" },
-                            "durability": "durable",
-                            "visibility": {
-                                "transcript_eligible": true,
-                                "operator_eligible": true
-                            }
-                        },
-                        "text": "must not enter runtime queue"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            error_message(&rejected).contains("Max sessions"),
-            "capacity-full runtime submit should reject before runtime input accept: {}",
-            error_message(&rejected)
-        );
-
-        let first_active = router
-            .runtime_adapter()
-            .list_active_inputs(&first_session_id)
-            .await
-            .expect("list active inputs after rejection");
-        assert!(
-            first_active.is_empty(),
-            "capacity-full runtime submit must not enqueue active runtime input"
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_submit_external_event_capacity_full_rejects_before_input_accept() {
-        let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
-        let first_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({ "prompt": "completed session" }),
-            ))
-            .await
-            .unwrap();
-        let first_session_id = SessionId::parse(
-            result_value(&first_resp)["session_id"]
-                .as_str()
-                .expect("first session id"),
-        )
-        .expect("valid first session id");
-
-        let filler_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({
-                    "prompt": "capacity filler",
-                    "initial_turn": "deferred"
-                }),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            result_value(&filler_resp)["session_id"].is_string(),
-            "deferred filler should reserve active capacity"
-        );
-
-        let rejected = router
-            .dispatch(make_request(
-                "runtime/session_submit",
-                serde_json::json!({
-                    "session_id": first_session_id.to_string(),
-                    "input": {
-                        "input_type": "external_event",
-                        "header": {
-                            "id": meerkat_core::InputId::new(),
-                            "timestamp": "2026-03-12T00:00:00Z",
-                            "source": {
-                                "type": "external",
-                                "source_name": "calendar"
-                            },
-                            "durability": "durable",
-                            "visibility": {
-                                "transcript_eligible": true,
-                                "operator_eligible": true
-                            }
-                        },
-                        "event_type": "calendar.reminder",
-                        "payload": {
-                            "body": "must not enter runtime queue"
-                        },
-                        "handling_mode": "queue"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            error_message(&rejected).contains("Max sessions"),
-            "capacity-full external event submit should reject before runtime input accept: {}",
-            error_message(&rejected)
-        );
-
-        let first_active = router
-            .runtime_adapter()
-            .list_active_inputs(&first_session_id)
-            .await
-            .expect("list active inputs after rejection");
-        assert!(
-            first_active.is_empty(),
-            "capacity-full external event submit must not enqueue active runtime input"
-        );
-    }
-
-    #[tokio::test]
     async fn turn_start_capacity_full_rejects_before_executor_registration() {
         let (router, _notif_rx) = test_router_with_v9_runtime_and_max_sessions(1).await;
         let target_resp = router
@@ -6218,94 +5966,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_submit_routes_restored_staged_transient_archive_session() {
-        let (router, _notif_rx) = test_router_with_v9_runtime().await;
-        let create_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({
-                    "prompt": "deferred",
-                    "initial_turn": "deferred"
-                }),
-            ))
-            .await
-            .unwrap();
-        let created = result_value(&create_resp);
-        let session_id = SessionId::parse(created["session_id"].as_str().expect("session_id"))
-            .expect("valid session id");
-
-        let primitive = RunPrimitive::StagedInput(
-            meerkat_core::lifecycle::run_primitive::StagedRunInput {
-                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                appends: Vec::new(),
-                context_appends: Vec::new(),
-                contributing_input_ids: vec![meerkat_core::InputId::new()],
-                turn_metadata: Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        execution_kind: Some(
-                            meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind::ResumePending,
-                        ),
-                        ..Default::default()
-                    },
-                ),
-            },
-        );
-        let (event_tx, _event_rx) = mpsc::channel(100);
-        router
-            .runtime
-            .apply_runtime_turn(
-                &session_id,
-                meerkat_core::RunId::new(),
-                &primitive,
-                ContentInput::Text(String::new()),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("resume-pending pre-run terminal should restore staged session");
-        let stored = router
-            .runtime
-            .load_persisted_session(&session_id)
-            .await
-            .expect("load transient archived session")
-            .expect("transient archived session should exist");
-        assert!(MethodRouter::session_metadata_marks_archived(&stored));
-
-        let accept_resp = router
-            .dispatch(make_request(
-                "runtime/session_submit",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "input": {
-                        "input_type": "prompt",
-                        "header": {
-                            "id": meerkat_core::InputId::new(),
-                            "timestamp": "2026-03-12T00:00:00Z",
-                            "source": { "type": "operator" },
-                            "durability": "durable",
-                            "visibility": {
-                                "transcript_eligible": true,
-                                "operator_eligible": true
-                            }
-                        },
-                        "text": "retry restored staged session"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        let accepted = result_value(&accept_resp);
-        assert_eq!(
-            accepted["outcome_type"].as_str(),
-            Some("accepted"),
-            "runtime predispatch should allow restored staged sessions despite transient archived snapshots"
-        );
-    }
-
-    #[tokio::test]
     async fn realtime_status_projects_runtime_realtime_attachment_truth_for_session_targets() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
         let create_resp = router
@@ -6325,15 +5985,10 @@ mod tests {
             .to_string();
         let parsed_session_id =
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
-        let session_status = router
-            .dispatch(make_request(
-                "runtime/session_status",
-                serde_json::json!({ "session_id": session_id }),
-            ))
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
             .await
-            .unwrap();
-        let status = result_value(&session_status);
-        assert_eq!(status["state"].as_str(), Some("attached"));
+            .expect("session should register for realtime status setup");
         router
             .runtime_adapter()
             .project_realtime_attachment_intent(&parsed_session_id, true)
@@ -6378,15 +6033,10 @@ mod tests {
             .to_string();
         let parsed_session_id =
             meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
-        let session_status = router
-            .dispatch(make_request(
-                "runtime/session_status",
-                serde_json::json!({ "session_id": session_id }),
-            ))
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
             .await
-            .unwrap();
-        let status = result_value(&session_status);
-        assert_eq!(status["state"].as_str(), Some("attached"));
+            .expect("session should register for realtime status setup");
 
         // Drive the session into a reconnecting state. `intent=true`
         // plus `RequireRealtimeReattach` puts the DSL into
@@ -7454,50 +7104,6 @@ mod tests {
         let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
 
         assert_eq!(error_code(&interrupt_resp), error::SESSION_NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn turn_interrupt_retired_runtime_returns_invalid_request() {
-        let (router, _notif_rx) = test_router().await;
-        let create_resp = router
-            .dispatch(make_request(
-                "session/create",
-                serde_json::json!({"prompt": "Hello"}),
-            ))
-            .await
-            .unwrap();
-        let session_id = result_value(&create_resp)["session_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let retire_resp = router
-            .dispatch(make_request(
-                "runtime/session_retire",
-                serde_json::json!({ "session_id": session_id }),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            retire_resp.error.is_none(),
-            "runtime/session_retire should succeed: {:?}",
-            retire_resp.error
-        );
-
-        let interrupt_resp = router
-            .dispatch(make_request(
-                "turn/interrupt",
-                serde_json::json!({ "session_id": session_id }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(error_code(&interrupt_resp), error::INVALID_REQUEST);
-        assert!(
-            error_message(&interrupt_resp).contains("runtime is retired"),
-            "unexpected error: {:?}",
-            interrupt_resp.error
-        );
     }
 
     #[tokio::test]

@@ -9,12 +9,17 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, ConnectionRef, ContentInput, HookRunOverrides, OutputSchema,
-    PeerMeta, Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
-    checkpoint::SessionCheckpointer, skills::SkillKey,
+    PeerMeta, Provider, Session, SessionBuildState, SessionDeferredTurnState, SessionMetadata,
+    ToolCategoryOverride, ToolDef, checkpoint::SessionCheckpointer, skills::SkillKey,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
 
+/// Explicit semantic caller intent for a resumed turn.
+///
+/// Omitted fields inherit from [`SessionDefaults`], then from [`RealmDefaults`]
+/// where a realm field has no session value. These fields are semantic agent
+/// configuration; render and transport options must stay outside this type.
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
@@ -42,6 +47,57 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub recoverable_tool_defs: Option<Vec<ToolDef>>,
 }
 
+/// Canonical name for resumed-turn semantic overrides.
+///
+/// The older `SurfaceSessionRecoveryOverrides` name is kept as the public
+/// compatibility spelling for existing CLI/RPC callers.
+pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
+
+/// Realm/config defaults that can participate in semantic recovery.
+///
+/// These values come from the active realm/config context. They only fill fields
+/// that are not already durable session defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RealmDefaults {
+    pub realm_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub backend: Option<String>,
+    pub config_generation: Option<u64>,
+}
+
+impl RealmDefaults {
+    #[must_use]
+    pub fn from_recovery_context(context: &SurfaceSessionRecoveryContext) -> Self {
+        Self {
+            realm_id: context.realm_id.clone(),
+            instance_id: context.instance_id.clone(),
+            backend: context.backend.clone(),
+            config_generation: context.config_generation,
+        }
+    }
+}
+
+/// Durable defaults projected from persisted session state.
+#[derive(Debug, Clone)]
+pub struct SessionDefaults {
+    pub metadata: SessionMetadata,
+    pub build_state: SessionBuildState,
+    pub allows_first_turn_build_overrides: bool,
+}
+
+impl SessionDefaults {
+    pub fn from_session(session: &Session) -> Result<Self, SurfaceSessionRecoveryError> {
+        let metadata = session.session_metadata().ok_or_else(|| {
+            SurfaceSessionRecoveryError::MissingSessionMetadata(session.id().to_string())
+        })?;
+        Ok(Self {
+            metadata,
+            build_state: session.build_state().unwrap_or_default(),
+            allows_first_turn_build_overrides: session_allows_first_turn_build_overrides(session),
+        })
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
@@ -53,6 +109,25 @@ pub struct SurfaceSessionRecoveryContext {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+}
+
+/// Resolved semantic config for the next recovered turn.
+///
+/// This is the internal contract for:
+///
+/// `EffectiveTurnConfig = RealmDefaults + SessionDefaults + TurnOverrides`
+///
+/// Non-semantic render/transport resources remain in
+/// [`SurfaceSessionRecoveryContext`] and are copied into `build` only as host
+/// plumbing.
+#[derive(Debug)]
+pub struct EffectiveTurnConfig {
+    pub model: String,
+    pub system_prompt: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub keep_alive: bool,
+    pub build: SessionBuildOptions,
+    pub recoverable_tool_defs: Vec<ToolDef>,
 }
 
 #[derive(Debug)]
@@ -86,6 +161,19 @@ impl RecoveredSessionBuild {
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(self.build),
             labels: None,
+        }
+    }
+}
+
+impl From<EffectiveTurnConfig> for RecoveredSessionBuild {
+    fn from(config: EffectiveTurnConfig) -> Self {
+        Self {
+            model: config.model,
+            system_prompt: config.system_prompt,
+            max_tokens: config.max_tokens,
+            keep_alive: config.keep_alive,
+            build: config.build,
+            recoverable_tool_defs: config.recoverable_tool_defs,
         }
     }
 }
@@ -167,9 +255,22 @@ pub fn build_recovered_session(
     overrides: &SurfaceSessionRecoveryOverrides,
     context: SurfaceSessionRecoveryContext,
 ) -> Result<RecoveredSessionBuild, SurfaceSessionRecoveryError> {
-    let metadata = session.session_metadata().ok_or_else(|| {
-        SurfaceSessionRecoveryError::MissingSessionMetadata(session.id().to_string())
-    })?;
+    let realm_defaults = RealmDefaults::from_recovery_context(&context);
+    resolve_effective_turn_config(session, realm_defaults, overrides, context).map(Into::into)
+}
+
+pub fn resolve_effective_turn_config(
+    session: Session,
+    realm_defaults: RealmDefaults,
+    overrides: &TurnOverrides,
+    context: SurfaceSessionRecoveryContext,
+) -> Result<EffectiveTurnConfig, SurfaceSessionRecoveryError> {
+    let SessionDefaults {
+        metadata,
+        build_state,
+        allows_first_turn_build_overrides,
+    } = SessionDefaults::from_session(&session)?;
+
     if overrides.provider.is_some() && overrides.model.is_none() {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
             "provider override requires model on a session turn".to_string(),
@@ -185,9 +286,7 @@ pub fn build_recovered_session(
             "clear_connection_ref cannot be combined with connection_ref".to_string(),
         ));
     }
-    if has_build_only_turn_overrides(overrides)
-        && !session_allows_first_turn_build_overrides(&session)
-    {
+    if has_build_only_turn_overrides(overrides) && !allows_first_turn_build_overrides {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
             BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
         ));
@@ -198,7 +297,6 @@ pub fn build_recovered_session(
         ));
     }
 
-    let build_state = session.build_state().unwrap_or_default();
     let llm_binding = resolve_resume_llm_binding(
         metadata.provider,
         metadata.self_hosted_server_id.clone(),
@@ -226,7 +324,7 @@ pub fn build_recovered_session(
         .model
         .clone()
         .unwrap_or_else(|| metadata.model.clone());
-    let system_prompt = if session_allows_first_turn_build_overrides(&session) {
+    let system_prompt = if allows_first_turn_build_overrides {
         overrides
             .system_prompt
             .clone()
@@ -302,10 +400,12 @@ pub fn build_recovered_session(
             .preload_skills
             .clone()
             .or_else(|| metadata.tooling.active_skills.clone()),
-        realm_id: metadata.realm_id.clone().or(context.realm_id),
-        instance_id: metadata.instance_id.clone().or(context.instance_id),
-        backend: metadata.backend.clone().or(context.backend),
-        config_generation: metadata.config_generation.or(context.config_generation),
+        realm_id: metadata.realm_id.clone().or(realm_defaults.realm_id),
+        instance_id: metadata.instance_id.clone().or(realm_defaults.instance_id),
+        backend: metadata.backend.clone().or(realm_defaults.backend),
+        config_generation: metadata
+            .config_generation
+            .or(realm_defaults.config_generation),
         // Phase 3: persisted connection_ref re-entered at resume time so
         // the binding re-resolves through the same realm entry unless this
         // recovery request explicitly sets or clears it.
@@ -347,7 +447,7 @@ pub fn build_recovered_session(
         build_state.mob_tool_authority_context,
     );
 
-    Ok(RecoveredSessionBuild {
+    Ok(EffectiveTurnConfig {
         model,
         system_prompt,
         max_tokens,
@@ -467,6 +567,64 @@ mod tests {
             .set_deferred_turn_state(deferred)
             .expect("deferred turn state");
         session
+    }
+
+    #[test]
+    fn resolve_effective_turn_config_plain_resume_inherits_session_defaults_before_realm() {
+        let mut session = sample_session();
+        let persisted_ref = connection_ref("persisted", "default");
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.connection_ref = Some(persisted_ref.clone());
+        metadata.keep_alive = true;
+        session
+            .set_session_metadata(metadata.clone())
+            .expect("updated session metadata");
+
+        let effective = resolve_effective_turn_config(
+            session,
+            RealmDefaults {
+                realm_id: Some("realm-fallback".to_string()),
+                instance_id: Some("instance-fallback".to_string()),
+                backend: Some("jsonl".to_string()),
+                config_generation: Some(99),
+            },
+            &TurnOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("effective turn config");
+
+        assert_eq!(effective.model, metadata.model);
+        assert_eq!(effective.max_tokens, Some(metadata.max_tokens));
+        assert!(effective.keep_alive);
+        assert_eq!(effective.build.provider, Some(metadata.provider));
+        assert_eq!(effective.build.provider_params, metadata.provider_params);
+        assert_eq!(effective.build.connection_ref, Some(persisted_ref));
+        assert_eq!(effective.build.override_builtins, metadata.tooling.builtins);
+        assert_eq!(effective.build.override_shell, metadata.tooling.shell);
+        assert_eq!(effective.build.override_memory, metadata.tooling.memory);
+        assert_eq!(
+            effective.build.override_mob,
+            ToolCategoryOverride::Enable,
+            "persisted mob authority is durable session state and rehydrates mob access"
+        );
+        assert!(effective.build.mob_tool_authority_context.is_some());
+        assert_eq!(
+            effective.build.preload_skills,
+            metadata.tooling.active_skills
+        );
+        assert_eq!(effective.build.realm_id, metadata.realm_id);
+        assert_eq!(effective.build.instance_id, metadata.instance_id);
+        assert_eq!(effective.build.backend, metadata.backend);
+        assert_eq!(
+            effective.build.config_generation,
+            metadata.config_generation
+        );
+        assert_eq!(
+            effective.build.resume_override_mask,
+            crate::service::ResumeOverrideMask::default()
+        );
+        assert_eq!(effective.recoverable_tool_defs.len(), 1);
+        assert_eq!(effective.recoverable_tool_defs[0].name, "inline_tool");
     }
 
     #[test]

@@ -812,8 +812,7 @@ fn machine_apply_turn_run_failed(
                 .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
             runtime_apply_failure_message: runtime_apply_failure
                 .map(|failure| failure.message().to_owned()),
-            terminal_cause_kind:
-                crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure,
+            terminal_cause_kind: machine_run_failed_terminal_cause_kind(runtime_apply_failure),
             error: terminal_error.to_owned(),
         },
     )
@@ -823,6 +822,16 @@ fn machine_apply_turn_run_failed(
             "failed to apply runtime turn failure for run {run_id}: {err}"
         ))
     })
+}
+
+fn machine_run_failed_terminal_cause_kind(
+    runtime_apply_failure: Option<&CoreApplyFailureCause>,
+) -> crate::meerkat_machine::dsl::TurnTerminalCauseKind {
+    if runtime_apply_failure.is_some() {
+        crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure
+    } else {
+        crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure
+    }
 }
 
 pub(crate) fn slice_starts_with(seq: &[InputId], prefix: &[InputId]) -> bool {
@@ -2551,6 +2560,76 @@ async fn fail_runtime_loop_run_inner(
                 "failed to record run-failed event: {run_err}"
             )))
         })
+}
+
+#[cfg(test)]
+mod run_failed_cause_tests {
+    use super::*;
+
+    fn running_driver(run_id: &RunId) -> DriverEntry {
+        let driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+            "run-failed-cause-test",
+        ));
+        let entry = DriverEntry::Ephemeral(driver);
+        {
+            let authority = entry.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            auth.state.lifecycle_phase = crate::meerkat_machine::dsl::MeerkatPhase::Running;
+            auth.state.current_run_id =
+                Some(crate::meerkat_machine::dsl::RunId::from_domain(run_id));
+            auth.state.turn_phase = crate::meerkat_machine::dsl::TurnPhase::Ready;
+        }
+        entry
+    }
+
+    #[test]
+    fn run_failed_without_runtime_apply_cause_uses_fatal_terminal_cause() {
+        let run_id = RunId::new();
+        let mut driver = running_driver(&run_id);
+
+        machine_apply_turn_run_failed(&mut driver, &run_id, "legacy failure", None)
+            .expect("legacy run failure should apply");
+
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            auth.state.terminal_cause_kind,
+            Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
+        );
+        assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
+        assert_eq!(auth.state.last_runtime_apply_failure_message, None);
+    }
+
+    #[test]
+    fn run_failed_with_runtime_apply_cause_uses_runtime_apply_terminal_cause() {
+        let run_id = RunId::new();
+        let mut driver = running_driver(&run_id);
+        let failure = CoreApplyFailureCause::runtime_turn("runtime apply failed");
+
+        machine_apply_turn_run_failed(&mut driver, &run_id, failure.message(), Some(&failure))
+            .expect("runtime apply failure should apply");
+
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            auth.state.terminal_cause_kind,
+            Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure)
+        );
+        assert_eq!(
+            auth.state.last_runtime_apply_failure_cause,
+            Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RuntimeTurn)
+        );
+        assert_eq!(
+            auth.state.last_runtime_apply_failure_message.as_deref(),
+            Some("runtime apply failed")
+        );
+    }
 }
 
 #[cfg(test)]

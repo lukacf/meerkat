@@ -602,6 +602,57 @@ async fn channel_open_fails_closed_without_machine_bootstrap_eligibility_on_ws_r
 }
 
 #[tokio::test]
+async fn open_grant_fails_closed_when_projected_status_lacks_machine_capability_eligibility() {
+    let (_temp, runtime, _config_store) = build_test_runtime();
+    let session_id = meerkat_core::SessionId::new();
+    let session_id_text = session_id.to_string();
+    runtime
+        .runtime_adapter()
+        .register_session(session_id.clone())
+        .await;
+    runtime
+        .runtime_adapter()
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("projected attachment intent should be recorded");
+    let status = runtime
+        .runtime_adapter()
+        .realtime_channel_status(&session_id)
+        .await
+        .expect("projected channel status should remain readable");
+    assert_eq!(status.state, RealtimeChannelState::Opening);
+
+    if let Ok(eligibility) = runtime
+        .runtime_adapter()
+        .realtime_bootstrap_eligibility(&session_id)
+        .await
+    {
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws".to_string());
+        let open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: session_id_text,
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeOpenGrant::from_machine_eligibility(
+                    eligibility,
+                    conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+                ),
+                None,
+            )
+            .await;
+        panic!(
+            "projected realtime status minted open_info without machine capability eligibility: {open_info:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_managed_text_input_emits_transcript_events_and_commits_history() {
     let (_temp, runtime, config_store) = build_test_runtime();
     let session_id = create_materialized_session(&runtime).await;

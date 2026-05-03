@@ -708,21 +708,16 @@ impl MeerkatMachine {
                 let host = match self.llm_reconfigure_host() {
                     Ok(host) => host,
                     Err(err) => {
-                        let denial = RuntimeDriverError::ValidationFailed {
+                        return Err(RuntimeDriverError::ValidationFailed {
                             reason: format!(
                                 "realtime bootstrap eligibility is unresolved for session {session_id}: {err}"
                             ),
-                        };
-                        return self
-                            .realtime_status_eligibility_or(session_id, denial)
-                            .await;
+                        });
                     }
                 };
                 let hydrated = match host.hydrate_session_llm_state(session_id).await {
                     Ok(hydrated) => hydrated,
-                    Err(err) => {
-                        return self.realtime_status_eligibility_or(session_id, err).await;
-                    }
+                    Err(err) => return Err(err),
                 };
                 self.cache_hydrated_session_llm_state(session_id, &hydrated)
                     .await?;
@@ -735,15 +730,12 @@ impl MeerkatMachine {
                         (identity, surface)
                     }
                     (identity, _, _) => {
-                        let denial = RuntimeDriverError::ValidationFailed {
+                        return Err(RuntimeDriverError::ValidationFailed {
                             reason: format!(
                                 "realtime bootstrap eligibility is unresolved for provider '{:?}' model '{}'",
                                 identity.provider, identity.model
                             ),
-                        };
-                        return self
-                            .realtime_status_eligibility_or(session_id, denial)
-                            .await;
+                        });
                     }
                 }
             }
@@ -761,31 +753,5 @@ impl MeerkatMachine {
         let status =
             <Self as SessionServiceRuntimeExt>::realtime_channel_status(self, session_id).await?;
         Ok(crate::meerkat_machine_types::RealtimeBootstrapEligibility::eligible(status))
-    }
-
-    async fn realtime_status_eligibility_or(
-        &self,
-        session_id: &SessionId,
-        denial: RuntimeDriverError,
-    ) -> Result<crate::meerkat_machine_types::RealtimeBootstrapEligibility, RuntimeDriverError>
-    {
-        let Ok(status) =
-            <Self as SessionServiceRuntimeExt>::realtime_channel_status(self, session_id).await
-        else {
-            return Err(denial);
-        };
-        if matches!(
-            status.state,
-            meerkat_contracts::RealtimeChannelState::Opening
-                | meerkat_contracts::RealtimeChannelState::Ready
-                | meerkat_contracts::RealtimeChannelState::Interrupted
-                | meerkat_contracts::RealtimeChannelState::Reconnecting
-                | meerkat_contracts::RealtimeChannelState::Error
-        ) {
-            return Ok(
-                crate::meerkat_machine_types::RealtimeBootstrapEligibility::eligible(status),
-            );
-        }
-        Err(denial)
     }
 }

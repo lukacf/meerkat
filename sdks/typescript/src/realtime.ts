@@ -7,6 +7,7 @@ import type {
   RealtimeInputChunk,
   RealtimeOpenInfo,
   RealtimeOpenRequest,
+  RealtimeProtocolVersion,
   RealtimeReconnectPolicy,
   RealtimeServerFrame,
   RealtimeStatusResult,
@@ -17,6 +18,7 @@ import { AsyncQueue } from "./streaming.js";
 import WebSocket, { type RawData } from "ws";
 
 export type { RealtimeChannelTarget };
+export type { RealtimeProtocolVersion };
 export type RealtimeSessionTarget = RealtimeChannelTargetSessionTarget;
 export type RealtimeMobMemberTarget = RealtimeChannelTargetMobMember;
 

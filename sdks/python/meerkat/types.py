@@ -77,6 +77,7 @@ from .generated.types import (
     RealtimeOpenRequest as RealtimeOpenRequest,
     RealtimeOutputChunk as RealtimeOutputChunk,
     RealtimeOutputKind as RealtimeOutputKind,
+    RealtimeProtocolVersion as RealtimeProtocolVersion,
     RealtimeReconnectPolicy as RealtimeReconnectPolicy,
     RealtimeServerFrame as RealtimeServerFrame,
     RealtimeStatusParams as RealtimeStatusParams,

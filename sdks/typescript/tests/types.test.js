@@ -65,10 +65,11 @@ describe("Contract Version", () => {
     );
 
     assert.match(generated, /export interface RealtimeOpenInfo/);
-    assert.match(generated, /supported_protocol_versions\??: string\[]/);
-    assert.match(generated, /default_protocol_version: string/);
+    assert.match(generated, /export type RealtimeProtocolVersion = "2"/);
+    assert.match(generated, /supported_protocol_versions\??: RealtimeProtocolVersion\[]/);
+    assert.match(generated, /default_protocol_version: RealtimeProtocolVersion/);
     assert.match(generated, /export interface RealtimeChannelOpenFrame/);
-    assert.match(generated, /protocol_version: string/);
+    assert.match(generated, /protocol_version: RealtimeProtocolVersion/);
     assert.match(generated, /export interface RuntimeStateResult \{\n  state: WireRuntimeState;\n\}/);
   });
 });

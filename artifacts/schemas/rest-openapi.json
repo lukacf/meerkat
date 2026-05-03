@@ -2275,7 +2275,7 @@
             "$ref": "#/components/schemas/RealtimeCapabilities"
           },
           "default_protocol_version": {
-            "type": "string"
+            "$ref": "#/components/schemas/RealtimeProtocolVersion"
           },
           "expires_at": {
             "type": "string"
@@ -2285,7 +2285,7 @@
           },
           "supported_protocol_versions": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RealtimeProtocolVersion"
             },
             "type": "array"
           },
@@ -2357,6 +2357,16 @@
           "video"
         ],
         "type": "string"
+      },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
       },
       "RealtimeReconnectPolicy": {
         "description": "Public reconnect policy for a realtime channel.",

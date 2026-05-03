@@ -5834,11 +5834,12 @@
                 "type": "string"
               },
               "requested": {
+                "description": "Raw rejected client input. This string is diagnostic projection\nonly; accepted/default/supported protocol truth is typed by\n[`RealtimeProtocolVersion`].",
                 "type": "string"
               },
               "supported": {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/RealtimeProtocolVersion"
                 },
                 "type": "array"
               }
@@ -5849,6 +5850,16 @@
               "supported"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
           }
         ]
       },
@@ -6420,6 +6431,16 @@
         ],
         "type": "string"
       },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
+      },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",
         "enum": [
@@ -6436,7 +6457,7 @@
         "type": "string"
       },
       "protocol_version": {
-        "type": "string"
+        "$ref": "#/$defs/RealtimeProtocolVersion"
       },
       "role": {
         "$ref": "#/$defs/RealtimeChannelRole"
@@ -6623,6 +6644,16 @@
         ],
         "type": "string"
       },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
+      },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",
         "enum": [
@@ -6639,7 +6670,7 @@
         "$ref": "#/$defs/RealtimeCapabilities"
       },
       "protocol_version": {
-        "type": "string"
+        "$ref": "#/$defs/RealtimeProtocolVersion"
       },
       "role": {
         "$ref": "#/$defs/RealtimeChannelRole"
@@ -6919,7 +6950,7 @@
             "type": "string"
           },
           "protocol_version": {
-            "type": "string"
+            "$ref": "#/$defs/RealtimeProtocolVersion"
           },
           "role": {
             "$ref": "#/$defs/RealtimeChannelRole"
@@ -6985,6 +7016,16 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
           }
         ]
       },
@@ -7750,6 +7791,16 @@
         ],
         "type": "string"
       },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
+      },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",
         "enum": [
@@ -7766,7 +7817,7 @@
         "$ref": "#/$defs/RealtimeCapabilities"
       },
       "default_protocol_version": {
-        "type": "string"
+        "$ref": "#/$defs/RealtimeProtocolVersion"
       },
       "expires_at": {
         "type": "string"
@@ -7776,7 +7827,7 @@
       },
       "supported_protocol_versions": {
         "items": {
-          "type": "string"
+          "$ref": "#/$defs/RealtimeProtocolVersion"
         },
         "type": "array"
       },
@@ -8147,7 +8198,7 @@
             "$ref": "#/$defs/RealtimeCapabilities"
           },
           "protocol_version": {
-            "type": "string"
+            "$ref": "#/$defs/RealtimeProtocolVersion"
           },
           "role": {
             "$ref": "#/$defs/RealtimeChannelRole"
@@ -8434,11 +8485,12 @@
                 "type": "string"
               },
               "requested": {
+                "description": "Raw rejected client input. This string is diagnostic projection\nonly; accepted/default/supported protocol truth is typed by\n[`RealtimeProtocolVersion`].",
                 "type": "string"
               },
               "supported": {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/$defs/RealtimeProtocolVersion"
                 },
                 "type": "array"
               }
@@ -8745,6 +8797,16 @@
           "video"
         ],
         "type": "string"
+      },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
       },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",

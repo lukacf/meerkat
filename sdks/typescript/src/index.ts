@@ -189,6 +189,7 @@ export type {
   RealtimeOpenInfo,
   RealtimeOpenRequest,
   RealtimeOutputChunk,
+  RealtimeProtocolVersion,
   RealtimeReconnectPolicy,
   RealtimeStatusParams,
   RealtimeStatusResult,

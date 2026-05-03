@@ -123,10 +123,45 @@ class SkillsParams:
 
 
 @dataclass
+class McpStdioConfig:
+    """Stdio transport configuration"""
+    command: str
+    args: Optional[list[str]] = None
+    env: Optional[dict[str, str]] = None
+
+
+@dataclass
+class McpHttpConfig:
+    """HTTP transport configuration (streamable HTTP or legacy SSE)"""
+    url: str
+    headers: Optional[dict[str, str]] = None
+    transport: Optional[McpHttpTransport] = None
+
+
+class McpStdioServerConfig(TypedDict, total=False):
+    """Typed stdio variant for MCP server configuration."""
+    name: Required[str]
+    command: Required[str]
+    args: NotRequired[list[str]]
+    env: NotRequired[dict[str, str]]
+    connect_timeout_secs: NotRequired[int]
+
+
+class McpHttpServerConfig(TypedDict, total=False):
+    """Typed HTTP variant for MCP server configuration."""
+    name: Required[str]
+    url: Required[str]
+    headers: NotRequired[dict[str, str]]
+    transport: NotRequired[McpHttpTransport]
+    connect_timeout_secs: NotRequired[int]
+
+
+McpServerConfig = McpStdioServerConfig | McpHttpServerConfig
+
+@dataclass
 class McpAddParams:
     """Request payload for `mcp/add`."""
-    server_config: Any
-    server_name: str
+    server_config: McpServerConfig
     session_id: str
     persisted: Optional[bool] = None
 
@@ -144,6 +179,17 @@ class McpReloadParams:
     """Request payload for optional `mcp/reload`."""
     session_id: str
     persisted: Optional[bool] = None
+    server_name: Optional[str] = None
+
+
+@dataclass
+class McpLiveOpResponse:
+    """Response payload for live MCP operations."""
+    operation: Literal['add', 'remove', 'reload']
+    persisted: bool
+    session_id: str
+    status: Literal['staged', 'applied', 'rejected']
+    applied_at_turn: Optional[int] = None
     server_name: Optional[str] = None
 
 
@@ -292,6 +338,7 @@ class MobSpawnManySpawnedResult:
 @dataclass
 class MobSpawnManyFailedResult:
     """Failed per-member `mob/spawn_many` result payload."""
+    cause: MobSpawnManyFailureCause
     message: str
 
 
@@ -1088,12 +1135,6 @@ class SessionStreamCloseResult:
 
 
 @dataclass
-class RuntimeStateParams:
-    """Request payload for `runtime/session_status`."""
-    session_id: str
-
-
-@dataclass
 class RuntimeRealtimeAttachmentStatusParams:
     """Request payload for `session/realtime_attachment_status`."""
     session_id: str
@@ -1119,43 +1160,6 @@ class RealtimeStatusParams:
 class RealtimeCapabilitiesParams:
     """Request payload for `realtime/capabilities`."""
     target: RealtimeChannelTarget
-
-
-@dataclass
-class RuntimeAcceptParams:
-    """Request payload for `runtime/session_submit`.
-
-The runtime input body is owned by `meerkat-runtime`; contracts cannot
-depend on the runtime crate without inverting the dependency graph. The
-envelope is canonical here and the runtime crate remains the typed
-authority over the `input` discriminator and variant body."""
-    input: Any
-    session_id: str
-
-
-@dataclass
-class RuntimeRetireParams:
-    """Request payload for `runtime/session_retire`."""
-    session_id: str
-
-
-@dataclass
-class RuntimeResetParams:
-    """Request payload for `runtime/session_reset`."""
-    session_id: str
-
-
-@dataclass
-class InputStateParams:
-    """Request payload for `runtime/session_submission`."""
-    input_id: str
-    session_id: str
-
-
-@dataclass
-class InputListParams:
-    """Request payload for `runtime/session_submissions`."""
-    session_id: str
 
 
 @dataclass
@@ -1197,17 +1201,6 @@ class UpdateScheduleParams:
 
 
 @dataclass
-class McpLiveOpResponse:
-    """Response payload for live MCP operations."""
-    operation: Literal['add', 'remove', 'reload']
-    persisted: bool
-    session_id: str
-    status: Literal['staged', 'applied', 'rejected']
-    applied_at_turn: Optional[int] = None
-    server_name: Optional[str] = None
-
-
-@dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
     class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
@@ -1235,7 +1228,7 @@ not provide raw peer IDs, and missing key material fails at the boundary."""
 
 @dataclass
 class RuntimeStateResult:
-    """Response payload for runtime/session_status."""
+    """Response payload for runtime-backed session status projections."""
     state: WireRuntimeState
 
 
@@ -1300,12 +1293,12 @@ class RealtimeChannelStatus:
 class RealtimeOpenInfo:
     """Response payload for `realtime/open_info`."""
     capabilities: RealtimeCapabilities
-    default_protocol_version: str
+    default_protocol_version: RealtimeProtocolVersion
     expires_at: str
     open_token: str
     target: RealtimeChannelTarget
     ws_url: str
-    supported_protocol_versions: Optional[list[str]] = None
+    supported_protocol_versions: Optional[list[RealtimeProtocolVersion]] = None
 
 
 @dataclass
@@ -1385,7 +1378,7 @@ class ToolCallTimeoutContext:
 class RealtimeChannelOpenFrame:
     """Payload for `channel.open`."""
     open_token: str
-    protocol_version: str
+    protocol_version: RealtimeProtocolVersion
     role: RealtimeChannelRole
     turning_mode: RealtimeTurningMode
 
@@ -1400,7 +1393,7 @@ class RealtimeChannelInputFrame:
 class RealtimeChannelOpenedFrame:
     """Payload for `channel.opened`."""
     capabilities: RealtimeCapabilities
-    protocol_version: str
+    protocol_version: RealtimeProtocolVersion
     role: RealtimeChannelRole
     status: RealtimeChannelStatus
 
@@ -1433,26 +1426,13 @@ class RealtimeChannelClosedFrame:
 
 @dataclass
 class RuntimeAcceptResult:
-    """Response payload for `runtime/session_submit`."""
+    """Response payload for runtime-backed input submission."""
     outcome_type: Literal['accepted', 'deduplicated', 'rejected']
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
     policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reason: Optional[str] = None
     state: Optional[dict[str, Any]] = None
-
-
-@dataclass
-class RuntimeRetireResult:
-    """Response payload for `runtime/session_retire`."""
-    inputs_abandoned: int
-    inputs_pending_drain: Optional[int] = None
-
-
-@dataclass
-class RuntimeResetResult:
-    """Response payload for `runtime/session_reset`."""
-    inputs_abandoned: int
 
 
 @dataclass
@@ -1485,12 +1465,6 @@ fields with typed projections so the wire carries no untyped carriers."""
     reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
     recovery_count: Optional[int] = None
     terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
-
-
-@dataclass
-class InputListResult:
-    """Response payload for `runtime/session_submissions`."""
-    inputs: list[dict[str, Any]]
 
 
 @dataclass
@@ -1986,6 +1960,9 @@ WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unkn
 # Mob RPC helper wire type for WireMobRuntimeMode.
 WireMobRuntimeMode = Literal['autonomous_host', 'turn_driven']
 
+# Typed failure cause for one failed `mob/spawn_many` member row.
+MobSpawnManyFailureCause = Literal['profile_not_found', 'member_not_found', 'member_already_exists', 'not_externally_addressable', 'invalid_transition', 'wiring_error', 'bridge_command_rejected', 'member_restore_failed', 'kickoff_wait_timed_out', 'ready_wait_timed_out', 'definition_error', 'flow_not_found', 'flow_failed', 'run_not_found', 'run_canceled', 'flow_turn_timed_out', 'frame_depth_limit_exceeded', 'frame_atomic_persistence_unavailable', 'spec_revision_conflict', 'schema_validation', 'insufficient_targets', 'topology_violation', 'bridge_delivery_rejected', 'supervisor_escalation', 'unsupported_for_mode', 'reset_barrier', 'storage_error', 'session_error', 'comms_error', 'callback_pending', 'stale_fence_token', 'stale_event_cursor', 'work_not_found', 'internal']
+
 # Typed status for one `mob/spawn_many` row.
 MobSpawnManyResultStatus = Literal['spawned', 'failed']
 
@@ -2108,6 +2085,9 @@ McpLiveOperation = Literal['add', 'remove', 'reload']
 # Shared status for live MCP operations.
 McpLiveOpStatus = Literal['staged', 'applied', 'rejected']
 
+# HTTP transport selection for URL-based servers
+McpHttpTransport = Literal['streamable-http', 'sse']
+
 # Target for a mob wire/unwire call.
 MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]
 
@@ -2159,6 +2139,14 @@ RealtimeChannelRole = Literal['primary', 'observer']
 # Turning mode for a realtime channel.
 RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
 
+# Canonical wire protocol version for realtime channels.
+#
+# The version is bumped every time the on-the-wire shape of
+# [`RealtimeAudioChunk`], frame enums, or other load-bearing realtime
+# contracts changes in an incompatible way. Clients and servers handshake on
+# the string form; this enum is the single typed owner of the set.
+RealtimeProtocolVersion = Literal['2']
+
 # Input modality kind supported by a realtime channel.
 RealtimeInputKind = Literal['text', 'audio', 'video']
 
@@ -2190,7 +2178,7 @@ class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
 class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
     kind: Required[Literal['unsupported_protocol_version']]
     requested: Required[str]
-    supported: Required[list[str]]
+    supported: Required[list[RealtimeProtocolVersion]]
 
 RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion
 
@@ -2303,7 +2291,7 @@ RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscri
 # Client-to-server realtime frame.
 class RealtimeClientFrameChannelOpen(TypedDict, total=False):
     open_token: Required[str]
-    protocol_version: Required[str]
+    protocol_version: Required[RealtimeProtocolVersion]
     role: Required[RealtimeChannelRole]
     turning_mode: Required[RealtimeTurningMode]
     type: Required[Literal['channel.open']]
@@ -2332,7 +2320,7 @@ RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChanne
 # Server-to-client realtime frame.
 class RealtimeServerFrameChannelOpened(TypedDict, total=False):
     capabilities: Required[RealtimeCapabilities]
-    protocol_version: Required[str]
+    protocol_version: Required[RealtimeProtocolVersion]
     role: Required[RealtimeChannelRole]
     status: Required[RealtimeChannelStatus]
     type: Required[Literal['channel.opened']]
@@ -2357,7 +2345,7 @@ class RealtimeServerFrameChannelClosed(TypedDict, total=False):
 
 RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
 
-# Discriminator for `runtime/session_submit` responses.
+# Discriminator for runtime-backed input submission responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
 
 # Public input lifecycle state projection used by RPC surfaces.
@@ -2605,6 +2593,3 @@ PeerReachability = Literal['unknown', 'reachable', 'unreachable']
 
 # Comms/session-stream RPC contract for PeerReachabilityReason.
 PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']
-
-# Response payload for `runtime/session_submission`.
-InputStateResult = Optional[WireInputState]

@@ -19,51 +19,15 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
-    SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
+    CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest,
+    MachineProductionOwnerRelation, MachineSchema, SchedulerRule, SemanticCoverageEntry,
+    TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas,
 };
-use proc_macro2::TokenTree;
 use quote::ToTokens;
 use serde::Serialize;
 use syn::spanned::Spanned;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Phase1CarryForwardProductionBody {
-    pub machine: &'static str,
-    pub path: &'static str,
-}
-
-pub const PHASE1_CARRY_FORWARD_PRODUCTION_BODIES: &[Phase1CarryForwardProductionBody] = &[];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProductionMachineOwnerPath {
-    pub machine: &'static str,
-    pub path: &'static str,
-}
-
-pub const PRODUCTION_MACHINE_OWNER_PATHS: &[ProductionMachineOwnerPath] = &[
-    ProductionMachineOwnerPath {
-        machine: "MeerkatMachine",
-        path: "meerkat-runtime/src/meerkat_machine/dsl.rs",
-    },
-    ProductionMachineOwnerPath {
-        machine: "AuthMachine",
-        path: "meerkat-runtime/src/auth_machine/dsl.rs",
-    },
-    ProductionMachineOwnerPath {
-        machine: "MobMachine",
-        path: "meerkat-mob/src/machines/mob_machine.rs",
-    },
-    ProductionMachineOwnerPath {
-        machine: "ScheduleLifecycleMachine",
-        path: "meerkat-schedule/src/machines/schedule_lifecycle.rs",
-    },
-    ProductionMachineOwnerPath {
-        machine: "OccurrenceLifecycleMachine",
-        path: "meerkat-schedule/src/machines/occurrence_lifecycle.rs",
-    },
-];
 
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
@@ -278,8 +242,8 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
     mismatches.extend(collect_machine_inventory_mismatches(&root)?);
+    mismatches.extend(collect_production_machine_owner_relation_mismatches(&root)?);
     mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
-    mismatches.extend(collect_phase1_production_body_mismatches(&root)?);
     mismatches.extend(collect_authority_language_mismatches(&root)?);
     mismatches.extend(collect_stale_cfg_mismatches(&root)?);
     mismatches.extend(collect_peer_response_terminal_projection_mismatches(&root)?);
@@ -497,8 +461,8 @@ fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     let mut mismatches = collect_drift_mismatches(root, selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(root, selection));
     mismatches.extend(collect_machine_inventory_mismatches(root)?);
+    mismatches.extend(collect_production_machine_owner_relation_mismatches(root)?);
     mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
-    mismatches.extend(collect_phase1_production_body_mismatches(root)?);
     mismatches.extend(collect_authority_language_mismatches(root)?);
     mismatches.extend(collect_stale_cfg_mismatches(root)?);
     mismatches.extend(collect_peer_response_terminal_projection_mismatches(root)?);
@@ -1671,55 +1635,6 @@ pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<S
         }
     }
 
-    for machine in &registry.machines {
-        let slug = generated_kernel_module_slug(&machine.machine);
-        let generated_kernel = generated_kernel_module_path(root, &slug);
-        if !generated_kernel.exists() {
-            continue;
-        }
-
-        let owner_paths = PRODUCTION_MACHINE_OWNER_PATHS
-            .iter()
-            .filter(|owner| owner.machine == machine.machine.as_str())
-            .collect::<Vec<_>>();
-        if owner_paths.is_empty() {
-            mismatches.push(format!(
-                "missing production owner audit path for {} while generated kernel {} exists",
-                machine.machine,
-                generated_kernel.display()
-            ));
-            continue;
-        }
-
-        for owner in owner_paths {
-            let owner_path = root.join(owner.path);
-            if !owner_path.exists() {
-                mismatches.push(format!(
-                    "production owner audit path for {} is missing: {}",
-                    machine.machine,
-                    owner_path.display()
-                ));
-                continue;
-            }
-            let source = fs::read_to_string(&owner_path)
-                .with_context(|| format!("read production owner {}", owner_path.display()))?;
-            if !source.contains("machine") {
-                continue;
-            }
-            let parsed = syn::parse_file(&source)
-                .with_context(|| format!("parse production owner {}", owner_path.display()))?;
-            for declared_machine in machine_macro_names(&parsed) {
-                if declared_machine == machine.machine.as_str() {
-                    mismatches.push(format!(
-                        "production owner module must not define canonical machine! body after generated-kernel cutover: {} in {}",
-                        machine.machine,
-                        owner.path
-                    ));
-                }
-            }
-        }
-    }
-
     let generated_mod = generated_kernel_mod_path(root);
     let generated_dir = generated_mod
         .parent()
@@ -1756,6 +1671,103 @@ pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<S
     Ok(mismatches)
 }
 
+pub fn collect_production_machine_owner_relation_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let relations = canonical_machine_production_owner_relations();
+    collect_production_machine_owner_relation_mismatches_for_schemas(
+        root,
+        &registry.machines,
+        &relations,
+    )
+}
+
+pub fn collect_production_machine_owner_relation_mismatches_for_schemas(
+    root: &Path,
+    schemas: &[MachineSchema],
+    relations: &[MachineProductionOwnerRelation],
+) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let schemas_by_machine = schemas
+        .iter()
+        .map(|schema| (schema.machine.as_str(), schema))
+        .collect::<BTreeMap<_, _>>();
+    let mut relations_by_machine: BTreeMap<&str, Vec<&MachineProductionOwnerRelation>> =
+        BTreeMap::new();
+
+    for relation in relations {
+        relations_by_machine
+            .entry(relation.machine.as_str())
+            .or_default()
+            .push(relation);
+
+        if !schemas_by_machine.contains_key(relation.machine.as_str()) {
+            mismatches.push(format!(
+                "production owner schema relation references untracked machine {}",
+                relation.machine
+            ));
+            continue;
+        }
+
+        if relation.rust.crate_name == "self" || relation.rust.crate_name.trim().is_empty() {
+            mismatches.push(format!(
+                "production owner schema relation for {} must name a production crate, found `{}`",
+                relation.machine, relation.rust.crate_name
+            ));
+        }
+        if relation.rust.module.trim().is_empty() {
+            mismatches.push(format!(
+                "production owner schema relation for {} must name a Rust module",
+                relation.machine
+            ));
+        }
+
+        let owner_path = owner_module_file(root, &relation.rust.crate_name, &relation.rust.module)?;
+        let rel_owner_path = relative_slash_path(root, &owner_path)?;
+        if is_catalog_dsl_path(&rel_owner_path) {
+            mismatches.push(format!(
+                "production owner schema relation for {} points at catalog DSL instead of production owner: {}",
+                relation.machine, rel_owner_path
+            ));
+        }
+        if !owner_path.exists() {
+            mismatches.push(format!(
+                "production owner schema relation for {} points at missing owner module {}",
+                relation.machine,
+                owner_path.display()
+            ));
+        }
+
+        let generated_slug = generated_kernel_module_slug(&relation.machine);
+        let generated_kernel = generated_kernel_module_path(root, &generated_slug);
+        if !generated_kernel.exists() {
+            mismatches.push(format!(
+                "production owner schema relation for {} has no generated kernel module {}",
+                relation.machine,
+                generated_kernel.display()
+            ));
+        }
+    }
+
+    for schema in schemas {
+        let relation_count = relations_by_machine
+            .get(schema.machine.as_str())
+            .map_or(0, Vec::len);
+        match relation_count {
+            0 => mismatches.push(format!(
+                "missing production owner schema relation for {}",
+                schema.machine
+            )),
+            1 => {}
+            count => mismatches.push(format!(
+                "duplicate production owner schema relations for {} ({count} entries)",
+                schema.machine
+            )),
+        }
+    }
+
+    Ok(mismatches)
+}
+
 fn retired_generated_source_paths() -> &'static [&'static str] {
     &[
         "meerkat-machine-kernels/src/compat_generated.rs",
@@ -1770,63 +1782,6 @@ fn retired_generated_source_paths() -> &'static [&'static str] {
         "meerkat-mob/src/runtime/flow_frame_kernel.rs",
         "meerkat-mob/src/runtime/loop_iteration_authority.rs",
     ]
-}
-
-pub fn collect_phase1_production_body_mismatches(root: &Path) -> Result<Vec<String>> {
-    let registry = CanonicalRegistry::load();
-    let canonical_machines: BTreeSet<String> = registry
-        .machines
-        .iter()
-        .map(|machine| machine.machine.as_str().to_owned())
-        .collect();
-    let carry_forward: BTreeSet<(&'static str, &'static str)> =
-        PHASE1_CARRY_FORWARD_PRODUCTION_BODIES
-            .iter()
-            .map(|body| (body.path, body.machine))
-            .collect();
-    let mut seen_carry_forward = BTreeSet::new();
-    let mut mismatches = Vec::new();
-
-    for path in production_rust_source_paths(root)? {
-        let rel = relative_slash_path(root, &path)?;
-        let source = fs::read_to_string(&path)
-            .with_context(|| format!("read machine body candidate {}", path.display()))?;
-        if !source.contains("machine") {
-            continue;
-        }
-        let parsed = syn::parse_file(&source)
-            .with_context(|| format!("parse machine body candidate {}", path.display()))?;
-
-        for machine in machine_macro_names(&parsed) {
-            if !canonical_machines.contains(&machine) {
-                continue;
-            }
-            if is_catalog_dsl_path(&rel) {
-                continue;
-            }
-            if is_expected_generated_kernel_body(&rel, &machine) {
-                continue;
-            }
-            if carry_forward.contains(&(rel.as_str(), machine.as_str())) {
-                seen_carry_forward.insert((rel.clone(), machine));
-                continue;
-            }
-            mismatches.push(format!(
-                "canonical machine! body outside catalog is not Phase 1 carry-forward debt: {machine} in {rel}"
-            ));
-        }
-    }
-
-    for body in PHASE1_CARRY_FORWARD_PRODUCTION_BODIES {
-        if !seen_carry_forward.contains(&(body.path.to_owned(), body.machine.to_owned())) {
-            mismatches.push(format!(
-                "Phase 1 carry-forward production body is not present as declared: {} in {}",
-                body.machine, body.path
-            ));
-        }
-    }
-
-    Ok(mismatches)
 }
 
 pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
@@ -2264,152 +2219,6 @@ fn relative_slash_path(root: &Path, path: &Path) -> Result<String> {
 
 fn is_catalog_dsl_path(path: &str) -> bool {
     path.starts_with("meerkat-machine-schema/src/catalog/dsl/")
-}
-
-fn is_expected_generated_kernel_body(path: &str, machine: &str) -> bool {
-    path == format!(
-        "meerkat-machine-kernels/src/generated/{}.rs",
-        generated_kernel_module_slug(machine)
-    )
-}
-
-fn machine_macro_names(parsed: &syn::File) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut aliases = BTreeSet::new();
-    collect_machine_macro_aliases_from_items(&parsed.items, &mut aliases);
-    collect_machine_macro_names_from_items(&parsed.items, &aliases, &mut names);
-    names
-}
-
-fn collect_machine_macro_names_from_items(
-    items: &[syn::Item],
-    aliases: &BTreeSet<String>,
-    names: &mut Vec<String>,
-) {
-    for item in items {
-        match item {
-            syn::Item::Macro(item_macro)
-                if macro_path_ends_with_machine(&item_macro.mac.path)
-                    || macro_path_ends_with_machine_alias(&item_macro.mac.path, aliases) =>
-            {
-                if let Some(name) = machine_name_from_tokens(item_macro.mac.tokens.clone()) {
-                    names.push(name);
-                }
-            }
-            syn::Item::Macro(item_macro)
-                if macro_path_ends_with_macro_rules(&item_macro.mac.path) =>
-            {
-                for name in machine_names_from_wrapper_macro_tokens(item_macro.mac.tokens.clone()) {
-                    names.push(name);
-                }
-            }
-            syn::Item::Mod(item_mod) => {
-                if let Some((_, nested_items)) = &item_mod.content {
-                    collect_machine_macro_names_from_items(nested_items, aliases, names);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_machine_macro_aliases_from_items(items: &[syn::Item], aliases: &mut BTreeSet<String>) {
-    for item in items {
-        match item {
-            syn::Item::Use(item_use) => {
-                collect_machine_macro_aliases_from_use_tree(&item_use.tree, &[], aliases);
-            }
-            syn::Item::Mod(item_mod) => {
-                if let Some((_, nested_items)) = &item_mod.content {
-                    collect_machine_macro_aliases_from_items(nested_items, aliases);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_machine_macro_aliases_from_use_tree(
-    tree: &syn::UseTree,
-    prefix: &[String],
-    aliases: &mut BTreeSet<String>,
-) {
-    match tree {
-        syn::UseTree::Path(path) => {
-            let mut next_prefix = prefix.to_vec();
-            next_prefix.push(path.ident.to_string());
-            collect_machine_macro_aliases_from_use_tree(&path.tree, &next_prefix, aliases);
-        }
-        syn::UseTree::Name(name)
-            if is_meerkat_machine_dsl_prefix(prefix) && name.ident == "machine" =>
-        {
-            aliases.insert(name.ident.to_string());
-        }
-        syn::UseTree::Rename(rename)
-            if is_meerkat_machine_dsl_prefix(prefix) && rename.ident == "machine" =>
-        {
-            aliases.insert(rename.rename.to_string());
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                collect_machine_macro_aliases_from_use_tree(item, prefix, aliases);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_meerkat_machine_dsl_prefix(prefix: &[String]) -> bool {
-    prefix.len() == 1 && prefix[0] == "meerkat_machine_dsl"
-}
-
-fn macro_path_ends_with_machine(path: &syn::Path) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| segment.ident == "machine")
-}
-
-fn macro_path_ends_with_machine_alias(path: &syn::Path, aliases: &BTreeSet<String>) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| aliases.contains(&segment.ident.to_string()))
-}
-
-fn macro_path_ends_with_macro_rules(path: &syn::Path) -> bool {
-    path.segments
-        .last()
-        .is_some_and(|segment| segment.ident == "macro_rules")
-}
-
-fn machine_names_from_wrapper_macro_tokens(tokens: proc_macro2::TokenStream) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut iter = tokens.into_iter().peekable();
-    while let Some(token) = iter.next() {
-        match token {
-            TokenTree::Ident(ident) if ident == "machine" => {
-                if let Some(TokenTree::Ident(machine_name)) = iter.next() {
-                    names.push(machine_name.to_string());
-                }
-            }
-            TokenTree::Group(group) => {
-                names.extend(machine_names_from_wrapper_macro_tokens(group.stream()));
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
-fn machine_name_from_tokens(tokens: proc_macro2::TokenStream) -> Option<String> {
-    let mut after_machine_keyword = false;
-    for token in tokens {
-        match token {
-            TokenTree::Ident(ident) if after_machine_keyword => return Some(ident.to_string()),
-            TokenTree::Ident(ident) if ident == "machine" => after_machine_keyword = true,
-            _ => {}
-        }
-    }
-    None
 }
 
 pub struct CanonicalRegistry {

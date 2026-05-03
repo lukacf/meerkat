@@ -164,6 +164,16 @@
           },
           {
             "properties": {
+              "hook_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HookId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "point": {
                 "$ref": "#/$defs/HookPoint"
               },
@@ -185,7 +195,7 @@
           {
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "reason_type": {
                 "const": "hook_timeout",
@@ -207,7 +217,7 @@
           {
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "reason": {
                 "type": "string"
@@ -1449,7 +1459,7 @@
         "description": "Hook invocation started.",
         "properties": {
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "point": {
             "$ref": "#/$defs/HookPoint"
@@ -1475,7 +1485,7 @@
             "type": "integer"
           },
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "point": {
             "$ref": "#/$defs/HookPoint"
@@ -1500,7 +1510,7 @@
             "type": "string"
           },
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "point": {
             "$ref": "#/$defs/HookPoint"
@@ -1522,7 +1532,7 @@
         "description": "Hook denied an action.",
         "properties": {
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "message": {
             "type": "string"
@@ -1552,7 +1562,7 @@
         "description": "A rewrite patch was applied synchronously.",
         "properties": {
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "patch": {
             "$ref": "#/$defs/HookPatch"
@@ -1580,7 +1590,7 @@
             "$ref": "#/$defs/HookPatchEnvelope"
           },
           "hook_id": {
-            "type": "string"
+            "$ref": "#/$defs/HookId"
           },
           "point": {
             "$ref": "#/$defs/HookPoint"
@@ -2389,6 +2399,16 @@
           },
           {
             "properties": {
+              "hook_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HookId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "point": {
                 "$ref": "#/$defs/HookPoint"
               },
@@ -2410,7 +2430,7 @@
           {
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "reason_type": {
                 "const": "hook_timeout",
@@ -2432,7 +2452,7 @@
           {
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "reason": {
                 "type": "string"
@@ -2657,7 +2677,7 @@
             "description": "Hook invocation started.",
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
@@ -2683,7 +2703,7 @@
                 "type": "integer"
               },
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
@@ -2708,7 +2728,7 @@
                 "type": "string"
               },
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
@@ -2730,7 +2750,7 @@
             "description": "Hook denied an action.",
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "message": {
                 "type": "string"
@@ -2760,7 +2780,7 @@
             "description": "A rewrite patch was applied synchronously.",
             "properties": {
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "patch": {
                 "$ref": "#/$defs/HookPatch"
@@ -2788,7 +2808,7 @@
                 "$ref": "#/$defs/HookPatchEnvelope"
               },
               "hook_id": {
-                "type": "string"
+                "$ref": "#/$defs/HookId"
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"

@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use meerkat_machine_schema::{MachineProductionOwnerRelation, canonical_machine_schemas};
 use tempfile::tempdir;
 use xtask::machines::*;
 
@@ -385,36 +386,6 @@ fn kernel_generated_inventory_is_canonical_five_only() {
 }
 
 #[test]
-fn generated_kernel_boundary_rejects_production_owner_machine_body() {
-    let dir = tempdir().expect("tempdir");
-    let generated = dir
-        .path()
-        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
-    fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
-    fs::write(&generated, "// generated kernel exists").expect("write generated kernel");
-
-    let owner = dir
-        .path()
-        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
-    fs::create_dir_all(owner.parent().expect("owner parent")).expect("create owner");
-    fs::write(
-        &owner,
-        "meerkat_machine_dsl::machine! { machine MeerkatMachine {} }",
-    )
-    .expect("write production owner body");
-
-    let mismatches =
-        collect_generated_kernel_boundary_mismatches(dir.path()).expect("boundary mismatches");
-    assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MeerkatMachine")
-                && mismatch.contains("meerkat-runtime/src/meerkat_machine/dsl.rs")
-        }),
-        "expected production owner machine! body to be rejected, got {mismatches:#?}"
-    );
-}
-
-#[test]
 fn generated_kernel_boundary_rejects_retired_generated_source_and_bridge_paths() {
     let dir = tempdir().expect("tempdir");
     for retired in [
@@ -471,132 +442,86 @@ fn generated_kernel_boundary_accepts_canonical_generated_module_without_owner_bo
 }
 
 #[test]
-fn phase1_production_body_audit_accepts_only_declared_carry_forward_bodies() {
-    require_live_workspace_runfiles();
-    let root = repo_root().expect("repo root");
+fn production_owner_relation_rejects_source_only_token_without_schema_relation() {
+    let dir = tempdir().expect("tempdir");
+    let schemas = canonical_machine_schemas()
+        .into_iter()
+        .filter(|schema| schema.machine.as_str() == "MeerkatMachine")
+        .collect::<Vec<_>>();
+
+    let generated = dir
+        .path()
+        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
+    fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
+    fs::write(&generated, "// generated MeerkatMachine kernel").expect("write generated kernel");
+
+    let source_only = dir
+        .path()
+        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
+    fs::create_dir_all(source_only.parent().expect("source parent")).expect("create parent");
+    fs::write(&source_only, "machine! { machine MeerkatMachine {} }").expect("write source");
+
     let mismatches =
-        collect_phase1_production_body_mismatches(&root).expect("production body mismatches");
+        collect_production_machine_owner_relation_mismatches_for_schemas(dir.path(), &schemas, &[])
+            .expect("production owner relation mismatches");
+    assert!(
+        mismatches.iter().any(|mismatch| mismatch
+            .contains("missing production owner schema relation for MeerkatMachine")),
+        "expected source-only machine token to fail without schema owner relation, got {mismatches:#?}"
+    );
+}
+
+#[test]
+fn production_owner_relation_accepts_generated_relation_without_machine_token_shape() {
+    let dir = tempdir().expect("tempdir");
+    let schemas = canonical_machine_schemas()
+        .into_iter()
+        .filter(|schema| schema.machine.as_str() == "MeerkatMachine")
+        .collect::<Vec<_>>();
+    let relations = [MachineProductionOwnerRelation::new(
+        "MeerkatMachine",
+        "meerkat-runtime",
+        "meerkat_machine::dsl",
+    )];
+
+    let generated = dir
+        .path()
+        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
+    fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
+    fs::write(&generated, "// generated MeerkatMachine kernel").expect("write generated kernel");
+
+    let owner = dir
+        .path()
+        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
+    fs::create_dir_all(owner.parent().expect("owner parent")).expect("create owner");
+    fs::write(&owner, "pub fn schema_adapter() {}").expect("write owner");
+
+    let mismatches = collect_production_machine_owner_relation_mismatches_for_schemas(
+        dir.path(),
+        &schemas,
+        &relations,
+    )
+    .expect("production owner relation mismatches");
     assert!(
         mismatches.is_empty(),
-        "expected live canonical machine! bodies outside the catalog to be explicit Phase 1 carry-forward debt, got {mismatches:#?}"
+        "expected typed owner relation plus generated kernel to pass without source token shape, got {mismatches:#?}"
     );
 }
 
 #[test]
-fn phase1_production_body_audit_rejects_new_canonical_body_outside_catalog() {
-    let dir = tempdir().expect("tempdir");
-
-    for body in PHASE1_CARRY_FORWARD_PRODUCTION_BODIES {
-        let path = dir.path().join(body.path);
-        fs::create_dir_all(path.parent().expect("carry-forward parent")).expect("create parent");
-        fs::write(
-            &path,
-            format!("machine! {{ machine {} {{}} }}", body.machine),
-        )
-        .expect("write carry-forward body");
-    }
-
-    let new_body = dir.path().join("meerkat-runtime/src/new_machine.rs");
-    fs::create_dir_all(new_body.parent().expect("new body parent")).expect("create parent");
-    fs::write(&new_body, "machine! { machine MeerkatMachine {} }").expect("write new body");
-
-    let mismatches =
-        collect_phase1_production_body_mismatches(dir.path()).expect("production body mismatches");
-    assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MeerkatMachine")
-                && mismatch.contains("meerkat-runtime/src/new_machine.rs")
-        }),
-        "expected new canonical body to be rejected, got {mismatches:#?}"
-    );
-}
-
-#[test]
-fn phase1_production_body_audit_rejects_spaced_and_qualified_machine_macros() {
-    let dir = tempdir().expect("tempdir");
-
-    for body in PHASE1_CARRY_FORWARD_PRODUCTION_BODIES {
-        let path = dir.path().join(body.path);
-        fs::create_dir_all(path.parent().expect("carry-forward parent")).expect("create parent");
-        fs::write(
-            &path,
-            format!("machine! {{ machine {} {{}} }}", body.machine),
-        )
-        .expect("write carry-forward body");
-    }
-
-    let spaced_body = dir.path().join("meerkat-runtime/src/spaced_machine.rs");
-    fs::create_dir_all(spaced_body.parent().expect("spaced body parent")).expect("create parent");
-    fs::write(&spaced_body, "machine ! { machine MeerkatMachine {} }").expect("write spaced body");
-
-    let qualified_body = dir.path().join("meerkat-mob/src/qualified_machine.rs");
-    fs::create_dir_all(qualified_body.parent().expect("qualified body parent"))
-        .expect("create parent");
-    fs::write(
-        &qualified_body,
-        "meerkat_machine_dsl::machine! { machine MobMachine {} }",
+fn phase1_source_string_scanner_is_removed_from_xtask_surface() {
+    require_live_workspace_runfiles();
+    let source = fs::read_to_string(
+        repo_root()
+            .expect("repo root")
+            .join("xtask/src/machines.rs"),
     )
-    .expect("write qualified body");
+    .expect("read machines xtask source");
 
-    let alias_body = dir.path().join("meerkat-runtime/src/aliased_machine.rs");
-    fs::create_dir_all(alias_body.parent().expect("aliased body parent")).expect("create parent");
-    fs::write(
-        &alias_body,
-        "use meerkat_machine_dsl::machine as local_machine;\nlocal_machine! { machine MeerkatMachine {} }",
-    )
-    .expect("write aliased body");
-
-    let mismatches =
-        collect_phase1_production_body_mismatches(dir.path()).expect("production body mismatches");
     assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MeerkatMachine")
-                && mismatch.contains("meerkat-runtime/src/spaced_machine.rs")
-        }),
-        "expected spaced canonical body to be rejected, got {mismatches:#?}"
-    );
-    assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MobMachine")
-                && mismatch.contains("meerkat-mob/src/qualified_machine.rs")
-        }),
-        "expected qualified canonical body to be rejected, got {mismatches:#?}"
-    );
-    assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MeerkatMachine")
-                && mismatch.contains("meerkat-runtime/src/aliased_machine.rs")
-        }),
-        "expected aliased canonical body to be rejected, got {mismatches:#?}"
-    );
-}
-
-#[test]
-fn phase1_production_body_audit_rejects_machine_body_hidden_in_wrapper_macro() {
-    let dir = tempdir().expect("tempdir");
-    let wrapped_body = dir.path().join("meerkat-runtime/src/wrapped_machine.rs");
-    fs::create_dir_all(wrapped_body.parent().expect("wrapped body parent")).expect("create parent");
-    fs::write(
-        &wrapped_body,
-        r"
-macro_rules! prod_body {
-    () => {
-        meerkat_machine_dsl::machine! { machine MeerkatMachine {} }
-    };
-}
-prod_body!();
-",
-    )
-    .expect("write wrapped body");
-
-    let mismatches =
-        collect_phase1_production_body_mismatches(dir.path()).expect("production body mismatches");
-    assert!(
-        mismatches.iter().any(|mismatch| {
-            mismatch.contains("MeerkatMachine")
-                && mismatch.contains("meerkat-runtime/src/wrapped_machine.rs")
-        }),
-        "expected wrapper macro canonical body to be rejected, got {mismatches:#?}"
+        !source.contains("collect_phase1_production_body_mismatches")
+            && !source.contains("PHASE1_CARRY_FORWARD_PRODUCTION_BODIES"),
+        "old Phase 1 source-string machine scanner must not remain invokable as the authoritative gate"
     );
 }
 

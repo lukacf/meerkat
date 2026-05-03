@@ -2738,6 +2738,12 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
+                    meerkat_runtime::completion::CompletionOutcome::Cancelled => {
+                        mob_dsl::MobMachineInput::KickoffResolveFailed {
+                            member_id: agent_identity.to_string(),
+                            error: "cancelled".to_string(),
+                        }
+                    }
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {

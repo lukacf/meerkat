@@ -10,21 +10,19 @@ pub enum SurfaceResultClass {
     Success,
     HardFailure,
     Cancelled,
+    MissingTerminal,
 }
 
 /// Exhaustive terminal outcome classification for `MeerkatMachine`.
 /// No default arm — adding a new `TurnTerminalOutcome` variant forces a compile-time update.
-/// Returns `None` when no terminal outcome has been recorded yet.
-pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> Option<SurfaceResultClass> {
+pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> SurfaceResultClass {
     match outcome {
-        TurnTerminalOutcome::None => None,
-        TurnTerminalOutcome::Completed => Some(SurfaceResultClass::Success),
-        TurnTerminalOutcome::Failed => Some(SurfaceResultClass::HardFailure),
-        TurnTerminalOutcome::Cancelled => Some(SurfaceResultClass::Cancelled),
-        TurnTerminalOutcome::BudgetExhausted => Some(SurfaceResultClass::Success),
-        TurnTerminalOutcome::TimeBudgetExceeded => Some(SurfaceResultClass::HardFailure),
-        TurnTerminalOutcome::StructuredOutputValidationFailed => {
-            Some(SurfaceResultClass::HardFailure)
-        }
+        TurnTerminalOutcome::None => SurfaceResultClass::MissingTerminal,
+        TurnTerminalOutcome::Completed => SurfaceResultClass::Success,
+        TurnTerminalOutcome::Failed => SurfaceResultClass::HardFailure,
+        TurnTerminalOutcome::Cancelled => SurfaceResultClass::Cancelled,
+        TurnTerminalOutcome::BudgetExhausted => SurfaceResultClass::Success,
+        TurnTerminalOutcome::TimeBudgetExceeded => SurfaceResultClass::HardFailure,
+        TurnTerminalOutcome::StructuredOutputValidationFailed => SurfaceResultClass::HardFailure,
     }
 }

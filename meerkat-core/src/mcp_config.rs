@@ -6,6 +6,7 @@
 //!
 //! Precedence: project > user (project wins on name collision)
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -13,14 +14,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// MCP configuration containing server definitions
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct McpConfig {
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
 }
 
 /// Transport kind for MCP servers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpTransportKind {
     Stdio,
@@ -35,7 +36,7 @@ impl McpTransportKind {
 }
 
 /// Stdio transport configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpStdioConfig {
     /// Command to spawn the server
@@ -49,7 +50,7 @@ pub struct McpStdioConfig {
 }
 
 /// HTTP transport configuration (streamable HTTP or legacy SSE)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpHttpConfig {
     /// Server URL
@@ -63,7 +64,7 @@ pub struct McpHttpConfig {
 }
 
 /// HTTP transport selection for URL-based servers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
 pub enum McpHttpTransport {
@@ -73,7 +74,7 @@ pub enum McpHttpTransport {
 }
 
 /// MCP server transport configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum McpTransportConfig {
     Stdio(McpStdioConfig),
@@ -81,7 +82,7 @@ pub enum McpTransportConfig {
 }
 
 /// Configuration for a single MCP server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Server name (must be unique within scope)
     pub name: String,

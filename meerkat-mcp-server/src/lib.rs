@@ -1002,10 +1002,10 @@ pub struct MeerkatBlobGetInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MeerkatMcpAddInput {
     pub session_id: String,
-    pub server_name: String,
-    pub server_config: Value,
+    pub server_config: meerkat_core::McpServerConfig,
     #[serde(default)]
     pub persisted: bool,
 }
@@ -1239,7 +1239,12 @@ fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
 ) -> Result<Value, ToolCallError> {
-    format_agent_result(result, session_id).map_err(ToolCallError::internal)
+    match result {
+        Err(SessionError::Agent(meerkat::AgentError::Cancelled)) => {
+            Err(request_cancelled_tool_error())
+        }
+        result => format_agent_result(result, session_id).map_err(ToolCallError::internal),
+    }
 }
 
 fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
@@ -1285,6 +1290,19 @@ fn post_commit_session_created_error(
     session_id: &meerkat::SessionId,
     err: &SessionError,
 ) -> ToolCallError {
+    if matches!(err, SessionError::Agent(meerkat::AgentError::Cancelled)) {
+        return ToolCallError::new(
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
+            "request cancelled",
+            Some(json!({
+                "session_id": session_id.to_string(),
+                "session_ref": session_id.to_string(),
+                "session_created": true,
+                "resumable": true,
+            })),
+        );
+    }
+
     ToolCallError::internal_with_data(
         format!("Agent error: {err}"),
         json!({
@@ -1299,7 +1317,7 @@ fn post_commit_session_created_error(
 fn request_cancelled_tool_error() -> ToolCallError {
     ToolCallError::new(
         meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
-        "request cancelled before start",
+        "request cancelled",
         None,
     )
 }
@@ -1826,11 +1844,12 @@ async fn handle_meerkat_config(
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Set => {
-            let config = input.config.ok_or_else(|| {
+            let config_value = input.config.ok_or_else(|| {
                 ToolCallError::invalid_params("config is required for action=set")
             })?;
-            let config: Config = serde_json::from_value(config)
+            let config: Config = serde_json::from_value(config_value.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
+            reject_config_payload_defaulting(&config_value, &config)?;
             validate_config_for_commit(&config)?;
             let snapshot = state
                 .config_runtime
@@ -1884,6 +1903,51 @@ fn validate_config_for_commit(config: &Config) -> Result<(), ToolCallError> {
             ToolCallError::invalid_params(format!("Invalid skills source-identity config: {e}"))
         })?;
     Ok(())
+}
+
+fn reject_config_payload_defaulting(raw: &Value, config: &Config) -> Result<(), ToolCallError> {
+    let typed = serde_json::to_value(config).map_err(|e| {
+        ToolCallError::internal(format!(
+            "Failed to serialize typed config for validation: {e}"
+        ))
+    })?;
+    compare_config_payload_shape(raw, &typed, "config")
+}
+
+fn compare_config_payload_shape(
+    raw: &Value,
+    typed: &Value,
+    path: &str,
+) -> Result<(), ToolCallError> {
+    match (raw, typed) {
+        (Value::Object(raw_obj), Value::Object(typed_obj)) => {
+            for key in raw_obj.keys() {
+                if !typed_obj.contains_key(key) {
+                    return Err(ToolCallError::invalid_params(format!(
+                        "Invalid config: unknown field `{path}.{key}`"
+                    )));
+                }
+            }
+            for (key, typed_value) in typed_obj {
+                let Some(raw_value) = raw_obj.get(key) else {
+                    return Err(ToolCallError::invalid_params(format!(
+                        "Invalid config: missing field `{path}.{key}`; action=set requires a complete typed config payload"
+                    )));
+                };
+                compare_config_payload_shape(raw_value, typed_value, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        (Value::Array(raw_items), Value::Array(typed_items)) => {
+            for (index, (raw_item, typed_item)) in
+                raw_items.iter().zip(typed_items.iter()).enumerate()
+            {
+                compare_config_payload_shape(raw_item, typed_item, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn merge_patch(base: &mut Value, patch: Value) {
@@ -2110,11 +2174,22 @@ impl McpArchiveCleanup {
     }
 }
 
+async fn archive_with_mcp_machine_authority(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat::SessionId,
+) -> Result<(), SessionError> {
+    service
+        .archive_with_machine_authority(session_id, runtime_adapter.session_control_authority())
+        .await
+}
+
 async fn archive_session_with_runtime_cleanup(
     state: &MeerkatMcpState,
     session_id: meerkat::SessionId,
 ) -> Result<(), SessionError> {
     let service = Arc::clone(&state.service);
+    let runtime_adapter = Arc::clone(&state.runtime_adapter);
     let cleanup = McpArchiveCleanup {
         ingress: state.runtime_ingress_context(),
         #[cfg(feature = "mob")]
@@ -2123,7 +2198,12 @@ async fn archive_session_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
+        let result = archive_with_mcp_machine_authority(
+            service.as_ref(),
+            runtime_adapter.as_ref(),
+            &session_id,
+        )
+        .await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             cleanup.run(&session_id).await;
         }
@@ -2155,34 +2235,26 @@ async fn handle_meerkat_mcp_add(
     state: &MeerkatMcpState,
     input: MeerkatMcpAddInput,
 ) -> Result<Value, String> {
-    if input.server_name.trim().is_empty() {
+    let server_name = input.server_config.name.clone();
+    if server_name.trim().is_empty() {
         return Err("server_name cannot be empty".to_string());
     }
     let session_id =
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
     let adapter = state.mcp_adapter_for_session(&session_id).await?;
 
-    let mut server_config = input.server_config;
-    if let Some(obj) = server_config.as_object_mut() {
-        obj.insert(
-            "name".to_string(),
-            serde_json::Value::String(input.server_name.clone()),
-        );
-    }
-    let config: meerkat_core::McpServerConfig =
-        serde_json::from_value(server_config).map_err(|e| format!("invalid server_config: {e}"))?;
     adapter
-        .stage_add(config)
+        .stage_add(input.server_config)
         .await
         .map_err(|e| format!("failed to stage add: {e}"))?;
 
-    Ok(wrap_tool_payload(json!({
-        "session_id": input.session_id,
-        "operation": "add",
-        "server_name": input.server_name,
-        "status": "staged",
-        "persisted": false
-    })))
+    mcp_live_response_value(
+        input.session_id,
+        meerkat_contracts::McpLiveOperation::Add,
+        Some(server_name),
+        false,
+    )
+    .map(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_remove(
@@ -2200,13 +2272,13 @@ async fn handle_meerkat_mcp_remove(
         .await
         .map_err(|e| format!("failed to stage remove: {e}"))?;
 
-    Ok(wrap_tool_payload(json!({
-        "session_id": input.session_id,
-        "operation": "remove",
-        "server_name": input.server_name,
-        "status": "staged",
-        "persisted": false
-    })))
+    mcp_live_response_value(
+        input.session_id,
+        meerkat_contracts::McpLiveOperation::Remove,
+        Some(input.server_name),
+        false,
+    )
+    .map(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_reload(
@@ -2237,13 +2309,30 @@ async fn handle_meerkat_mcp_reload(
         }
     }
 
-    Ok(wrap_tool_payload(json!({
-        "session_id": input.session_id,
-        "operation": "reload",
-        "server_name": input.server_name,
-        "status": "staged",
-        "persisted": false
-    })))
+    mcp_live_response_value(
+        input.session_id,
+        meerkat_contracts::McpLiveOperation::Reload,
+        input.server_name,
+        false,
+    )
+    .map(wrap_tool_payload)
+}
+
+fn mcp_live_response_value(
+    session_id: String,
+    operation: meerkat_contracts::McpLiveOperation,
+    server_name: Option<String>,
+    persisted: bool,
+) -> Result<Value, String> {
+    serde_json::to_value(meerkat_contracts::McpLiveOpResponse {
+        session_id,
+        operation,
+        server_name,
+        status: meerkat_contracts::McpLiveOpStatus::Staged,
+        persisted,
+        applied_at_turn: None,
+    })
+    .map_err(|error| format!("failed to serialize MCP live response: {error}"))
 }
 
 async fn handle_meerkat_realtime_open_info(
@@ -2856,19 +2945,31 @@ async fn handle_meerkat_run(
             }))
             .await;
         let service = state.service.clone();
+        let archive_runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cleanup = session_id.clone();
         let ingress_for_cleanup = ingress.clone();
         context.set_unpublished_cleanup(request_action(move || {
             let service = service.clone();
+            let archive_runtime_adapter = archive_runtime_adapter.clone();
             let ingress = ingress_for_cleanup.clone();
             let session_id = session_id_for_cleanup.clone();
             async move {
-                let _ = service.archive(&session_id).await;
+                let _ = archive_with_mcp_machine_authority(
+                    service.as_ref(),
+                    archive_runtime_adapter.as_ref(),
+                    &session_id,
+                )
+                .await;
                 ingress.clear_session(&session_id).await;
             }
         }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            let _ = state.service.archive(&session_id).await;
+            let _ = archive_with_mcp_machine_authority(
+                state.service.as_ref(),
+                state.runtime_adapter.as_ref(),
+                &session_id,
+            )
+            .await;
             ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
         }
@@ -2955,7 +3056,12 @@ async fn handle_meerkat_run(
     ));
 
     reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
-        let _ = state.service.archive(&session_id).await;
+        let _ = archive_with_mcp_machine_authority(
+            state.service.as_ref(),
+            state.runtime_adapter.as_ref(),
+            &session_id,
+        )
+        .await;
         state.runtime_adapter.unregister_session(&session_id).await;
         ingress.clear_session(&session_id).await;
     })
@@ -4054,6 +4160,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_config_set_rejects_payload_that_would_default_missing_fields() {
+        let raw = json!({
+            "max_tokens": 448
+        });
+        let parsed: Config = serde_json::from_value(raw.clone())
+            .expect("serde would otherwise fabricate config defaults");
+        let err = reject_config_payload_defaulting(&raw, &parsed)
+            .expect_err("partial config set must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("missing field `config.agent`"));
+    }
+
+    #[test]
+    fn test_config_set_accepts_complete_typed_payload() {
+        let config = Config::default();
+        let raw = serde_json::to_value(&config).expect("config serializes");
+        reject_config_payload_defaulting(&raw, &config).expect("complete config is accepted");
+    }
+
+    #[tokio::test]
+    async fn test_config_rejects_unknown_action_string_before_dispatch() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "default_if_unknown",
+                "config": {"max_tokens": 448}
+            }),
+        ))
+        .await
+        .expect_err("unknown config action string must be rejected before dispatch");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("unknown variant") || err.message.contains("expected one of"));
+    }
+
     #[cfg(feature = "mob")]
     fn unwrap_tool_payload_json(value: Value) -> Value {
         let text = value["content"][0]["text"]
@@ -4151,6 +4296,16 @@ mod tests {
         assert_eq!(archive_tool["name"], "meerkat_archive");
         let mcp_add_tool = find_tool("meerkat_mcp_add");
         assert_eq!(mcp_add_tool["name"], "meerkat_mcp_add");
+        assert!(
+            mcp_add_tool["inputSchema"]["properties"]
+                .get("server_config")
+                .is_some()
+        );
+        assert!(
+            mcp_add_tool["inputSchema"]["properties"]
+                .get("server_name")
+                .is_none()
+        );
         let mcp_remove_tool = find_tool("meerkat_mcp_remove");
         assert_eq!(mcp_remove_tool["name"], "meerkat_mcp_remove");
         let mcp_reload_tool = find_tool("meerkat_mcp_reload");
@@ -5588,6 +5743,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_format_agent_result_tool_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = format_agent_result_tool(
+            Err(SessionError::Agent(meerkat::AgentError::Cancelled)),
+            &session_id,
+        )
+        .expect_err("cancelled terminal should be a tool error");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[test]
+    fn test_post_commit_session_created_error_preserves_cancelled_error_code() {
+        let session_id = meerkat::SessionId::new();
+        let err = post_commit_session_created_error(
+            &session_id,
+            &SessionError::Agent(meerkat::AgentError::Cancelled),
+        );
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        let data = err.data.as_ref().expect("structured cancellation data");
+        assert_eq!(
+            data.get("session_created").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
     #[cfg(feature = "comms")]
     #[test]
     fn test_tools_list_has_keep_alive_parameter() {
@@ -5878,11 +6067,13 @@ mod tests {
         assert_eq!(history_payload["has_more"], true);
         assert_eq!(history_payload["messages"].as_array().unwrap().len(), 2);
 
-        state
-            .service
-            .archive(session.id())
-            .await
-            .expect("archive should succeed");
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("archive should succeed");
 
         let archived_history = Box::pin(handle_tools_call(
             &state,
@@ -6002,13 +6193,70 @@ mod tests {
             "meerkat_mcp_add",
             &json!({
                 "session_id": session_id,
-                "server_name": "demo",
-                "server_config": {"command": "cat", "args": [], "env": {}}
+                "server_config": {"name": "demo", "command": "cat", "args": [], "env": {}}
             }),
         ))
         .await
         .expect_err("mcp add should fail without adapter registration");
         assert!(err.message.contains("Live MCP unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_add_rejects_legacy_server_name_mirror_before_dispatch() {
+        let (state, session_id) = state_with_persisted_session().await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": session_id,
+                "server_name": "demo",
+                "server_config": {"name": "demo", "command": "cat", "args": [], "env": {}}
+            }),
+        ))
+        .await
+        .expect_err("legacy server_name mirror must be rejected at input boundary");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("unknown field"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_add_rejects_malformed_server_config_before_dispatch() {
+        let (state, session_id) = state_with_persisted_session().await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": session_id,
+                "server_config": {}
+            }),
+        ))
+        .await
+        .expect_err("malformed server_config must be rejected at input boundary");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("missing field")
+                || err.message.contains("data did not match any variant")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_add_rejects_legacy_config_string_before_dispatch() {
+        let (state, session_id) = state_with_persisted_session().await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": session_id,
+                "server_config": "demo"
+            }),
+        ))
+        .await
+        .expect_err("legacy config string must be rejected at input boundary");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("invalid type"));
     }
 
     #[tokio::test]
@@ -6037,8 +6285,7 @@ mod tests {
             "meerkat_mcp_add",
             &json!({
                 "session_id": session_id,
-                "server_name": "demo",
-                "server_config": {"command": "cat", "args": [], "env": {}}
+                "server_config": {"name": "demo", "command": "cat", "args": [], "env": {}}
             }),
         ))
         .await

@@ -12,12 +12,16 @@ from typing import Any, Literal, NewType, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
-    InputListParams as InputListParams,
-    InputListResult as InputListResult,
     McpAddParams as McpAddParams,
+    McpHttpConfig as McpHttpConfig,
+    McpHttpServerConfig as McpHttpServerConfig,
+    McpHttpTransport as McpHttpTransport,
     McpLiveOpResponse as McpLiveOpResponse,
     McpReloadParams as McpReloadParams,
     McpRemoveParams as McpRemoveParams,
+    McpServerConfig as McpServerConfig,
+    McpStdioConfig as McpStdioConfig,
+    McpStdioServerConfig as McpStdioServerConfig,
     MobBackendConfigInput as MobBackendConfigInput,
     MobCreateParams as MobCreateParams,
     MobCreateResult as MobCreateResult,
@@ -41,6 +45,7 @@ from .generated.types import (
     MobReconcileReportWire as MobReconcileReportWire,
     MobReconcileResult as MobReconcileResult,
     MobSpawnManyFailedResult as MobSpawnManyFailedResult,
+    MobSpawnManyFailureCause as MobSpawnManyFailureCause,
     MobSpawnManyParams as MobSpawnManyParams,
     MobSpawnManyResult as MobSpawnManyResult,
     MobSpawnManyResultEntry as MobSpawnManyResultEntry,
@@ -79,6 +84,7 @@ from .generated.types import (
     RealtimeOpenRequest as RealtimeOpenRequest,
     RealtimeOutputChunk as RealtimeOutputChunk,
     RealtimeOutputKind as RealtimeOutputKind,
+    RealtimeProtocolVersion as RealtimeProtocolVersion,
     RealtimeReconnectPolicy as RealtimeReconnectPolicy,
     RealtimeServerFrame as RealtimeServerFrame,
     RealtimeStatusParams as RealtimeStatusParams,
@@ -87,14 +93,8 @@ from .generated.types import (
     RealtimeTextDelta as RealtimeTextDelta,
     RealtimeTurningMode as RealtimeTurningMode,
     RealtimeVideoChunk as RealtimeVideoChunk,
-    RuntimeAcceptParams as RuntimeAcceptParams,
     RuntimeAcceptResult as RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusResult as RuntimeRealtimeAttachmentStatusResult,
-    RuntimeResetParams as RuntimeResetParams,
-    RuntimeResetResult as RuntimeResetResult,
-    RuntimeRetireParams as RuntimeRetireParams,
-    RuntimeRetireResult as RuntimeRetireResult,
-    RuntimeStateParams as RuntimeStateParams,
     RuntimeStateResult as RuntimeStateResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
@@ -489,10 +489,22 @@ class SessionHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class EventSourceIdentity:
+    """Typed source identity for session or runtime event semantics."""
+
+    type: str = ""
+    session_id: str | None = None
+    runtime_id: str | None = None
+    interaction_id: str | None = None
+    source_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EventEnvelope:
     """Session or agent event with delivery metadata."""
 
     event_id: str = ""
+    source: EventSourceIdentity | None = None
     source_id: str = ""
     seq: int = 0
     timestamp_ms: int = 0

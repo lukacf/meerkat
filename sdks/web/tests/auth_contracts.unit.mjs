@@ -216,6 +216,66 @@ test('generated auth parsers reject provider-specific auth and backend mismatche
   );
 });
 
+test('generated auth list and realm parsers reject unresolved or cross-provider bindings', async () => {
+  const geminiAuthProfile = {
+    id: 'gemini_oauth',
+    provider: 'gemini',
+    auth_method: 'google_oauth',
+    source_kind: 'external_resolver',
+  };
+  const crossProviderBinding = {
+    ...binding,
+    id: 'bad_binding',
+    auth_profile: 'gemini_oauth',
+  };
+
+  await assert.rejects(
+    () =>
+      authWithResponse({
+        realm_id: 'dev',
+        auth_profiles: [geminiAuthProfile],
+        backend_profiles: [backendProfile],
+        bindings: [crossProviderBinding],
+      }).auth.listProfiles('dev'),
+    /auth_profile/,
+  );
+
+  assert.throws(
+    () =>
+      parseWireRealmConnectionSet({
+        realm_id: 'dev',
+        backends: { openai_api: backendProfile },
+        auth_profiles: { gemini_oauth: geminiAuthProfile },
+        bindings: { bad_binding: crossProviderBinding },
+      }),
+    /auth_profile/,
+  );
+
+  assert.throws(
+    () =>
+      parseWireRealmConnectionSet({
+        realm_id: 'dev',
+        backends: { openai_api: backendProfile },
+        auth_profiles: { prod_env_key: authProfile },
+        bindings: {
+          default_openai: { ...binding, backend_profile: 'missing_backend' },
+        },
+      }),
+    /backend_profile/,
+  );
+
+  await assert.rejects(
+    () =>
+      authWithResponse({
+        realm_id: 'dev',
+        auth_profiles: [authProfile],
+        backend_profiles: [backendProfile],
+        bindings: [{ ...binding, auth_profile: 'missing_auth' }],
+      }).auth.listProfiles('dev'),
+    /auth_profile/,
+  );
+});
+
 test('Auth.status and device-complete ready parse generated terminal payloads', async () => {
   const status = {
     ...identityPayload(),

@@ -1,5 +1,4 @@
-//! v9 runtime RPC handlers — runtime/session_status, runtime/session_submit, and
-//! session/realtime_attachment_status.
+//! Runtime-backed session support handlers.
 
 use serde_json::value::RawValue;
 

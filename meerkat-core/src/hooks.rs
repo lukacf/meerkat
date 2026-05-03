@@ -1,7 +1,7 @@
 //! Hook contracts and engine interfaces.
 
 use crate::error::AgentError;
-use crate::event::{AgentErrorClass, AgentErrorReport};
+use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
 use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResult, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -151,7 +151,7 @@ pub enum HookPatch {
     /// Replace assistant text content in the latest model response.
     AssistantText { text: String },
     /// Replace serialized tool arguments.
-    ToolArgs { args: Value },
+    ToolArgs { args: ToolCallArguments },
     /// Mutate tool result payload before it is persisted.
     ToolResult {
         content: String,
@@ -212,7 +212,7 @@ pub struct HookLlmResponse {
 pub struct HookToolCall {
     pub tool_use_id: String,
     pub name: String,
-    pub args: Value,
+    pub args: ToolCallArguments,
 }
 
 /// Tool result view exposed to hooks.
@@ -459,6 +459,37 @@ mod tests {
             media_type: media_type.to_string(),
             data: data.into(),
         }
+    }
+
+    #[test]
+    fn hook_tool_call_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "tool_use_id": "tc_1",
+            "name": "search",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<HookToolCall>(value)
+            .expect_err("hook surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn hook_tool_args_patch_rejects_string_args_on_deserialize() {
+        let value = serde_json::json!({
+            "patch_type": "tool_args",
+            "args": "{\"query\":"
+        });
+
+        let err = serde_json::from_value::<HookPatch>(value)
+            .expect_err("hook patch surface must reject string-success tool args");
+        assert!(
+            err.to_string().contains("JSON object, got string"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -153,9 +153,9 @@ pub use error::{AgentError, ToolError};
 pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta,
     ExternalToolDeltaPhase, ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
-    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config,
+    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, VerboseEventConfig, agent_event_type, compare_event_envelopes,
+    format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{

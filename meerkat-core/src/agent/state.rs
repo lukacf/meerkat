@@ -3,9 +3,9 @@
 use crate::budget::{BudgetDimension, BudgetExceeded};
 use crate::error::{AgentError, ToolError};
 use crate::event::{
-    AgentEvent, BackgroundJobTerminalStatus, BudgetType, DeferredCatalogDelta,
-    ToolConfigChangeDomain, ToolConfigChangeOperation, ToolConfigChangeStatus,
-    ToolConfigChangedPayload,
+    AgentEvent, BackgroundJobTerminalStatus, BudgetType, DeferredCatalogDelta, ToolCallArguments,
+    ToolCallArgumentsError, ToolConfigChangeDomain, ToolConfigChangeOperation,
+    ToolConfigChangeStatus, ToolConfigChangedPayload,
 };
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
@@ -219,6 +219,16 @@ where
         return Err(ToolError::access_denied(name));
     }
     Err(ToolError::not_found(name))
+}
+
+fn tool_call_args_projection_error(tool_name: &str, error: ToolCallArgumentsError) -> AgentError {
+    AgentError::ToolError(
+        ToolError::invalid_arguments(
+            tool_name,
+            format!("tool call arguments projection failed: {error}"),
+        )
+        .to_string(),
+    )
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -1726,33 +1736,48 @@ where
 
                     // Check if we have tool calls
                     if assistant_msg.has_tool_calls() {
+                        let tool_calls: Vec<(ToolCallOwned, ToolCallArguments)> =
+                            match assistant_msg
+                                .tool_calls()
+                                .map(|tc| {
+                                    let args = ToolCallArguments::from_raw_json(tc.args).map_err(
+                                        |error| tool_call_args_projection_error(tc.name, error),
+                                    )?;
+                                    Ok((ToolCallOwned::from_view(tc), args))
+                                })
+                                .collect::<Result<_, AgentError>>()
+                            {
+                                Ok(tool_calls) => tool_calls,
+                                Err(error) => {
+                                    self.terminalize_fatal_error(
+                                        &run_id, turn_count, &event_tx, &error,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
+                            };
+
                         // Add assistant message with ordered blocks
                         self.session
                             .push(Message::BlockAssistant(assistant_msg.clone()));
 
                         // Emit tool call requests
-                        for tc in assistant_msg.tool_calls() {
-                            let args_value: Value = serde_json::from_str(tc.args.get())
-                                .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
+                        for (tc, args) in &tool_calls {
                             emit_event!(AgentEvent::ToolCallRequested {
-                                id: tc.id.to_string(),
-                                name: tc.name.into(),
-                                args: args_value,
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                args: args.clone(),
                             });
                         }
 
                         // Transition to waiting for ops
-                        let tc_count = assistant_msg.tool_calls().count() as u32;
+                        let tc_count = tool_calls.len() as u32;
                         self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
                             run_id: run_id.clone(),
                             tool_count: tc_count,
                         })?;
 
                         // Execute tool calls in parallel
-                        let tool_calls: Vec<ToolCallOwned> = assistant_msg
-                            .tool_calls()
-                            .map(ToolCallOwned::from_view)
-                            .collect();
                         let tools_ref = Arc::clone(&self.tools);
                         let mut executable_tool_calls = Vec::new();
                         let mut tool_results = Vec::with_capacity(tool_calls.len());
@@ -1762,9 +1787,7 @@ where
                             .collect::<ToolNameSet>();
 
                         let pre_tool_reports =
-                            futures::future::join_all(tool_calls.iter().map(|tc| {
-                                let args_value: Value = serde_json::from_str(tc.args.get())
-                                    .unwrap_or_else(|_| Value::String(tc.args.get().to_string()));
+                            futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
                                 self.execute_hooks(
                                     HookInvocation {
                                         point: HookPoint::PreToolExecution,
@@ -1780,7 +1803,7 @@ where
                                         tool_call: Some(HookToolCall {
                                             tool_use_id: tc.id.clone(),
                                             name: tc.name.clone(),
-                                            args: args_value,
+                                            args: args.clone(),
                                         }),
                                         tool_result: None,
                                     },
@@ -1789,7 +1812,7 @@ where
                             }))
                             .await;
 
-                        for (tool_index, (mut tc, pre_tool_report)) in tool_calls
+                        for (tool_index, ((mut tc, _args), pre_tool_report)) in tool_calls
                             .into_iter()
                             .zip(pre_tool_reports.into_iter())
                             .enumerate()
@@ -1824,7 +1847,15 @@ where
                                             point: HookPoint::PreToolExecution,
                                             patch: HookPatch::ToolArgs { args: args.clone() },
                                         });
-                                        tc.set_args(args.clone());
+                                        if let Err(error) = tc.set_args(args) {
+                                            let error =
+                                                tool_call_args_projection_error(&tc.name, error);
+                                            self.terminalize_fatal_error(
+                                                &run_id, turn_count, &event_tx, &error,
+                                            )
+                                            .await?;
+                                            return Err(error);
+                                        }
                                     }
                                 }
                             }
@@ -2438,12 +2469,10 @@ struct ToolCallOwned {
 
 impl ToolCallOwned {
     fn from_view(view: ToolCallView<'_>) -> Self {
-        let args = RawValue::from_string(view.args.get().to_string())
-            .unwrap_or_else(|_| fallback_raw_value());
         Self {
             id: view.id.to_string(),
             name: view.name.into(),
-            args,
+            args: view.args.to_owned(),
         }
     }
 
@@ -2455,15 +2484,14 @@ impl ToolCallOwned {
         }
     }
 
-    fn set_args(&mut self, args: Value) {
-        let raw = RawValue::from_string(args.to_string()).unwrap_or_else(|_| fallback_raw_value());
-        self.args = raw;
+    fn set_args(&mut self, args: &ToolCallArguments) -> Result<(), ToolCallArgumentsError> {
+        self.args = RawValue::from_string(args.as_value().to_string()).map_err(|error| {
+            ToolCallArgumentsError::new(format!(
+                "validated tool call arguments failed raw projection: {error}"
+            ))
+        })?;
+        Ok(())
     }
-}
-
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-fn fallback_raw_value() -> Box<RawValue> {
-    RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
 #[cfg(test)]

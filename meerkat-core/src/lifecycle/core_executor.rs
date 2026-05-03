@@ -7,6 +7,8 @@
 use super::RunId;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
+use crate::error::AgentError;
+use crate::service::SessionError;
 use crate::types::RunResult;
 use serde_json::Value;
 use std::sync::Arc;
@@ -18,10 +20,43 @@ pub enum CoreApplyFailureCauseKind {
     PrimitiveRejected,
     RuntimeContextApply,
     RuntimeTurn,
+    HookDenied,
+    HookRuntimeFailure,
     ExecutorStopped,
     ExecutorControlFailed,
     ExecutorInternal,
     Unknown,
+}
+
+impl CoreApplyFailureCauseKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimitiveRejected => "PrimitiveRejected",
+            Self::RuntimeContextApply => "RuntimeContextApply",
+            Self::RuntimeTurn => "RuntimeTurn",
+            Self::HookDenied => "HookDenied",
+            Self::HookRuntimeFailure => "HookRuntimeFailure",
+            Self::ExecutorStopped => "ExecutorStopped",
+            Self::ExecutorControlFailed => "ExecutorControlFailed",
+            Self::ExecutorInternal => "ExecutorInternal",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        match value {
+            "PrimitiveRejected" => Some(Self::PrimitiveRejected),
+            "RuntimeContextApply" => Some(Self::RuntimeContextApply),
+            "RuntimeTurn" => Some(Self::RuntimeTurn),
+            "HookDenied" => Some(Self::HookDenied),
+            "HookRuntimeFailure" => Some(Self::HookRuntimeFailure),
+            "ExecutorStopped" => Some(Self::ExecutorStopped),
+            "ExecutorControlFailed" => Some(Self::ExecutorControlFailed),
+            "ExecutorInternal" => Some(Self::ExecutorInternal),
+            "Unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 /// Typed apply-failure cause plus its human-readable display projection.
@@ -51,6 +86,14 @@ impl CoreApplyFailureCause {
         Self::new(CoreApplyFailureCauseKind::RuntimeTurn, message)
     }
 
+    pub fn hook_denied(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::HookDenied, message)
+    }
+
+    pub fn hook_runtime_failure(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::HookRuntimeFailure, message)
+    }
+
     pub fn executor_stopped() -> Self {
         Self::new(
             CoreApplyFailureCauseKind::ExecutorStopped,
@@ -68,6 +111,23 @@ impl CoreApplyFailureCause {
 
     pub fn unknown(message: impl Into<String>) -> Self {
         Self::new(CoreApplyFailureCauseKind::Unknown, message)
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        match error {
+            AgentError::HookDenied { .. } => Self::hook_denied(error.to_string()),
+            AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. } => Self::hook_runtime_failure(error.to_string()),
+            _ => Self::runtime_turn(error.to_string()),
+        }
+    }
+
+    pub fn from_session_error(error: &SessionError) -> Self {
+        match error {
+            SessionError::Agent(agent_error) => Self::from_agent_error(agent_error),
+            _ => Self::runtime_turn(error.to_string()),
+        }
     }
 
     pub fn message(&self) -> &str {
@@ -166,10 +226,10 @@ impl CoreExecutorError {
         Self::apply_failed(CoreApplyFailureCause::runtime_turn(message))
     }
 
-    pub fn apply_failed_runtime_turn_session_error(error: crate::SessionError) -> Self {
+    pub fn apply_failed_from_session_error(error: SessionError) -> Self {
         match error {
-            crate::SessionError::Agent(crate::AgentError::Cancelled) => Self::Cancelled,
-            error => Self::apply_failed_runtime_turn(error.to_string()),
+            SessionError::Agent(AgentError::Cancelled) => Self::Cancelled,
+            error => Self::apply_failed(CoreApplyFailureCause::from_session_error(&error)),
         }
     }
 
@@ -391,14 +451,41 @@ mod tests {
 
     #[test]
     fn cancelled_session_error_remains_typed_at_runtime_executor_boundary() {
-        let err = CoreExecutorError::apply_failed_runtime_turn_session_error(
-            crate::SessionError::Agent(crate::AgentError::Cancelled),
-        );
+        let err = CoreExecutorError::apply_failed_from_session_error(SessionError::Agent(
+            AgentError::Cancelled,
+        ));
 
         assert!(err.is_cancelled());
         assert_eq!(
             err.apply_failure_cause().kind,
             CoreApplyFailureCauseKind::RuntimeTurn
         );
+    }
+
+    #[test]
+    fn hook_denial_agent_error_maps_to_typed_apply_failure_cause() {
+        let error = AgentError::HookDenied {
+            hook_id: crate::hooks::HookId::new("guard"),
+            point: crate::hooks::HookPoint::PreToolExecution,
+            reason_code: crate::hooks::HookReasonCode::PolicyViolation,
+            message: "blocked by hook".to_string(),
+            payload: None,
+        };
+
+        let cause = CoreApplyFailureCause::from_agent_error(&error);
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::HookDenied);
+        assert!(cause.message().contains("blocked by hook"));
+    }
+
+    #[test]
+    fn hook_runtime_agent_error_maps_to_typed_apply_failure_cause() {
+        let error = AgentError::HookExecutionFailed {
+            hook_id: crate::hooks::HookId::new("guard"),
+            reason: "missing runtime".to_string(),
+        };
+
+        let cause = CoreApplyFailureCause::from_agent_error(&error);
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::HookRuntimeFailure);
+        assert!(cause.message().contains("missing runtime"));
     }
 }

@@ -108,7 +108,7 @@ export type HookPatch = {
   patch_type: "assistant_text";
   text: string;
 } | {
-  args: unknown;
+  args: ToolCallArguments;
   patch_type: "tool_args";
 } | {
   content: string;
@@ -221,6 +221,8 @@ export type SkillResolutionFailureReason = {
 export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+
+export type ToolCallArguments = Record<string, unknown>;
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
 
@@ -356,7 +358,7 @@ export interface TextCompleteEvent {
 }
 
 export interface ToolCallRequestedEvent {
-  args: unknown;
+  args: ToolCallArguments;
   id: string;
   name: string;
   type: "tool_call_requested";
@@ -482,8 +484,8 @@ export interface BackgroundJobCompletedEvent {
   detail: string;
   display_name: string;
   job_id: string;
-  status: string;
-  terminal_status?: BackgroundJobTerminalStatus | null;
+  status?: string | null;
+  terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 }
 
@@ -516,9 +518,11 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "skills_resolved",
   "skill_resolution_failed",
   "interaction_complete",
+  "interaction_callback_pending",
   "interaction_failed",
   "stream_truncated",
-  "tool_config_changed"
+  "tool_config_changed",
+  "background_job_completed"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

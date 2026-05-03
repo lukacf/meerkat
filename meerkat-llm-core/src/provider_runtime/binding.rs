@@ -13,21 +13,25 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use meerkat_core::{
-    AuthError, AuthLease, AuthMetadata, AuthProfile, AuthRefreshReason, BackendProfile,
-    BindingPolicy, ConnectionRef, HttpAuthorizer, Provider, ResolvedAuthKind,
+    AuthError, AuthLease, AuthMetadata, AuthRefreshReason, BackendProfile, HttpAuthorizer,
+    Provider, ResolvedAuthKind,
 };
 
 use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
 use meerkat_core::provider_matrix::google::{GoogleAuthMethod, GoogleBackendKind};
 use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
+use meerkat_core::provider_matrix::self_hosted::{SelfHostedAuthMethod, SelfHostedBackendKind};
+
+pub use crate::provider_runtime::catalog::ValidatedBinding;
 
 /// Provider-tagged normalized backend kind. Each variant is produced by the
-/// matching provider runtime's `validate_binding`.
+/// provider runtime catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedBackendKind {
     OpenAi(OpenAiBackendKind),
     Anthropic(AnthropicBackendKind),
     Google(GoogleBackendKind),
+    SelfHosted(SelfHostedBackendKind),
 }
 
 /// Provider-tagged normalized auth method.
@@ -36,31 +40,7 @@ pub enum NormalizedAuthMethod {
     OpenAi(OpenAiAuthMethod),
     Anthropic(AnthropicAuthMethod),
     Google(GoogleAuthMethod),
-}
-
-/// A binding that has been provider-validated but not yet resolved.
-#[derive(Clone)]
-pub struct ValidatedBinding {
-    pub connection_ref: ConnectionRef,
-    pub provider: Provider,
-    pub backend: NormalizedBackendKind,
-    pub auth: NormalizedAuthMethod,
-    pub backend_profile: Arc<BackendProfile>,
-    pub auth_profile: Arc<AuthProfile>,
-    pub policy: BindingPolicy,
-}
-
-impl std::fmt::Debug for ValidatedBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ValidatedBinding")
-            .field("connection_ref", &self.connection_ref)
-            .field("provider", &self.provider)
-            .field("backend", &self.backend)
-            .field("auth", &self.auth)
-            .field("backend_profile_id", &self.backend_profile.id)
-            .field("auth_profile_id", &self.auth_profile.id)
-            .finish()
-    }
+    SelfHosted(SelfHostedAuthMethod),
 }
 
 // Plan §6.11 deleted the legacy marker enum. Credential material

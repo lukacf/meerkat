@@ -22,6 +22,7 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   EventEnvelope,
+  EventSourceIdentity,
   AgentRuntimeId,
   SubscriptionLaggedEvent,
 } from './types.js';
@@ -388,6 +389,57 @@ function parseSubscriptionLaggedEvent(
   };
 }
 
+function normalizeEventSourceIdentity(raw: unknown, context: string): EventSourceIdentity {
+  const source = requireRecord(raw, `${context}: missing source`);
+  const sourceType = requireStringField(source, 'type', `${context}: source missing type`);
+  switch (sourceType) {
+    case 'session': {
+      requireOnlyKeys(source, ['type', 'session_id', 'sessionId'], `${context}: malformed source`);
+      const sessionId =
+        typeof source.session_id === 'string' ? source.session_id : source.sessionId;
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        throw new Error(`${context}: source missing session_id`);
+      }
+      return { type: 'session', session_id: sessionId };
+    }
+    case 'runtime': {
+      requireOnlyKeys(source, ['type', 'runtime_id', 'runtimeId'], `${context}: malformed source`);
+      const runtimeId =
+        typeof source.runtime_id === 'string' ? source.runtime_id : source.runtimeId;
+      if (typeof runtimeId !== 'string' || runtimeId.length === 0) {
+        throw new Error(`${context}: source missing runtime_id`);
+      }
+      return { type: 'runtime', runtime_id: runtimeId };
+    }
+    case 'interaction': {
+      requireOnlyKeys(
+        source,
+        ['type', 'interaction_id', 'interactionId'],
+        `${context}: malformed source`,
+      );
+      const interactionId =
+        typeof source.interaction_id === 'string' ? source.interaction_id : source.interactionId;
+      if (typeof interactionId !== 'string' || interactionId.length === 0) {
+        throw new Error(`${context}: source missing interaction_id`);
+      }
+      return { type: 'interaction', interaction_id: interactionId };
+    }
+    case 'callback':
+      requireOnlyKeys(source, ['type'], `${context}: malformed source`);
+      return { type: 'callback' };
+    case 'external': {
+      requireOnlyKeys(source, ['type', 'source_id', 'sourceId'], `${context}: malformed source`);
+      const sourceId = typeof source.source_id === 'string' ? source.source_id : source.sourceId;
+      if (typeof sourceId !== 'string' || sourceId.length === 0) {
+        throw new Error(`${context}: source missing source_id`);
+      }
+      return { type: 'external', source_id: sourceId };
+    }
+    default:
+      throw new Error(`${context}: unsupported source type`);
+  }
+}
+
 function parseEventPayload(raw: unknown, context: string): EventEnvelope['payload'] {
   const payload = requireRecord(raw, `${context}: missing payload`);
   requireStringField(payload, 'type', `${context}: payload missing type`);
@@ -403,6 +455,7 @@ function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
       'event_id',
       `${context}: missing event_id`,
     ),
+    source: normalizeEventSourceIdentity(record.source, context),
     source_id: requireStringField(
       record,
       'source_id',

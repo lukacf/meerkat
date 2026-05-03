@@ -11,15 +11,22 @@ use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
     RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
     RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent, WireRunResult,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
+    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion,
+    RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent,
+    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireUsage,
 };
+use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
     HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    ToolCallArguments, ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
+    Usage,
 };
+
+fn tool_args(value: serde_json::Value) -> ToolCallArguments {
+    ToolCallArguments::from_value(value).expect("test tool args must be an object")
+}
 
 // ---------------------------------------------------------------------------
 // 1. WireRunResult required fields
@@ -405,7 +412,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolCallRequested {
             id: "tc1".to_string(),
             name: "read_file".to_string(),
-            args: serde_json::json!({"path": "/tmp"}),
+            args: tool_args(serde_json::json!({"path": "/tmp"})),
         },
         AgentEvent::ToolResultReceived {
             id: "tc1".to_string(),
@@ -491,6 +498,12 @@ fn agent_event_all_variants_roundtrip() {
             )
             .with_applied_at_turn(Some(5)),
         },
+        AgentEvent::background_job_completed(
+            "j_123",
+            "sleep 2",
+            BackgroundJobTerminalStatus::Completed,
+            "exit_code: 0",
+        ),
     ];
 
     for event in &direct_variants {
@@ -570,7 +583,7 @@ fn agent_event_all_variants_roundtrip() {
         );
     }
 
-    // All 31 AgentEvent variants are covered: 28 direct + 3 from JSON.
+    // All 32 AgentEvent variants are covered: 29 direct + 3 from JSON.
     // If a new variant is added and not covered here, the exhaustive
     // agent_event_type() match in meerkat-core will fail to compile,
     // prompting addition here too.
@@ -657,7 +670,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolCallRequested {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            args: serde_json::json!({}),
+            args: tool_args(serde_json::json!({})),
         },
         AgentEvent::ToolResultReceived {
             id: "tool-1".to_string(),
@@ -753,6 +766,12 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             )
             .with_applied_at_turn(Some(1)),
         },
+        AgentEvent::background_job_completed(
+            "j_123",
+            "sleep 2",
+            BackgroundJobTerminalStatus::Completed,
+            "exit_code: 0",
+        ),
     ];
 
     for event in events {
@@ -857,8 +876,8 @@ fn realtime_open_info_required_fields() {
         target: RealtimeChannelTarget::SessionTarget {
             session_id: "session-1".to_string(),
         },
-        supported_protocol_versions: vec!["1".to_string()],
-        default_protocol_version: "1".to_string(),
+        supported_protocol_versions: vec![RealtimeProtocolVersion::CURRENT],
+        default_protocol_version: RealtimeProtocolVersion::CURRENT,
         capabilities: RealtimeCapabilities {
             input_kinds: vec![
                 RealtimeInputKind::Text,
@@ -892,6 +911,11 @@ fn realtime_open_info_required_fields() {
         value.get("default_protocol_version").is_some(),
         "missing default_protocol_version"
     );
+    assert_eq!(
+        value["supported_protocol_versions"],
+        serde_json::json!(["2"])
+    );
+    assert_eq!(value["default_protocol_version"], serde_json::json!("2"));
     assert!(value.get("capabilities").is_some(), "missing capabilities");
 }
 
@@ -943,7 +967,7 @@ fn realtime_open_request_roundtrip() {
 #[test]
 fn realtime_client_open_frame_pins_protocol_version_field() {
     let frame = RealtimeClientFrame::ChannelOpen(meerkat_contracts::RealtimeChannelOpenFrame {
-        protocol_version: "1".to_string(),
+        protocol_version: RealtimeProtocolVersion::CURRENT,
         open_token: "token-1".to_string(),
         role: RealtimeChannelRole::Observer,
         turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -957,7 +981,7 @@ fn realtime_client_open_frame_pins_protocol_version_field() {
     );
     assert_eq!(
         value.get("protocol_version").and_then(|v| v.as_str()),
-        Some("1")
+        Some("2")
     );
     assert_eq!(
         value.get("open_token").and_then(|v| v.as_str()),

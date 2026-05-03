@@ -49,8 +49,19 @@ export type StopReason =
   | "content_filter"
   | "cancelled";
 
+export type ToolCallArguments = Readonly<Record<string, unknown>>;
+
 /** Which budget dimension triggered a warning. */
 export type BudgetType = "tokens" | "time" | "tool_calls";
+
+/** Terminal state for a completed background job. */
+export type BackgroundJobTerminalStatus =
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "cancelled"
+  | "retired"
+  | "terminated";
 
 /** Hook lifecycle points. */
 export type HookPoint =
@@ -152,7 +163,7 @@ export interface ToolCallRequestedEvent {
   readonly type: "tool_call_requested";
   readonly id: string;
   readonly name: string;
-  readonly args: unknown;
+  readonly args: ToolCallArguments;
 }
 
 export interface ToolResultReceivedEvent {
@@ -296,7 +307,7 @@ export interface HookPatchPublishedEvent {
 
 export interface SkillsResolvedEvent {
   readonly type: "skills_resolved";
-  readonly skills: readonly string[];
+  readonly skills: readonly SkillKey[];
   readonly injectionBytes: number;
 }
 
@@ -412,6 +423,15 @@ export interface ToolConfigChangedEvent {
   readonly payload: ToolConfigChangedPayload;
 }
 
+export interface BackgroundJobCompletedEvent {
+  readonly type: "background_job_completed";
+  readonly jobId: string;
+  readonly displayName: string;
+  readonly legacyStatus?: string;
+  readonly terminalStatus: BackgroundJobTerminalStatus;
+  readonly detail: string;
+}
+
 // ---------------------------------------------------------------------------
 // Unknown / forward-compat
 // ---------------------------------------------------------------------------
@@ -463,6 +483,7 @@ export type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
+  | BackgroundJobCompletedEvent
   | MalformedEvent
   | UnknownEvent;
 
@@ -532,6 +553,14 @@ function requireBooleanField(raw: Record<string, unknown>, field: string): boole
   const value = raw[field];
   if (typeof value !== "boolean") {
     throw new Error(`${field} must be boolean`);
+  }
+  return value;
+}
+
+function requireRecordField(raw: Record<string, unknown>, field: string): Record<string, unknown> {
+  const value = raw[field];
+  if (!isPlainRecord(value)) {
+    throw new Error(`${field} must be object`);
   }
   return value;
 }
@@ -688,18 +717,37 @@ function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | und
 }
 
 function parseSkillKey(raw: unknown): SkillKey | undefined {
-  if (raw == null || typeof raw !== "object") {
+  if (!isPlainRecord(raw)) {
     return undefined;
   }
-  const value = raw as Record<string, unknown>;
+  const value = raw;
+  const sourceUuid = value.source_uuid ?? value.sourceUuid;
+  const skillName = value.skill_name ?? value.skillName;
+  if (typeof sourceUuid !== "string" || sourceUuid.length === 0) {
+    return undefined;
+  }
+  if (typeof skillName !== "string" || skillName.length === 0) {
+    return undefined;
+  }
   return {
-    sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
-    skillName: String(value.skill_name ?? value.skillName ?? ""),
+    sourceUuid,
+    skillName,
   };
 }
 
-function emptySkillKey(): SkillKey {
-  return { sourceUuid: "", skillName: "" };
+function requireSkillKey(raw: unknown, field: string): SkillKey {
+  const skillKey = parseSkillKey(raw);
+  if (!skillKey) {
+    throw new Error(`${field} must be SkillKey`);
+  }
+  return skillKey;
+}
+
+function requireSkillKeyArray(raw: unknown): readonly SkillKey[] {
+  if (!Array.isArray(raw)) {
+    throw new Error("skills must be SkillKey array");
+  }
+  return raw.map((skill, index) => requireSkillKey(skill, `skills[${index}]`));
 }
 
 const STOP_REASONS = new Set<StopReason>([
@@ -752,14 +800,21 @@ function parseSkillResolutionFailureReason(
   }
   const reasonType = reasonTypeRaw;
   switch (reasonType) {
-    case "not_found":
-      return { reasonType, key: parseSkillKey(value.key) ?? emptySkillKey() };
-    case "capability_unavailable":
+    case "not_found": {
+      const key = parseSkillKey(value.key);
+      return key ? { reasonType, key } : undefined;
+    }
+    case "capability_unavailable": {
+      const key = parseSkillKey(value.key);
+      if (!key || typeof value.capability !== "string" || value.capability.length === 0) {
+        return undefined;
+      }
       return {
         reasonType,
-        key: parseSkillKey(value.key) ?? emptySkillKey(),
-        capability: String(value.capability ?? ""),
+        key,
+        capability: value.capability,
       };
+    }
     case "load":
     case "parse":
       return { reasonType, message: String(value.message ?? "") };
@@ -886,7 +941,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "text_complete":
       return { type, content: requireStringField(raw, "content") };
     case "tool_call_requested":
-      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), args: raw.args };
+      return {
+        type,
+        id: requireStringField(raw, "id"),
+        name: requireStringField(raw, "name"),
+        args: requireRecordField(raw, "args"),
+      };
     case "tool_result_received":
       return {
         type,
@@ -958,10 +1018,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Skills
     case "skills_resolved":
-      if (!Array.isArray(raw.skills) || !raw.skills.every((skill) => typeof skill === "string")) {
-        throw new Error("skills must be string array");
-      }
-      return { type, skills: raw.skills, injectionBytes: requireNumberField(raw, "injection_bytes") };
+      return {
+        type,
+        skills: requireSkillKeyArray(raw.skills),
+        injectionBytes: requireNumberField(raw, "injection_bytes"),
+      };
     case "skill_resolution_failed": {
       const reference = requireStringField(raw, "reference");
       const error = requireStringField(raw, "error");
@@ -1003,6 +1064,21 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
+      };
+    }
+    case "background_job_completed": {
+      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
+      return {
+        type,
+        jobId: requireStringField(raw, "job_id"),
+        displayName: requireStringField(raw, "display_name"),
+        ...(legacyStatus != null ? { legacyStatus } : {}),
+        terminalStatus: requireOneOf(
+          requireStringField(raw, "terminal_status"),
+          "terminal_status",
+          ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
+        ),
+        detail: requireStringField(raw, "detail"),
       };
     }
 

@@ -847,16 +847,29 @@ impl LlmClient for AnthropicClient {
                                         // We emit ToolCallComplete with the
                                         // accumulated_tool_args (collected during
                                         // input_json_delta events).
-                                        let args_str = accumulated_tool_args.clone();
-                                        let args_val: serde_json::Value = serde_json::from_str(&args_str)
-                                            .unwrap_or(serde_json::json!({}));
-                                        saw_event = true;
-                                        yield LlmEvent::ToolCallComplete {
-                                            id: tool_id.clone(),
-                                            name: current_tool_name.take().unwrap_or_default(),
-                                            args: args_val,
-                                            meta: None,
-                                        };
+                                        match parse_streamed_tool_args(
+                                            &accumulated_tool_args,
+                                            tool_id,
+                                        ) {
+                                            Ok(args_val) => {
+                                                saw_event = true;
+                                                yield LlmEvent::ToolCallComplete {
+                                                    id: tool_id.clone(),
+                                                    name: current_tool_name.take().unwrap_or_default(),
+                                                    args: args_val,
+                                                    meta: None,
+                                                };
+                                            }
+                                            Err(error) => {
+                                                saw_event = true;
+                                                if !saw_done {
+                                                    yield LlmEvent::Done {
+                                                        outcome: LlmDoneOutcome::Error { error },
+                                                    };
+                                                    saw_done = true;
+                                                }
+                                            }
+                                        }
                                         accumulated_tool_args.clear();
                                     }
                                     current_tool_id = None;
@@ -1065,6 +1078,20 @@ struct AnthropicContentBlock {
     signature: Option<String>,
     /// Encrypted data for redacted_thinking blocks
     data: Option<String>,
+}
+
+fn parse_streamed_tool_args(args: &str, tool_id: &str) -> Result<Value, LlmError> {
+    let args = if args.is_empty() { "{}" } else { args };
+    let value: Value = serde_json::from_str(args).map_err(|error| LlmError::StreamParseError {
+        message: format!("invalid Anthropic tool call arguments JSON for {tool_id}: {error}"),
+    })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(LlmError::StreamParseError {
+            message: format!("Anthropic tool call arguments for {tool_id} must be a JSON object"),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2157,6 +2184,109 @@ mod tests {
         server.abort();
 
         assert!(saw_error_done, "Expected Done with error outcome");
+    }
+
+    #[tokio::test]
+    async fn test_stream_valid_tool_use_args_project_successfully() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"tool_1","name":"read_file"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp/test.txt\"}"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("read".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut tool_args = None;
+        let mut saw_success_done = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ToolCallComplete { args, .. } => tool_args = Some(args),
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => {
+                    saw_success_done = true;
+                    break;
+                }
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                } => panic!("valid tool args should not fail: {error:?}"),
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(
+            tool_args.expect("expected tool call complete"),
+            serde_json::json!({"path": "/tmp/test.txt"})
+        );
+        assert!(saw_success_done, "Expected successful Done outcome");
+    }
+
+    #[tokio::test]
+    async fn test_stream_malformed_tool_use_args_fail_closed() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"tool_bad","name":"read_file"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("read".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut tool_completes = 0;
+        let mut error_done = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream wrapper should convert errors to Done") {
+                LlmEvent::ToolCallComplete { .. } => tool_completes += 1,
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                } => {
+                    error_done = Some(error);
+                    break;
+                }
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => panic!("malformed tool args must not complete successfully"),
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(tool_completes, 0);
+        let error = error_done.expect("expected terminal error for malformed args");
+        assert!(
+            matches!(error, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("invalid Anthropic tool call arguments JSON"),
+            "error should name invalid Anthropic tool args: {error}"
+        );
     }
 
     /// Normal stream with message_stop should still work (baseline).

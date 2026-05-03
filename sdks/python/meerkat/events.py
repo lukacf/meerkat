@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 
 ContentBlock = dict[str, Any]
 ContentInput = str | list[ContentBlock]
+BackgroundJobTerminalStatus = Literal[
+    "completed",
+    "failed",
+    "aborted",
+    "cancelled",
+    "retired",
+    "terminated",
+]
 HookId = str
 AgentErrorClass = str
 AgentErrorReason = dict[str, Any]
@@ -307,7 +315,7 @@ class HookPatchPublished(Event):
 class SkillsResolved(Event):
     """Skills were resolved for this turn."""
 
-    skills: list[str] = field(default_factory=list)
+    skills: list[SkillKey] = field(default_factory=list)
     injection_bytes: int = 0
 
 
@@ -441,6 +449,17 @@ class ToolConfigChanged(Event):
     payload: ToolConfigChangedPayload = field(default_factory=ToolConfigChangedPayload)
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundJobCompleted(Event):
+    """A background shell job reached a typed terminal state."""
+
+    job_id: str
+    display_name: str
+    terminal_status: BackgroundJobTerminalStatus
+    detail: str
+    legacy_status: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Scoped streaming attribution
 # ---------------------------------------------------------------------------
@@ -486,6 +505,14 @@ _STOP_REASONS = frozenset({
 })
 
 _TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
+_BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
+    "completed",
+    "failed",
+    "aborted",
+    "cancelled",
+    "retired",
+    "terminated",
+})
 
 _EVENT_MAP: dict[str, type[Event]] = {
     "run_started": RunStarted,
@@ -517,6 +544,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "interaction_failed": InteractionFailed,
     "stream_truncated": StreamTruncated,
     "tool_config_changed": ToolConfigChanged,
+    "background_job_completed": BackgroundJobCompleted,
 }
 
 
@@ -671,10 +699,29 @@ def _parse_skill_key(raw: Any) -> SkillKey | None:
 
     from .types import SkillKey
 
+    source_uuid = raw.get("source_uuid", raw.get("sourceUuid"))
+    skill_name = raw.get("skill_name", raw.get("skillName"))
+    if not isinstance(source_uuid, str) or source_uuid == "":
+        return None
+    if not isinstance(skill_name, str) or skill_name == "":
+        return None
+
     return SkillKey(
-        source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
-        skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
+        source_uuid=source_uuid,
+        skill_name=skill_name,
     )
+
+
+def _parse_skill_key_list(raw: Any) -> list[SkillKey]:
+    if not isinstance(raw, list):
+        raise ValueError("skills must be SkillKey list")
+    skills: list[SkillKey] = []
+    for index, item in enumerate(raw):
+        skill_key = _parse_skill_key(item)
+        if skill_key is None:
+            raise ValueError(f"skills[{index}] must be SkillKey")
+        skills.append(skill_key)
+    return skills
 
 
 def _parse_optional_str(raw: Any) -> str | None:
@@ -721,11 +768,20 @@ def _parse_skill_resolution_failure_reason(
         "unknown",
     }
     normalized_reason_type = reason_type if reason_type in known_reason_types else "unknown"
+    key = _parse_skill_key(raw.get("key"))
+    if reason_type == "not_found" and key is None:
+        return None
+    if reason_type == "capability_unavailable":
+        capability = raw.get("capability")
+        if key is None or not isinstance(capability, str) or capability == "":
+            return None
+    else:
+        capability = raw.get("capability", "")
 
     return SkillResolutionFailureReason(
         reason_type=normalized_reason_type,
-        key=_parse_skill_key(raw.get("key")),
-        capability=str(raw.get("capability", "")),
+        key=key,
+        capability=capability if isinstance(capability, str) else "",
         message=str(raw.get("message", fallback_message)),
         source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
         skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
@@ -855,6 +911,14 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "interaction_failed": ("interaction_id", "error"),
         "stream_truncated": ("reason",),
     }
+    if event_type == "background_job_completed":
+        _require_str(raw, "job_id")
+        _require_str(raw, "display_name")
+        terminal_status = raw.get("terminal_status")
+        if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
+            raise ValueError("terminal_status must be a background job terminal status")
+        _require_str(raw, "detail")
+        return
     if event_type == "tool_config_changed":
         payload = raw.get("payload")
         if not isinstance(payload, dict):
@@ -893,9 +957,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
             if "prompt" not in raw:
                 raise ValueError("prompt is required")
         elif field_name == "skills":
-            skills = raw.get("skills")
-            if not isinstance(skills, list) or not all(isinstance(skill, str) for skill in skills):
-                raise ValueError("skills must be string list")
+            _parse_skill_key_list(raw.get("skills"))
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
@@ -955,6 +1017,8 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
             elif f == "duration_ms" and cls is ToolExecutionCompleted:
                 kwargs["duration_ms"] = _parse_optional_int(raw.get("duration_ms"))
+            elif f == "skills" and cls is SkillsResolved:
+                kwargs["skills"] = _parse_skill_key_list(raw.get("skills"))
             elif f == "skill_key" and cls is SkillResolutionFailed:
                 kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
             elif f == "reason" and cls is SkillResolutionFailed:
@@ -984,6 +1048,16 @@ def parse_event(raw: dict[str, Any]) -> Event:
                         if isinstance(applied_at_turn_raw, int)
                         else None
                     ),
+                )
+            elif f == "legacy_status" and cls is BackgroundJobCompleted:
+                legacy_status = raw.get("status")
+                kwargs["legacy_status"] = (
+                    legacy_status if isinstance(legacy_status, str) else None
+                )
+            elif f == "terminal_status" and cls is BackgroundJobCompleted:
+                kwargs["terminal_status"] = cast(
+                    BackgroundJobTerminalStatus,
+                    raw["terminal_status"],
                 )
             elif f in raw:
                 kwargs[f] = raw[f]

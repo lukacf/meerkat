@@ -4,6 +4,7 @@ import test from 'node:test';
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
+import { isKnownEvent } from '../dist/types.js';
 
 function makeSubscriptionRuntime(overrides = {}) {
   return {
@@ -44,7 +45,11 @@ async function makeRuntimeMob(wasm) {
 function canonicalEnvelope(overrides = {}) {
   return {
     event_id: '00000000-0000-0000-0000-000000000001',
-    source_id: 'worker-runtime',
+    source: {
+      type: 'runtime',
+      runtime_id: 'worker-runtime',
+    },
+    source_id: 'runtime:worker-runtime',
     seq: 7,
     timestamp_ms: 1710000000000,
     payload: {
@@ -96,6 +101,59 @@ async function runtimeWithMobList(payload) {
     {},
   );
 }
+
+test('isKnownEvent requires typed skills_resolved identities', () => {
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: [
+        {
+          source_uuid: '00000000-0000-4b11-8111-000000000001',
+          skill_name: 'email-extractor',
+        },
+      ],
+      injection_bytes: 128,
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: ['legacy/ref'],
+      injection_bytes: 128,
+    }),
+    false,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skills_resolved',
+      skills: [{ source_uuid: '00000000-0000-4b11-8111-000000000001' }],
+      injection_bytes: 128,
+    }),
+    false,
+  );
+});
+
+test('isKnownEvent fails closed for unknown skill resolution statuses', () => {
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'future_status', message: 'future details' },
+      reference: 'legacy/ref',
+      error: 'missing',
+    }),
+    false,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'unknown', message: 'future details' },
+      reference: 'legacy/ref',
+      error: 'missing',
+    }),
+    true,
+  );
+});
 
 test('Mob.spawn strips legacy generation and projects typed wasm spawn rows', async () => {
   let captured;
@@ -242,6 +300,7 @@ test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads',
   const items = subscription.poll();
 
   assert.deepEqual(items, [envelope]);
+  assert.deepEqual(items[0].source, { type: 'runtime', runtime_id: 'worker-runtime' });
   assert.equal(items[0].payload.type, 'text_delta');
   assert.equal('event' in items[0], false);
 });
@@ -269,8 +328,82 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
 
   assert.deepEqual(items, [attributed]);
   assert.deepEqual(items[0].source, { identity: 'worker-runtime', generation: 0 });
+  assert.deepEqual(items[0].envelope.source, { type: 'runtime', runtime_id: 'worker-runtime' });
   assert.equal(items[0].envelope.payload.type, 'text_delta');
   assert.equal('event' in items[0].envelope, false);
+});
+
+test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () => {
+  const sourceIdOnly = {
+    event_id: '00000000-0000-0000-0000-000000000001',
+    source_id: 'session:00000000-0000-4000-8000-000000000001',
+    seq: 7,
+    timestamp_ms: 1710000000000,
+    payload: {
+      type: 'text_delta',
+      delta: 'legacy',
+    },
+  };
+  const mob = makeSubscriptionMob((handle) => {
+    if (handle === 1) {
+      return JSON.stringify([sourceIdOnly]);
+    }
+    return JSON.stringify([
+      {
+        source: {
+          identity: 'worker-runtime',
+          generation: 0,
+        },
+        role: 'worker',
+        envelope: sourceIdOnly,
+      },
+    ]);
+  });
+
+  const memberSubscription = await mob.subscribeMemberEvents('worker-1');
+  assert.throws(() => memberSubscription.poll(), /missing source/);
+
+  const mobSubscription = await mob.subscribeEvents();
+  assert.throws(() => mobSubscription.poll(), /missing source/);
+});
+
+test('Mob subscriptions reject malformed typed EventEnvelope source instead of trusting source_id', async () => {
+  const malformedSource = canonicalEnvelope({
+    source: {
+      type: 'session',
+    },
+    source_id: 'session:00000000-0000-4000-8000-000000000001',
+  });
+  const mob = makeSubscriptionMob((handle) => {
+    assert.equal(handle, 1);
+    return JSON.stringify([malformedSource]);
+  });
+
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  assert.throws(() => subscription.poll(), /source missing session_id/);
+});
+
+test('Mob subscriptions keep legacy source_id inert when typed source disagrees', async () => {
+  const envelope = canonicalEnvelope({
+    source: {
+      type: 'session',
+      session_id: '00000000-0000-4000-8000-000000000001',
+    },
+    source_id: 'session:not-a-uuid',
+  });
+  const mob = makeSubscriptionMob((handle) => {
+    assert.equal(handle, 1);
+    return JSON.stringify([envelope]);
+  });
+
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  const [item] = subscription.poll();
+
+  assert.deepEqual(item.source, {
+    type: 'session',
+    session_id: '00000000-0000-4000-8000-000000000001',
+  });
+  assert.equal(item.source_id, 'session:not-a-uuid');
 });
 
 test('Mob subscriptions reject unrecognized event envelopes instead of fabricating unknown events', async () => {
@@ -345,6 +478,58 @@ test('Session direct polling rejects malformed event items', () => {
 
   assert.throws(() => session.pollEvents(), /missing type/);
   assert.throws(() => session.subscribe().poll(), /missing type/);
+});
+
+test('Session destroy does not cache lifecycle state in the browser handle', async () => {
+  let destroyCalls = 0;
+  let stateCalls = 0;
+  let pollCalls = 0;
+  let appendCalls = 0;
+  const session = new Session(
+    11,
+    async () => {
+      throw new Error('SESSION_NOT_FOUND: session not found');
+    },
+    () => {
+      stateCalls += 1;
+      return JSON.stringify({
+        handle: 11,
+        session_id: 'session-web-unit',
+        mob_id: '',
+        model: 'claude-sonnet-4-5',
+        usage: { input_tokens: 0, output_tokens: 0 },
+        message_count: 0,
+        is_active: false,
+        last_assistant_text: null,
+      });
+    },
+    () => {
+      destroyCalls += 1;
+    },
+    () => {
+      pollCalls += 1;
+      return JSON.stringify([{ type: 'text_complete', text: 'from wasm' }]);
+    },
+    async () => {
+      appendCalls += 1;
+      throw new Error('SESSION_NOT_FOUND: session not found');
+    },
+  );
+
+  session.destroy();
+
+  assert.equal(destroyCalls, 1);
+  assert.equal(session.getState().session_id, 'session-web-unit');
+  assert.equal(stateCalls, 1);
+  assert.deepEqual(session.pollEvents(), [{ type: 'text_complete', text: 'from wasm' }]);
+  assert.equal(pollCalls, 1);
+  await assert.rejects(() => session.turn('after destroy'), /SESSION_NOT_FOUND|session not found/);
+  await assert.rejects(
+    () => session.appendSystemContext({ text: 'after destroy' }),
+    /SESSION_NOT_FOUND|session not found/,
+  );
+  assert.equal(appendCalls, 1);
+  assert.throws(() => session.isDestroyed, /deprecated/i);
 });
 
 test('MeerkatRuntime keeps a clean empty subscription poll as empty success', async () => {
@@ -726,6 +911,7 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
       return JSON.stringify([
         {
           event_id: 'evt-1',
+          source: { type: 'session', session_id: 'session-typed-1' },
           source_id: 'session-1',
           seq: 1,
           timestamp_ms: 123,
@@ -740,6 +926,8 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
   const [memberEvent] = memberSubscription.poll();
 
   assert.equal(memberEvent.payload.type, 'text_delta');
+  assert.deepEqual(memberEvent.source, { type: 'session', session_id: 'session-typed-1' });
+  assert.equal(memberEvent.source_id, 'session-1');
   assert.equal(memberEvent.seq, 1);
 
   const mobWide = new Mob('mob-web-unit', {
@@ -754,6 +942,7 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
           role: 'worker',
           envelope: {
             event_id: 'evt-2',
+            source: { type: 'session', session_id: 'session-typed-2' },
             source_id: 'session-2',
             seq: 2,
             timestamp_ms: 456,
@@ -771,5 +960,10 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
   assert.deepEqual(mobEvent.source, { identity: 'worker-1', generation: 7 });
   assert.equal('agent_identity' in mobEvent, false);
   assert.equal(mobEvent.source_fence_token, 7);
+  assert.deepEqual(mobEvent.envelope.source, {
+    type: 'session',
+    session_id: 'session-typed-2',
+  });
+  assert.equal(mobEvent.envelope.source_id, 'session-2');
   assert.equal(mobEvent.envelope.payload.type, 'turn_completed');
 });

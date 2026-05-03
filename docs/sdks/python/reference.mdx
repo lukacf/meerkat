@@ -184,6 +184,7 @@ Types:
 - synchronous constructor style (`session.stream(...)` returns stream object)
 - request is sent on `async with` entry
 - `events.result` is available after iteration
+- `BackgroundJobCompleted.terminal_status` carries background job completion semantics; `legacy_status` is only the optional wire `status` display mirror
 
 ## Capability and error model
 

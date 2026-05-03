@@ -1016,18 +1016,14 @@ impl LlmClient for OpenAiClient {
                                                         tracing::warn!(call_id, "function_call missing name");
                                                         continue;
                                                     };
-                                                    // arguments is a JSON string
-                                                    let args: Box<RawValue> = match item.get("arguments").and_then(|a| a.as_str()) {
-                                                        Some(args_str) => match RawValue::from_string(args_str.to_string()) {
-                                                            Ok(raw) => raw,
-                                                            Err(e) => {
-                                                                tracing::error!(call_id, "invalid args JSON, skipping: {e}");
-                                                                continue;
-                                                            }
-                                                        },
+                                                    // arguments is a JSON string. Missing arguments
+                                                    // represent a no-arg tool; malformed or non-object
+                                                    // JSON fails closed before projection.
+                                                    let (args, args_value) = match item.get("arguments").and_then(|a| a.as_str()) {
+                                                        Some(args_str) => parse_tool_call_arguments(args_str, call_id)?,
                                                         None => {
                                                             // Empty args - treat as empty object
-                                                            fallback_raw_value()
+                                                            (empty_tool_args_raw_value(), serde_json::json!({}))
                                                         }
                                                     };
 
@@ -1039,8 +1035,6 @@ impl LlmClient for OpenAiClient {
                                                         None,
                                                     );
 
-                                                    // Also emit as legacy Value for compatibility
-                                                    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
                                                     yield LlmEvent::ToolCallComplete {
                                                         id: call_id.to_string(),
                                                         name: name.into(),
@@ -1121,8 +1115,8 @@ impl LlmClient for OpenAiClient {
                         else if event.event_type == "response.function_call_arguments.done" {
                             if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
                                 let name = event.name.clone().unwrap_or_default();
-                                let args: Box<RawValue> = RawValue::from_string(arguments.clone())
-                                    .unwrap_or_else(|_| fallback_raw_value());
+                                let (args, args_value) =
+                                    parse_tool_call_arguments(arguments, call_id)?;
 
                                 let _ = assembler.on_tool_call_start(call_id.clone());
                                 let _ = assembler.on_tool_call_complete(
@@ -1132,7 +1126,6 @@ impl LlmClient for OpenAiClient {
                                     None,
                                 );
 
-                                let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
                                 streamed_tool_ids.insert(call_id.clone());
                                 yield LlmEvent::ToolCallComplete {
                                     id: call_id.clone(),
@@ -1321,8 +1314,30 @@ struct ResponsesStreamEvent {
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-fn fallback_raw_value() -> Box<RawValue> {
+fn empty_tool_args_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
+
+fn parse_tool_call_arguments(
+    arguments: &str,
+    call_id: &str,
+) -> Result<(Box<RawValue>, Value), LlmError> {
+    let raw = RawValue::from_string(arguments.to_string()).map_err(|error| {
+        LlmError::StreamParseError {
+            message: format!("invalid OpenAI tool call arguments JSON for {call_id}: {error}"),
+        }
+    })?;
+    let value: Value =
+        serde_json::from_str(raw.get()).map_err(|error| LlmError::StreamParseError {
+            message: format!("invalid OpenAI tool call arguments JSON for {call_id}: {error}"),
+        })?;
+    if value.is_object() {
+        Ok((raw, value))
+    } else {
+        Err(LlmError::StreamParseError {
+            message: format!("OpenAI tool call arguments for {call_id} must be a JSON object"),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3126,6 +3141,55 @@ mod tests {
         // Should only get one ToolCallComplete, not duplicated from response.completed
         assert_eq!(tool_completes.len(), 1);
         assert_eq!(tool_completes[0], "call_1");
+    }
+
+    #[tokio::test]
+    async fn test_stream_malformed_function_call_arguments_done_fails_closed() {
+        let payload = [
+            r#"data: {"type":"response.function_call_arguments.done","call_id":"call_bad","name":"get_weather","arguments":"{\"location\":"}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("weather".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut tool_completes = 0;
+        let mut error_done = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream wrapper should convert errors to Done") {
+                LlmEvent::ToolCallComplete { .. } => tool_completes += 1,
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                } => {
+                    error_done = Some(error);
+                    break;
+                }
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => panic!("malformed tool args must not complete successfully"),
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(tool_completes, 0);
+        let error = error_done.expect("expected terminal error for malformed args");
+        assert!(
+            matches!(error, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("invalid OpenAI tool call arguments JSON"),
+            "error should name invalid OpenAI tool args: {error}"
+        );
     }
 
     #[tokio::test]

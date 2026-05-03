@@ -88,10 +88,25 @@ export interface SkillsParams {
   skill_refs: Array<{ source_uuid: string; skill_name: string }>;
 }
 
+export interface McpStdioConfig {
+  args?: string[];
+  command: string;
+  env?: Record<string, string>;
+}
+
+export interface McpHttpConfig {
+  headers?: Record<string, string>;
+  transport?: McpHttpTransport;
+  url: string;
+}
+
+export type McpServerConfig =
+  | ({ name: string; connect_timeout_secs?: number } & McpStdioConfig)
+  | ({ name: string; connect_timeout_secs?: number } & McpHttpConfig);
+
 export interface McpAddParams {
   persisted?: boolean;
-  server_config: unknown;
-  server_name: string;
+  server_config: McpServerConfig;
   session_id: string;
 }
 
@@ -105,6 +120,15 @@ export interface McpReloadParams {
   persisted?: boolean;
   server_name?: string;
   session_id: string;
+}
+
+export interface McpLiveOpResponse {
+  applied_at_turn?: number;
+  operation: "add" | "remove" | "reload";
+  persisted: boolean;
+  server_name?: string;
+  session_id: string;
+  status: "staged" | "applied" | "rejected";
 }
 
 export interface MobWireParams {
@@ -958,15 +982,6 @@ export interface UpdateScheduleParams {
   trigger?: Record<string, unknown>;
 }
 
-export interface McpLiveOpResponse {
-  applied_at_turn?: number;
-  operation: "add" | "remove" | "reload";
-  persisted: boolean;
-  server_name?: string;
-  session_id: string;
-  status: "staged" | "applied" | "rejected";
-}
-
 export interface WireContentBlockText {
   text: string;
   type: "text";
@@ -1078,6 +1093,8 @@ export type WireMemberState = "active" | "retiring";
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
 export type WireMobRuntimeMode = "autonomous_host" | "turn_driven";
+
+export type MobSpawnManyFailureCause = unknown;
 
 export type MobSpawnManyResultStatus = "spawned" | "failed";
 
@@ -1198,6 +1215,8 @@ export type McpLiveOperation = "add" | "remove" | "reload";
 
 export type McpLiveOpStatus = "staged" | "applied" | "rejected";
 
+export type McpHttpTransport = "streamable-http" | "sse";
+
 export type MobPeerTarget = { local: string } | { external: WireTrustedPeerSpec };
 
 export type WireHandlingMode = "queue" | "steer";
@@ -1226,6 +1245,8 @@ export type RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | Realtim
 export type RealtimeChannelRole = "primary" | "observer";
 
 export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
+
+export type RealtimeProtocolVersion = unknown;
 
 export type RealtimeInputKind = "text" | "audio" | "video";
 

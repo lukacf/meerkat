@@ -1089,21 +1089,7 @@
         "type": "object"
       },
       "CapabilityId": {
-        "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
-        "enum": [
-          "sessions",
-          "streaming",
-          "structured_output",
-          "hooks",
-          "builtins",
-          "shell",
-          "comms",
-          "memory_store",
-          "session_store",
-          "session_compaction",
-          "skills",
-          "mcp_live"
-        ],
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
       },
       "CapabilityStatus": {
@@ -2315,15 +2301,15 @@
         "type": "object"
       },
       "McpAddParams": {
+        "additionalProperties": false,
         "description": "Request payload for `mcp/add`.",
         "properties": {
           "persisted": {
             "default": false,
             "type": "boolean"
           },
-          "server_config": true,
-          "server_name": {
-            "type": "string"
+          "server_config": {
+            "$ref": "#/components/schemas/McpServerConfig"
           },
           "session_id": {
             "type": "string"
@@ -2331,11 +2317,52 @@
         },
         "required": [
           "session_id",
-          "server_name",
           "server_config"
         ],
         "title": "McpAddParams",
         "type": "object"
+      },
+      "McpHttpConfig": {
+        "additionalProperties": false,
+        "description": "HTTP transport configuration (streamable HTTP or legacy SSE)",
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Extra headers to include on requests",
+            "type": "object"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/McpHttpTransport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "HTTP transport selection (default: streamable-http)"
+          },
+          "url": {
+            "description": "Server URL",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "McpHttpTransport": {
+        "description": "HTTP transport selection for URL-based servers",
+        "enum": [
+          "streamable-http",
+          "sse"
+        ],
+        "type": "string"
       },
       "McpLiveOpResponse": {
         "description": "Response payload for live MCP operations.",
@@ -2436,6 +2463,66 @@
           "server_name"
         ],
         "title": "McpRemoveParams",
+        "type": "object"
+      },
+      "McpServerConfig": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/McpStdioConfig"
+          },
+          {
+            "$ref": "#/components/schemas/McpHttpConfig"
+          }
+        ],
+        "description": "Configuration for a single MCP server",
+        "properties": {
+          "connect_timeout_secs": {
+            "description": "Connection timeout in seconds (connect + handshake + list_tools).\nDefaults to 10 seconds when not specified.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Server name (must be unique within scope)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "McpStdioConfig": {
+        "additionalProperties": false,
+        "description": "Stdio transport configuration",
+        "properties": {
+          "args": {
+            "default": [],
+            "description": "Arguments to pass to the command",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "description": "Command to spawn the server",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Environment variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "command"
+        ],
         "type": "object"
       },
       "MeerkatSchema": {
@@ -3421,7 +3508,7 @@
             "$ref": "#/components/schemas/RealtimeCapabilities"
           },
           "default_protocol_version": {
-            "type": "string"
+            "$ref": "#/components/schemas/RealtimeProtocolVersion"
           },
           "expires_at": {
             "type": "string"
@@ -3431,7 +3518,7 @@
           },
           "supported_protocol_versions": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RealtimeProtocolVersion"
             },
             "type": "array"
           },
@@ -3503,6 +3590,16 @@
           "video"
         ],
         "type": "string"
+      },
+      "RealtimeProtocolVersion": {
+        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
+        "oneOf": [
+          {
+            "const": "2",
+            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
+            "type": "string"
+          }
+        ]
       },
       "RealtimeReconnectPolicy": {
         "description": "Public reconnect policy for a realtime channel.",

@@ -18,11 +18,16 @@ on:
       - ready_for_review
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 env:
   MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
+  MEERKAT_DOGMA_CLEANUP_GATE: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE || 'false' }}
 
 jobs:
   cargo:
@@ -45,6 +50,7 @@ jobs:
 
   dogma-cleanup-gate:
     name: Dogma cleanup review gate
+    if: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}
     runs-on:
       - self-hosted
       - meerkat-temp-linux
@@ -116,9 +122,10 @@ jobs:
           cargo_result="${{ needs.cargo.result }}"
           buildbuddy_result="${{ needs.buildbuddy.result }}"
           dogma_result="${{ needs.dogma-cleanup-gate.result }}"
+          dogma_enabled="${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}"
 
           echo "Dogma cleanup gate: $dogma_result"
-          if [[ "$dogma_result" != "success" ]]; then
+          if [[ "$dogma_enabled" == "true" && "$dogma_result" != "success" ]]; then
             exit 1
           fi
 

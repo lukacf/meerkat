@@ -269,6 +269,20 @@ fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToo
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness {
+    let provenance = meerkat_core::ToolProvenance {
+        kind: meerkat_core::ToolSourceKind::Builtin,
+        source_id: "builtin".into(),
+    };
+    meerkat_core::ToolVisibilityWitness {
+        stable_owner_key: Some(
+            meerkat_core::tool_catalog::stable_owner_key_from_provenance(&provenance),
+        ),
+        last_seen_provenance: Some(provenance),
+    }
+}
+
 struct RuntimePreAdmissionGuard {
     admission: Option<RuntimePreAdmission>,
 }
@@ -1842,10 +1856,10 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .await
             .map_err(session_error_to_runtime_driver)?;
         let current_visibility_state = session
-            .tool_visibility_state()
+            .try_tool_visibility_state()
             .map_err(|err| {
                 RuntimeDriverError::Internal(format!(
-                    "failed to decode live session tool visibility state: {err}"
+                    "invalid canonical tool visibility state: {err}"
                 ))
             })?
             .unwrap_or_default();
@@ -7357,10 +7371,9 @@ impl SessionRuntime {
     pub async fn mcp_stage_add(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        server_config: serde_json::Value,
+        server_config: McpServerConfig,
     ) -> Result<(), RpcError> {
-        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+        self.mcp_stage_add_with_persistence(session_id, server_config, false)
             .await
             .map(|_| ())
     }
@@ -7369,32 +7382,17 @@ impl SessionRuntime {
     pub async fn mcp_stage_add_with_persistence(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        mut server_config: serde_json::Value,
+        config: McpServerConfig,
         persisted: bool,
     ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
-        if server_name.trim().is_empty() {
+        if config.name.trim().is_empty() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: "server_name cannot be empty".to_string(),
                 data: None,
             });
         }
-
-        if let Some(obj) = server_config.as_object_mut() {
-            obj.insert(
-                "name".to_string(),
-                serde_json::Value::String(server_name.clone()),
-            );
-        }
-
-        let config: McpServerConfig =
-            serde_json::from_value(server_config).map_err(|e| RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!("invalid server_config: {e}"),
-                data: None,
-            })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
         let rollback = if persisted {
@@ -7744,10 +7742,10 @@ impl SessionRuntime {
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        let source_id = format!("session:{session_id}");
+        let source = meerkat_core::EventSourceIdentity::session(session_id.clone());
         meerkat::surface::emit_mcp_lifecycle_events(
             event_tx,
-            &source_id,
+            &source,
             prompt,
             turn_number,
             actions,
@@ -7799,10 +7797,28 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         },
         _ => error::INTERNAL_ERROR,
     };
+    let core_apply_failure_cause = match &err {
+        SessionError::Agent(agent_err) => {
+            use meerkat_core::lifecycle::core_executor::{
+                CoreApplyFailureCause, CoreApplyFailureCauseKind,
+            };
+            let cause = CoreApplyFailureCause::from_agent_error(agent_err);
+            match cause.kind {
+                CoreApplyFailureCauseKind::HookDenied
+                | CoreApplyFailureCauseKind::HookRuntimeFailure => Some(cause.kind.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     RpcError {
         code,
         message: err.to_string(),
-        data: None,
+        data: core_apply_failure_cause.map(|cause| {
+            serde_json::json!({
+                "core_apply_failure_cause": cause
+            })
+        }),
     }
 }
 
@@ -10840,7 +10856,7 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<serde_json::Value> {
+    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
         let path = mcp_test_server_path();
         if !path.exists() {
             eprintln!(
@@ -10848,12 +10864,12 @@ mod tests {
             );
             return None;
         }
-        Some(serde_json::json!({
-            "command": path.to_string_lossy().to_string(),
-            "args": [],
-            "env": {},
-            "name": server_name,
-        }))
+        Some(McpServerConfig::stdio(
+            server_name,
+            path.to_string_lossy().to_string(),
+            Vec::new(),
+            HashMap::new(),
+        ))
     }
 
     #[tokio::test]
@@ -16689,12 +16705,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("staging should succeed");
@@ -16759,7 +16770,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "test-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16823,7 +16834,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "timeout-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16953,7 +16964,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "server-draining".to_string(), server1_config)
+            .mcp_stage_add(&session_id, server1_config)
             .await
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -17012,7 +17023,7 @@ mod tests {
         );
 
         runtime
-            .mcp_stage_add(&session_id, "server-staged".to_string(), server2_config)
+            .mcp_stage_add(&session_id, server2_config)
             .await
             .expect("stage second add");
 
@@ -17100,7 +17111,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "lossless-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -17156,12 +17167,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("stage broken add");
@@ -18133,6 +18139,9 @@ mod tests {
         visibility_state.active_filter =
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect());
         visibility_state.staged_filter = visibility_state.active_filter.clone();
+        visibility_state
+            .filter_witnesses
+            .insert("datetime".to_string(), builtin_tool_visibility_witness());
         runtime
             .service
             .set_session_tool_visibility_state(&session_id, Some(visibility_state))

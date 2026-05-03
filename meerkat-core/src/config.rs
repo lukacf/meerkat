@@ -1546,6 +1546,11 @@ pub struct HookEntryConfig {
 }
 
 impl HookEntryConfig {
+    /// Legacy compatibility projection for persisted hook configs.
+    ///
+    /// Runtime hook admission no longer consults this value; foreground hook
+    /// runtime failures surface as typed `HookEngineError`s and terminal
+    /// classification is owned by the runtime machine policy.
     pub fn effective_failure_policy(&self) -> HookFailurePolicy {
         self.failure_policy
             .unwrap_or_else(|| crate::hooks::default_failure_policy(self.capability))

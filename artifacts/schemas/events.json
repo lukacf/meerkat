@@ -607,7 +607,9 @@
           {
             "description": "Replace serialized tool arguments.",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "patch_type": {
                 "const": "tool_args",
                 "type": "string"
@@ -1138,6 +1140,10 @@
             "type": "string"
           }
         ]
+      },
+      "ToolCallArguments": {
+        "additionalProperties": true,
+        "type": "object"
       },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
@@ -1698,7 +1704,9 @@
       {
         "description": "Model requested a tool call",
         "properties": {
-          "args": true,
+          "args": {
+            "$ref": "#/$defs/ToolCallArguments"
+          },
           "id": {
             "type": "string"
           },
@@ -2205,17 +2213,14 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "description": "Legacy display mirror for consumers still rendering string status.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "terminal_status": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/BackgroundJobTerminalStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/BackgroundJobTerminalStatus"
           },
           "type": {
             "const": "background_job_completed",
@@ -2226,7 +2231,7 @@
           "type",
           "job_id",
           "display_name",
-          "status",
+          "terminal_status",
           "detail"
         ],
         "type": "object"
@@ -2916,7 +2921,9 @@
           {
             "description": "Model requested a tool call",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "id": {
                 "type": "string"
               },
@@ -3423,17 +3430,14 @@
                 "type": "string"
               },
               "status": {
-                "type": "string"
+                "description": "Legacy display mirror for consumers still rendering string status.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "terminal_status": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/BackgroundJobTerminalStatus"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
               },
               "type": {
                 "const": "background_job_completed",
@@ -3444,7 +3448,7 @@
               "type",
               "job_id",
               "display_name",
-              "status",
+              "terminal_status",
               "detail"
             ],
             "type": "object"
@@ -3705,7 +3709,9 @@
           {
             "description": "Replace serialized tool arguments.",
             "properties": {
-              "args": true,
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
               "patch_type": {
                 "const": "tool_args",
                 "type": "string"
@@ -4280,6 +4286,10 @@
           }
         ]
       },
+      "ToolCallArguments": {
+        "additionalProperties": true,
+        "type": "object"
+      },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
         "enum": [
@@ -4566,9 +4576,11 @@
       "skills_resolved",
       "skill_resolution_failed",
       "interaction_complete",
+      "interaction_callback_pending",
       "interaction_failed",
       "stream_truncated",
-      "tool_config_changed"
+      "tool_config_changed",
+      "background_job_completed"
     ],
     "known_payloads": {
       "tool_config_changed": {

@@ -76,7 +76,7 @@ impl RealtimeChannel {
             return Err(RealtimeConnectionError::TargetMismatch);
         }
         let open_frame = RealtimeChannelOpenFrame {
-            protocol_version: open_info.default_protocol_version.clone(),
+            protocol_version: open_info.default_protocol_version,
             open_token: open_info.open_token.clone(),
             role: self.role,
             turning_mode: self.turning_mode,
@@ -121,8 +121,8 @@ pub enum RealtimeConnectionError {
         "default realtime protocol version '{requested}' is not supported (supported: {supported:?})"
     )]
     UnsupportedProtocolVersion {
-        requested: String,
-        supported: Vec<String>,
+        requested: RealtimeProtocolVersion,
+        supported: Vec<RealtimeProtocolVersion>,
     },
     #[error("realtime websocket rejected channel open with {code:?}: {message}")]
     OpenRejected {
@@ -147,15 +147,12 @@ impl RealtimeConnection {
         open_info: &RealtimeOpenInfo,
         open_frame: RealtimeChannelOpenFrame,
     ) -> Result<(Self, RealtimeChannelOpenedFrame), RealtimeConnectionError> {
-        let supported_versions: Vec<RealtimeProtocolVersion> = open_info
+        if !open_info
             .supported_protocol_versions
-            .iter()
-            .filter_map(|version| RealtimeProtocolVersion::parse(version))
-            .collect();
-        let requested_protocol = RealtimeProtocolVersion::parse(&open_frame.protocol_version);
-        if requested_protocol.is_none_or(|version| !supported_versions.contains(&version)) {
+            .contains(&open_frame.protocol_version)
+        {
             return Err(RealtimeConnectionError::UnsupportedProtocolVersion {
-                requested: open_frame.protocol_version.clone(),
+                requested: open_frame.protocol_version,
                 supported: open_info.supported_protocol_versions.clone(),
             });
         }

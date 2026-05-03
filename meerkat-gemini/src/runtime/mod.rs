@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use meerkat_core::AuthError;
 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_core::HttpAuthorizer;
-use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
@@ -59,37 +59,6 @@ fn google_code_assist_oauth_refresh_failure_is_permanent(
     }
 }
 
-/// Allowed (backend, auth) combinations for Google.
-pub const ALLOWED_BINDINGS: &[(GoogleBackendKind, GoogleAuthMethod)] = &[
-    (GoogleBackendKind::GoogleGenAi, GoogleAuthMethod::ApiKey),
-    (
-        GoogleBackendKind::GoogleGenAi,
-        GoogleAuthMethod::BearerApiKey,
-    ),
-    (
-        GoogleBackendKind::GoogleGenAi,
-        GoogleAuthMethod::ExternalAuthorizer,
-    ),
-    (GoogleBackendKind::VertexAi, GoogleAuthMethod::Adc),
-    (GoogleBackendKind::VertexAi, GoogleAuthMethod::ApiKeyExpress),
-    (
-        GoogleBackendKind::VertexAi,
-        GoogleAuthMethod::ExternalAuthorizer,
-    ),
-    (
-        GoogleBackendKind::GoogleCodeAssist,
-        GoogleAuthMethod::GoogleOauth,
-    ),
-    (
-        GoogleBackendKind::GoogleCodeAssist,
-        GoogleAuthMethod::ComputeAdc,
-    ),
-    (
-        GoogleBackendKind::GoogleCodeAssist,
-        GoogleAuthMethod::ExternalAuthorizer,
-    ),
-];
-
 pub struct GoogleProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -99,44 +68,17 @@ impl ProviderRuntime for GoogleProviderRuntime {
         Provider::Gemini
     }
 
-    fn validate_binding(
-        &self,
-        connection_ref: &meerkat_core::ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        if backend.provider != Provider::Gemini || auth.provider != Provider::Gemini {
-            return Err(ProviderBindingError::ProviderMismatch);
-        }
-        let backend_kind = GoogleBackendKind::parse(&backend.backend_kind).ok_or_else(|| {
-            ProviderBindingError::UnknownBackendKind(backend.backend_kind.clone())
-        })?;
-        let auth_method = GoogleAuthMethod::parse(&auth.auth_method)
-            .ok_or_else(|| ProviderBindingError::UnknownAuthMethod(auth.auth_method.clone()))?;
-        if !ALLOWED_BINDINGS.contains(&(backend_kind, auth_method)) {
-            return Err(ProviderBindingError::UnsupportedCombination {
-                backend: backend.backend_kind.clone(),
-                auth: auth.auth_method.clone(),
-            });
-        }
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
-            provider: Provider::Gemini,
-            backend: NormalizedBackendKind::Google(backend_kind),
-            auth: NormalizedAuthMethod::Google(auth_method),
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
-    }
-
     async fn resolve_binding(
         &self,
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        let auth_method = match binding.auth {
+        if binding.provider() != Provider::Gemini {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
+        let auth_method = match binding.auth() {
             NormalizedAuthMethod::Google(m) => m,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -144,7 +86,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 ));
             }
         };
-        let backend_kind = match binding.backend {
+        let backend_kind = match binding.backend() {
             NormalizedBackendKind::Google(k) => k,
             _ => {
                 return Err(ProviderAuthError::Binding(
@@ -153,13 +95,13 @@ impl ProviderRuntime for GoogleProviderRuntime {
             }
         };
 
-        let source_label = format!("google:{}", binding.auth_profile.id);
+        let source_label = format!("google:{}", binding.auth_profile().id);
         let lease: Arc<dyn AuthLease> = match auth_method {
             GoogleAuthMethod::ApiKey
             | GoogleAuthMethod::BearerApiKey
             | GoogleAuthMethod::ApiKeyExpress => {
                 let secret =
-                    resolve_simple_secret(&binding.auth_profile.source, env, binding).await?;
+                    resolve_simple_secret(&binding.auth_profile().source, env, binding).await?;
                 let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
                 Arc::new(StaticLease::inline_secret(
                     secret,
@@ -169,7 +111,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 ))
             }
             GoogleAuthMethod::ExternalAuthorizer => {
-                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
+                resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
             GoogleAuthMethod::Adc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
@@ -183,7 +125,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
                             meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
+                                binding.connection_ref(),
                             ),
                         );
                     }
@@ -226,7 +168,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
                             meerkat_core::handles::LeaseKey::from_connection_ref(
-                                &binding.connection_ref,
+                                binding.connection_ref(),
                             ),
                         );
                     }
@@ -261,7 +203,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
                 {
                     validate_oauth_target_for_auth_mode(
-                        &binding.auth_profile,
+                        binding.auth_profile(),
                         Provider::Gemini,
                         PersistedAuthMode::GoogleOauth,
                     )
@@ -395,7 +337,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
         Ok(ResolvedConnection {
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(backend_kind),
-            backend_profile: binding.backend_profile.clone(),
+            backend_profile: binding.backend_profile().clone(),
             auth_lease: lease,
         })
     }
@@ -598,7 +540,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
 ))]
 fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String> {
     binding
-        .backend_profile
+        .backend_profile()
         .options
         .get(key)
         .and_then(serde_json::Value::as_str)
@@ -609,17 +551,22 @@ fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
 
     #[test]
-    fn allowed_bindings_cover_three_backends() {
-        assert!(
-            ALLOWED_BINDINGS.contains(&(GoogleBackendKind::GoogleGenAi, GoogleAuthMethod::ApiKey,))
-        );
-        assert!(ALLOWED_BINDINGS.contains(&(GoogleBackendKind::VertexAi, GoogleAuthMethod::Adc,)));
-        assert!(ALLOWED_BINDINGS.contains(&(
-            GoogleBackendKind::GoogleCodeAssist,
-            GoogleAuthMethod::GoogleOauth,
-        )));
+    fn typed_catalog_covers_three_backends() {
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleGenAi),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::ApiKey),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Google(GoogleBackendKind::VertexAi),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::Adc),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::GoogleOauth),
+        ));
     }
 
     #[test]

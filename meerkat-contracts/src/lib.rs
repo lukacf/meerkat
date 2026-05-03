@@ -191,6 +191,7 @@ pub use wire::{
     MobSnapshotResult,
     MobSpawnHelperParams,
     MobSpawnManyFailedResult,
+    MobSpawnManyFailureCause,
     MobSpawnManyParams,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,

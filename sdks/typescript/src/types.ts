@@ -244,8 +244,16 @@ export interface TurnOptions {
   readonly providerParams?: Record<string, unknown>;
 }
 
+export type EventSourceIdentity =
+  | { readonly type: "session"; readonly sessionId: string }
+  | { readonly type: "runtime"; readonly runtimeId: string }
+  | { readonly type: "interaction"; readonly interactionId: string }
+  | { readonly type: "callback" }
+  | { readonly type: "external"; readonly sourceId: string };
+
 export interface EventEnvelope<T = unknown> {
   readonly timestamp_ms: number;
+  readonly source: EventSourceIdentity;
   readonly source_id: string;
   readonly seq: number;
   readonly event_id: string;
@@ -670,6 +678,7 @@ export interface SessionOptions {
 /** Explicit standalone session-event envelope. */
 export interface AgentEventEnvelope {
   readonly eventId?: string;
+  readonly source?: EventSourceIdentity;
   readonly sourceId?: string;
   readonly seq?: number;
   readonly timestampMs?: number;

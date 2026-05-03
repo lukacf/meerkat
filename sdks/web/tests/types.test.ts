@@ -34,6 +34,7 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   FlowStatus,
+  EventEnvelope,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
 
@@ -139,6 +140,35 @@ const appendSystemContextOptions: AppendSystemContextOptions = {
   text: 'Coordinate with the orchestrator.',
   source: 'mob',
   idempotencyKey: 'ctx-1',
+};
+
+const typedEventEnvelope: EventEnvelope = {
+  event_id: '00000000-0000-0000-0000-000000000001',
+  source: {
+    type: 'session',
+    session_id: '00000000-0000-4000-8000-000000000001',
+  },
+  source_id: 'session:not-a-uuid',
+  seq: 1,
+  timestamp_ms: 1710000000000,
+  payload: {
+    type: 'text_delta',
+    delta: 'hi',
+  },
+};
+if (typedEventEnvelope.source.type === 'session') {
+  typedEventEnvelope.source.session_id;
+}
+// @ts-expect-error source_id alone is only an inert compatibility projection.
+const sourceIdOnlyEventEnvelope: EventEnvelope = {
+  event_id: '00000000-0000-0000-0000-000000000001',
+  source_id: 'session:00000000-0000-4000-8000-000000000001',
+  seq: 1,
+  timestamp_ms: 1710000000000,
+  payload: {
+    type: 'text_delta',
+    delta: 'hi',
+  },
 };
 
 const appendSystemContextResult: AppendSystemContextResult = {

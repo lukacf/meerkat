@@ -150,6 +150,19 @@ struct ArchiveRuntimeCleanup {
 }
 
 impl ArchiveRuntimeCleanup {
+    async fn archive_service(
+        &self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        service
+            .archive_with_machine_authority(
+                session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+    }
+
     async fn run(&self, session_id: &SessionId) {
         self.runtime_adapter.unregister_session(session_id).await;
         if let Some(streams) = self.pending_session_event_streams.as_ref() {
@@ -449,7 +462,10 @@ async fn await_guarded_session_cleanup(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = match operation {
-            GuardedSessionCleanupOperation::Archive => service.archive(&session_id).await,
+            GuardedSessionCleanupOperation::Archive => match runtime_cleanup.as_ref() {
+                Some(cleanup) => cleanup.archive_service(&service, &session_id).await,
+                None => service.archive(&session_id).await,
+            },
             GuardedSessionCleanupOperation::DiscardLive => {
                 service.discard_live_session(&session_id).await
             }
@@ -484,7 +500,7 @@ async fn await_guarded_staged_archive(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = match service.archive(&session_id).await {
+        let result = match runtime_cleanup.archive_service(&service, &session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {
                 runtime_cleanup.run(&session_id).await;
                 #[cfg(test)]
@@ -531,7 +547,7 @@ async fn await_session_archive_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
+        let result = runtime_cleanup.archive_service(&service, &session_id).await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             runtime_cleanup.run(&session_id).await;
         }
@@ -654,6 +670,7 @@ impl PendingPromotionCleanup {
     async fn restore_after_materialized_failure(
         &mut self,
         service: &PersistentSessionService<FactoryAgentBuilder>,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         if let Err(error) = self
             .recover_materialized_staged_capacity_admission(service)
@@ -663,7 +680,10 @@ impl PendingPromotionCleanup {
             return Err(error);
         }
 
-        if let Err(error) = service.archive(&self.session_id).await {
+        if let Err(error) = service
+            .archive_with_machine_authority(&self.session_id, authority)
+            .await
+        {
             let _ = service.discard_live_session(&self.session_id).await;
             self.restore_now().await;
             return Err(error);
@@ -1262,7 +1282,10 @@ impl SessionService for RpcMobSessionService {
         if self.staged_sessions.contains(id).await {
             return Err(SessionError::Busy { id: id.clone() });
         }
-        let result = self.service.archive(id).await;
+        let result = self
+            .service
+            .archive_with_machine_authority(id, self.runtime_adapter.session_control_authority())
+            .await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
             self.archive_runtime_cleanup().run(id).await;
         }
@@ -3098,7 +3121,10 @@ impl SessionRuntime {
             let result = service.start_turn(&session_id, start_req).await;
             if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
                 let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(&service)
+                    .restore_after_materialized_failure(
+                        &service,
+                        runtime_adapter.session_control_authority(),
+                    )
                     .await;
                 promotion_cleanup.disarm();
                 let _ = result_tx.send(match restore_result {
@@ -3299,7 +3325,10 @@ impl SessionRuntime {
                 .await
             {
                 let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(&service)
+                    .restore_after_materialized_failure(
+                        &service,
+                        runtime_adapter.session_control_authority(),
+                    )
                     .await;
                 promotion_cleanup.disarm();
                 let _ = result_tx.send(match restore_result {
@@ -15153,7 +15182,10 @@ mod tests {
             .expect("reserve recovery admission");
         runtime
             .service
-            .archive(&session_id)
+            .archive_with_machine_authority(
+                &session_id,
+                runtime.runtime_adapter.session_control_authority(),
+            )
             .await
             .expect("archive should win before recovered create");
         let result_rx = runtime.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(

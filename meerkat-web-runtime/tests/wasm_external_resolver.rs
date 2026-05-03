@@ -23,11 +23,8 @@ use meerkat_core::{
     AuthError, AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, CredentialSourceSpec,
     Provider, ResolvedAuthEnvelope,
     connection::{BindingId, ProfileId, RealmId},
-    provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind},
 };
-use meerkat_providers::{
-    ExternalAuthResolverHandle, NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
-};
+use meerkat_providers::{ExternalAuthResolverHandle, ProviderRuntimeCatalog, ValidatedBinding};
 use meerkat_web_runtime::external_auth::{
     WASM_EXTERNAL_AUTH_RESOLVER_ID, WasmExternalAuthResolver, has_external_auth_resolver,
     register_external_auth_resolver,
@@ -36,34 +33,34 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 fn test_binding() -> ValidatedBinding {
-    ValidatedBinding {
-        connection_ref: ConnectionRef {
+    let backend = BackendProfile {
+        id: "openai-backend".into(),
+        provider: Provider::OpenAI,
+        backend_kind: "openai_api".into(),
+        base_url: None,
+        options: serde_json::Value::Null,
+    };
+    let auth = AuthProfile {
+        id: "host-oauth".into(),
+        provider: Provider::OpenAI,
+        auth_method: "external_authorizer".into(),
+        source: CredentialSourceSpec::ExternalResolver {
+            handle: "wasm_host".into(),
+        },
+        constraints: Default::default(),
+        metadata_defaults: Default::default(),
+    };
+    ProviderRuntimeCatalog::validate_binding(
+        &ConnectionRef {
             realm: RealmId::parse("browser").expect("realm"),
-            binding: BindingId::parse("chatgpt").expect("binding"),
+            binding: BindingId::parse("openai").expect("binding"),
             profile: Some(ProfileId::parse("primary").expect("profile")),
         },
-        provider: Provider::OpenAI,
-        backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
-        auth: NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ExternalAuthorizer),
-        backend_profile: Arc::new(BackendProfile {
-            id: "chatgpt-backend".into(),
-            provider: Provider::OpenAI,
-            backend_kind: "chatgpt_backend".into(),
-            base_url: None,
-            options: serde_json::Value::Null,
-        }),
-        auth_profile: Arc::new(AuthProfile {
-            id: "host-oauth".into(),
-            provider: Provider::OpenAI,
-            auth_method: "external_authorizer".into(),
-            source: CredentialSourceSpec::ExternalResolver {
-                handle: "wasm_host".into(),
-            },
-            constraints: Default::default(),
-            metadata_defaults: Default::default(),
-        }),
-        policy: BindingPolicy::default(),
-    }
+        &backend,
+        &auth,
+        &BindingPolicy::default(),
+    )
+    .expect("openai external authorizer binding")
 }
 
 fn register_eval_callback(source: &str) {
@@ -167,7 +164,7 @@ async fn resolver_preserves_typed_inline_secret_expiration_and_metadata() {
             (function (connectionRef) {
                 if (
                     connectionRef.realm !== "browser" ||
-                    connectionRef.binding !== "chatgpt" ||
+                    connectionRef.binding !== "openai" ||
                     connectionRef.profile !== "primary"
                 ) {
                     return Promise.reject({

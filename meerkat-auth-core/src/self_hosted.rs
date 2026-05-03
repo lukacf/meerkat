@@ -7,13 +7,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::{
-    AuthLease, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider,
-};
+use meerkat_core::provider_matrix::SelfHostedAuthMethod;
+use meerkat_core::{AuthLease, AuthMetadata, Provider};
 use meerkat_llm_core::LlmClient;
 use meerkat_llm_core::provider_runtime::{
-    NormalizedAuthMethod, NormalizedBackendKind, ProviderBindingError, ProviderClientError,
-    ProviderRuntime, ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+    NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+    ProviderClientError, ProviderRuntime, ResolvedConnection, ResolverEnvironment, StaticLease,
+    ValidatedBinding,
 };
 
 pub struct SelfHostedProviderRuntime;
@@ -25,59 +25,41 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
         Provider::SelfHosted
     }
 
-    fn validate_binding(
-        &self,
-        connection_ref: &ConnectionRef,
-        backend: &BackendProfile,
-        auth: &AuthProfile,
-        policy: &BindingPolicy,
-    ) -> Result<ValidatedBinding, ProviderBindingError> {
-        if backend.provider != Provider::SelfHosted || auth.provider != Provider::SelfHosted {
-            return Err(ProviderBindingError::ProviderMismatch);
-        }
-        if !matches!(
-            backend.backend_kind.as_str(),
-            "self_hosted" | "openai_compatible"
-        ) {
-            return Err(ProviderBindingError::UnknownBackendKind(
-                backend.backend_kind.clone(),
-            ));
-        }
-        let auth_method = match auth.auth_method.as_str() {
-            "api_key" => meerkat_core::provider_matrix::openai::OpenAiAuthMethod::ApiKey,
-            "none" | "static_bearer" => {
-                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::StaticBearer
-            }
-            other => return Err(ProviderBindingError::UnknownAuthMethod(other.to_string())),
-        };
-
-        Ok(ValidatedBinding {
-            connection_ref: connection_ref.clone(),
-            provider: Provider::SelfHosted,
-            backend: NormalizedBackendKind::OpenAi(
-                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
-            ),
-            auth: NormalizedAuthMethod::OpenAi(auth_method),
-            backend_profile: Arc::new(backend.clone()),
-            auth_profile: Arc::new(auth.clone()),
-            policy: policy.clone(),
-        })
-    }
-
     async fn resolve_binding(
         &self,
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
-    ) -> Result<ResolvedConnection, meerkat_llm_core::provider_runtime::ProviderAuthError> {
-        let source_label = format!("self_hosted:{}", binding.auth_profile.id);
-        let lease: Arc<dyn AuthLease> = match binding.auth_profile.auth_method.as_str() {
-            "none" => Arc::new(StaticLease::empty_lease(
+    ) -> Result<ResolvedConnection, ProviderAuthError> {
+        if binding.provider() != Provider::SelfHosted {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
+        match binding.backend() {
+            NormalizedBackendKind::SelfHosted(_) => {}
+            _ => {
+                return Err(ProviderAuthError::Binding(
+                    ProviderBindingError::ProviderMismatch,
+                ));
+            }
+        }
+        let auth_method = match binding.auth() {
+            NormalizedAuthMethod::SelfHosted(method) => method,
+            _ => {
+                return Err(ProviderAuthError::Binding(
+                    ProviderBindingError::ProviderMismatch,
+                ));
+            }
+        };
+        let source_label = format!("self_hosted:{}", binding.auth_profile().id);
+        let lease: Arc<dyn AuthLease> = match auth_method {
+            SelfHostedAuthMethod::None => Arc::new(StaticLease::empty_lease(
                 AuthMetadata::default(),
                 source_label,
             )),
-            _ => {
+            SelfHostedAuthMethod::ApiKey | SelfHostedAuthMethod::StaticBearer => {
                 let secret = crate::resolver::resolve_simple_secret(
-                    &binding.auth_profile.source,
+                    &binding.auth_profile().source,
                     env,
                     binding,
                 )
@@ -93,8 +75,8 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
 
         Ok(ResolvedConnection {
             provider: Provider::SelfHosted,
-            backend: binding.backend,
-            backend_profile: Arc::clone(&binding.backend_profile),
+            backend: binding.backend(),
+            backend_profile: Arc::clone(binding.backend_profile()),
             auth_lease: lease,
         })
     }
@@ -106,5 +88,111 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
         Err(ProviderClientError::MissingFeature(
             "self-hosted client construction is surface-owned because model aliases carry remote_model/api_style",
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use meerkat_core::provider_matrix::{SelfHostedAuthMethod, SelfHostedBackendKind};
+    use meerkat_core::{
+        AuthProfile, BackendProfile, BindingId, BindingPolicy, ConnectionRef, CredentialSourceSpec,
+        RealmId,
+    };
+    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
+
+    fn connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default").unwrap(),
+            profile: None,
+        }
+    }
+
+    fn backend_profile(provider: Provider, backend_kind: &str) -> BackendProfile {
+        BackendProfile {
+            id: "backend".into(),
+            provider,
+            backend_kind: backend_kind.into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        }
+    }
+
+    fn auth_profile(provider: Provider, auth_method: &str) -> AuthProfile {
+        AuthProfile {
+            id: "auth".into(),
+            provider,
+            auth_method: auth_method.into(),
+            source: CredentialSourceSpec::InlineSecret {
+                secret: "secret".into(),
+            },
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        }
+    }
+
+    fn self_hosted_binding() -> ValidatedBinding {
+        let backend = backend_profile(
+            Provider::SelfHosted,
+            SelfHostedBackendKind::SelfHosted.as_str(),
+        );
+        let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
+        ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_resolve_accepts_catalog_validated_self_hosted_none() {
+        let resolved = SelfHostedProviderRuntime
+            .resolve_binding(&self_hosted_binding(), &ResolverEnvironment::testing())
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.provider, Provider::SelfHosted);
+        assert!(matches!(
+            resolved.backend,
+            NormalizedBackendKind::SelfHosted(SelfHostedBackendKind::SelfHosted)
+        ));
+    }
+
+    #[test]
+    fn catalog_rejects_mismatched_self_hosted_provider_tags() {
+        let backend = backend_profile(
+            Provider::SelfHosted,
+            SelfHostedBackendKind::SelfHosted.as_str(),
+        );
+        let auth = auth_profile(Provider::OpenAI, "api_key");
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderBindingError::ProviderMismatch));
+    }
+
+    #[test]
+    fn catalog_rejects_non_self_hosted_backend_for_self_hosted_provider() {
+        let backend = backend_profile(Provider::OpenAI, "openai_api");
+        let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
+        let err = ProviderRuntimeCatalog::validate_binding_for_provider(
+            Provider::SelfHosted,
+            &connection_ref(),
+            &backend,
+            &auth,
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
 }

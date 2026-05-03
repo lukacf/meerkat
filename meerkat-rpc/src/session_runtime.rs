@@ -71,6 +71,14 @@ use meerkat_core::ToolConfigChangeOperation;
 
 const SESSION_TRANSIENT_PENDING_ARCHIVE_KEY: &str = "session_transient_pending_archive";
 
+fn unknown_provider_message(provider: &str) -> String {
+    format!("unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)")
+}
+
+fn parse_provider_override(provider: &str) -> Result<meerkat_core::Provider, String> {
+    meerkat_core::Provider::parse_strict(provider).ok_or_else(|| unknown_provider_message(provider))
+}
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -1715,7 +1723,8 @@ impl SessionRuntimeLlmReconfigureHost {
             .clone()
             .unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = request.provider.as_ref() {
-            meerkat_core::Provider::from_name(provider_name)
+            parse_provider_override(provider_name)
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
         } else {
             current.provider
         };
@@ -2193,7 +2202,7 @@ impl SessionRuntime {
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
             provider: overrides
                 .and_then(|ov| ov.provider.as_ref())
-                .map(|provider| meerkat_core::Provider::from_name(provider)),
+                .and_then(|provider| parse_provider_override(provider).ok()),
             provider_params,
             render_metadata: None,
             connection_ref,
@@ -3615,11 +3624,15 @@ impl SessionRuntime {
 
         Ok(SurfaceSessionRecoveryOverrides {
             model: overrides.and_then(|ov| ov.model.clone()),
-            provider: overrides.and_then(|ov| {
-                ov.provider
-                    .as_ref()
-                    .map(|provider| meerkat_core::Provider::from_name(provider))
-            }),
+            provider: overrides
+                .and_then(|ov| ov.provider.as_ref())
+                .map(|provider| parse_provider_override(provider))
+                .transpose()
+                .map_err(|message| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                })?,
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
             clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
             connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
@@ -3885,7 +3898,11 @@ impl SessionRuntime {
         let registry = self.model_registry().await?;
         let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = ov.provider.as_ref() {
-            meerkat_core::Provider::from_name(provider_name)
+            parse_provider_override(provider_name).map_err(|message| RpcError {
+                code: error::INVALID_PARAMS,
+                message,
+                data: None,
+            })?
         } else {
             current.provider
         };
@@ -10498,6 +10515,38 @@ mod tests {
         assert!(
             err.to_string().contains("anthropic") && err.to_string().contains("gpt-5.4"),
             "error should identify the rejected provider/model pair: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_rejects_unknown_provider_model_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let host = runtime.llm_reconfigure_host();
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let request = SessionLlmReconfigureRequest {
+            model: Some("unknown-model-xyz".to_string()),
+            provider: Some("provider-shaped-cache-key".to_string()),
+            provider_params: None,
+            clear_provider_params: false,
+            connection_ref: None,
+            clear_connection_ref: false,
+        };
+
+        let err = host
+            .resolve_target_session_llm_identity(&request, &current)
+            .await
+            .expect_err("unknown provider/model identity must fail closed");
+        assert!(
+            err.to_string().contains("unknown provider")
+                && err.to_string().contains("provider-shaped-cache-key"),
+            "error should reject the provider string before model fallback: {err}"
         );
     }
 

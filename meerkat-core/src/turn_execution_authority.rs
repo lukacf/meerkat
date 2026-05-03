@@ -141,12 +141,16 @@ impl TurnTerminalCauseKind {
             Self::StructuredOutputValidationFailed => AgentErrorClass::StructuredOutput,
             Self::BudgetExhausted | Self::TimeBudgetExceeded => AgentErrorClass::Budget,
             Self::TurnLimitReached => AgentErrorClass::MaxTurns,
-            Self::RuntimeApplyFailure => AgentErrorClass::Internal,
-            Self::Unknown | Self::FatalFailure => AgentErrorClass::Terminal,
+            Self::RuntimeApplyFailure | Self::Unknown => AgentErrorClass::Internal,
+            Self::FatalFailure => AgentErrorClass::Terminal,
         }
     }
 
-    pub fn default_message(self, outcome: TurnTerminalOutcome) -> &'static str {
+    pub fn is_specific_failure_cause(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
+    pub fn default_message(self, _outcome: TurnTerminalOutcome) -> &'static str {
         match self {
             Self::HookDenied => "hook denied terminal turn",
             Self::HookFailure => "hook failure terminal turn",
@@ -158,17 +162,7 @@ impl TurnTerminalCauseKind {
             Self::TurnLimitReached => "turn limit reached",
             Self::RuntimeApplyFailure => "runtime apply failure",
             Self::FatalFailure => "fatal turn failure",
-            Self::Unknown => match outcome {
-                TurnTerminalOutcome::None => "turn did not reach a terminal outcome",
-                TurnTerminalOutcome::Completed => "turn completed",
-                TurnTerminalOutcome::Cancelled => "turn cancelled",
-                TurnTerminalOutcome::Failed => "turn failed",
-                TurnTerminalOutcome::BudgetExhausted => "budget exhausted",
-                TurnTerminalOutcome::TimeBudgetExceeded => "time budget exceeded",
-                TurnTerminalOutcome::StructuredOutputValidationFailed => {
-                    "structured output validation failed"
-                }
-            },
+            Self::Unknown => "unknown terminal cause",
         }
     }
 }

@@ -121,6 +121,17 @@ fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureRe
     }
 }
 
+fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
+    if let Some(reason) = turn_input_failure_reason(input)
+        && !reason.cause_kind.is_specific_failure_cause()
+    {
+        return Err(AgentError::InternalError(format!(
+            "turn input {input:?} has unknown machine-owned terminal_cause_kind"
+        )));
+    }
+    Ok(())
+}
+
 fn budget_warning_event(exceeded: BudgetExceeded) -> AgentEvent {
     let budget_type = match exceeded.dimension {
         BudgetDimension::Tokens => BudgetType::Tokens,
@@ -689,6 +700,7 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
+        validate_turn_input_failure_reason(&input)?;
         let prev_phase = self.turn_phase()?;
         self.apply_turn_input_via_runtime_handle(&input)?;
         let next_phase = self.turn_phase()?;
@@ -737,16 +749,31 @@ where
         }
 
         let outcome = self.turn_terminal_outcome()?;
-        let Some(cause_kind) = self.turn_terminal_cause_kind()? else {
-            return Err(AgentError::InternalError(format!(
-                "failed turn transition for input {input:?} missing machine-owned terminal_cause_kind"
-            )));
-        };
+        let cause_kind = self.require_machine_terminal_failure_cause_kind(format!(
+            "failed turn transition for input {input:?}"
+        ))?;
         Ok(TurnFailureReason::with_cause(
             cause_kind,
             cause_kind.agent_error_class(),
             cause_kind.default_message(outcome),
         ))
+    }
+
+    fn require_machine_terminal_failure_cause_kind(
+        &self,
+        context: String,
+    ) -> Result<TurnTerminalCauseKind, AgentError> {
+        let Some(cause_kind) = self.turn_terminal_cause_kind()? else {
+            return Err(AgentError::InternalError(format!(
+                "{context} missing machine-owned terminal_cause_kind"
+            )));
+        };
+        if !cause_kind.is_specific_failure_cause() {
+            return Err(AgentError::InternalError(format!(
+                "{context} has unknown machine-owned terminal_cause_kind"
+            )));
+        }
+        Ok(cause_kind)
     }
 
     /// Execute side effects from a transition. Handles CheckCompaction
@@ -2386,11 +2413,14 @@ where
         let classification = classify_terminal(&outcome);
         match classification {
             Some(SurfaceResultClass::HardFailure) => {
-                let Some(cause_kind) = self.turn_terminal_cause_kind()? else {
-                    self.pending_fatal_diagnostic = None;
-                    return Err(AgentError::InternalError(format!(
-                        "hard-failure terminal outcome {outcome:?} missing machine-owned terminal_cause_kind"
-                    )));
+                let cause_kind = match self.require_machine_terminal_failure_cause_kind(format!(
+                    "hard-failure terminal outcome {outcome:?}"
+                )) {
+                    Ok(cause_kind) => cause_kind,
+                    Err(error) => {
+                        self.pending_fatal_diagnostic = None;
+                        return Err(error);
+                    }
                 };
                 let message = self
                     .pending_fatal_diagnostic
@@ -5644,6 +5674,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fatal_failure_unknown_input_cause_fails_before_machine_apply() {
+        use crate::TurnExecutionInput;
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        use crate::turn_execution_authority::TurnFailureReason;
+
+        let turn_handle = Arc::new(TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(FatalLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let run_id = crate::lifecycle::RunId::new();
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+            })
+            .expect("start conversation run should apply");
+
+        let err = agent
+            .apply_turn_input(TurnExecutionInput::FatalFailure {
+                run_id: run_id.clone(),
+                reason: TurnFailureReason::with_cause(
+                    crate::TurnTerminalCauseKind::Unknown,
+                    crate::event::AgentErrorClass::Terminal,
+                    "display text must not classify unknown terminal cause",
+                ),
+            })
+            .expect_err("unknown failure input cause should fail before machine apply");
+
+        match err {
+            AgentError::InternalError(message) => {
+                assert!(
+                    message.contains("unknown machine-owned terminal_cause_kind"),
+                    "unexpected unknown-cause invariant error: {message}"
+                );
+                assert!(
+                    message.contains("FatalFailure"),
+                    "invariant error should name the rejected input: {message}"
+                );
+            }
+            AgentError::TerminalFailure {
+                cause_kind,
+                message,
+                ..
+            } => panic!(
+                "core shell must not publish Unknown terminal semantics, got {cause_kind:?}: {message}"
+            ),
+            other => panic!("expected fail-closed invariant error, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.turn_phase,
+            crate::TurnPhase::ApplyingPrimitive,
+            "fixture must prove the ambiguous input did not reach the machine"
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind, None,
+            "fixture must prove the ambiguous input did not store a terminal cause"
+        );
+    }
+
+    #[tokio::test]
     async fn unrecognized_failed_transition_missing_cause_fails_closed() {
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
         use crate::{ContentShape, TurnExecutionInput};
@@ -5714,6 +5816,106 @@ mod tests {
             snapshot.terminal_cause_kind, None,
             "fixture must prove the machine snapshot has no terminal cause"
         );
+    }
+
+    #[tokio::test]
+    async fn unrecognized_failed_transition_unknown_cause_fails_closed() {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        use crate::{ContentShape, TurnExecutionInput};
+
+        let turn_handle = Arc::new(TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(FatalLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let run_id = crate::lifecycle::RunId::new();
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+            })
+            .expect("start conversation run should apply");
+        agent
+            .apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+                run_id: run_id.clone(),
+                admitted_content_shape: ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+            })
+            .expect("primitive application should enter CallingLlm");
+
+        turn_handle
+            .force_next_llm_terminal_failed_for_test(Some(crate::TurnTerminalCauseKind::Unknown))
+            .expect("force terminal failure with ambiguous cause");
+
+        let err = agent
+            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                run_id: run_id.clone(),
+            })
+            .expect_err("unrecognized failed transition with Unknown cause should fail closed");
+
+        match err {
+            AgentError::InternalError(message) => {
+                assert!(
+                    message.contains("unknown machine-owned terminal_cause_kind"),
+                    "unexpected unknown-cause invariant error: {message}"
+                );
+                assert!(
+                    message.contains("LlmReturnedTerminal"),
+                    "invariant error should name the unrecognized failed input: {message}"
+                );
+            }
+            AgentError::TerminalFailure { cause_kind, .. } => {
+                panic!("core shell must not publish Unknown terminal semantics, got {cause_kind:?}")
+            }
+            other => panic!("expected fail-closed invariant error, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::Unknown),
+            "fixture must prove the machine snapshot has an ambiguous terminal cause"
+        );
+
+        let err = agent
+            .build_result(0, 0)
+            .await
+            .expect_err("unknown machine terminal cause should not publish final result semantics");
+
+        match err {
+            AgentError::InternalError(message) => {
+                assert!(
+                    message.contains("unknown machine-owned terminal_cause_kind"),
+                    "unexpected unknown-cause final-result invariant error: {message}"
+                );
+                assert!(
+                    message.contains("Failed"),
+                    "final-result invariant error should name the terminal outcome: {message}"
+                );
+            }
+            AgentError::TerminalFailure {
+                cause_kind,
+                message,
+                ..
+            } => panic!(
+                "core shell must not publish Unknown terminal result semantics, got {cause_kind:?}: {message}"
+            ),
+            other => panic!("expected fail-closed final-result invariant error, got {other:?}"),
+        }
     }
 
     /// Mock LLM client that returns high usage, causing budget exhaustion

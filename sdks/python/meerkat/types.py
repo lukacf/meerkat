@@ -12,8 +12,6 @@ from typing import Any, Literal, NewType, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
-    InputListParams as InputListParams,
-    InputListResult as InputListResult,
     McpAddParams as McpAddParams,
     McpLiveOpResponse as McpLiveOpResponse,
     McpReloadParams as McpReloadParams,
@@ -87,14 +85,8 @@ from .generated.types import (
     RealtimeTextDelta as RealtimeTextDelta,
     RealtimeTurningMode as RealtimeTurningMode,
     RealtimeVideoChunk as RealtimeVideoChunk,
-    RuntimeAcceptParams as RuntimeAcceptParams,
     RuntimeAcceptResult as RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusResult as RuntimeRealtimeAttachmentStatusResult,
-    RuntimeResetParams as RuntimeResetParams,
-    RuntimeResetResult as RuntimeResetResult,
-    RuntimeRetireParams as RuntimeRetireParams,
-    RuntimeRetireResult as RuntimeRetireResult,
-    RuntimeStateParams as RuntimeStateParams,
     RuntimeStateResult as RuntimeStateResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,

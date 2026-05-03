@@ -1386,9 +1386,14 @@ fn sorted_names(names: &ToolNameSet) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::ToolScopeRevision;
-    use super::{ToolFilter, ToolScope, ToolScopeStageError};
+    use super::{
+        ToolFilter, ToolScope, ToolScopeApplyError, ToolScopeStageError, ToolVisibilityOwner,
+    };
+    use crate::session::{
+        DeferredToolLoadAuthority, SessionToolVisibilityState, ToolVisibilityWitness,
+    };
     use crate::types::{ToolDef, ToolNameSet, ToolProvenance, ToolSourceKind};
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::Arc;
 
     fn set(names: &[&str]) -> ToolNameSet {
@@ -1424,6 +1429,57 @@ mod tests {
                 source_id: source_id.into(),
             }),
         })
+    }
+
+    struct VisibilityReadFailingOwner;
+
+    impl ToolVisibilityOwner for VisibilityReadFailingOwner {
+        fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+            Err(ToolScopeApplyError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: SessionToolVisibilityState,
+        ) -> Result<(), ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: ToolFilter,
+            _witnesses: BTreeMap<String, ToolVisibilityWitness>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<String>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<DeferredToolLoadAuthority>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+            Err(ToolScopeApplyError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
     }
 
     #[test]
@@ -1462,6 +1518,32 @@ mod tests {
 
         assert!(second > first);
         assert_eq!(handle.staged_revision().unwrap(), second);
+    }
+
+    #[test]
+    fn owner_visibility_read_failure_fails_closed_without_local_defaults() {
+        let scope = ToolScope::new_with_visibility_owner(
+            tools(&["visible", "deferred"]),
+            HashSet::new(),
+            raw_set(&["deferred"]),
+            Arc::new(VisibilityReadFailingOwner),
+        );
+
+        let err = scope
+            .visible_tools_result()
+            .expect_err("owner read failures must stay explicit");
+        assert!(
+            err.to_string().contains("visibility read fixture failed"),
+            "unexpected visibility error: {err}"
+        );
+        assert!(
+            scope.visible_tools().is_empty(),
+            "fallible visible_tools facade must close the projected tool set"
+        );
+        assert!(
+            scope.visible_tool_names().is_err(),
+            "dispatch prechecks must not synthesize names from local defaults"
+        );
     }
 
     #[test]

@@ -140,6 +140,10 @@ pub enum CoreExecutorError {
     #[error("Executor is stopped")]
     Stopped,
 
+    /// The applied turn reached the canonical cancellation terminal.
+    #[error("Run was cancelled")]
+    Cancelled,
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -162,8 +166,23 @@ impl CoreExecutorError {
         Self::apply_failed(CoreApplyFailureCause::runtime_turn(message))
     }
 
+    pub fn apply_failed_runtime_turn_session_error(error: crate::SessionError) -> Self {
+        match error {
+            crate::SessionError::Agent(crate::AgentError::Cancelled) => Self::Cancelled,
+            error => Self::apply_failed_runtime_turn(error.to_string()),
+        }
+    }
+
     pub fn apply_failed_unknown(message: impl Into<String>) -> Self {
         Self::apply_failed(CoreApplyFailureCause::unknown(message))
+    }
+
+    pub fn cancelled() -> Self {
+        Self::Cancelled
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
     }
 
     pub fn control_failed(cause: CoreControlFailureCause) -> Self {
@@ -181,6 +200,7 @@ impl CoreExecutorError {
                 CoreApplyFailureCause::executor_control_failed(cause.message.clone())
             }
             Self::Stopped => CoreApplyFailureCause::executor_stopped(),
+            Self::Cancelled => CoreApplyFailureCause::runtime_turn("cancelled"),
             Self::Internal(message) => CoreApplyFailureCause::executor_internal(message.clone()),
         }
     }
@@ -347,6 +367,9 @@ mod tests {
         let err = CoreExecutorError::Stopped;
         assert_eq!(err.to_string(), "Executor is stopped");
 
+        let err = CoreExecutorError::Cancelled;
+        assert_eq!(err.to_string(), "Run was cancelled");
+
         let err = CoreExecutorError::Internal("oops".into());
         assert_eq!(err.to_string(), "Internal error: oops");
     }
@@ -364,5 +387,18 @@ mod tests {
             }
             other => panic!("expected typed apply failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancelled_session_error_remains_typed_at_runtime_executor_boundary() {
+        let err = CoreExecutorError::apply_failed_runtime_turn_session_error(
+            crate::SessionError::Agent(crate::AgentError::Cancelled),
+        );
+
+        assert!(err.is_cancelled());
+        assert_eq!(
+            err.apply_failure_cause().kind,
+            CoreApplyFailureCauseKind::RuntimeTurn
+        );
     }
 }

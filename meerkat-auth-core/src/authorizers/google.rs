@@ -26,7 +26,7 @@ use thiserror::Error;
 
 use super::{
     EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
-    oauth_endpoint_failure_is_permanent, token_is_fresh_at,
+    oauth_endpoint_failure_is_permanent,
 };
 use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
@@ -118,6 +118,8 @@ fn default_expires_in() -> u64 {
 struct CachedToken {
     access_token: String,
     expires_at: DateTime<Utc>,
+    // Private cache provenance only; freshness is decided by the
+    // required AuthMachine lease snapshot.
     lease_generation: Option<u64>,
 }
 
@@ -219,81 +221,74 @@ impl GoogleAuthAuthorizer {
     }
 
     fn cached_expires_at(&self) -> Option<DateTime<Utc>> {
-        if let Some(observer) = &self.lease_observer {
-            return observer.expires_at();
-        }
-        self.cache.lock().as_ref().map(|token| token.expires_at)
+        self.lease_observer
+            .as_ref()
+            .and_then(LeaseFreshnessObserver::expires_at)
     }
 
-    fn fresh_cached_token(&self, now: DateTime<Utc>) -> Result<Option<String>, AuthError> {
-        if let Some((access_token, expires_at, lease_generation)) = {
+    fn fresh_cached_token(
+        &self,
+        observer: &LeaseFreshnessObserver,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, AuthError> {
+        let Some((access_token, expires_at, lease_generation)) = ({
             let guard = self.cache.lock();
             guard
                 .as_ref()
                 .map(|t| (t.access_token.clone(), t.expires_at, t.lease_generation))
-        } {
-            let fresh = if let Some(observer) = &self.lease_observer {
-                observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)?
-            } else {
-                token_is_fresh_at(expires_at, now)
-            };
-            if fresh {
-                return Ok(Some(access_token));
-            }
+        }) else {
+            return Ok(None);
+        };
+        if observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)? {
+            return Ok(Some(access_token));
         }
         Ok(None)
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+        let Some(observer) = &self.lease_observer else {
+            return Err(AuthError::HostOwnedUnavailable);
+        };
+
+        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
             return Ok(access_token);
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
             return Ok(access_token);
         }
 
-        let lifecycle = if let Some(observer) = &self.lease_observer {
-            Some(observer.begin_refresh(&self.label).await?)
-        } else {
-            None
-        };
+        let lifecycle = observer.begin_refresh(&self.label).await?;
 
         let mut token = match self.chain {
             GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
                 Ok(token) => token,
                 Err(err) => {
-                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                        observer.refresh_failed(
-                            &self.label,
-                            lifecycle,
-                            google_refresh_failure_is_permanent(&err),
-                        )?;
-                    }
+                    observer.refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        google_refresh_failure_is_permanent(&err),
+                    )?;
                     return Err(err.into());
                 }
             },
             GoogleAuthChain::Default => match self.fetch_full_chain().await {
                 Ok(token) => token,
                 Err(err) => {
-                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-                        observer.refresh_failed(
-                            &self.label,
-                            lifecycle,
-                            google_refresh_failure_is_permanent(&err),
-                        )?;
-                    }
+                    observer.refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        google_refresh_failure_is_permanent(&err),
+                    )?;
                     return Err(err.into());
                 }
             },
         };
         let access = token.access_token.clone();
         let expires_at = token.expires_at;
-        if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            token.lease_generation =
-                Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
-        }
+        token.lease_generation =
+            Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
         *self.cache.lock() = Some(token);
         Ok(access)
     }

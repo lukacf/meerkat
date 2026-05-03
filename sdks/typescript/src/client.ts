@@ -43,7 +43,6 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
-  type InputListResult,
   type RealtimeCapabilitiesResult,
   type RealtimeOpenInfo,
   type RealtimeOpenRequest,
@@ -1983,32 +1982,50 @@ export class MeerkatClient {
     );
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeStatus(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeSubmit(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeSubmission(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeSubmissions(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeRetire(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * @deprecated Retired runtime/session control RPC method; always fails before transport.
+   */
   async _runtimeReset(_params: Record<string, unknown>): Promise<never> {
     throw MeerkatClient.retiredRuntimeSessionControlError();
   }

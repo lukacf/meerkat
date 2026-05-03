@@ -212,6 +212,7 @@ async fn agent_boundary_routes_tool_catalog_load_authority_from_control_plane() 
     let visibility_state = agent
         .session()
         .tool_visibility_state()
+        .expect("agent visibility state should decode")
         .expect("agent boundary should persist canonical visibility state");
     assert!(
         visibility_state

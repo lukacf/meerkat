@@ -329,6 +329,58 @@ test('Session direct polling rejects malformed event items', () => {
   assert.throws(() => session.subscribe().poll(), /missing type/);
 });
 
+test('Session destroy does not cache lifecycle state in the browser handle', async () => {
+  let destroyCalls = 0;
+  let stateCalls = 0;
+  let pollCalls = 0;
+  let appendCalls = 0;
+  const session = new Session(
+    11,
+    async () => {
+      throw new Error('SESSION_NOT_FOUND: session not found');
+    },
+    () => {
+      stateCalls += 1;
+      return JSON.stringify({
+        handle: 11,
+        session_id: 'session-web-unit',
+        mob_id: '',
+        model: 'claude-sonnet-4-5',
+        usage: { input_tokens: 0, output_tokens: 0 },
+        message_count: 0,
+        is_active: false,
+        last_assistant_text: null,
+      });
+    },
+    () => {
+      destroyCalls += 1;
+    },
+    () => {
+      pollCalls += 1;
+      return JSON.stringify([{ type: 'text_complete', text: 'from wasm' }]);
+    },
+    async () => {
+      appendCalls += 1;
+      throw new Error('SESSION_NOT_FOUND: session not found');
+    },
+  );
+
+  session.destroy();
+
+  assert.equal(destroyCalls, 1);
+  assert.equal(session.getState().session_id, 'session-web-unit');
+  assert.equal(stateCalls, 1);
+  assert.deepEqual(session.pollEvents(), [{ type: 'text_complete', text: 'from wasm' }]);
+  assert.equal(pollCalls, 1);
+  await assert.rejects(() => session.turn('after destroy'), /SESSION_NOT_FOUND|session not found/);
+  await assert.rejects(
+    () => session.appendSystemContext({ text: 'after destroy' }),
+    /SESSION_NOT_FOUND|session not found/,
+  );
+  assert.equal(appendCalls, 1);
+  assert.throws(() => session.isDestroyed, /deprecated/i);
+});
+
 test('MeerkatRuntime keeps a clean empty subscription poll as empty success', async () => {
   const wasm = makeSubscriptionRuntime();
   const { runtime, mob } = await makeRuntimeMob(wasm);

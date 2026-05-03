@@ -205,7 +205,14 @@ test(
       assert.ok(state.session_id);
 
       session.destroy();
-      assert.equal(session.isDestroyed, true);
+      const archived = session.getState();
+      assert.equal(archived.session_id, state.session_id);
+      assert.equal(archived.is_active, false);
+      await assert.rejects(
+        () => session.turn("stale browser handle must not control archived session"),
+        /SESSION_NOT_FOUND|session not found/,
+      );
+      assert.throws(() => session.isDestroyed, /deprecated/i);
     });
   },
 );

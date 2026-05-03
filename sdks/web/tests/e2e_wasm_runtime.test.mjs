@@ -76,31 +76,43 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
     assert.equal(typeof state.session_id, "string");
     assert.notEqual(state.session_id, String(session.handle));
     assert.equal(state.model, "claude-sonnet-4-5");
+    assert.equal(state.run_counter, undefined);
 
     session.destroy();
-    assert.equal(session.isDestroyed, true);
-    assert.throws(() => session.getState(), /destroyed/i);
+    const archived = session.getState();
+    assert.equal(archived.session_id, state.session_id);
+    assert.equal(archived.is_active, false);
+    await assert.rejects(
+      () => session.turn("stale handles must not restart archived sessions"),
+      /SESSION_NOT_FOUND|session not found/,
+    );
+    assert.throws(() => session.isDestroyed, /deprecated/i);
   } finally {
     runtime.destroy();
   }
 });
 
-test("Session.destroy remains retryable when the underlying wasm destroy throws", () => {
+test("Session.destroy does not cache destroyed state when the underlying wasm destroy throws", async () => {
   let destroyAttempts = 0;
+  let stateReads = 0;
   const session = new Session(
     7,
-    async () => "{}",
-    () => JSON.stringify({
-      handle: 7,
-      session_id: "sess_busy",
-      mob_id: "",
-      model: "claude-sonnet-4-5",
-      usage: { input_tokens: 0, output_tokens: 0 },
-      run_counter: 0,
-      message_count: 0,
-      is_active: true,
-      last_assistant_text: null,
-    }),
+    async () => {
+      throw new Error("SESSION_NOT_FOUND: session not found");
+    },
+    () => {
+      stateReads += 1;
+      return JSON.stringify({
+        handle: 7,
+        session_id: "sess_busy",
+        mob_id: "",
+        model: "claude-sonnet-4-5",
+        usage: { input_tokens: 0, output_tokens: 0 },
+        message_count: 0,
+        is_active: true,
+        last_assistant_text: null,
+      });
+    },
     () => {
       destroyAttempts += 1;
       if (destroyAttempts === 1) {
@@ -112,30 +124,29 @@ test("Session.destroy remains retryable when the underlying wasm destroy throws"
   );
 
   assert.throws(() => session.destroy(), /SESSION_BUSY/);
-  assert.equal(session.isDestroyed, false);
   assert.equal(session.sessionId, "sess_busy");
+  assert.equal(stateReads, 1);
 
   session.destroy();
-  assert.equal(session.isDestroyed, true);
-  assert.throws(() => session.getState(), /destroyed/i);
+  assert.equal(session.getState().session_id, "sess_busy");
+  assert.equal(stateReads, 2);
+  await assert.rejects(
+    () => session.turn("after canonical destroy"),
+    /SESSION_NOT_FOUND|session not found/,
+  );
+  assert.throws(() => session.isDestroyed, /deprecated/i);
 });
 
-test("Session.destroy becomes idempotent after the runtime has already been destroyed", () => {
+test("Session.destroy treats runtime teardown as canonical absence without poisoning the handle", () => {
   let destroyAttempts = 0;
+  let stateReads = 0;
   const session = new Session(
     8,
     async () => "{}",
-    () => JSON.stringify({
-      handle: 8,
-      session_id: "sess_runtime_gone",
-      mob_id: "",
-      model: "claude-sonnet-4-5",
-      usage: { input_tokens: 0, output_tokens: 0 },
-      run_counter: 0,
-      message_count: 0,
-      is_active: false,
-      last_assistant_text: null,
-    }),
+    () => {
+      stateReads += 1;
+      throw new Error("not_initialized: runtime not initialized");
+    },
     () => {
       destroyAttempts += 1;
       throw new Error("not_initialized: runtime not initialized");
@@ -145,14 +156,14 @@ test("Session.destroy becomes idempotent after the runtime has already been dest
   );
 
   assert.doesNotThrow(() => session.destroy());
-  assert.equal(session.isDestroyed, true);
   assert.equal(destroyAttempts, 1);
   assert.doesNotThrow(() => session.destroy());
-  assert.equal(destroyAttempts, 1);
-  assert.throws(() => session.getState(), /destroyed/i);
+  assert.equal(destroyAttempts, 2);
+  assert.throws(() => session.getState(), /not_initialized/i);
+  assert.equal(stateReads, 1);
 });
 
-test("Session.destroy treats typed not_initialized errors as idempotent teardown", () => {
+test("Session.destroy swallows typed not_initialized without caching lifecycle state", () => {
   let destroyAttempts = 0;
   const session = new Session(
     9,
@@ -163,7 +174,6 @@ test("Session.destroy treats typed not_initialized errors as idempotent teardown
       mob_id: "",
       model: "claude-sonnet-4-5",
       usage: { input_tokens: 0, output_tokens: 0 },
-      run_counter: 0,
       message_count: 0,
       is_active: false,
       last_assistant_text: null,
@@ -179,10 +189,49 @@ test("Session.destroy treats typed not_initialized errors as idempotent teardown
   );
 
   assert.doesNotThrow(() => session.destroy());
-  assert.equal(session.isDestroyed, true);
   assert.equal(destroyAttempts, 1);
   assert.doesNotThrow(() => session.destroy());
-  assert.equal(destroyAttempts, 1);
+  assert.equal(destroyAttempts, 2);
+  assert.equal(session.getState().session_id, "sess_runtime_code_gone");
+  assert.throws(() => session.isDestroyed, /deprecated/i);
+});
+
+test("Session observation remains a canonical wasm call after destroy", async () => {
+  let pollAttempts = 0;
+  let appendAttempts = 0;
+  const session = new Session(
+    10,
+    async () => "{}",
+    () => JSON.stringify({
+      handle: 10,
+      session_id: "sess_projection",
+      mob_id: "",
+      model: "claude-sonnet-4-5",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      message_count: 0,
+      is_active: false,
+      last_assistant_text: null,
+    }),
+    () => {},
+    () => {
+      pollAttempts += 1;
+      return JSON.stringify([{ type: "text_complete", text: "from wasm" }]);
+    },
+    async () => {
+      appendAttempts += 1;
+      throw new Error("SESSION_NOT_FOUND: session not found");
+    },
+  );
+
+  session.destroy();
+
+  assert.deepEqual(session.pollEvents(), [{ type: "text_complete", text: "from wasm" }]);
+  assert.equal(pollAttempts, 1);
+  await assert.rejects(
+    () => session.appendSystemContext({ text: "after destroy" }),
+    /SESSION_NOT_FOUND|session not found/,
+  );
+  assert.equal(appendAttempts, 1);
 });
 
 test("isKnownEvent recognizes the full current canonical event surface", () => {

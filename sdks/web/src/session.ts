@@ -64,8 +64,6 @@ export class Session {
   private destroyFn: DestroySessionFn;
   private pollFn: PollEventsFn;
   private appendSystemContextFn: AppendSystemContextFn;
-  private destroyed = false;
-  private cachedSessionId?: string;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
@@ -86,7 +84,6 @@ export class Session {
 
   /** Run a turn through the agent loop. */
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
-    if (this.destroyed) throw new Error('Session has been destroyed');
     const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
     const json = await this.startTurnFn(this.handle, promptStr);
     const parsed = JSON.parse(json) as Partial<TurnResult> & {
@@ -108,21 +105,16 @@ export class Session {
 
   /** Get the current runtime-backed session state. */
   getState(): SessionState {
-    if (this.destroyed) throw new Error('Session has been destroyed');
-    const state = JSON.parse(this.getStateFn(this.handle)) as SessionState;
-    this.cachedSessionId = state.session_id;
-    return state;
+    return JSON.parse(this.getStateFn(this.handle)) as SessionState;
   }
 
   /** The authoritative runtime session ID behind this local browser handle. */
   get sessionId(): string {
-    if (this.destroyed) throw new Error('Session has been destroyed');
-    return this.cachedSessionId ?? this.getState().session_id;
+    return this.getState().session_id;
   }
 
   /** Poll buffered agent events from the last turn. */
   pollEvents(): SessionEvent[] {
-    if (this.destroyed) return [];
     const json = this.pollFn(this.handle);
     const parsed: unknown = JSON.parse(json);
     return normalizeSessionEvents(parsed);
@@ -136,9 +128,8 @@ export class Session {
    * either `pollEvents()` or the returned subscription, not both at once.
    */
   subscribe(): EventSubscription<SessionEvent> {
-    if (this.destroyed) throw new Error('Session has been destroyed');
     return new EventSubscription<SessionEvent>(
-      () => (this.destroyed ? '[]' : this.pollFn(this.handle)),
+      () => this.pollFn(this.handle),
       (raw) => raw.map((item) => normalizeSessionEvent(item)),
     );
   }
@@ -147,7 +138,6 @@ export class Session {
   async appendSystemContext(
     options: AppendSystemContextOptions,
   ): Promise<AppendSystemContextResult> {
-    if (this.destroyed) throw new Error('Session has been destroyed');
     const json = await this.appendSystemContextFn(
       this.handle,
       JSON.stringify({
@@ -161,22 +151,26 @@ export class Session {
 
   /** Destroy the session and release resources. */
   destroy(): void {
-    if (this.destroyed) return;
     try {
       this.destroyFn(this.handle);
-      this.destroyed = true;
     } catch (error) {
       if (isRuntimeNotInitializedError(error)) {
-        this.destroyed = true;
         return;
       }
       throw error;
     }
   }
 
-  /** Whether this session has been destroyed. */
+  /**
+   * Deprecated compatibility surface.
+   *
+   * Browser-local sessions no longer report lifecycle state from cached handle
+   * flags. Use `getState()` and canonical runtime/session errors instead.
+   */
   get isDestroyed(): boolean {
-    return this.destroyed;
+    throw new Error(
+      'Session.isDestroyed is deprecated: lifecycle state is owned by the runtime; use getState() or canonical operation errors.',
+    );
   }
 }
 

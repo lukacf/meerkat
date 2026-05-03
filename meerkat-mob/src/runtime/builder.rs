@@ -458,7 +458,6 @@ struct RuntimeWiring {
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
-    mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
 }
@@ -878,22 +877,6 @@ impl MobBuilder {
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
-        let mcp_servers = Arc::new(tokio::sync::Mutex::new(
-            definition
-                .mcp_servers
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        actor::McpServerEntry {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            process: None,
-                            running: false,
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
         let initial_dsl_authority = Box::new(seed_mob_authority(resumed_state));
@@ -916,7 +899,6 @@ impl MobBuilder {
             restore_diagnostics: restore_diagnostics.clone(),
             runtime_metadata: storage.runtime_metadata.clone(),
             supervisor_bridge: supervisor_bridge.clone(),
-            mcp_servers: mcp_servers.clone(),
             command_tx: command_tx.clone(),
             command_rx,
         };
@@ -1578,22 +1560,6 @@ impl MobBuilder {
             tokio::sync::watch::channel(dsl_authority.state.clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
-        let mcp_servers = Arc::new(tokio::sync::Mutex::new(
-            definition
-                .mcp_servers
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        actor::McpServerEntry {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            process: None,
-                            running: false,
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-        ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
@@ -1605,7 +1571,6 @@ impl MobBuilder {
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
-            mcp_servers,
             command_tx,
             command_rx,
         };
@@ -1649,7 +1614,6 @@ impl MobBuilder {
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
-            mcp_servers,
             command_tx,
             command_rx,
         } = wiring;
@@ -1756,7 +1720,6 @@ impl MobBuilder {
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),
             flow_streams: handle.flow_streams.clone(),
-            mcp_servers,
             command_tx,
             tool_bundles,
             default_llm_client,

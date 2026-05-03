@@ -355,9 +355,6 @@ pub(super) enum MobCommand {
         task_id: TaskId,
         reply_tx: oneshot::Sender<Option<MobTask>>,
     },
-    McpServerStates {
-        reply_tx: oneshot::Sender<BTreeMap<String, bool>>,
-    },
     SubscribeAgentEvents {
         agent_identity: MeerkatId,
         reply_tx: oneshot::Sender<Result<EventStream, MobError>>,

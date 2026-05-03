@@ -1,8 +1,8 @@
 //! Definition validation for mob definitions.
 //!
 //! Validates that all cross-references in a `MobDefinition` are consistent:
-//! skill references resolve, MCP references exist, orchestrator profile exists,
-//! wiring rules reference valid profiles, and profile names are valid identifiers.
+//! skill references resolve, orchestrator profile exists, wiring rules
+//! reference valid profiles, and profile names are valid identifiers.
 
 use crate::MobBackendKind;
 use crate::definition::MobDefinition;
@@ -15,8 +15,6 @@ use std::fmt;
 pub enum DiagnosticCode {
     /// A skill referenced by a profile is not defined in the skills section.
     MissingSkillRef,
-    /// An MCP server referenced by a profile is not defined in the mcp section.
-    MissingMcpRef,
     /// The orchestrator profile is not defined.
     MissingOrchestratorProfile,
     /// A profile name is not a valid identifier.
@@ -59,7 +57,6 @@ impl fmt::Display for DiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::MissingSkillRef => "missing_skill_ref",
-            Self::MissingMcpRef => "missing_mcp_ref",
             Self::MissingOrchestratorProfile => "missing_orchestrator_profile",
             Self::InvalidProfileName => "invalid_profile_name",
             Self::InvalidWiringProfile => "invalid_wiring_profile",
@@ -180,17 +177,10 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
             }
         }
 
-        // Check MCP server references
-        for (i, mcp_ref) in profile.tools.mcp.iter().enumerate() {
-            if !def.mcp_servers.contains_key(mcp_ref) {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::MissingMcpRef,
-                    message: format!("MCP server '{mcp_ref}' is not defined"),
-                    location: Some(format!("profiles.{}.tools.mcp[{}]", name.as_str(), i)),
-                    severity: DiagnosticSeverity::Error,
-                });
-            }
-        }
+        // profile.tools.mcp is a free allowlist of host MCP source IDs (loaded
+        // by the host's McpRouterAdapter from .rkat/mcp.toml). The mob
+        // definition has no opinion on which sources exist; mismatched names
+        // simply produce no tools at compose time. No mob-level validation.
 
         if let Some(threshold) = profile.max_inline_peer_notifications
             && threshold < -1
@@ -295,8 +285,7 @@ fn is_valid_identifier(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::definition::{
-        BackendConfig, McpServerConfig, MobDefinition, OrchestratorConfig, RoleWiringRule,
-        SkillSource, WiringRules,
+        BackendConfig, MobDefinition, OrchestratorConfig, RoleWiringRule, SkillSource, WiringRules,
     };
     use crate::ids::{MobId, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
@@ -341,23 +330,12 @@ mod tests {
             },
         );
 
-        let mut mcp_servers = BTreeMap::new();
-        mcp_servers.insert(
-            "server-a".to_string(),
-            McpServerConfig {
-                command: vec!["node".to_string(), "server.js".to_string()],
-                url: None,
-                env: BTreeMap::new(),
-            },
-        );
-
         MobDefinition {
             id: MobId::from("test-mob"),
             orchestrator: Some(OrchestratorConfig {
                 profile: ProfileName::from("lead"),
             }),
             profiles,
-            mcp_servers,
             wiring: WiringRules {
                 auto_wire_orchestrator: true,
                 role_wiring: vec![RoleWiringRule {
@@ -417,7 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_mcp_ref() {
+    fn test_unknown_mcp_source_does_not_error() {
+        // profile.tools.mcp is a free allowlist of host MCP source IDs;
+        // unknown names produce no tools at compose time but are not errors
+        // at validation time (the mob has no opinion on host MCP catalog).
         let mut def = valid_definition();
         def.profiles
             .get_mut(&ProfileName::from("lead"))
@@ -429,10 +410,13 @@ mod tests {
             .push("nonexistent-mcp".to_string());
 
         let diagnostics = validate_definition(&def);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingMcpRef);
-        assert!(diagnostics[0].message.contains("nonexistent-mcp"));
-        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Error);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::MissingSkillRef
+                    && !d.message.contains("nonexistent-mcp")),
+            "validate_definition must not flag unknown MCP source IDs: {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -510,6 +494,8 @@ mod tests {
             .unwrap()
             .skills
             .push("bad-skill".to_string());
+        // profile.tools.mcp entries no longer trigger validation diagnostics —
+        // they are a free allowlist of host MCP source IDs.
         def.profiles
             .get_mut(&ProfileName::from("lead"))
             .unwrap()
@@ -517,10 +503,16 @@ mod tests {
             .unwrap()
             .tools
             .mcp
-            .push("bad-mcp".to_string());
+            .push("unknown-source".to_string());
 
         let diagnostics = validate_definition(&def);
-        assert!(diagnostics.len() >= 3);
+        assert!(diagnostics.len() >= 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| !d.message.contains("unknown-source")),
+            "free MCP source allowlist must not produce diagnostics"
+        );
     }
 
     #[test]
@@ -650,7 +642,6 @@ model = "claude-sonnet-4-5"
             id: MobId::from("minimal"),
             orchestrator: None,
             profiles: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),

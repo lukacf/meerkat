@@ -2531,7 +2531,6 @@ fn sample_definition() -> MobDefinition {
             profile: ProfileName::from("lead"),
         }),
         profiles,
-        mcp_servers: BTreeMap::new(),
         wiring: WiringRules::default(),
         skills: BTreeMap::new(),
         backend: BackendConfig::default(),
@@ -2619,19 +2618,6 @@ fn sample_definition_without_mob_flags() -> MobDefinition {
         .unwrap();
     lead.tools.mob = false;
     lead.tools.mob_tasks = false;
-    def
-}
-
-fn sample_definition_with_mcp_servers() -> MobDefinition {
-    let mut def = sample_definition();
-    def.mcp_servers.insert(
-        "search".to_string(),
-        crate::definition::McpServerConfig {
-            command: Vec::new(),
-            url: Some("https://example.invalid/mcp".to_string()),
-            env: BTreeMap::new(),
-        },
-    );
     def
 }
 
@@ -5850,7 +5836,7 @@ async fn test_query_string_bootstrap_token_fallback_is_rejected() {
 
 #[tokio::test]
 async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() {
-    let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
+    let (handle, _service) = create_test_mob(sample_definition()).await;
 
     let stop = {
         let handle = handle.clone();
@@ -5882,46 +5868,6 @@ async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() 
     assert!(
         matches!(state, MobState::Stopped | MobState::Completed),
         "terminal lifecycle race should leave a terminal lifecycle phase, got {state:?}"
-    );
-    assert!(
-        handle
-            .mcp_server_states()
-            .await
-            .values()
-            .all(|running| !*running),
-        "terminal lifecycle shell mechanics should stop mcp servers exactly once"
-    );
-}
-
-#[tokio::test]
-async fn test_lifecycle_updates_mcp_server_states() {
-    let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let initial = handle.mcp_server_states().await;
-    assert!(
-        initial.values().all(|running| *running),
-        "mcp servers should start in running state"
-    );
-
-    handle.stop().await.expect("stop");
-    let stopped = handle.mcp_server_states().await;
-    assert!(
-        stopped.values().all(|running| !*running),
-        "stop should mark all mcp servers as stopped"
-    );
-
-    handle.resume().await.expect("resume");
-    let resumed = handle.mcp_server_states().await;
-    assert!(
-        resumed.values().all(|running| *running),
-        "resume should mark all mcp servers as running"
-    );
-
-    handle.complete().await.expect("complete");
-    let completed = handle.mcp_server_states().await;
-    assert!(
-        completed.values().all(|running| !*running),
-        "complete should stop all mcp servers"
     );
 }
 
@@ -6613,6 +6559,161 @@ async fn test_mob_management_tools_visible_with_default_authority_but_scope_rest
             .await
             .is_none(),
         "scope-denied operator tools must not mutate roster state"
+    );
+}
+
+#[tokio::test]
+async fn profile_tools_mcp_allowlist_scopes_default_external_tools() {
+    use meerkat_core::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+    fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("Tool {name}"),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: ToolSourceId::new(source),
+            }),
+        })
+    }
+
+    struct StaticDefsDispatcher {
+        defs: Arc<[Arc<ToolDef>]>,
+    }
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDefsDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.defs)
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            if self.defs.iter().any(|d| d.name.as_str() == call.name) {
+                Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+            } else {
+                Err(ToolError::not_found(call.name))
+            }
+        }
+    }
+
+    // Build a definition where the worker profile lists only "linear".
+    let mut definition = sample_definition();
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(|b| b.as_inline_mut())
+        .expect("worker profile");
+    worker.tools.mcp = vec!["linear".to_string()];
+
+    let (handle, _service) = create_test_mob(definition).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .and_then(|b| b.as_inline().cloned())
+        .expect("worker profile");
+
+    let host_mcp_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(StaticDefsDispatcher {
+        defs: Arc::from(vec![
+            mcp_tool("search", "linear"),
+            mcp_tool("create_issue", "linear"),
+            mcp_tool("ping", "github"),
+            mcp_tool("trigger", "zapier"),
+        ]),
+    });
+
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        Some(host_mcp_dispatcher),
+        None,
+    )
+    .expect("compose dispatcher")
+    .expect("dispatcher should mount when default_external_tools is provided");
+
+    let visible: std::collections::BTreeSet<String> = composed
+        .tools()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        visible.contains("search") && visible.contains("create_issue"),
+        "linear-source MCP tools must remain visible"
+    );
+    assert!(
+        !visible.contains("ping") && !visible.contains("trigger"),
+        "non-allowlisted MCP source tools must be hidden: visible={visible:?}"
+    );
+}
+
+#[tokio::test]
+async fn profile_tools_mcp_empty_passes_all_default_external_tools() {
+    use meerkat_core::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+    fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("Tool {name}"),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: ToolSourceId::new(source),
+            }),
+        })
+    }
+
+    struct StaticDefsDispatcher {
+        defs: Arc<[Arc<ToolDef>]>,
+    }
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDefsDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.defs)
+        }
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new("id".to_string(), "{}".to_string(), false).into())
+        }
+    }
+
+    // Worker profile keeps tools.mcp = vec![] (default).
+    let definition = sample_definition();
+    let (handle, _service) = create_test_mob(definition).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .and_then(|b| b.as_inline().cloned())
+        .expect("worker profile");
+    assert!(profile.tools.mcp.is_empty());
+
+    let host_mcp_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(StaticDefsDispatcher {
+        defs: Arc::from(vec![
+            mcp_tool("search", "linear"),
+            mcp_tool("ping", "github"),
+        ]),
+    });
+
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        Some(host_mcp_dispatcher),
+        None,
+    )
+    .expect("compose dispatcher")
+    .expect("dispatcher should mount when default_external_tools is provided");
+
+    let visible: std::collections::BTreeSet<String> = composed
+        .tools()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        visible.contains("search") && visible.contains("ping"),
+        "empty allowlist must let all host MCP tools through; visible={visible:?}"
     );
 }
 
@@ -10749,16 +10850,6 @@ async fn test_destroy_deletes_storage() {
             .expect("replay")
             .is_empty(),
         "destroy should delete persisted events"
-    );
-}
-
-#[tokio::test]
-async fn test_destroy_cleans_mcp_namespace() {
-    let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
-    handle.destroy().await.expect("destroy");
-    assert!(
-        handle.mcp_server_states().await.is_empty(),
-        "destroy should clean up mcp namespace state"
     );
 }
 
@@ -22777,6 +22868,101 @@ async fn test_name_filtered_dispatcher() {
         })
         .await;
     assert!(result.is_ok(), "non-excluded tool should delegate to inner");
+}
+
+#[tokio::test]
+async fn mcp_provenance_filter_scopes_only_mcp_tools_to_allowlist() {
+    use super::tools::McpProvenanceFilter;
+    use meerkat_core::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+    fn mcp_tool(name: &str, source: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("Tool {name}"),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: ToolSourceId::new(source),
+            }),
+        })
+    }
+
+    fn callback_tool(name: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("Tool {name}"),
+            input_schema: serde_json::Value::Object(serde_json::Map::new()),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Callback,
+                source_id: ToolSourceId::new("inline"),
+            }),
+        })
+    }
+
+    struct StaticDefsDispatcher {
+        defs: Arc<[Arc<ToolDef>]>,
+    }
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDefsDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.defs)
+        }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            if self.defs.iter().any(|d| d.name.as_str() == call.name) {
+                Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+            } else {
+                Err(ToolError::not_found(call.name))
+            }
+        }
+    }
+
+    let defs: Vec<Arc<ToolDef>> = vec![
+        mcp_tool("search", "linear"),
+        mcp_tool("create_issue", "linear"),
+        mcp_tool("ping", "github"),
+        callback_tool("workpad_save"),
+    ];
+    let inner = Arc::new(StaticDefsDispatcher {
+        defs: Arc::from(defs),
+    }) as Arc<dyn AgentToolDispatcher>;
+
+    let allowlist: HashSet<String> = ["linear".to_string()].into_iter().collect();
+    let filter = McpProvenanceFilter::new(inner, allowlist);
+
+    let visible: std::collections::BTreeSet<String> =
+        filter.tools().iter().map(|t| t.name.to_string()).collect();
+    assert!(visible.contains("search"));
+    assert!(visible.contains("create_issue"));
+    assert!(
+        !visible.contains("ping"),
+        "github MCP tool must be hidden when only linear is allowed"
+    );
+    assert!(
+        visible.contains("workpad_save"),
+        "non-MCP tools (callback, builtin, etc.) must pass through unchanged"
+    );
+
+    // Dispatch on a hidden MCP tool returns NotFound.
+    let raw_args = RawValue::from_string("{}".to_string()).unwrap();
+    let err = filter
+        .dispatch(ToolCallView {
+            id: "call-ping",
+            name: "ping",
+            args: &raw_args,
+        })
+        .await
+        .expect_err("hidden MCP tool must report NotFound");
+    assert!(matches!(err, ToolError::NotFound { .. }));
+
+    // Dispatch on a visible MCP tool reaches the inner dispatcher.
+    let ok = filter
+        .dispatch(ToolCallView {
+            id: "call-search",
+            name: "search",
+            args: &raw_args,
+        })
+        .await;
+    assert!(ok.is_ok(), "visible MCP tool must dispatch to inner");
 }
 
 // ── RuntimeBinding TDD tests ────────────────────────────────────────────

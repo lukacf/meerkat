@@ -214,13 +214,6 @@ fn render_fork_context(
     lines.join("\n")
 }
 
-/// Unified MCP server entry: process handle + running status behind a single lock.
-pub(super) struct McpServerEntry {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub process: Option<Child>,
-    pub running: bool,
-}
-
 pub(super) struct PendingSpawn {
     pub(super) profile_name: ProfileName,
     pub(super) agent_identity: MeerkatId,
@@ -317,7 +310,6 @@ pub(super) struct MobActor {
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
-    pub(super) mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, McpServerEntry>>>,
     pub(super) command_tx: mpsc::Sender<MobCommand>,
     pub(super) tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -1749,13 +1741,6 @@ impl MobActor {
                 "failed cleaning up autonomous host loops after startup error"
             );
         }
-        if let Err(stop_error) = self.stop_mcp_servers().await {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                error = %stop_error,
-                "failed cleaning up mcp servers after startup error"
-            );
-        }
         if let Err(error) =
             self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "stop_after_startup_failure")
         {
@@ -2368,94 +2353,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn stop_mcp_servers(&self) -> Result<(), MobError> {
-        let mut servers = self.mcp_servers.lock().await;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut first_error: Option<MobError> = None;
-        for (_name, entry) in servers.iter_mut() {
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(child) = entry.process.as_mut() {
-                if let Err(error) = child.kill().await {
-                    let mob_error =
-                        MobError::Internal(format!("failed to stop mcp server '{_name}': {error}"));
-                    tracing::warn!(error = %mob_error, "mcp server kill failed");
-                    if first_error.is_none() {
-                        first_error = Some(mob_error);
-                    }
-                }
-                if let Err(error) = child.wait().await {
-                    let mob_error = MobError::Internal(format!(
-                        "failed waiting for mcp server '{_name}' to exit: {error}"
-                    ));
-                    tracing::warn!(error = %mob_error, "mcp server wait failed");
-                    if first_error.is_none() {
-                        first_error = Some(mob_error);
-                    }
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                entry.process = None;
-            }
-            entry.running = false;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn start_mcp_servers(&self) -> Result<(), MobError> {
-        let mut servers = self.mcp_servers.lock().await;
-        for (name, cfg) in &self.definition.mcp_servers {
-            if cfg.command.is_empty() {
-                continue;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                if servers
-                    .get(name)
-                    .is_some_and(|entry| entry.process.is_some())
-                {
-                    continue;
-                }
-                let mut cmd = Command::new(&cfg.command[0]);
-                for arg in cfg.command.iter().skip(1) {
-                    cmd.arg(arg);
-                }
-                for (k, v) in &cfg.env {
-                    cmd.env(k, v);
-                }
-                let child = cmd.spawn().map_err(|error| {
-                    MobError::Internal(format!(
-                        "failed to start mcp server '{name}' command '{}': {error}",
-                        cfg.command.join(" ")
-                    ))
-                })?;
-                servers.insert(
-                    name.clone(),
-                    McpServerEntry {
-                        process: Some(child),
-                        running: true,
-                    },
-                );
-            }
-            #[cfg(target_arch = "wasm32")]
-            servers.insert(name.clone(), McpServerEntry { running: true });
-        }
-        // Mark any servers that were already in the map but had no command
-        // (i.e. URL-only servers) as running.
-        for (name, entry) in servers.iter_mut() {
-            if self.definition.mcp_servers.contains_key(name) {
-                entry.running = true;
-            }
-        }
-        Ok(())
-    }
-
     async fn cleanup_namespace(&self) -> Result<(), MobError> {
-        self.mcp_servers.lock().await.clear();
         Ok(())
     }
 
@@ -3003,14 +2901,7 @@ impl MobActor {
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
         if matches!(self.state(), MobState::Running) {
-            if let Err(error) = self.start_mcp_servers().await {
-                tracing::error!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "failed to start mcp servers during actor startup; entering Stopped"
-                );
-                self.fail_startup_to_stopped("mcp startup failure").await;
-            } else if let Err(error) = self.ensure_autonomous_runtimes_from_roster().await {
+            if let Err(error) = self.ensure_autonomous_runtimes_from_roster().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
                     error = %error,
@@ -3336,22 +3227,11 @@ impl MobActor {
                             self.provisioner.cancel_all_checkpointers().await;
                             let mut stop_result: Result<(), MobError> = Ok(());
                             let loop_result = self.stop_all_autonomous_members().await;
-                            let mcp_result = self.stop_mcp_servers().await;
                             if let Err(error) = loop_result {
                                 tracing::warn!(
                                     mob_id = %self.definition.id,
                                     error = %error,
                                     "stop encountered autonomous loop cleanup error"
-                                );
-                                if stop_result.is_ok() {
-                                    stop_result = Err(error);
-                                }
-                            }
-                            if let Err(error) = mcp_result {
-                                tracing::warn!(
-                                    mob_id = %self.definition.id,
-                                    error = %error,
-                                    "stop encountered mcp cleanup error"
                                 );
                                 if stop_result.is_ok() {
                                     stop_result = Err(error);
@@ -3396,31 +3276,13 @@ impl MobActor {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
-                            if let Err(error) = self.start_mcp_servers().await {
-                                if let Err(stop_error) = self.stop_mcp_servers().await {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        error = %stop_error,
-                                        "resume cleanup failed while stopping mcp servers"
-                                    );
-                                }
-                                self.provisioner.cancel_all_checkpointers().await;
-                                Err(error)
-                            } else if let Err(error) =
-                                self.ensure_autonomous_runtimes_from_roster().await
+                            if let Err(error) = self.ensure_autonomous_runtimes_from_roster().await
                             {
                                 if let Err(stop_error) = self.stop_all_autonomous_members().await {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
                                         "resume cleanup failed while stopping autonomous loops"
-                                    );
-                                }
-                                if let Err(stop_error) = self.stop_mcp_servers().await {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        error = %stop_error,
-                                        "resume cleanup failed while stopping mcp servers"
                                     );
                                 }
                                 self.provisioner.cancel_all_checkpointers().await;
@@ -3454,13 +3316,6 @@ impl MobActor {
                                             mob_id = %self.definition.id,
                                             error = %stop_error,
                                             "resume transition rollback failed while stopping autonomous loops"
-                                        );
-                                    }
-                                    if let Err(stop_error) = self.stop_mcp_servers().await {
-                                        tracing::warn!(
-                                            mob_id = %self.definition.id,
-                                            error = %stop_error,
-                                            "resume transition rollback failed while stopping mcp servers"
                                         );
                                     }
                                     self.provisioner.cancel_all_checkpointers().await;
@@ -3542,16 +3397,6 @@ impl MobActor {
                 MobCommand::TaskGet { task_id, reply_tx } => {
                     let task = self.task_board.read().await.get(&task_id).cloned();
                     let _ = reply_tx.send(task);
-                }
-                MobCommand::McpServerStates { reply_tx } => {
-                    let states = self
-                        .mcp_servers
-                        .lock()
-                        .await
-                        .iter()
-                        .map(|(name, entry)| (name.clone(), entry.running))
-                        .collect();
-                    let _ = reply_tx.send(states);
                 }
                 MobCommand::SubscribeAgentEvents {
                     agent_identity,
@@ -3748,12 +3593,6 @@ impl MobActor {
                         }
                     }
                     self.teardown_session_runtime_bindings_from_roster().await;
-                    if let Err(error) = self.stop_mcp_servers().await {
-                        tracing::warn!(error = %error, "shutdown mcp stop encountered errors");
-                        if result.is_ok() {
-                            result = Err(error);
-                        }
-                    }
                     // Cancel remaining lifecycle notification tasks.
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
@@ -7944,7 +7783,6 @@ impl MobActor {
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
         self.retire_all_members("complete").await?;
-        self.stop_mcp_servers().await?;
 
         self.events
             .append(NewMobEvent {
@@ -8381,10 +8219,6 @@ impl MobActor {
         }
         self.destroy_remote_members_for_destroy(remote_entries, &mut report)
             .await;
-        if let Err(error) = self.stop_mcp_servers().await {
-            report.push_error(error.to_string());
-            return Err(MobDestroyError::Incomplete { report });
-        }
         if let Err(error) = self
             .runtime_metadata
             .delete_external_binding_overlays(&self.definition.id)
@@ -8684,12 +8518,6 @@ impl MobActor {
             }
             return Err(error);
         }
-        if let Err(error) = self.stop_mcp_servers().await {
-            // Members already retired -- fail-closed to Stopped.
-            self.fail_reset_to_stopped().await;
-            return Err(error);
-        }
-
         // --- Event rewrite phase: append new epoch markers. ---
         // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
         // marker). Projections (roster, task board) clear on MobReset; resume
@@ -8718,25 +8546,10 @@ impl MobActor {
             return Err(MobError::from(error));
         }
 
-        // Clear in-memory projections. Don't call cleanup_namespace() — it
-        // wipes mcp_servers keys which start_mcp_servers needs to track state.
-        // stop_mcp_servers already cleared processes and set running=false.
+        // Clear in-memory projections.
         self.edge_locks.clear().await;
         self.retired_event_index.write().await.clear();
         self.task_board_service.clear().await;
-
-        // --- Restart phase: bring MCP servers back up. ---
-        if let Err(error) = self.start_mcp_servers().await {
-            if let Err(stop_error) = self.stop_mcp_servers().await {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    error = %stop_error,
-                    "reset cleanup failed while stopping mcp servers"
-                );
-            }
-            self.fail_reset_to_stopped().await;
-            return Err(error);
-        }
 
         // The command handler already checked Reset's live MobMachine phase
         // guard before destructive shell work began. Once side effects and

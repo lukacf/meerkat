@@ -145,7 +145,6 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::TaskUpdate { .. }
             | mob_dsl::MobMachineInput::TaskList
             | mob_dsl::MobMachineInput::TaskGet
-            | mob_dsl::MobMachineInput::McpServerStates
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
@@ -1220,7 +1219,6 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::TaskUpdate { .. }
             | mob_dsl::MobMachineInput::TaskList
             | mob_dsl::MobMachineInput::TaskGet
-            | mob_dsl::MobMachineInput::McpServerStates
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
@@ -4806,7 +4804,6 @@ mod tests {
                 profile: ProfileName::from("lead"),
             }),
             profiles,
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),

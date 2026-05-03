@@ -85,6 +85,101 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
 }
 
 // ---------------------------------------------------------------------------
+// McpProvenanceFilter
+// ---------------------------------------------------------------------------
+
+/// Restrict an inner dispatcher's MCP tool surface to a per-profile allowlist
+/// of source IDs.
+///
+/// Tools whose `ToolProvenance.kind` is not `Mcp` (or that have no provenance)
+/// pass through unchanged — only MCP-flavored tools are scoped. The canonical
+/// MCP source identity comes from `meerkat-mcp` (which stamps each tool's
+/// `provenance.source_id` with the server name at protocol time); this filter
+/// is a pure projection of (member's profile allowlist × host MCP catalog)
+/// and stores no semantic state of its own.
+pub(crate) struct McpProvenanceFilter {
+    inner: Arc<dyn AgentToolDispatcher>,
+    allowlist: HashSet<String>,
+}
+
+impl McpProvenanceFilter {
+    pub(crate) fn new(inner: Arc<dyn AgentToolDispatcher>, allowlist: HashSet<String>) -> Self {
+        Self { inner, allowlist }
+    }
+
+    fn is_visible(&self, tool: &ToolDef) -> bool {
+        match &tool.provenance {
+            Some(provenance) if provenance.kind == ToolSourceKind::Mcp => {
+                self.allowlist.contains(provenance.source_id.as_str())
+            }
+            // Non-MCP tools (callback, builtin, etc.) and tools with no
+            // provenance pass through unconditionally.
+            _ => true,
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for McpProvenanceFilter {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.inner
+            .tools()
+            .iter()
+            .filter(|tool| self.is_visible(tool))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        // Resolve the called tool against the inner catalog so we can apply
+        // the same provenance gate at dispatch time. If the tool isn't there,
+        // forward to inner and let it produce the canonical NotFound.
+        let live = self.inner.tools();
+        if let Some(tool) = live.iter().find(|tool| tool.name.as_str() == call.name)
+            && !self.is_visible(tool)
+        {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: SessionId,
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let outcome = owned
+            .inner
+            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapper = Arc::new(McpProvenanceFilter {
+            inner,
+            allowlist: owned.allowlist,
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mob tool dispatcher
 // ---------------------------------------------------------------------------
 
@@ -129,6 +224,17 @@ pub(super) fn compose_external_tools_for_profile(
     // registry that gets populated later via tools/register). Dropping it here
     // would permanently disconnect the session from late-registered tools.
     if let Some(ext) = default_external_tools {
+        // Per-profile MCP source scoping: when profile.tools.mcp lists names,
+        // restrict MCP-flavored tools from `ext` to those source IDs. Non-MCP
+        // tools (callback, etc.) pass through. An empty list = no scoping
+        // (member sees the full host MCP surface).
+        let ext = if profile.tools.mcp.is_empty() {
+            ext
+        } else {
+            let allowlist: HashSet<String> = profile.tools.mcp.iter().cloned().collect();
+            Arc::new(McpProvenanceFilter::new(ext, allowlist)) as Arc<dyn AgentToolDispatcher>
+        };
+
         let profile_names: HashSet<String> = dispatchers
             .iter()
             .flat_map(|d| {

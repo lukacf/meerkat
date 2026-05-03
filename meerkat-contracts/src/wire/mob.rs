@@ -174,18 +174,6 @@ pub struct MobOrchestratorInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobMcpServerConfigInput {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum MobSkillSourceInput {
     Inline { content: String },
@@ -529,8 +517,6 @@ pub struct MobDefinitionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<MobOrchestratorInput>,
     pub profiles: BTreeMap<String, MobProfileBindingInput>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, MobMcpServerConfigInput>,
     #[serde(default)]
     pub wiring: MobWiringRulesInput,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

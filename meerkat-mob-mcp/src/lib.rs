@@ -4165,7 +4165,6 @@ mod tests {
                             "external_addressable": true
                         }
                     },
-                    "mcp_servers": {},
                     "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
                     "skills": {},
                     "backend": {"default": "session"}
@@ -4674,7 +4673,6 @@ mod tests {
                             "external_addressable": false
                         }
                     },
-                    "mcp_servers": {},
                     "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
                     "skills": {},
                     "backend": {

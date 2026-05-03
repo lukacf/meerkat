@@ -142,7 +142,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TaskUpdate`(task_id: TaskId, new_status: TaskStatus)
 - `TaskList`
 - `TaskGet`
-- `McpServerStates`
 - `RosterSnapshot`
 - `ListMembers`
 - `ListMembersIncludingRetiring`
@@ -171,7 +170,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowStatus`
 - `TaskList`
 - `TaskGet`
-- `McpServerStates`
 - `RosterSnapshot`
 - `ListMembers`
 - `ListMembersIncludingRetiring`

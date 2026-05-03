@@ -2645,7 +2645,6 @@ mod tests {
             id: MobId::from("mob"),
             orchestrator: None,
             profiles,
-            mcp_servers: std::collections::BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: std::collections::BTreeMap::new(),
             backend: BackendConfig::default(),

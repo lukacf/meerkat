@@ -483,7 +483,6 @@ mod tests {
                 profile: ProfileName::from("lead"),
             }),
             profiles,
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills,
             backend: BackendConfig::default(),

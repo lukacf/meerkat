@@ -14,9 +14,9 @@ use meerkat_mob::{
     definition::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
         EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
-        FrameStepSpec, LimitsSpec, McpServerConfig, OrchestratorConfig, PolicyMode,
-        RepeatUntilSpec, RoleWiringRule, SessionCleanupPolicy, SkillSource, SpawnPolicyConfig,
-        StepOutputFormat, SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
+        FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode, RepeatUntilSpec, RoleWiringRule,
+        SessionCleanupPolicy, SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorSpec,
+        TopologyRule, TopologySpec, WiringRules,
     },
 };
 use std::convert::TryFrom;
@@ -35,20 +35,6 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
         .into_iter()
         .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
         .collect::<Result<_, _>>()?;
-    definition.mcp_servers = input
-        .mcp_servers
-        .into_iter()
-        .map(|(name, config)| {
-            Ok((
-                name,
-                McpServerConfig {
-                    command: config.command,
-                    url: config.url,
-                    env: config.env,
-                },
-            ))
-        })
-        .collect::<Result<_, String>>()?;
     definition.wiring = WiringRules {
         auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
         role_wiring: input
@@ -461,7 +447,6 @@ mod tests {
             id: "triage".to_string(),
             orchestrator: None,
             profiles,
-            mcp_servers: BTreeMap::new(),
             wiring: Default::default(),
             skills: BTreeMap::new(),
             backend: MobBackendConfigInput::default(),

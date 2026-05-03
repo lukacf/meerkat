@@ -1,8 +1,13 @@
 //! Mob definition types and TOML parsing.
 //!
 //! A `MobDefinition` describes the complete structure of a mob: profiles,
-//! MCP servers, wiring rules, and skill sources. Definitions are serializable
-//! so they can be stored in `MobCreated` events for resume recovery.
+//! wiring rules, and skill sources. Definitions are serializable so they can
+//! be stored in `MobCreated` events for resume recovery.
+//!
+//! MCP servers are not a mob concept — members consume MCP tools from the
+//! host's `McpRouterAdapter` (configured in `.rkat/mcp.toml`), and per-profile
+//! scoping happens via `profile.tools.mcp` (an allowlist of host MCP source
+//! IDs).
 
 use crate::MobBackendKind;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
@@ -17,20 +22,6 @@ use std::collections::BTreeMap;
 pub struct OrchestratorConfig {
     /// Profile name of the orchestrator.
     pub profile: ProfileName,
-}
-
-/// MCP server configuration for a mob.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    /// Stdio command to launch the server (mutually exclusive with `url`).
-    #[serde(default)]
-    pub command: Vec<String>,
-    /// HTTP/SSE URL for the server (mutually exclusive with `command`).
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Environment variables passed to the server process.
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
 }
 
 /// Source for a skill definition.
@@ -353,9 +344,6 @@ pub struct MobDefinition {
     /// realm-scoped reusable profile.
     #[serde(default)]
     pub profiles: BTreeMap<ProfileName, ProfileBinding>,
-    /// Named MCP server configurations.
-    #[serde(default)]
-    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     /// Wiring rules for automatic peer connections.
     #[serde(default)]
     pub wiring: WiringRules,
@@ -418,8 +406,6 @@ struct TomlDefinition {
     #[serde(default)]
     profiles: BTreeMap<ProfileName, ProfileBinding>,
     #[serde(default)]
-    mcp: BTreeMap<String, McpServerConfig>,
-    #[serde(default)]
     wiring: WiringRules,
     #[serde(default)]
     skills: BTreeMap<String, SkillSource>,
@@ -446,7 +432,6 @@ impl MobDefinition {
             id: id.into(),
             orchestrator: None,
             profiles: BTreeMap::new(),
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
@@ -494,7 +479,6 @@ impl MobDefinition {
             id: mob_id,
             orchestrator: None,
             profiles,
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules {
                 auto_wire_orchestrator: true,
                 role_wiring: Vec::new(),
@@ -528,7 +512,6 @@ impl MobDefinition {
             id: raw.mob.id,
             orchestrator,
             profiles: raw.profiles,
-            mcp_servers: raw.mcp,
             wiring: raw.wiring,
             skills: raw.skills,
             backend: raw.backend,
@@ -685,12 +668,6 @@ comms = true
 mob_tasks = true
 mcp = ["code-server"]
 
-[mcp.code-server]
-command = ["npx", "-y", "@mcp/code-server"]
-
-[mcp.docs-server]
-url = "https://docs.example.com/mcp"
-
 [wiring]
 auto_wire_orchestrator = true
 
@@ -732,23 +709,6 @@ path = "skills/reviewer.md"
         assert_eq!(reviewer.model, "claude-sonnet-4-5");
         assert!(reviewer.tools.shell);
         assert_eq!(reviewer.tools.mcp, vec!["code-server"]);
-
-        assert_eq!(def.mcp_servers.len(), 2);
-        assert!(def.mcp_servers.contains_key("code-server"));
-        let code_server = &def.mcp_servers["code-server"];
-        assert_eq!(
-            code_server.command,
-            vec![
-                "npx".to_string(),
-                "-y".to_string(),
-                "@mcp/code-server".to_string()
-            ]
-        );
-        let docs_server = &def.mcp_servers["docs-server"];
-        assert_eq!(
-            docs_server.url.as_ref().unwrap(),
-            "https://docs.example.com/mcp"
-        );
 
         assert!(def.wiring.auto_wire_orchestrator);
         assert_eq!(def.wiring.role_wiring.len(), 1);
@@ -805,7 +765,6 @@ path = "skills/reviewer.md"
                 );
                 m
             },
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),
@@ -834,7 +793,6 @@ id = "minimal"
         assert_eq!(def.id.as_str(), "minimal");
         assert!(def.orchestrator.is_none());
         assert!(def.profiles.is_empty());
-        assert!(def.mcp_servers.is_empty());
         assert!(!def.wiring.auto_wire_orchestrator);
         assert!(def.wiring.role_wiring.is_empty());
         assert!(def.skills.is_empty());
@@ -876,22 +834,6 @@ id = "minimal"
         let json = serde_json::to_string(&rules).unwrap();
         let parsed: WiringRules = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, rules);
-    }
-
-    #[test]
-    fn test_mcp_server_config_serde() {
-        let stdio = McpServerConfig {
-            command: vec!["node".to_string(), "server.js".to_string()],
-            url: None,
-            env: {
-                let mut m = BTreeMap::new();
-                m.insert("API_KEY".to_string(), "secret".to_string());
-                m
-            },
-        };
-        let json = serde_json::to_string(&stdio).unwrap();
-        let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, stdio);
     }
 
     #[test]

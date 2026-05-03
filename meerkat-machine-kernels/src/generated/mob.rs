@@ -2192,8 +2192,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TaskGet {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct McpServerStates {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RosterSnapshot {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ListMembers {}
@@ -2297,7 +2295,6 @@ pub enum Input {
     TaskUpdate(inputs::TaskUpdate),
     TaskList(inputs::TaskList),
     TaskGet(inputs::TaskGet),
-    McpServerStates(inputs::McpServerStates),
     RosterSnapshot(inputs::RosterSnapshot),
     ListMembers(inputs::ListMembers),
     ListMembersIncludingRetiring(inputs::ListMembersIncludingRetiring),
@@ -2369,7 +2366,6 @@ impl Input {
             Self::TaskUpdate(_) => InputKind::TaskUpdate,
             Self::TaskList(_) => InputKind::TaskList,
             Self::TaskGet(_) => InputKind::TaskGet,
-            Self::McpServerStates(_) => InputKind::McpServerStates,
             Self::RosterSnapshot(_) => InputKind::RosterSnapshot,
             Self::ListMembers(_) => InputKind::ListMembers,
             Self::ListMembersIncludingRetiring(_) => InputKind::ListMembersIncludingRetiring,
@@ -2434,7 +2430,6 @@ pub enum InputKind {
     TaskUpdate,
     TaskList,
     TaskGet,
-    McpServerStates,
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,

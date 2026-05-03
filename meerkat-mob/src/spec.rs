@@ -514,7 +514,6 @@ mod tests {
             id: MobId::from("mob"),
             orchestrator: None,
             profiles,
-            mcp_servers: BTreeMap::new(),
             wiring: WiringRules::default(),
             skills: BTreeMap::new(),
             backend: BackendConfig::default(),

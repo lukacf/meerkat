@@ -109,7 +109,6 @@ pub(crate) enum MobMachineCommand {
     TaskGet {
         task_id: crate::ids::TaskId,
     },
-    McpServerStates,
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,
@@ -197,7 +196,6 @@ pub(crate) enum MobMachineCommandResult {
     TaskId(crate::ids::TaskId),
     TaskList(Vec<MobTask>),
     TaskGet(Option<MobTask>),
-    McpServerStates(BTreeMap<String, bool>),
     RosterSnapshot(Roster),
     ListMembers(Vec<MobMemberListEntry>),
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
@@ -310,7 +308,6 @@ pub enum MobMachineCatalogInput {
     TaskUpdate,
     TaskList,
     TaskGet,
-    McpServerStates,
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,
@@ -374,7 +371,6 @@ impl MobMachineCatalogInput {
         Self::TaskUpdate,
         Self::TaskList,
         Self::TaskGet,
-        Self::McpServerStates,
         Self::RosterSnapshot,
         Self::ListMembers,
         Self::ListMembersIncludingRetiring,
@@ -439,7 +435,6 @@ impl MobMachineCatalogInput {
             Self::TaskUpdate => MobMachineInputVariant::TaskUpdate,
             Self::TaskList => MobMachineInputVariant::TaskList,
             Self::TaskGet => MobMachineInputVariant::TaskGet,
-            Self::McpServerStates => MobMachineInputVariant::McpServerStates,
             Self::RosterSnapshot => MobMachineInputVariant::RosterSnapshot,
             Self::ListMembers => MobMachineInputVariant::ListMembers,
             Self::ListMembersIncludingRetiring => {
@@ -527,7 +522,6 @@ impl MobMachineCatalogInput {
             Self::TaskUpdate => "TaskUpdate",
             Self::TaskList => "TaskList",
             Self::TaskGet => "TaskGet",
-            Self::McpServerStates => "McpServerStates",
             Self::RosterSnapshot => "RosterSnapshot",
             Self::ListMembers => "ListMembers",
             Self::ListMembersIncludingRetiring => "ListMembersIncludingRetiring",
@@ -603,7 +597,6 @@ impl MobMachineCommandVariant {
             Self::TaskUpdate => Some(MobMachineCatalogInput::TaskUpdate),
             Self::TaskList => Some(MobMachineCatalogInput::TaskList),
             Self::TaskGet => Some(MobMachineCatalogInput::TaskGet),
-            Self::McpServerStates => Some(MobMachineCatalogInput::McpServerStates),
             Self::RosterSnapshot => Some(MobMachineCatalogInput::RosterSnapshot),
             Self::ListMembers => Some(MobMachineCatalogInput::ListMembers),
             Self::ListMembersIncludingRetiring => {
@@ -856,9 +849,6 @@ const fn mob_machine_command_classification(
         }
         MobMachineCommandVariant::TaskGet => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskGet)
-        }
-        MobMachineCommandVariant::McpServerStates => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::McpServerStates)
         }
         MobMachineCommandVariant::RosterSnapshot => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::RosterSnapshot)

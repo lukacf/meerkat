@@ -1549,12 +1549,6 @@ impl MobHandle {
                     .await?;
                 Ok(MobMachineCommandResult::TaskGet(task))
             }
-            MobMachineCommand::McpServerStates => {
-                let states = self
-                    .send_actor_command(|reply_tx| MobCommand::McpServerStates { reply_tx })
-                    .await?;
-                Ok(MobMachineCommandResult::McpServerStates(states))
-            }
             MobMachineCommand::RosterSnapshot => {
                 let roster = self.roster.read().await.snapshot();
                 Ok(MobMachineCommandResult::RosterSnapshot(roster))
@@ -2232,21 +2226,6 @@ impl MobHandle {
                 super::event_router::spawn_event_router(self.clone(), config)
             }
             Err(_) => super::event_router::spawn_event_router(self.clone(), config),
-        }
-    }
-
-    /// Snapshot of MCP server lifecycle state tracked by this runtime.
-    pub async fn mcp_server_states(&self) -> BTreeMap<String, bool> {
-        match self
-            .execute_machine_command(MobMachineCommand::McpServerStates)
-            .await
-        {
-            Ok(MobMachineCommandResult::McpServerStates(states)) => states,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => BTreeMap::new(),
         }
     }
 

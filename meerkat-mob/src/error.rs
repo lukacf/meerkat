@@ -385,15 +385,15 @@ mod tests {
                 severity: DiagnosticSeverity::Error,
             },
             Diagnostic {
-                code: DiagnosticCode::MissingMcpRef,
-                message: "mcp 'bar' not defined".to_string(),
-                location: Some("profiles.worker.tools.mcp[0]".to_string()),
+                code: DiagnosticCode::EmptyProfiles,
+                message: "no spawnable profiles".to_string(),
+                location: Some("profiles".to_string()),
                 severity: DiagnosticSeverity::Error,
             },
         ]);
         let msg = format!("{err}");
         assert!(msg.contains("missing_skill_ref"));
-        assert!(msg.contains("missing_mcp_ref"));
+        assert!(msg.contains("empty_profiles"));
     }
 
     #[test]

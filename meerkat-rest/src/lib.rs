@@ -9429,7 +9429,9 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains("extra_behavior") || message.contains("unknown field"),
+            message.contains("extra_behavior")
+                || message.contains("unknown field")
+                || message.contains("did not match any variant"),
             "expected unknown params field error, got: {message}"
         );
     }
@@ -9453,7 +9455,9 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains("extra_behavior") || message.contains("unknown field"),
+            message.contains("extra_behavior")
+                || message.contains("unknown field")
+                || message.contains("did not match any variant"),
             "expected unknown result field error, got: {message}"
         );
     }

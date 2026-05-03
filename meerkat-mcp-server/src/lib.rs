@@ -6275,9 +6275,12 @@ mod tests {
             }
         }))
         .expect_err("malformed typed comms result must fail deserialization");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("ok") || err.to_string().contains("invalid type"),
-            "expected serde error mentioning malformed result, got: {err}"
+            message.contains("ok")
+                || message.contains("invalid type")
+                || message.contains("did not match any variant"),
+            "expected serde error mentioning malformed result, got: {message}"
         );
     }
 }

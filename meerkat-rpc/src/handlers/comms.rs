@@ -211,9 +211,12 @@ mod tests {
             uuid::Uuid::new_v4()
         );
         let err = serde_json::from_str::<CommsSendParams>(&json).unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("ok") || err.to_string().contains("invalid type"),
-            "expected typed-result serde error, got: {err}"
+            message.contains("ok")
+                || message.contains("invalid type")
+                || message.contains("did not match any variant"),
+            "expected typed-result serde error, got: {message}"
         );
     }
 

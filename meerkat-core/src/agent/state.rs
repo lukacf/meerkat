@@ -8,7 +8,7 @@ use crate::event::{
     ToolConfigChangedPayload,
 };
 use crate::hooks::{
-    HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
+    HookExecutionReport, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
 };
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
@@ -549,20 +549,8 @@ where
                 event_tx,
             )
             .await?;
-        if let Some(HookDecision::Deny {
-            hook_id,
-            reason_code,
-            message,
-            payload,
-        }) = turn_boundary_report.decision
-        {
-            return Err(AgentError::HookDenied {
-                hook_id,
-                point: HookPoint::TurnBoundary,
-                reason_code,
-                message,
-                payload,
-            });
+        if let Some(error) = turn_boundary_report.denial_error(HookPoint::TurnBoundary) {
+            return Err(error);
         }
 
         Ok(())
@@ -983,6 +971,23 @@ where
         self.execute_turn_effects(&transition, turn_count, event_tx)
             .await;
         Ok(())
+    }
+
+    async fn execute_turn_hooks(
+        &mut self,
+        invocation: HookInvocation,
+        run_id: &RunId,
+        turn_count: u32,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<HookExecutionReport, AgentError> {
+        match self.execute_hooks(invocation, event_tx.as_ref()).await {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.terminalize_fatal_error(run_id, turn_count, event_tx, &error)
+                    .await?;
+                Err(error)
+            }
+        }
     }
 
     async fn run_completed_hooks_before_terminal(
@@ -1485,7 +1490,7 @@ where
 
                     // Pre-LLM hooks may rewrite request params or deny the turn.
                     let pre_llm_report = self
-                        .execute_hooks(
+                        .execute_turn_hooks(
                             HookInvocation {
                                 point: HookPoint::PreLlmRequest,
                                 session_id: self.session.id().clone(),
@@ -1505,24 +1510,13 @@ where
                                 tool_call: None,
                                 tool_result: None,
                             },
-                            event_tx.as_ref(),
+                            &run_id,
+                            turn_count,
+                            &event_tx,
                         )
                         .await?;
 
-                    if let Some(HookDecision::Deny {
-                        hook_id,
-                        reason_code,
-                        message,
-                        payload,
-                    }) = pre_llm_report.decision
-                    {
-                        let error = AgentError::HookDenied {
-                            hook_id,
-                            point: HookPoint::PreLlmRequest,
-                            reason_code,
-                            message,
-                            payload,
-                        };
+                    if let Some(error) = pre_llm_report.denial_error(HookPoint::PreLlmRequest) {
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
@@ -1659,7 +1653,7 @@ where
                     let mut assistant_text = assistant_msg.to_string();
 
                     let post_llm_report = self
-                        .execute_hooks(
+                        .execute_turn_hooks(
                             HookInvocation {
                                 point: HookPoint::PostLlmResponse,
                                 session_id: self.session.id().clone(),
@@ -1682,24 +1676,13 @@ where
                                 tool_call: None,
                                 tool_result: None,
                             },
-                            event_tx.as_ref(),
+                            &run_id,
+                            turn_count,
+                            &event_tx,
                         )
                         .await?;
 
-                    if let Some(HookDecision::Deny {
-                        hook_id,
-                        reason_code,
-                        message,
-                        payload,
-                    }) = post_llm_report.decision
-                    {
-                        let error = AgentError::HookDenied {
-                            hook_id,
-                            point: HookPoint::PostLlmResponse,
-                            reason_code,
-                            message,
-                            payload,
-                        };
+                    if let Some(error) = post_llm_report.denial_error(HookPoint::PostLlmResponse) {
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
@@ -1797,22 +1780,20 @@ where
                             .zip(pre_tool_reports.into_iter())
                             .enumerate()
                         {
-                            let pre_tool_report = pre_tool_report?;
+                            let pre_tool_report = match pre_tool_report {
+                                Ok(report) => report,
+                                Err(error) => {
+                                    self.terminalize_fatal_error(
+                                        &run_id, turn_count, &event_tx, &error,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
+                            };
 
-                            if let Some(HookDecision::Deny {
-                                hook_id,
-                                reason_code,
-                                message,
-                                payload,
-                            }) = pre_tool_report.decision
+                            if let Some(error) =
+                                pre_tool_report.denial_error(HookPoint::PreToolExecution)
                             {
-                                let error = AgentError::HookDenied {
-                                    hook_id,
-                                    point: HookPoint::PreToolExecution,
-                                    reason_code,
-                                    message,
-                                    payload,
-                                };
                                 self.terminalize_fatal_error(
                                     &run_id, turn_count, &event_tx, &error,
                                 )
@@ -1910,7 +1891,7 @@ where
                             }
 
                             let post_tool_report = self
-                                .execute_hooks(
+                                .execute_turn_hooks(
                                     HookInvocation {
                                         point: HookPoint::PostToolExecution,
                                         session_id: self.session.id().clone(),
@@ -1931,24 +1912,15 @@ where
                                             ),
                                         ),
                                     },
-                                    event_tx.as_ref(),
+                                    &run_id,
+                                    turn_count,
+                                    &event_tx,
                                 )
                                 .await?;
 
-                            if let Some(HookDecision::Deny {
-                                hook_id,
-                                reason_code,
-                                message,
-                                payload,
-                            }) = post_tool_report.decision
+                            if let Some(error) =
+                                post_tool_report.denial_error(HookPoint::PostToolExecution)
                             {
-                                let error = AgentError::HookDenied {
-                                    hook_id,
-                                    point: HookPoint::PostToolExecution,
-                                    reason_code,
-                                    message,
-                                    payload,
-                                };
                                 self.terminalize_fatal_error(
                                     &run_id, turn_count, &event_tx, &error,
                                 )

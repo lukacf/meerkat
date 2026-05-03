@@ -5643,11 +5643,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                     primitive.contributing_input_ids().to_vec(),
                 )
                 .await
-                .map_err(|e| {
-                    meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_runtime_turn(
-                        e.to_string(),
-                    )
-                })?;
+                .map_err(
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error,
+                )?;
             return Ok(output);
         }
 
@@ -5656,11 +5654,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             .service
             .start_turn(&self.session_id, turn_req)
             .await
-            .map_err(|e| {
-                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_runtime_turn(
-                    e.to_string(),
-                )
-            })?;
+            .map_err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error,
+            )?;
 
         Ok(
             meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(

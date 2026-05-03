@@ -1363,6 +1363,82 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
 }
 
 #[tokio::test]
+async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
+
+    struct HookDeniedExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for HookDeniedExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed(
+                CoreApplyFailureCause::hook_denied("hook denied pre-tool execution"),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(HookDeniedExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed hook denial"))
+        .await
+        .expect("input should be accepted");
+
+    let (cause, message) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observed = {
+                let sessions = adapter.sessions.read().await;
+                let entry = sessions.get(&session_id).expect("session should exist");
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                authority
+                    .state
+                    .last_runtime_apply_failure_cause
+                    .map(|cause| {
+                        (
+                            cause,
+                            authority.state.last_runtime_apply_failure_message.clone(),
+                        )
+                    })
+            };
+            if let Some(observed) = observed {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should terminalize the typed hook denial");
+
+    assert_eq!(cause, mm_dsl::RuntimeApplyFailureCause::HookDenied);
+    assert_eq!(message.as_deref(), Some("hook denied pre-tool execution"));
+}
+
+#[tokio::test]
 async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

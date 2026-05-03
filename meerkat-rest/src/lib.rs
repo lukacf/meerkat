@@ -1525,7 +1525,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await
-            .map_err(CoreExecutorError::apply_failed_runtime_turn_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {

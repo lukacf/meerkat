@@ -37,9 +37,8 @@ use meerkat_core::config::HookInProcessRuntimeConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
-    HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
-    HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HookRuntimeKind,
-    HooksConfig, SessionId,
+    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPatchEnvelope,
+    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -347,15 +346,6 @@ impl DefaultHookEngine {
             )));
         }
 
-        if entry.mode == HookExecutionMode::Background
-            && entry.effective_failure_policy() == HookFailurePolicy::FailClosed
-        {
-            return Err(HookEngineError::InvalidConfiguration(format!(
-                "background hooks must use fail_open policy: {}",
-                entry.id
-            )));
-        }
-
         Ok(())
     }
 
@@ -364,10 +354,9 @@ impl DefaultHookEngine {
         entry: HookEntryConfig,
         registration_index: usize,
         invocation: HookInvocation,
-    ) -> HookOutcome {
+    ) -> Result<HookOutcome, HookEngineError> {
         let start = meerkat_core::time_compat::Instant::now();
         let timeout_ms = entry.timeout_ms.unwrap_or(self.config.default_timeout_ms);
-        let policy = entry.effective_failure_policy();
 
         let mut outcome = HookOutcome {
             hook_id: entry.id.clone(),
@@ -387,38 +376,17 @@ impl DefaultHookEngine {
         )
         .await;
 
-        match runtime_result {
+        let response = match runtime_result {
             Err(_) => {
-                let message = format!("hook timed out after {timeout_ms}ms");
-                if policy == HookFailurePolicy::FailClosed {
-                    outcome.decision = Some(HookDecision::deny(
-                        entry.id.clone(),
-                        HookReasonCode::Timeout,
-                        message,
-                        None,
-                    ));
-                } else {
-                    outcome.error = Some(message);
-                }
+                return Err(HookEngineError::Timeout {
+                    hook_id: entry.id.clone(),
+                    timeout_ms,
+                });
             }
-            Ok(Err(err)) => {
-                let message = err.to_string();
-                if policy == HookFailurePolicy::FailClosed {
-                    outcome.decision = Some(HookDecision::deny(
-                        entry.id.clone(),
-                        HookReasonCode::RuntimeError,
-                        message,
-                        None,
-                    ));
-                } else {
-                    outcome.error = Some(message);
-                }
-            }
-            Ok(Ok(response)) => {
-                outcome.decision = canonicalize_runtime_decision(response.decision, &entry.id);
-                outcome.patches = response.patches;
-            }
-        }
+            Ok(response) => response?,
+        };
+        outcome.decision = runtime_decision_with_configured_hook_id(response.decision, &entry.id);
+        outcome.patches = response.patches;
 
         if entry.mode == HookExecutionMode::Background {
             if entry.point.is_pre() {
@@ -446,7 +414,7 @@ impl DefaultHookEngine {
         }
 
         outcome.duration_ms = Some(start.elapsed().as_millis() as u64);
-        outcome
+        Ok(outcome)
     }
 
     async fn invoke_runtime(
@@ -745,7 +713,7 @@ impl DefaultHookEngine {
     }
 }
 
-fn canonicalize_runtime_decision(
+fn runtime_decision_with_configured_hook_id(
     decision: Option<HookDecision>,
     hook_id: &HookId,
 ) -> Option<HookDecision> {
@@ -817,7 +785,7 @@ impl HookEngine for DefaultHookEngine {
         for (registration_index, entry) in foreground {
             let outcome = self
                 .execute_one(entry, registration_index, invocation.clone())
-                .await;
+                .await?;
 
             if let Some(decision) = outcome.decision.clone() {
                 match &decision {
@@ -855,9 +823,19 @@ impl HookEngine for DefaultHookEngine {
                     let _permit = permit;
                     let delivery_target =
                         HookPatchDeliveryTarget::for_session(invocation_cloned.session_id.clone());
-                    let outcome = engine
+                    let outcome = match engine
                         .execute_one(entry, registration_index, invocation_cloned)
-                        .await;
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "background hook execution failed"
+                            );
+                            return;
+                        }
+                    };
                     if let Some(error) = &outcome.error {
                         tracing::warn!(
                             hook_id = %outcome.hook_id,
@@ -1286,7 +1264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observe_defaults_fail_open_on_runtime_error() {
+    async fn observe_runtime_error_returns_typed_engine_failure() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("observe-missing-handler"),
@@ -1297,7 +1275,7 @@ mod tests {
         }];
 
         let engine = DefaultHookEngine::new(config);
-        let report = engine
+        let err = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PreToolExecution,
@@ -1316,15 +1294,17 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect_err("hook runtime errors must fail closed through typed engine errors");
 
-        assert!(report.decision.is_none());
-        assert_eq!(report.outcomes.len(), 1);
-        assert!(report.outcomes[0].error.is_some());
+        assert!(matches!(
+            err,
+            HookEngineError::ExecutionFailed { ref hook_id, .. }
+                if hook_id == &HookId::new("observe-missing-handler")
+        ));
     }
 
     #[tokio::test]
-    async fn rewrite_defaults_fail_closed_on_runtime_error() {
+    async fn rewrite_runtime_error_returns_typed_engine_failure() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("rewrite-missing-handler"),
@@ -1335,7 +1315,7 @@ mod tests {
         }];
 
         let engine = DefaultHookEngine::new(config);
-        let report = engine
+        let err = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PreToolExecution,
@@ -1354,14 +1334,12 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect_err("hook runtime errors must not be converted into hook-local denials");
 
         assert!(matches!(
-            report.decision,
-            Some(HookDecision::Deny {
-                reason_code: HookReasonCode::RuntimeError,
-                ..
-            })
+            err,
+            HookEngineError::ExecutionFailed { ref hook_id, .. }
+                if hook_id == &HookId::new("rewrite-missing-handler")
         ));
     }
 
@@ -1553,7 +1531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewrite_with_fail_open_override_does_not_deny() {
+    async fn fail_open_override_cannot_convert_runtime_error_to_success() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("rewrite-explicit-open"),
@@ -1565,7 +1543,7 @@ mod tests {
         }];
 
         let engine = DefaultHookEngine::new(config);
-        let report = engine
+        let err = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PreToolExecution,
@@ -1584,15 +1562,17 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect_err("legacy fail_open override must not make runtime errors warning-only");
 
-        assert!(report.decision.is_none());
-        assert_eq!(report.outcomes.len(), 1);
-        assert!(report.outcomes[0].error.is_some());
+        assert!(matches!(
+            err,
+            HookEngineError::ExecutionFailed { ref hook_id, .. }
+                if hook_id == &HookId::new("rewrite-explicit-open")
+        ));
     }
 
     #[tokio::test]
-    async fn background_fail_closed_configuration_is_rejected() {
+    async fn background_failure_policy_is_inert_compatibility_config() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("invalid-background-fail-closed"),
@@ -1605,7 +1585,7 @@ mod tests {
         }];
 
         let engine = DefaultHookEngine::new(config);
-        let err = engine
+        let report = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PostToolExecution,
@@ -1624,9 +1604,9 @@ mod tests {
                 None,
             )
             .await
-            .unwrap_err();
+            .expect("legacy failure_policy must not be an admission authority");
 
-        assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+        assert!(report.decision.is_none());
     }
 
     #[tokio::test]

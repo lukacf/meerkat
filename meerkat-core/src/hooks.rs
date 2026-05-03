@@ -370,6 +370,29 @@ impl HookExecutionReport {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Project an authoritative hook denial into the typed agent error shape.
+    ///
+    /// Runtime policy owns whether the returned error terminalizes the run.
+    /// This projection only preserves the denial facts emitted by the hook
+    /// engine without reclassifying them through string matching.
+    pub fn denial_error(&self, point: HookPoint) -> Option<AgentError> {
+        match self.decision.as_ref()? {
+            HookDecision::Deny {
+                hook_id,
+                reason_code,
+                message,
+                payload,
+            } => Some(AgentError::HookDenied {
+                hook_id: hook_id.clone(),
+                point,
+                reason_code: *reason_code,
+                message: message.clone(),
+                payload: payload.clone(),
+            }),
+            HookDecision::Allow => None,
+        }
+    }
 }
 
 pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
@@ -413,6 +436,31 @@ pub enum HookEngineError {
     ExecutionFailed { hook_id: HookId, reason: String },
     #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
     Timeout { hook_id: HookId, timeout_ms: u64 },
+}
+
+impl HookEngineError {
+    pub fn hook_id(&self) -> Option<&HookId> {
+        match self {
+            Self::InvalidConfiguration(_) => None,
+            Self::ExecutionFailed { hook_id, .. } | Self::Timeout { hook_id, .. } => Some(hook_id),
+        }
+    }
+
+    pub fn into_agent_error(self) -> AgentError {
+        match self {
+            Self::InvalidConfiguration(reason) => AgentError::HookConfigInvalid { reason },
+            Self::Timeout {
+                hook_id,
+                timeout_ms,
+            } => AgentError::HookTimeout {
+                hook_id,
+                timeout_ms,
+            },
+            Self::ExecutionFailed { hook_id, reason } => {
+                AgentError::HookExecutionFailed { hook_id, reason }
+            }
+        }
+    }
 }
 
 /// Runtime-independent engine interface.

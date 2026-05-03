@@ -7799,10 +7799,28 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         },
         _ => error::INTERNAL_ERROR,
     };
+    let core_apply_failure_cause = match &err {
+        SessionError::Agent(agent_err) => {
+            use meerkat_core::lifecycle::core_executor::{
+                CoreApplyFailureCause, CoreApplyFailureCauseKind,
+            };
+            let cause = CoreApplyFailureCause::from_agent_error(agent_err);
+            match cause.kind {
+                CoreApplyFailureCauseKind::HookDenied
+                | CoreApplyFailureCauseKind::HookRuntimeFailure => Some(cause.kind.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     RpcError {
         code,
         message: err.to_string(),
-        data: None,
+        data: core_apply_failure_cause.map(|cause| {
+            serde_json::json!({
+                "core_apply_failure_cause": cause
+            })
+        }),
     }
 }
 

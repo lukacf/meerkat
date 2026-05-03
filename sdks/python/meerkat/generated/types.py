@@ -123,10 +123,45 @@ class SkillsParams:
 
 
 @dataclass
+class McpStdioConfig:
+    """Stdio transport configuration"""
+    command: str
+    args: Optional[list[str]] = None
+    env: Optional[dict[str, str]] = None
+
+
+@dataclass
+class McpHttpConfig:
+    """HTTP transport configuration (streamable HTTP or legacy SSE)"""
+    url: str
+    headers: Optional[dict[str, str]] = None
+    transport: Optional[McpHttpTransport] = None
+
+
+class McpStdioServerConfig(TypedDict, total=False):
+    """Typed stdio variant for MCP server configuration."""
+    name: Required[str]
+    command: Required[str]
+    args: NotRequired[list[str]]
+    env: NotRequired[dict[str, str]]
+    connect_timeout_secs: NotRequired[int]
+
+
+class McpHttpServerConfig(TypedDict, total=False):
+    """Typed HTTP variant for MCP server configuration."""
+    name: Required[str]
+    url: Required[str]
+    headers: NotRequired[dict[str, str]]
+    transport: NotRequired[McpHttpTransport]
+    connect_timeout_secs: NotRequired[int]
+
+
+McpServerConfig = McpStdioServerConfig | McpHttpServerConfig
+
+@dataclass
 class McpAddParams:
     """Request payload for `mcp/add`."""
-    server_config: Any
-    server_name: str
+    server_config: McpServerConfig
     session_id: str
     persisted: Optional[bool] = None
 
@@ -144,6 +179,17 @@ class McpReloadParams:
     """Request payload for optional `mcp/reload`."""
     session_id: str
     persisted: Optional[bool] = None
+    server_name: Optional[str] = None
+
+
+@dataclass
+class McpLiveOpResponse:
+    """Response payload for live MCP operations."""
+    operation: Literal['add', 'remove', 'reload']
+    persisted: bool
+    session_id: str
+    status: Literal['staged', 'applied', 'rejected']
+    applied_at_turn: Optional[int] = None
     server_name: Optional[str] = None
 
 
@@ -1154,17 +1200,6 @@ class UpdateScheduleParams:
 
 
 @dataclass
-class McpLiveOpResponse:
-    """Response payload for live MCP operations."""
-    operation: Literal['add', 'remove', 'reload']
-    persisted: bool
-    session_id: str
-    status: Literal['staged', 'applied', 'rejected']
-    applied_at_turn: Optional[int] = None
-    server_name: Optional[str] = None
-
-
-@dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
     class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
@@ -2045,6 +2080,9 @@ McpLiveOperation = Literal['add', 'remove', 'reload']
 
 # Shared status for live MCP operations.
 McpLiveOpStatus = Literal['staged', 'applied', 'rejected']
+
+# HTTP transport selection for URL-based servers
+McpHttpTransport = Literal['streamable-http', 'sse']
 
 # Target for a mob wire/unwire call.
 MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]

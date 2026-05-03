@@ -919,8 +919,11 @@ async def test_peer_response_terminal_uses_canonical_peer_id_and_correlation() -
 def test_live_mcp_contract_types_exported():
     add = McpAddParams(
         session_id="s1",
-        server_config={"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]},
-        server_name="filesystem",
+        server_config={
+            "name": "filesystem",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        },
         persisted=False,
     )
     response = McpLiveOpResponse(
@@ -930,7 +933,7 @@ def test_live_mcp_contract_types_exported():
         persisted=False,
         applied_at_turn=5,
     )
-    assert add.server_name == "filesystem"
+    assert add.server_config["name"] == "filesystem"
     assert response.applied_at_turn == 5
 
 
@@ -1728,13 +1731,14 @@ async def test_client_mcp_methods_send_expected_rpc_calls():
             "operation": method.split("/")[1],
             "status": "staged",
             "persisted": params.get("persisted", False),
-            "server_name": params.get("server_name"),
+            "server_name": params.get("server_name")
+            or params.get("server_config", {}).get("name"),
             "applied_at_turn": None,
         }
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    add = await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+    add = await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
     remove = await client.mcp_remove("s1", "filesystem", persisted=True)
     reload = await client.mcp_reload("s1", server_name="filesystem")
 
@@ -1754,7 +1758,7 @@ async def test_client_mcp_methods_propagate_request_failures():
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="boom"):
-        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+        await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
     with pytest.raises(MeerkatError, match="boom"):
         await client.mcp_remove("s1", "filesystem")
     with pytest.raises(MeerkatError, match="boom"):
@@ -1776,7 +1780,7 @@ async def test_client_mcp_methods_reject_malformed_response():
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="persisted must be boolean"):
-        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+        await client.mcp_add("s1", {"name": "filesystem", "command": "npx"})
 
 
 @pytest.mark.asyncio

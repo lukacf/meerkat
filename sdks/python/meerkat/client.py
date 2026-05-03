@@ -38,6 +38,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    McpServerConfig,
     MobDefinitionInput,
     MobSpawnManyFailedResult,
     MobSpawnManyResult,
@@ -993,8 +994,7 @@ class MeerkatClient:
     async def mcp_add(
         self,
         session_id: str,
-        server_name: str,
-        server_config: dict[str, Any],
+        server_config: McpServerConfig,
         *,
         persisted: bool = False,
     ) -> McpLiveOpResponse:
@@ -1002,7 +1002,6 @@ class MeerkatClient:
             "mcp/add",
             {
                 "session_id": session_id,
-                "server_name": server_name,
                 "server_config": server_config,
                 "persisted": persisted,
             },

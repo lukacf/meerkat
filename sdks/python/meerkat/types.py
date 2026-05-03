@@ -13,9 +13,15 @@ from typing import Any, Literal, NewType, TypedDict, Union
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
     McpAddParams as McpAddParams,
+    McpHttpConfig as McpHttpConfig,
+    McpHttpServerConfig as McpHttpServerConfig,
+    McpHttpTransport as McpHttpTransport,
     McpLiveOpResponse as McpLiveOpResponse,
     McpReloadParams as McpReloadParams,
     McpRemoveParams as McpRemoveParams,
+    McpServerConfig as McpServerConfig,
+    McpStdioConfig as McpStdioConfig,
+    McpStdioServerConfig as McpStdioServerConfig,
     MobBackendConfigInput as MobBackendConfigInput,
     MobCreateParams as MobCreateParams,
     MobCreateResult as MobCreateResult,

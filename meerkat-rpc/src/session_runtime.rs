@@ -7341,10 +7341,9 @@ impl SessionRuntime {
     pub async fn mcp_stage_add(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        server_config: serde_json::Value,
+        server_config: McpServerConfig,
     ) -> Result<(), RpcError> {
-        self.mcp_stage_add_with_persistence(session_id, server_name, server_config, false)
+        self.mcp_stage_add_with_persistence(session_id, server_config, false)
             .await
             .map(|_| ())
     }
@@ -7353,32 +7352,17 @@ impl SessionRuntime {
     pub async fn mcp_stage_add_with_persistence(
         &self,
         session_id: &SessionId,
-        server_name: String,
-        mut server_config: serde_json::Value,
+        config: McpServerConfig,
         persisted: bool,
     ) -> Result<bool, RpcError> {
         self.ensure_session_exists(session_id).await?;
-        if server_name.trim().is_empty() {
+        if config.name.trim().is_empty() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: "server_name cannot be empty".to_string(),
                 data: None,
             });
         }
-
-        if let Some(obj) = server_config.as_object_mut() {
-            obj.insert(
-                "name".to_string(),
-                serde_json::Value::String(server_name.clone()),
-            );
-        }
-
-        let config: McpServerConfig =
-            serde_json::from_value(server_config).map_err(|e| RpcError {
-                code: error::INVALID_PARAMS,
-                message: format!("invalid server_config: {e}"),
-                data: None,
-            })?;
 
         let adapter = self.mcp_adapter_for_session(session_id).await?;
         let rollback = if persisted {
@@ -10787,7 +10771,7 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    fn maybe_mcp_server_config(server_name: &str) -> Option<serde_json::Value> {
+    fn maybe_mcp_server_config(server_name: &str) -> Option<McpServerConfig> {
         let path = mcp_test_server_path();
         if !path.exists() {
             eprintln!(
@@ -10795,12 +10779,12 @@ mod tests {
             );
             return None;
         }
-        Some(serde_json::json!({
-            "command": path.to_string_lossy().to_string(),
-            "args": [],
-            "env": {},
-            "name": server_name,
-        }))
+        Some(McpServerConfig::stdio(
+            server_name,
+            path.to_string_lossy().to_string(),
+            Vec::new(),
+            HashMap::new(),
+        ))
     }
 
     #[tokio::test]
@@ -16636,12 +16620,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("staging should succeed");
@@ -16706,7 +16685,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "test-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16770,7 +16749,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "timeout-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
 
@@ -16900,7 +16879,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "server-draining".to_string(), server1_config)
+            .mcp_stage_add(&session_id, server1_config)
             .await
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -16959,7 +16938,7 @@ mod tests {
         );
 
         runtime
-            .mcp_stage_add(&session_id, "server-staged".to_string(), server2_config)
+            .mcp_stage_add(&session_id, server2_config)
             .await
             .expect("stage second add");
 
@@ -17047,7 +17026,7 @@ mod tests {
             .unwrap();
 
         runtime
-            .mcp_stage_add(&session_id, "lossless-server".to_string(), server_config)
+            .mcp_stage_add(&session_id, server_config)
             .await
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
@@ -17103,12 +17082,7 @@ mod tests {
         runtime
             .mcp_stage_add(
                 &session_id,
-                "broken-server".to_string(),
-                serde_json::json!({
-                    "command": "echo",
-                    "args": [],
-                    "env": {}
-                }),
+                McpServerConfig::stdio("broken-server", "echo", Vec::new(), HashMap::new()),
             )
             .await
             .expect("stage broken add");

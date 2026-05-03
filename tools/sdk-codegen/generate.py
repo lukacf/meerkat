@@ -118,6 +118,22 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "PeerReachabilityReason",
 ]
 
+MCP_LIVE_CONTRACT_TYPES = [
+    "McpAddParams",
+    "McpRemoveParams",
+    "McpReloadParams",
+    "McpLiveOpResponse",
+]
+
+MCP_CONFIG_HELPER_TYPES = [
+    "McpStdioConfig",
+    "McpHttpConfig",
+]
+
+MCP_CONFIG_ALIAS_TYPES = [
+    "McpHttpTransport",
+]
+
 MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberRef",
     "WireMobBackendKind",
@@ -265,6 +281,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         "AudioFormatMismatchContext",
         "ToolCallTimeoutContext",
         "WireTrustedPeerIdentity",
+        "McpServerConfig",
+        *MCP_CONFIG_HELPER_TYPES,
+        *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
@@ -751,9 +770,25 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
 
-    append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
-    append_python_dataclass("McpRemoveParams", params_schema, "Request payload for mcp/remove.")
-    append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
+    for name in MCP_CONFIG_HELPER_TYPES:
+        append_python_contract_dataclass(name)
+    types_content += "\nclass McpStdioServerConfig(TypedDict, total=False):\n"
+    types_content += '    """Typed stdio variant for MCP server configuration."""\n'
+    types_content += "    name: Required[str]\n"
+    types_content += "    command: Required[str]\n"
+    types_content += "    args: NotRequired[list[str]]\n"
+    types_content += "    env: NotRequired[dict[str, str]]\n"
+    types_content += "    connect_timeout_secs: NotRequired[int]\n\n"
+    types_content += "\nclass McpHttpServerConfig(TypedDict, total=False):\n"
+    types_content += '    """Typed HTTP variant for MCP server configuration."""\n'
+    types_content += "    name: Required[str]\n"
+    types_content += "    url: Required[str]\n"
+    types_content += "    headers: NotRequired[dict[str, str]]\n"
+    types_content += "    transport: NotRequired[McpHttpTransport]\n"
+    types_content += "    connect_timeout_secs: NotRequired[int]\n\n"
+    types_content += "\nMcpServerConfig = McpStdioServerConfig | McpHttpServerConfig\n"
+    for name in MCP_LIVE_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
     for name in MOB_RPC_CONTRACT_TYPES:
@@ -774,7 +809,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
     append_python_dataclass("UpdateScheduleParams", params_schema, "Request payload for schedule/update.")
-    append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
     append_python_dataclass("WireRenderMetadata", wire_schema, "Render metadata for mob member delivery.")
     append_python_alias("WireTrustedPeerIdentity", wire_schema, "Typed external peer identity.")
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
@@ -861,6 +895,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_alias(name, wire_schema, f"Mob RPC helper wire type for {name}.")
     append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
     append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
+    for name in MCP_CONFIG_ALIAS_TYPES:
+        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        append_python_alias(name, root_schema, f"MCP config alias {name}.")
     append_python_alias("MobPeerTarget", wire_schema, "Target for a mob wire/unwire call.")
     append_python_alias("WireHandlingMode", wire_schema, "Public handling mode for mob member delivery.")
     append_python_alias("WireRenderClass", wire_schema, "Public render class contract for mob member delivery.")
@@ -1099,9 +1136,15 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
 
-    append_typescript_interface("McpAddParams", params_schema)
-    append_typescript_interface("McpRemoveParams", params_schema)
-    append_typescript_interface("McpReloadParams", params_schema)
+    for name in MCP_CONFIG_HELPER_TYPES:
+        append_typescript_contract_interface(name)
+    types_content += (
+        "\nexport type McpServerConfig =\n"
+        "  | ({ name: string; connect_timeout_secs?: number } & McpStdioConfig)\n"
+        "  | ({ name: string; connect_timeout_secs?: number } & McpHttpConfig);\n"
+    )
+    for name in MCP_LIVE_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
     append_typescript_interface("MobWireParams", params_schema)
     append_typescript_interface("MobUnwireParams", params_schema)
     for name in MOB_RPC_CONTRACT_TYPES:
@@ -1118,13 +1161,15 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("ListSchedulesParams", params_schema)
     append_typescript_interface("ScheduleOccurrencesParams", params_schema)
     append_typescript_interface("UpdateScheduleParams", params_schema)
-    append_typescript_interface("McpLiveOpResponse", wire_schema)
     append_typescript_alias("WireContentBlock", wire_schema)
     append_typescript_alias("WireContentInput", wire_schema)
     for name in MOB_RPC_CONTRACT_ALIAS_TYPES:
         append_typescript_alias(name, wire_schema)
     append_typescript_alias("McpLiveOperation", wire_schema)
     append_typescript_alias("McpLiveOpStatus", wire_schema)
+    for name in MCP_CONFIG_ALIAS_TYPES:
+        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        append_typescript_alias(name, root_schema)
     append_typescript_alias("MobPeerTarget", wire_schema)
     append_typescript_alias("WireHandlingMode", wire_schema)
     append_typescript_alias("WireRenderClass", wire_schema)

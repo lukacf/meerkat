@@ -1284,8 +1284,7 @@ describe("Comms methods", () => {
 
     await client.mcpAdd({
       session_id: "s1",
-      server_name: "filesystem",
-      server_config: { cmd: "npx" },
+      server_config: { name: "filesystem", command: "npx" },
       persisted: false,
     });
     await client.mcpRemove({
@@ -1300,7 +1299,8 @@ describe("Comms methods", () => {
     });
 
     assert.deepEqual(calls.map((c) => c.method), ["mcp/add", "mcp/remove", "mcp/reload"]);
-    assert.equal(calls[0].params.server_name, "filesystem");
+    assert.equal(calls[0].params.server_config.name, "filesystem");
+    assert.equal(Object.hasOwn(calls[0].params, "server_name"), false);
     assert.equal(calls[1].params.persisted, true);
   });
 
@@ -1311,7 +1311,7 @@ describe("Comms methods", () => {
     };
 
     await assert.rejects(
-      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      () => client.mcpAdd({ session_id: "s1", server_config: { name: "fs", command: "npx" } }),
       /boom/,
     );
     await assert.rejects(
@@ -1334,7 +1334,7 @@ describe("Comms methods", () => {
     });
 
     await assert.rejects(
-      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      () => client.mcpAdd({ session_id: "s1", server_config: { name: "fs", command: "npx" } }),
       /persisted must be boolean/,
     );
   });

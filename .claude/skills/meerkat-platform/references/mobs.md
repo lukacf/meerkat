@@ -425,7 +425,7 @@ Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolS
 
 | Tool | Purpose |
 |------|---------|
-| `delegate` | Quick helper spawn -- creates implicit mob on first use, spawns member, auto-wires comms |
+| `delegate` | Quick helper spawn — creates implicit mob on first use, spawns member, auto-wires comms |
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
 | `mob_spawn_member` | Spawn a member into any mob |
@@ -435,6 +435,17 @@ Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolS
 | `mob_list` | List all mobs |
 | `mob_wire` | Wire a member to a local or external peer (creates comms trust) |
 | `mob_unwire` | Remove a wiring relationship between a member and a peer |
+
+When a realm profile store is configured, six additional profile-management tools are surfaced — they treat profiles as reusable, versioned member templates:
+
+| Tool | Purpose |
+|------|---------|
+| `mob_profile_create` | Register a named profile in the realm |
+| `mob_profile_get` | Read a profile (with revision) |
+| `mob_profile_list` | List profiles in the realm |
+| `mob_profile_update` | Update a profile with `expected_revision` for CAS |
+| `mob_profile_delete` | Delete a profile with `expected_revision` for CAS |
+| `mob_profile_list_sources` | List the provenance sources contributing profiles |
 
 These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime; ambient mob enablement alone does not surface operator tools on resume.
 

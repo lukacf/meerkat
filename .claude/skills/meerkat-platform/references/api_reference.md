@@ -63,10 +63,15 @@ rkat realm current|list|show
 rkat skill list [--json]
 rkat skill inspect <skill-name> --source-uuid <uuid> [--json]
 rkat models [--json]
-rkat mob create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
+rkat auth login|logout|status|profile ...
+rkat schedule create|list|show|update|pause|resume|delete ...
+rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run-flow|flow-status|pack|inspect|validate|deploy|web ...
 rkat config get|set|patch ...
 rkat capabilities
-rkat-rpc
+rkat-rpc                                # JSON-RPC stdio
+rkat-rpc --tcp 127.0.0.1:9000           # JSON-RPC over TCP (stdio is default)
+rkat-rpc-mini                           # reduced-method-set RPC binary
+rkat-mini ...                           # reduced CLI
 ```
 
 CLI keep-alive terminology:
@@ -74,44 +79,27 @@ CLI keep-alive terminology:
 - use `--keep-alive`
 - do not use `--host`
 
-Flow command details:
+### Mob CLI surface
 
-```bash
-rkat mob flows <MOB_ID>
-rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params '{"k":"v"}']
-rkat mob flow-status <MOB_ID> <RUN_ID>
-```
+Primary CLI mob usage is tool-driven from `run`/`resume` prompts using `mob_*` tools. The explicit `rkat mob <subcommand>` surface is helper-oriented — a small set of operational verbs:
 
-- `run-flow` returns `RUN_ID` and waits for terminal run state.
-- `flow-status` returns serialized `MobRun` JSON or `null`.
-- status values: `pending`, `running`, `completed`, `failed`, `canceled`.
-- run records include `step_ledger` + `failure_ledger`.
+| Subcommand | Purpose |
+|------------|---------|
+| `spawn-helper <mob_id> <prompt> [--profile] [--agent-identity] [--json]` | Spawn a short-lived helper, wait for completion, print the result |
+| `fork-helper <mob_id> <source_member> <prompt> [--profile] [--fork-context full-history\|last-messages] [--last-messages N]` | Fork from an existing member's context and run a helper |
+| `member-status <mob_id> <agent_identity>` | Execution status snapshot for a mob member |
+| `force-cancel <mob_id> <agent_identity>` | Force-cancel a member's in-flight turn |
+| `respawn <mob_id> <agent_identity> [--initial-message]` | Retire and respawn a member with the same profile |
+| `wait-kickoff <mob_id> [--member ...] [--timeout-ms]` | Wait for autonomous-host kickoff turns to complete |
+| `run-flow <mob_id> --flow <flow_id> [--params <json>] [--stream]` | Start a flow run, block until terminal, print run id and result |
+| `flow-status <mob_id> <run_id>` | Print live or terminal `MobRun` JSON; status: `pending`/`running`/`completed`/`failed`/`canceled` |
+| `pack <dir> -o <pack> [--sign <key> --signer-id <id>]` | Pack a mob directory into a `.mobpack` archive |
+| `inspect <pack>` | Inspect a `.mobpack` archive |
+| `validate <pack> [--trust-policy permissive\|strict]` | Validate a `.mobpack` archive |
+| `deploy <pack> <prompt> [--model] [--max-total-tokens] [--max-duration] [--max-tool-calls] [--trust-policy] [--surface cli\|rpc]` | Deploy a `.mobpack` with overrides |
+| `web build <pack> -o <dir> [--trust-policy]` | Build a browser-deployable WASM bundle |
 
-Primary CLI mob usage is tool-driven from `run`/`resume` prompts using `mob_*` tools.
-Mob lifecycle (non-flow) commands remain available as explicit operational/compatibility controls:
-
-- `create`
-- `list`
-- `status`
-- `spawn`
-- `retire`
-- `respawn` — retire + re-spawn same profile
-- `wire`
-- `unwire`
-- `turn`
-- `stop`
-- `resume`
-- `complete`
-- `events` — stream mob events to stdout as JSON lines (optionally `--member <id>`)
-- `destroy`
-
-Artifact/deployment commands:
-
-- `pack` — pack mob directory into `.mobpack` archive
-- `inspect` — inspect a `.mobpack` archive
-- `validate` — validate a `.mobpack` archive
-- `deploy` — deploy a `.mobpack` with a prompt (`--trust-policy`, `--surface`)
-- `web build` — build browser-deployable WASM bundle from a `.mobpack`
+Lifecycle verbs that used to live on the CLI (`create`, `spawn`, `retire`, `wire`, `unwire`, `turn`, `stop`, `resume`, `complete`, `events`, `destroy`) are reached through the agent tools (`mob_create`, `mob_spawn_member`, `mob_wire`, ...) or through the RPC `mob/*` methods listed below.
 
 ---
 
@@ -177,50 +165,111 @@ CAS writes:
 
 ---
 
-## JSON-RPC (`rkat-rpc`)
+## JSON-RPC (`rkat-rpc` / `rkat-rpc-mini`)
 
-Start scoped server:
+Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; some realtime hosts attach an optional websocket alongside):
 
 ```bash
 rkat-rpc --realm team-alpha
+rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000
 ```
 
-Core methods:
+`rkat-rpc-mini` is a reduced binary with the same wire protocol but a smaller method set, intended for embeddable hosts.
+
+### Sessions, turns, history
 
 - `initialize`
-- `session/create`
-- `session/list`
-- `session/read`
-- `session/history`
-- `blob/get` — fetch generated image and artifact payload bytes by blob id
-- `session/archive`
+- `session/create`, `session/list`, `session/read`, `session/history`, `session/archive`
+- `session/external_event`, `session/peer_response_terminal`, `session/inject_context`
+- `session/stream_open` / `session/stream_close` — event streaming
+- `events/latest_cursor`, `events/list_since`, `events/snapshot` — cursor-based event reads
 - `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap
 - `turn/interrupt`
-- `config/get`
-- `config/set`
-- `config/patch`
-- `skills/list` — list skills with provenance (active + shadowed)
-- `models/catalog` — curated model catalog with provider profiles
+- `blob/get` — fetch generated image / artifact payload bytes by blob id
+- `artifact/list`, `artifact/get`, `artifact/download`
+
+Generated assistant images appear in `session/history` as assistant blocks with `block_type: "image"`; fetch bytes via `blob/get` using `data.blob_ref.blob_id`.
+
+### Realtime (capability-driven)
+
+- `realtime/open_info` — open audio channel info
+- `realtime/status` — current attachment state
+- `realtime/capabilities` — capability projection
+- `session/realtime_attachment_status` — single-session status (no batch sibling)
+- `mob/member_status` includes `realtime_attachment_status` per member
+
+Set `model: "gpt-realtime-1.5"` on `session/create` to enable realtime; transport follows the resolved model's `ModelCapabilities.realtime`.
+
+### Auth (realm/binding model)
+
+- `auth/profile/list`, `auth/profile/get`, `auth/profile/create`, `auth/profile/delete`
+- `auth/login/start`, `auth/login/complete`
+- `auth/login/device_start`, `auth/login/device_complete`
+- `auth/login/provision_api_key`
+- `auth/status/get`, `auth/logout`
+- `realm/list`, `realm/get`
+
+### Scheduling
+
+- `schedule/create`, `schedule/get`, `schedule/list`, `schedule/update`
+- `schedule/pause`, `schedule/resume`, `schedule/delete`
+- `schedule/occurrences` — occurrences within the planning horizon
+- `schedule/tools`, `schedule/call` — agent-facing schedule tool surface
+
+### Skills, models, capabilities, runtime, approvals
+
+- `skills/list`, `skills/inspect`
+- `models/catalog`
 - `capabilities/get`
-- `mcp/add` — stage live MCP server add for a session
-- `mcp/remove` — stage live MCP server remove
-- `mcp/reload` — stage live MCP server reload
-- `session/stream_open` / `session/stream_close` — standalone session event streaming
-- `mob/create`, `mob/list`, `mob/status`, `mob/members` — explicit mob lifecycle/state methods (feature-gated)
-- `mob/spawn`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/lifecycle`, `mob/send` — explicit mob control methods (feature-gated)
-- `mob/events`, `mob/stream_open` / `mob/stream_close` — mob/member observation (feature-gated)
-- `mob/append_system_context`, `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` — advanced mob runtime methods (feature-gated)
-- `mob/tools` / `mob/call` — compatibility and escape-hatch mob tool access (feature-gated)
-- `mob/spawn_helper`, `mob/fork_helper` — convenience mob helpers (feature-gated)
+- `runtime/host_info`, `runtime/capabilities`, `runtime/health`
+- `approval/request`, `approval/list`, `approval/get`, `approval/decide`
 
-Generated assistant images are observed through `session/history` as assistant blocks with `block_type: "image"` and fetched through `blob/get` using `data.blob_ref.blob_id`.
-- `mob/force_cancel` — force-cancel a mob member's in-flight turn (feature-gated)
-- `comms/send` (feature-gated)
-- `comms/peers` (feature-gated)
+### Config
 
-`config/*` uses the same envelope + CAS semantics as REST.
+- `config/get`, `config/set`, `config/patch` (same envelope + CAS as REST)
 
-CLI parity:
+### MCP live mutation
+
+- `mcp/add`, `mcp/remove`, `mcp/reload`
+
+### Mob (feature-gated)
+
+Lifecycle and identity:
+
+- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`
+- `mob/members`, `mob/list_members_matching`, `mob/member_status`
+- `mob/spawn`, `mob/spawn_many`, `mob/spawn_helper`, `mob/fork_helper`
+- `mob/ensure_member`, `mob/reconcile`
+- `mob/retire`, `mob/respawn`, `mob/force_cancel`
+- `mob/wire`, `mob/unwire`, `mob/rotate_supervisor`
+
+Member interaction and context:
+
+- `mob/turn_start`, `mob/member_send`, `mob/ingress_interaction`
+- `mob/append_system_context`
+
+Work lanes (autonomous member work tracking):
+
+- `mob/submit_work`, `mob/cancel_work`, `mob/cancel_all_work`
+
+Waits and observation:
+
+- `mob/wait_kickoff`, `mob/wait_ready`
+- `mob/events`, `mob/stream_open`, `mob/stream_close`
+
+Flows:
+
+- `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel`
+
+Profiles (when a profile store is present):
+
+- `mob/profile/create`, `mob/profile/get`, `mob/profile/list`, `mob/profile/update`, `mob/profile/delete`
+
+### Comms (feature-gated)
+
+- `comms/send`, `comms/peers`
+
+### CLI parity (config)
 
 ```bash
 rkat config get --format json --with-generation
@@ -295,18 +344,40 @@ await client.connect(
 
 Client methods:
 
-- `create_session(prompt, ...)` → `Session`
+- `create_session(prompt, *, model, connection_ref=None, ...)` → `Session` — `connection_ref` scopes credentials to a realm/binding
 - `create_session_streaming(prompt, ...)` → `EventStream`
 - `list_sessions()` → `list[SessionInfo]`
 - `read_session(session_id)` → dict
 - `read_session_history(session_id, offset=0, limit=None)` → `SessionHistory`
 - `get_blob(blob_id)` → `BlobPayload`
-- `create_mob(definition, ...)` → `Mob`
+- `create_mob(definition, ..., connection_ref=None)` → `Mob`
 - `list_mobs()` → `list[MobSummary]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(params)` / `mcp_remove(params)` / `mcp_reload(params)`
 - `list_skills()`
 - `capabilities` (property, populated during `connect()`)
+- `runtime_host_info()` / `runtime_capabilities()` / `runtime_health()`
+
+Realtime helpers:
+
+- `runtime_realtime_attachment_status(session_id)` → status projection
+- `realtime_open_info(session_id)` → audio channel info
+- `realtime_capabilities()` / `realtime_status(session_id)`
+
+Auth helpers:
+
+- `auth_login_start(...)` / `auth_login_complete(...)`
+- `auth_login_device_start(...)` / `auth_login_device_complete(...)`
+- `auth_login_provision_api_key(...)`
+- `auth_status_get(...)` / `auth_logout(...)`
+- `auth_profile_create/get/list/delete`
+- `realm_list()` / `realm_get(realm_id)`
+
+Schedule helpers:
+
+- `schedule_create(...)` / `schedule_get(id)` / `schedule_list()` / `schedule_update(...)`
+- `schedule_pause(id)` / `schedule_resume(id)` / `schedule_delete(id)`
+- `schedule_occurrences(id)`
 
 Session methods:
 
@@ -361,18 +432,40 @@ await client.connect({
 
 Client methods:
 
-- `createSession(prompt, options?)` → `Session`
+- `createSession(prompt, options?)` → `Session` — `options.connectionRef` scopes credentials to a realm/binding
 - `createSessionStreaming(prompt, options?)` → `EventStream`
 - `listSessions()` → `SessionInfo[]`
 - `readSession(sessionId)` → object
 - `readSessionHistory(sessionId, { offset, limit }?)` → `SessionHistory`
 - `getBlob(blobId)` → `BlobPayload`
-- `createMob(definition, options?)` → `Mob`
+- `createMob(definition, options?)` → `Mob` — accepts `connectionRef`
 - `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()`
 - `capabilities` (property, populated during `connect()`)
+- `runtimeHostInfo()` / `runtimeCapabilities()` / `runtimeHealth()`
+
+Realtime helpers:
+
+- `runtimeRealtimeAttachmentStatus(sessionId)`
+- `realtimeOpenInfo(sessionId)`
+- `realtimeCapabilities()` / `realtimeStatus(sessionId)`
+
+Auth helpers:
+
+- `authLoginStart(...)` / `authLoginComplete(...)`
+- `authLoginDeviceStart(...)` / `authLoginDeviceComplete(...)`
+- `authLoginProvisionApiKey(...)`
+- `authStatusGet(...)` / `authLogout(...)`
+- `authProfileCreate/Get/List/Delete`
+- `realmList()` / `realmGet(realmId)`
+
+Schedule helpers:
+
+- `scheduleCreate(...)` / `scheduleGet(id)` / `scheduleList()` / `scheduleUpdate(...)`
+- `schedulePause(id)` / `scheduleResume(id)` / `scheduleDelete(id)`
+- `scheduleOccurrences(id)`
 
 Session methods:
 

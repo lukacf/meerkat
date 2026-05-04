@@ -12,19 +12,44 @@ All semantic state mutations route through the DSL authority via `dsl_apply(inpu
 
 Runtime-backed surfaces (CLI, REST, RPC, MCP) obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)` and pass them through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`. Standalone paths (WASM, tests, embedded) use `RuntimeBuildMode::StandaloneEphemeral`.
 
-`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle:
+`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle. As of 0.6 it carries identity plus a full set of DSL handles that share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)` — handle method calls and dispatch-driven transitions land on the same underlying state.
+
+Identity:
 
 - `session_id`, `epoch_id` — identity witnesses
+- `cursor_state: Arc<EpochCursorState>` — shared completion-feed cursors
+
+Ops + completions:
+
 - `ops_lifecycle: Arc<dyn OpsLifecycleRegistry>` — typed projection/command surface over DSL ops state
-- `cursor_state: Arc<EpochCursorState>` — shared completion feed cursors
-- `tool_visibility_owner: Arc<dyn ToolVisibilityOwner>` — visibility projection
+
+Turn / drain / admission:
+
 - `turn_state: Arc<dyn TurnStateHandle>` — turn execution transitions
 - `comms_drain: Arc<dyn CommsDrainHandle>` — drain lifecycle transitions
-- `external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>` — MCP surface transitions
-- `peer_comms: Arc<dyn PeerCommsHandle>` — peer envelope classification
 - `session_admission: Arc<dyn SessionAdmissionHandle>` — session turn admission
+- `session_claim_handle: Arc<dyn SessionClaimHandle>` — session-claim ownership/release transitions
+- `session_context: Arc<dyn SessionContextHandle>` — system-context append transitions
 
-All five DSL handles share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)`. Handle method calls land on the same underlying state as dispatch-driven transitions.
+Tool surface:
+
+- `tool_visibility_owner: Arc<dyn ToolVisibilityOwner>` — tool visibility projection
+- `external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>` — MCP surface transitions
+- `mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>` — MCP server add/remove/reload lifecycle
+
+Peer comms:
+
+- `peer_comms: Arc<dyn PeerCommsHandle>` — peer envelope classification
+- `peer_interaction: Arc<dyn PeerInteractionHandle>` — peer-driven interaction transitions
+- `interaction_stream: Arc<dyn InteractionStreamHandle>` — interaction stream lifecycle
+
+Model + auth + realtime:
+
+- `model_routing: Arc<dyn ModelRoutingHandle>` — provider/model resolution and live reconfigure
+- `auth_lease: Arc<dyn AuthLeaseHandle>` — published `AuthMachine` lease handle for the session
+- `realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>` — realtime-mode turn boundaries
+
+When you add a new handle field, `prepare_bindings()` and the factory's `SessionOwned` validation must be updated so the surface gets the same authority view as dispatch.
 
 ## Ownership split
 

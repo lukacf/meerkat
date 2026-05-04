@@ -20,5 +20,7 @@ and a lead analyst synthesizes findings into a cohesive report.
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat-mob \
+  --example 018-mob-research-team
 ```

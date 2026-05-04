@@ -20,5 +20,10 @@ stay alive between turns for instant multi-turn conversations.
 
 ## Run
 ```bash
+# From the repository root, first build the local TypeScript SDK and RPC binary:
+# npm --prefix sdks/typescript install && npm --prefix sdks/typescript run build
+# (cd examples && npm install)
+# ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+# export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ANTHROPIC_API_KEY=sk-... npx tsx main.ts
 ```

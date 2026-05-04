@@ -1,11 +1,17 @@
 # 003 — Hello Meerkat (TypeScript SDK)
 
-The simplest TypeScript agent. The SDK auto-downloads and spawns `rkat-rpc`
-as a child process — no manual binary management needed.
+The simplest TypeScript agent. The SDK spawns `rkat-rpc` as a child process
+and can use either an installed/downloaded runtime binary or the repo-local
+binary built from this checkout.
 
 ## Prerequisites
 ```bash
-npm install @rkat/sdk   # or: npm link from sdks/typescript
+# From the repository root when running from a checkout
+npm --prefix sdks/typescript install
+npm --prefix sdks/typescript run build
+(cd examples && npm install)
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ```
 
 ## Concepts

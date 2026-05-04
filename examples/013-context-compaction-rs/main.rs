@@ -12,7 +12,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 013-context-compaction --features jsonl-store,session-compaction
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 013-context-compaction --features jsonl-store,session-compaction
 //! ```
 
 use std::sync::Arc;

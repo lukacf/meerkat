@@ -23,7 +23,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 012-skills-loading --features jsonl-store,skills
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 012-skills-loading --features jsonl-store,skills
 //! ```
 
 use std::sync::Arc;

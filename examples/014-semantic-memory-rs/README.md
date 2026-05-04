@@ -22,5 +22,7 @@ Later: Agent calls memory_search("what language for backend?")
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 014-semantic-memory --features jsonl-store,memory-store-session
 ```

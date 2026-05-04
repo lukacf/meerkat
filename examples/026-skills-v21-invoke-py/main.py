@@ -8,7 +8,7 @@ Run:
     ANTHROPIC_API_KEY=sk-... \
     MEERKAT_SKILL_SOURCE_UUID=dc256086-0d2f-4f61-a307-320d4148107f \
     MEERKAT_SKILL_NAME=shell-patterns \
-    python main.py
+    python3 main.py
 """
 
 import asyncio

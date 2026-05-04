@@ -13,7 +13,7 @@ Everything you can do with `rkat` from the command line — no code required.
 ## Prerequisites
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo build -p meerkat-cli
+./scripts/repo-cargo build -p rkat --bin rkat
 ```
 
 ## Run

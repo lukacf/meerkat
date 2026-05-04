@@ -9,11 +9,23 @@ from "Hello World" to production multi-agent systems.
 # Set your API key
 export ANTHROPIC_API_KEY=sk-...
 
+# Build the repo-local CLI/RPC binaries used by shell and SDK examples
+./scripts/repo-cargo build -p rkat --bin rkat
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+
+# Point SDK examples at the repo-local RPC binary
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+
+# Install/build local SDK dependencies
+python3 -m pip install -e sdks/python
+npm --prefix sdks/typescript install
+npm --prefix sdks/typescript run build
+
 # Install shared TypeScript example dependencies once
 cd examples && npm install
 
 # Run a Python example
-(cd 002-hello-meerkat-py && python main.py)
+(cd 002-hello-meerkat-py && python3 main.py)
 
 # Run a TypeScript example
 (cd 003-hello-meerkat-ts && npx tsx main.ts)
@@ -23,8 +35,11 @@ cd examples && npm install
 ```
 
 Rust examples in this folder are wired into `meerkat/Cargo.toml` and can be run
-directly from the workspace root with `cargo run -p meerkat --example <name>`.
-For example: `cargo run -p meerkat --example 001-hello-meerkat --features jsonl-store`.
+directly from the workspace root. For example:
+
+```bash
+./scripts/repo-cargo run -p meerkat --example 001-hello-meerkat --features jsonl-store
+```
 
 ## Flagship Shell Examples
 
@@ -40,16 +55,15 @@ pedagogical workflows rather than lightweight command recipes:
 
 ## Verification Status
 
-This repo now mixes fully live-ran examples, build-verified examples, and
-recipe-style examples that are still useful but depend on heavier external
-toolchains. The table below reflects the current verification state for this
-branch.
+This repo mixes live examples, build-verified examples, and recipe-style
+examples that depend on external toolchains or provider credentials. The table
+below describes the expected local validation level.
 
 | Status | Examples |
 |--------|----------|
-| **Live-ran** | 001, 002, 003, 007, 008, 010, 021, 022, 023, 028, 029, 030, 034 via MCP stdio, 035 via Docker/TUX hive suite |
-| **Build-verified** | Registered Rust examples via `cargo check`; 031, 032, 033 via Vite builds |
-| **Syntax-checked / recipe-oriented** | 004, 036, and shell entrypoints that are safe but intentionally operational rather than fully automated |
+| **Live when provider keys/services are available** | 001-003, 005-015, 017-028, 034-036 |
+| **Build-verified locally** | Registered Rust examples via `./scripts/repo-cargo check`; 031 and 032 via Vite builds; 033 via `sdks/web` WASM artifacts plus Vite |
+| **Syntax-checked / recipe-oriented** | 004, 010, 028-030 shell entrypoints and 036 audio setup when live provider/audio devices are unavailable |
 
 ## Examples by Level
 
@@ -157,22 +171,27 @@ branch.
 ### Rust Examples
 ```bash
 # Build from source
-cargo build --workspace
+make build
 
-# Or install from crates.io
-cargo install meerkat
+# Run one registered Rust example from the workspace root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 001-hello-meerkat --features jsonl-store
 ```
 
 ### Python Examples
 ```bash
-pip install meerkat-sdk
-# Or install from source:
-pip install -e sdks/python
+python3 -m pip install -e sdks/python
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ```
 
 ### TypeScript Examples
 ```bash
-cd examples && npm install
+npm --prefix sdks/typescript install
+npm --prefix sdks/typescript run build
+(cd examples && npm install)
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ```
 
 ### API Keys

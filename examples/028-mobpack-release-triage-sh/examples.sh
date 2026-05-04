@@ -6,7 +6,40 @@ WORK="$ROOT/.work"
 MOB_DIR="$WORK/release-triage"
 PACK="$WORK/release-triage.mobpack"
 KEY="$WORK/release.key"
-RKAT="${RKAT:-rkat}"
+WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
+
+resolve_rkat() {
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT="$(resolve_rkat)"
 
 rm -rf "$MOB_DIR"
 mkdir -p "$MOB_DIR/skills" "$MOB_DIR/config" "$WORK"

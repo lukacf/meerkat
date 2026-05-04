@@ -23,7 +23,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 024-host-mode-event-mesh --features jsonl-store
 //! ```
 
 use std::sync::Arc;

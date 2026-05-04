@@ -11,7 +11,7 @@ What you'll learn:
 - Model selection strategies
 
 Run:
-    ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... python main.py
+    ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... python3 main.py
 """
 
 import asyncio

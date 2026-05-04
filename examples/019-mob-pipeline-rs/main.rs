@@ -15,7 +15,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 019-mob-pipeline --features comms
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat-mob --example 019-mob-pipeline
 //! ```
 
 use std::sync::Arc;

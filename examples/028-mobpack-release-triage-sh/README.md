@@ -50,10 +50,10 @@ with:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo install rkat
+./scripts/repo-cargo build -p rkat --bin rkat
 
-# Optional when working from this repo instead of a global install:
-export RKAT=../../target/debug/rkat
+# Optional override if you want to use a specific binary:
+export RKAT=/path/to/rkat
 ```
 
 ## Run

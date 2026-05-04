@@ -11,15 +11,14 @@ standalone runtime mode explicitly.
 ## Quick Start
 
 ```bash
-# Build
-cd examples/034-codemob-mcp
-cargo build --release
+# Build from the repository root
+./scripts/repo-cargo build --manifest-path examples/034-codemob-mcp/Cargo.toml --release
 
 # Register in Claude Code (.mcp.json in your project root)
 {
   "mcpServers": {
     "codemob": {
-      "command": "/path/to/target/release/codemob-mcp",
+      "command": "/path/to/codemob-mcp",
       "env": {
         "ANTHROPIC_API_KEY": "sk-ant-...",
         "OPENAI_API_KEY": "sk-...",

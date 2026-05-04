@@ -12,11 +12,45 @@
 #
 # Prerequisites:
 #   export ANTHROPIC_API_KEY=sk-...
-#   cargo build -p meerkat-cli  # produces ./target/debug/rkat
+#   ./scripts/repo-cargo build -p rkat --bin rkat
 
 set -euo pipefail
 
-RKAT="${RKAT:-rkat}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
+
+resolve_rkat() {
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT="$(resolve_rkat)"
 
 echo "=== 1. Single-turn prompt ==="
 $RKAT run "List three benefits of Rust. Be concise."

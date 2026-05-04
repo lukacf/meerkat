@@ -6,7 +6,6 @@ export type Provider = "anthropic" | "openai" | "gemini";
 
 export const MODEL_PROVIDER: Record<string, Provider> = {
   "claude-sonnet-4-6": "anthropic",
-  "claude-sonnet-4-6": "anthropic",
   "claude-opus-4-6": "anthropic",
   "gpt-5.2": "openai",
   "gemini-3-flash-preview": "gemini",

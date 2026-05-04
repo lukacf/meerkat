@@ -23,9 +23,13 @@ language or tool that speaks HTTP can integrate.
 
 ## Setup
 ```bash
+# From the repository root, build the REST server first:
+./scripts/repo-cargo build -p meerkat-rest --bin rkat-rest
+export RKAT_REST="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rest"
+
 # Terminal 1: Start REST server (default port 8080, configured in [rest] section)
-ANTHROPIC_API_KEY=sk-... rkat-rest
+ANTHROPIC_API_KEY=sk-... "$RKAT_REST"
 
 # Terminal 2: Run the example
-python main.py
+python3 main.py
 ```

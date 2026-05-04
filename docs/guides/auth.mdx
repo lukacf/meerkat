@@ -96,7 +96,7 @@ auth_profile    = "openai_apikey"
 
 ```bash
 # Interactive OAuth (opens a browser; stores refresh token in the
-# TokenStore — OS keychain when available, otherwise 0600 file).
+# local TokenStore credentials file, 0600 on Unix).
 rkat auth login anthropic
 
 # Scripted (api_key):

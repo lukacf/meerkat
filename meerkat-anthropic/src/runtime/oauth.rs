@@ -15,8 +15,8 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
-    exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
+    exchange_authorization_code_with_state, exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -75,10 +75,11 @@ pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         device_code_url: None,
         redirect_uri: redirect_uri.into(),
         scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_headers: vec![(
-            OAUTH_BETA_HEADER_NAME.into(),
-            OAUTH_BETA_HEADER_VALUE.into(),
-        )],
+        extra_authorize_params: Vec::new(),
+        token_request_format: OAuthTokenRequestFormat::Json,
+        include_state_in_token_exchange: true,
+        refresh_scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        extra_headers: Vec::new(),
     };
     meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
         meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi,
@@ -96,10 +97,11 @@ pub fn console_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         device_code_url: None,
         redirect_uri: redirect_uri.into(),
         scopes: CONSOLE_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_headers: vec![(
-            OAUTH_BETA_HEADER_NAME.into(),
-            OAUTH_BETA_HEADER_VALUE.into(),
-        )],
+        extra_authorize_params: Vec::new(),
+        token_request_format: OAuthTokenRequestFormat::Json,
+        include_state_in_token_exchange: true,
+        refresh_scopes: CONSOLE_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        extra_headers: Vec::new(),
     };
     meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
         meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
@@ -304,10 +306,17 @@ impl AnthropicOAuthRuntime {
         &self,
         code: &str,
         pkce_verifier: &str,
+        state: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let result =
-            exchange_authorization_code(&self.http, &self.endpoints, code, pkce_verifier, None)
-                .await?;
+        let result = exchange_authorization_code_with_state(
+            &self.http,
+            &self.endpoints,
+            code,
+            pkce_verifier,
+            None,
+            Some(state),
+        )
+        .await?;
         let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None)?;
         Ok(tokens)
     }

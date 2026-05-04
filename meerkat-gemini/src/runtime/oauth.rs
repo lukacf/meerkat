@@ -20,8 +20,8 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
-    exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
+    exchange_authorization_code, exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -82,6 +82,10 @@ pub fn code_assist_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints 
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
+        extra_authorize_params: Vec::new(),
+        token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+        include_state_in_token_exchange: false,
+        refresh_scopes: Vec::new(),
         extra_headers: Vec::new(),
     };
     meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(

@@ -22,7 +22,8 @@ pub mod token_exchange;
 
 #[cfg(feature = "oauth")]
 pub use callback::{
-    LoopbackBinding, LoopbackHandle, LoopbackOutcome, bind_loopback_callback, run_loopback_callback,
+    LoopbackBinding, LoopbackHandle, LoopbackOutcome, bind_loopback_callback,
+    bind_loopback_callback_with_redirect, run_loopback_callback,
 };
 #[cfg(feature = "oauth")]
 pub use device_code::{
@@ -31,10 +32,21 @@ pub use device_code::{
 #[cfg(feature = "oauth")]
 pub use pkce::{PkceChallenge, PkcePair};
 #[cfg(feature = "oauth")]
-pub use token_exchange::{exchange_authorization_code, exchange_refresh_token};
+pub use token_exchange::{
+    exchange_authorization_code, exchange_authorization_code_with_state, exchange_refresh_token,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Encoding expected by the provider token endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthTokenRequestFormat {
+    #[default]
+    FormUrlEncoded,
+    Json,
+}
 
 /// OAuth endpoint configuration. Each provider's concrete runtime
 /// (Phase 4b) embeds one of these with static URLs and client_id.
@@ -52,6 +64,20 @@ pub struct OAuthEndpoints {
     pub redirect_uri: String,
     /// Scopes to request.
     pub scopes: Vec<String>,
+    /// Provider-specific authorize-query params that are part of the public
+    /// login contract, not token-exchange headers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_authorize_params: Vec<(String, String)>,
+    /// Provider-specific token request body encoding.
+    #[serde(default)]
+    pub token_request_format: OAuthTokenRequestFormat,
+    /// Some providers require the browser callback state to be echoed in the
+    /// authorization-code token exchange request.
+    #[serde(default)]
+    pub include_state_in_token_exchange: bool,
+    /// Scopes to request during refresh-token exchange.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refresh_scopes: Vec<String>,
     /// Optional "beta" or "x-" headers required during OAuth requests
     /// (e.g., Claude Code's `oauth-2025-04-20` beta header).
     #[serde(default)]
@@ -74,6 +100,11 @@ impl OAuthEndpoints {
         if !self.scopes.is_empty() {
             query.push(("scope", self.scopes.join(" ")));
         }
+        query.extend(
+            self.extra_authorize_params
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone())),
+        );
         let qs = query
             .iter()
             .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
@@ -159,6 +190,10 @@ mod tests {
             device_code_url: None,
             redirect_uri: "http://127.0.0.1:8777/callback".into(),
             scopes: vec!["read".into(), "write".into()],
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            refresh_scopes: Vec::new(),
             extra_headers: Vec::new(),
         };
         let pkce = PkcePair::generate_s256();
@@ -183,11 +218,42 @@ mod tests {
             device_code_url: None,
             redirect_uri: "http://localhost/cb".into(),
             scopes: vec![],
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            refresh_scopes: Vec::new(),
             extra_headers: Vec::new(),
         };
         let pkce = PkcePair::generate_s256();
         let url = ep.authorize_url_with_pkce(&pkce.challenge, "x");
         assert!(url.contains("prompt=consent&response_type=code"));
+    }
+
+    #[test]
+    fn authorize_url_includes_extra_authorize_params() {
+        let ep = OAuthEndpoints {
+            client_id: "cid".into(),
+            authorize_url: "https://example.com/oauth/authorize".into(),
+            token_url: "https://example.com/oauth/token".into(),
+            device_code_url: None,
+            redirect_uri: "http://localhost:1455/auth/callback".into(),
+            scopes: vec!["openid".into()],
+            extra_authorize_params: vec![
+                ("id_token_add_organizations".into(), "true".into()),
+                ("codex_cli_simplified_flow".into(), "true".into()),
+                ("originator".into(), "codex_cli_rs".into()),
+            ],
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            refresh_scopes: Vec::new(),
+            extra_headers: Vec::new(),
+        };
+        let pkce = PkcePair::generate_s256();
+        let url = ep.authorize_url_with_pkce(&pkce.challenge, "state-abc");
+
+        assert!(url.contains("id_token_add_organizations=true"));
+        assert!(url.contains("codex_cli_simplified_flow=true"));
+        assert!(url.contains("originator=codex_cli_rs"));
     }
 
     fn token_result(expires_in_secs: Option<u64>) -> OAuthTokenResult {

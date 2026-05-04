@@ -19,8 +19,9 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use meerkat_auth_core::auth_oauth::{
-    DevicePollOutcome, OAuthEndpoints, PkcePair, exchange_authorization_code,
-    exchange_refresh_token, poll_device_code, request_device_code, run_loopback_callback,
+    DevicePollOutcome, OAuthEndpoints, OAuthTokenRequestFormat, PkcePair,
+    exchange_authorization_code, exchange_authorization_code_with_state, exchange_refresh_token,
+    poll_device_code, request_device_code, run_loopback_callback,
 };
 
 // --- Loopback callback ------------------------------------------------
@@ -144,6 +145,37 @@ async fn start_token_mock() -> (String, Arc<Mutex<Vec<TokenForm>>>) {
     (format!("http://{addr}/token"), captured)
 }
 
+#[derive(Clone, Default)]
+struct JsonTokenMock {
+    captured: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn json_token_handler(
+    State(state): State<JsonTokenMock>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    state.captured.lock().unwrap().push(body);
+    Json(serde_json::json!({
+        "access_token": "json-access",
+        "refresh_token": "json-refresh",
+        "expires_in": 3600,
+    }))
+}
+
+async fn start_json_token_mock() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let state = JsonTokenMock::default();
+    let captured = state.captured.clone();
+    let app = Router::new()
+        .route("/token", post(json_token_handler))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/token"), captured)
+}
+
 fn endpoints(token_url: String) -> OAuthEndpoints {
     OAuthEndpoints {
         client_id: "cid".into(),
@@ -152,6 +184,10 @@ fn endpoints(token_url: String) -> OAuthEndpoints {
         device_code_url: Some("https://example.com/device".into()),
         redirect_uri: "http://127.0.0.1:0/cb".into(),
         scopes: vec!["read".into(), "write".into()],
+        extra_authorize_params: Vec::new(),
+        token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+        include_state_in_token_exchange: false,
+        refresh_scopes: Vec::new(),
         extra_headers: Vec::new(),
     }
 }
@@ -202,6 +238,58 @@ async fn refresh_token_exchange_posts_grant_type_refresh_token() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured[0].grant_type, "refresh_token");
     assert_eq!(captured[0].refresh_token.as_deref(), Some("rt-abc"));
+}
+
+#[tokio::test]
+async fn json_token_exchange_posts_state_and_refresh_scope() {
+    let (token_url, captured) = start_json_token_mock().await;
+    let mut endpoints = endpoints(token_url);
+    endpoints.token_request_format = OAuthTokenRequestFormat::Json;
+    endpoints.include_state_in_token_exchange = true;
+    endpoints.refresh_scopes = vec!["org:create_api_key".into(), "user:profile".into()];
+    let pkce = PkcePair::generate_s256();
+
+    let missing_state = exchange_authorization_code(
+        &Client::new(),
+        &endpoints,
+        "code-xyz",
+        pkce.verifier.secret(),
+        None,
+    )
+    .await
+    .expect_err("providers that require token state must reject missing state");
+    assert!(matches!(
+        missing_state,
+        meerkat_auth_core::auth_oauth::OAuthError::InvalidConfig(_)
+    ));
+
+    let result = exchange_authorization_code_with_state(
+        &Client::new(),
+        &endpoints,
+        "code-xyz",
+        pkce.verifier.secret(),
+        None,
+        Some("state-abc"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.access_token, "json-access");
+
+    let refresh_result = exchange_refresh_token(&Client::new(), &endpoints, "refresh-abc", None)
+        .await
+        .unwrap();
+    assert_eq!(refresh_result.access_token, "json-access");
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["grant_type"], "authorization_code");
+    assert_eq!(captured[0]["state"], "state-abc");
+    assert_eq!(
+        captured[0]["code_verifier"],
+        pkce.verifier.secret().as_str()
+    );
+    assert_eq!(captured[1]["grant_type"], "refresh_token");
+    assert_eq!(captured[1]["scope"], "org:create_api_key user:profile");
 }
 
 // --- Device-code flow -------------------------------------------------

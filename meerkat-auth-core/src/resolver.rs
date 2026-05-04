@@ -268,6 +268,46 @@ fn oauth_lifecycle_marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn restore_fresh_oauth_lifecycle_from_marker(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &meerkat_core::handles::LeaseKey,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    tokens: &PersistedTokens,
+) -> Result<Option<meerkat_core::handles::AuthLeaseSnapshot>, ProviderAuthError> {
+    if snapshot.phase.is_some() || snapshot.credential_present || snapshot.generation != 0 {
+        return Ok(None);
+    }
+    let Some(publication) = meerkat_core::tokens_lifecycle_publication_with_explicit_expiry(tokens)
+    else {
+        return Err(stale_credential_error());
+    };
+    if publication.expires_at != meerkat_core::persisted_token_expires_at_epoch_secs(tokens) {
+        return Err(stale_credential_error());
+    }
+    let Some(generation) = publication.generation else {
+        return Err(stale_credential_error());
+    };
+    let Some(credential_published_at_millis) = publication.credential_published_at_millis else {
+        return Err(stale_credential_error());
+    };
+    let restored = meerkat_core::handles::AuthLeaseSnapshot {
+        phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
+        expires_at: (publication.expires_at != u64::MAX).then_some(publication.expires_at),
+        credential_present: true,
+        generation,
+        credential_published_at_millis: Some(credential_published_at_millis),
+    };
+    auth_lease
+        .restore_auth_lifecycle_snapshot(lease_key, &restored, restored.expires_at)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle restore failed: {e}"
+            ))
+        })?;
+    Ok(Some(auth_lease.snapshot(lease_key)))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn persisted_token_material_matches(left: &PersistedTokens, right: &PersistedTokens) -> bool {
     left.auth_mode == right.auth_mode
         && left.primary_secret == right.primary_secret
@@ -359,7 +399,17 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     let lifecycle = managed_store_lifecycle_from_phase(token_phase);
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        let snapshot = auth_lease.snapshot(&lease_key);
+        let mut snapshot = auth_lease.snapshot(&lease_key);
+        if is_oauth_login
+            && let Some(restored) = restore_fresh_oauth_lifecycle_from_marker(
+                auth_lease.as_ref(),
+                &lease_key,
+                &snapshot,
+                &tokens,
+            )?
+        {
+            snapshot = restored;
+        }
         if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
             return Err(user_reauth_required_error());
         }
@@ -2001,6 +2051,49 @@ mod tests {
             0,
             "a published marker without an explicit expiry must not rehydrate AuthMachine"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_fresh_runtime_restores_valid_lifecycle_marker() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
+        let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
+        let tokens = chatgpt_oauth_tokens("fresh-runtime-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let published_at = Some(12_345);
+        store
+            .save(
+                &key,
+                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &tokens,
+                    AuthLeaseTransition {
+                        generation: 1,
+                        credential_published_at_millis: published_at,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        let auth_lease = MutableAuthLeaseHandle::unknown();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+            .await
+            .expect("fresh CLI process should use a valid lifecycle-marked OAuth token");
+
+        assert_eq!(secret, "fresh-runtime-access");
+        assert_eq!(auth_lease.acquire_count(), 0);
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snapshot.expires_at, Some(expires_at));
+        assert!(snapshot.credential_present);
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.credential_published_at_millis, published_at);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

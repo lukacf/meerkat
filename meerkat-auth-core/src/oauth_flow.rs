@@ -17,7 +17,7 @@ use meerkat_core::{AuthBindingRef, AuthProfile, BackendProfile, CredentialSource
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::auth_oauth::OAuthEndpoints;
+use crate::auth_oauth::{OAuthEndpoints, OAuthTokenRequestFormat};
 use crate::auth_store::{
     PersistedAuthMode, credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
 };
@@ -36,8 +36,6 @@ const ANTHROPIC_SCOPES: &[&str] = &[
     "user:file_upload",
 ];
 const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
-const ANTHROPIC_BETA_HEADER_NAME: &str = "anthropic-beta";
-const ANTHROPIC_BETA_HEADER_VALUE: &str = "oauth-2025-04-20";
 
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -50,6 +48,7 @@ const OPENAI_SCOPES: &[&str] = &[
     "api.connectors.read",
     "api.connectors.invoke",
 ];
+const OPENAI_ORIGINATOR: &str = "codex_cli_rs";
 
 const GOOGLE_CLIENT_ID: &str = concat!(
     "6812558",
@@ -138,10 +137,11 @@ impl OAuthProviderIdentity {
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
                 scopes: strings(ANTHROPIC_SCOPES),
-                extra_headers: vec![(
-                    ANTHROPIC_BETA_HEADER_NAME.into(),
-                    ANTHROPIC_BETA_HEADER_VALUE.into(),
-                )],
+                extra_authorize_params: Vec::new(),
+                token_request_format: OAuthTokenRequestFormat::Json,
+                include_state_in_token_exchange: true,
+                refresh_scopes: strings(ANTHROPIC_SCOPES),
+                extra_headers: Vec::new(),
             },
             Self::AnthropicConsoleApiKey => OAuthEndpoints {
                 client_id: ANTHROPIC_CLIENT_ID.into(),
@@ -150,10 +150,11 @@ impl OAuthProviderIdentity {
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
                 scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
-                extra_headers: vec![(
-                    ANTHROPIC_BETA_HEADER_NAME.into(),
-                    ANTHROPIC_BETA_HEADER_VALUE.into(),
-                )],
+                extra_authorize_params: Vec::new(),
+                token_request_format: OAuthTokenRequestFormat::Json,
+                include_state_in_token_exchange: true,
+                refresh_scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
+                extra_headers: Vec::new(),
             },
             Self::OpenAiChatGpt => OAuthEndpoints {
                 client_id: OPENAI_CLIENT_ID.into(),
@@ -162,6 +163,14 @@ impl OAuthProviderIdentity {
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
                 scopes: strings(OPENAI_SCOPES),
+                extra_authorize_params: vec![
+                    ("id_token_add_organizations".into(), "true".into()),
+                    ("codex_cli_simplified_flow".into(), "true".into()),
+                    ("originator".into(), OPENAI_ORIGINATOR.into()),
+                ],
+                token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+                include_state_in_token_exchange: false,
+                refresh_scopes: Vec::new(),
                 extra_headers: Vec::new(),
             },
             Self::GoogleCodeAssist => OAuthEndpoints {
@@ -171,6 +180,10 @@ impl OAuthProviderIdentity {
                 device_code_url: Some(GOOGLE_DEVICE_CODE_URL.into()),
                 redirect_uri: redirect_uri.into(),
                 scopes: strings(GOOGLE_SCOPES),
+                extra_authorize_params: Vec::new(),
+                token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+                include_state_in_token_exchange: false,
+                refresh_scopes: Vec::new(),
                 extra_headers: Vec::new(),
             },
         };
@@ -2428,5 +2441,44 @@ mod tests {
         assert_eq!(resolved.identity, OAuthProviderIdentity::GoogleCodeAssist);
         assert!(resolved.endpoints.device_code_url.is_some());
         assert_eq!(resolved.client_secret, Some(GOOGLE_CLIENT_SECRET));
+    }
+
+    #[cfg(feature = "oauth")]
+    #[test]
+    fn openai_provider_resolution_matches_codex_authorize_contract() {
+        let resolved = resolve_oauth_provider("openai", "http://localhost:1455/auth/callback")
+            .expect("openai resolves");
+        let pkce = crate::auth_oauth::PkcePair::generate_s256();
+        let authorize_url = resolved
+            .endpoints
+            .authorize_url_with_pkce(&pkce.challenge, "state-abc");
+
+        assert_eq!(
+            resolved.endpoints.redirect_uri,
+            "http://localhost:1455/auth/callback"
+        );
+        assert_eq!(
+            resolved.endpoints.token_request_format,
+            OAuthTokenRequestFormat::FormUrlEncoded
+        );
+        assert!(
+            authorize_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback")
+        );
+        assert!(authorize_url.contains("id_token_add_organizations=true"));
+        assert!(authorize_url.contains("codex_cli_simplified_flow=true"));
+        assert!(authorize_url.contains("originator=codex_cli_rs"));
+    }
+
+    #[test]
+    fn anthropic_provider_resolution_matches_claude_code_token_contract() {
+        let resolved = resolve_oauth_provider("anthropic", "http://localhost:1455/callback")
+            .expect("anthropic resolves");
+
+        assert_eq!(
+            resolved.endpoints.token_request_format,
+            OAuthTokenRequestFormat::Json
+        );
+        assert!(resolved.endpoints.include_state_in_token_exchange);
+        assert_eq!(resolved.endpoints.refresh_scopes, strings(ANTHROPIC_SCOPES));
     }
 }

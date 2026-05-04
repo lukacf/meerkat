@@ -2,7 +2,7 @@
 
 use reqwest::Client;
 
-use super::{OAuthEndpoints, OAuthError, OAuthTokenResult};
+use super::{OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult};
 
 #[derive(serde::Deserialize)]
 struct TokenResponseWire {
@@ -25,6 +25,27 @@ pub async fn exchange_authorization_code(
     pkce_verifier: &str,
     client_secret: Option<&str>,
 ) -> Result<OAuthTokenResult, OAuthError> {
+    exchange_authorization_code_with_state(
+        http,
+        endpoints,
+        code,
+        pkce_verifier,
+        client_secret,
+        None,
+    )
+    .await
+}
+
+/// Exchange an authorization code while echoing the callback state for
+/// providers that require it in the token request.
+pub async fn exchange_authorization_code_with_state(
+    http: &Client,
+    endpoints: &OAuthEndpoints,
+    code: &str,
+    pkce_verifier: &str,
+    client_secret: Option<&str>,
+    state: Option<&str>,
+) -> Result<OAuthTokenResult, OAuthError> {
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
@@ -35,33 +56,13 @@ pub async fn exchange_authorization_code(
     if let Some(secret) = client_secret {
         form.push(("client_secret", secret.to_string()));
     }
-    let mut req = http.post(&endpoints.token_url).form(&form);
-    for (k, v) in &endpoints.extra_headers {
-        req = req.header(k, v);
+    if endpoints.include_state_in_token_exchange {
+        let state = state.ok_or_else(|| {
+            OAuthError::InvalidConfig("provider requires state in token exchange".into())
+        })?;
+        form.push(("state", state.to_string()));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| OAuthError::Network(e.to_string()))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(OAuthError::TokenEndpoint {
-            status: status.as_u16(),
-            body,
-        });
-    }
-    let wire: TokenResponseWire = resp
-        .json()
-        .await
-        .map_err(|e| OAuthError::Network(format!("decode: {e}")))?;
-    Ok(OAuthTokenResult {
-        access_token: wire.access_token,
-        refresh_token: wire.refresh_token,
-        id_token: wire.id_token,
-        expires_in_secs: wire.expires_in,
-        scope: wire.scope,
-    })
+    send_token_request(http, endpoints, &form).await
 }
 
 /// Exchange a refresh_token for a fresh access token.
@@ -79,7 +80,27 @@ pub async fn exchange_refresh_token(
     if let Some(secret) = client_secret {
         form.push(("client_secret", secret.to_string()));
     }
-    let mut req = http.post(&endpoints.token_url).form(&form);
+    if !endpoints.refresh_scopes.is_empty() {
+        form.push(("scope", endpoints.refresh_scopes.join(" ")));
+    }
+    send_token_request(http, endpoints, &form).await
+}
+
+async fn send_token_request(
+    http: &Client,
+    endpoints: &OAuthEndpoints,
+    params: &[(&str, String)],
+) -> Result<OAuthTokenResult, OAuthError> {
+    let mut req = match endpoints.token_request_format {
+        OAuthTokenRequestFormat::FormUrlEncoded => http.post(&endpoints.token_url).form(params),
+        OAuthTokenRequestFormat::Json => {
+            let body = params
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), serde_json::Value::String(value.clone())))
+                .collect::<serde_json::Map<_, _>>();
+            http.post(&endpoints.token_url).json(&body)
+        }
+    };
     for (k, v) in &endpoints.extra_headers {
         req = req.header(k, v);
     }

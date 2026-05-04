@@ -1,9 +1,10 @@
 //! Localhost loopback OAuth callback server.
 //!
 //! The host opens the authorize URL in the user's browser; the browser
-//! redirects to `http://127.0.0.1:<port>/callback?code=...&state=...`; this
-//! module binds an ephemeral port, parses the query, validates the state,
-//! and returns the code to the caller.
+//! redirects to the configured loopback callback URL. Anthropic and Gemini use
+//! ephemeral loopback ports; OpenAI ChatGPT mirrors Codex's fixed localhost
+//! callback contract. This module parses the query, validates the state, and
+//! returns the code to the caller.
 //!
 //! Reference-CLI parity: Codex `codex-rs/login/src/server.rs`, Gemini CLI
 //! `packages/core/src/code_assist/oauth2.ts:113-360`.
@@ -158,6 +159,16 @@ pub async fn run_loopback_callback(
 /// first, use `redirect_url` to ask their authority to start the flow, then
 /// call [`LoopbackBinding::expect_state`] before opening the browser.
 pub async fn bind_loopback_callback(path: &str) -> Result<LoopbackBinding, OAuthError> {
+    bind_loopback_callback_with_redirect(path, "127.0.0.1", &[0]).await
+}
+
+/// Bind a loopback listener while advertising a provider-specific redirect host
+/// and preferred ports. A port value of `0` asks the OS for an ephemeral port.
+pub async fn bind_loopback_callback_with_redirect(
+    path: &str,
+    redirect_host: &str,
+    preferred_ports: &[u16],
+) -> Result<LoopbackBinding, OAuthError> {
     let (result_tx, result_rx) = oneshot::channel();
     let expected_state = Arc::new(Mutex::new(None));
     let state = CallbackState {
@@ -168,13 +179,35 @@ pub async fn bind_loopback_callback(path: &str) -> Result<LoopbackBinding, OAuth
     let app = Router::new()
         .route(path, get(callback_handler))
         .with_state(state);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| OAuthError::InvalidConfig(format!("bind: {e}")))?;
+    let ports = if preferred_ports.is_empty() {
+        &[0][..]
+    } else {
+        preferred_ports
+    };
+    let mut last_error = None;
+    let mut listener = None;
+    for port in ports {
+        let bind_addr = format!("127.0.0.1:{port}");
+        match TcpListener::bind(&bind_addr).await {
+            Ok(bound) => {
+                listener = Some(bound);
+                break;
+            }
+            Err(err) => {
+                last_error = Some(format!("{bind_addr}: {err}"));
+            }
+        }
+    }
+    let listener = listener.ok_or_else(|| {
+        OAuthError::InvalidConfig(format!(
+            "bind: {}",
+            last_error.unwrap_or_else(|| "no callback ports configured".to_string())
+        ))
+    })?;
     let addr = listener
         .local_addr()
         .map_err(|e| OAuthError::InvalidConfig(format!("addr: {e}")))?;
-    let redirect_url = format!("http://{addr}{path}");
+    let redirect_url = format!("http://{}:{}{}", redirect_host, addr.port(), path);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {

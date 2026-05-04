@@ -29,8 +29,8 @@ use meerkat_core::{
     AuthBindingRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
 };
 use meerkat_providers::auth_oauth::{
-    DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code, poll_device_code,
-    request_device_code,
+    DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code_with_state,
+    poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
@@ -1176,12 +1176,13 @@ pub async fn complete_login(
     };
 
     let http = reqwest::Client::new();
-    let result = match exchange_authorization_code(
+    let result = match exchange_authorization_code_with_state(
         &http,
         &resolved.endpoints,
         &body.code,
         &flow.pkce_verifier,
         resolved.client_secret,
+        Some(&body.state),
     )
     .await
     {

@@ -18,8 +18,8 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
-    exchange_refresh_token,
+    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
+    exchange_authorization_code, exchange_refresh_token,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -35,6 +35,7 @@ pub const CHATGPT_ISSUER: &str = "https://auth.openai.com";
 pub const CHATGPT_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub const CHATGPT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const CHATGPT_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
+pub const CHATGPT_ORIGINATOR: &str = "codex_cli_rs";
 
 /// The scope Codex requests for a ChatGPT OAuth login.
 pub const CHATGPT_SCOPES: &[&str] = &[
@@ -68,6 +69,14 @@ pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         device_code_url: None,
         redirect_uri: redirect_uri.into(),
         scopes: CHATGPT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        extra_authorize_params: vec![
+            ("id_token_add_organizations".into(), "true".into()),
+            ("codex_cli_simplified_flow".into(), "true".into()),
+            ("originator".into(), CHATGPT_ORIGINATOR.into()),
+        ],
+        token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+        include_state_in_token_exchange: false,
+        refresh_scopes: Vec::new(),
         extra_headers: Vec::new(),
     };
     meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
@@ -366,6 +375,7 @@ mod tests {
         );
         assert_eq!(CHATGPT_TOKEN_URL, "https://auth.openai.com/oauth/token");
         assert_eq!(CHATGPT_REVOKE_URL, "https://auth.openai.com/oauth/revoke");
+        assert_eq!(CHATGPT_ORIGINATOR, "codex_cli_rs");
         assert_eq!(
             CHATGPT_SCOPES,
             &[

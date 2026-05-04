@@ -1338,18 +1338,10 @@ enum AuthCommands {
     Realms,
 
     /// List auth profiles + backends + bindings for one realm.
-    Profiles {
-        /// Realm id (as declared under [realm.<id>] in the config file).
-        #[arg(long, default_value = "dev")]
-        realm: String,
-    },
+    Profiles,
 
     /// Inspect a single auth profile.
     Profile {
-        /// Realm id.
-        #[arg(long, default_value = "dev")]
-        realm: String,
-
         /// Auth profile id.
         profile_id: String,
     },
@@ -1358,10 +1350,6 @@ enum AuthCommands {
     /// The realm config entry itself is declarative — this removes the
     /// secret/token material bound to the profile's owning `<realm>:<binding_id>`.
     ProfileDelete {
-        /// Realm id.
-        #[arg(long, default_value = "dev")]
-        realm: String,
-
         /// Auth profile id.
         profile_id: String,
 
@@ -1372,18 +1360,10 @@ enum AuthCommands {
 
     /// List all backend / auth / binding tuples across every realm in the
     /// active config.
-    Bindings {
-        /// Restrict to a specific realm id (defaults to all realms).
-        #[arg(long)]
-        realm: Option<String>,
-    },
+    Bindings,
 
     /// Dry-run a provider binding through the provider runtime registry.
     Test {
-        /// Realm id.
-        #[arg(long, default_value = "dev")]
-        realm: String,
-
         /// Binding id (from [realm.<realm>.binding.<id>]).
         binding_id: String,
     },
@@ -1391,10 +1371,6 @@ enum AuthCommands {
     /// Print auth profile status — reports realm config shape and the
     /// observed AuthMachine lease lifecycle state.
     Status {
-        /// Realm id.
-        #[arg(long, default_value = "dev")]
-        realm: String,
-
         /// Auth profile id.
         profile_id: String,
     },
@@ -1450,10 +1426,6 @@ enum AuthCommands {
     /// refresh as a side effect of resolving the binding — this
     /// subcommand is the explicit refresh-only entrypoint.
     Refresh {
-        /// Realm id.
-        #[arg(long, default_value = "dev")]
-        realm: String,
-
         /// Auth profile id.
         profile_id: String,
     },
@@ -2009,8 +1981,17 @@ async fn main() -> anyhow::Result<ExitCode> {
         .init();
 
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
+    let auth_config_realm = if matches!(&cli.command, Commands::Auth { .. }) {
+        cli.realm.clone()
+    } else {
+        None
+    };
 
-    let cli_scope = resolve_runtime_scope(&cli)?;
+    let cli_scope = if auth_config_realm.is_some() {
+        resolve_runtime_scope_with_realm(&cli, None)?
+    } else {
+        resolve_runtime_scope(&cli)?
+    };
 
     let result = match cli.command {
         Commands::Init => init_project_config().await,
@@ -2141,7 +2122,9 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models => handle_models_catalog(&cli_scope).await,
         Commands::Doctor => handle_doctor(&cli_scope).await,
-        Commands::Auth { command } => handle_auth_command(command, &cli_scope).await,
+        Commands::Auth { command } => {
+            handle_auth_command(command, &cli_scope, auth_config_realm.as_deref()).await
+        }
     };
 
     // Map result to exit code
@@ -2237,9 +2220,23 @@ async fn handle_run_command(
     let (config, config_base_dir) = load_config(scope).await?;
     let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
 
-    let model = model.unwrap_or_else(|| config.agent.model.clone());
+    let auth_binding_selection = auth_binding
+        .as_ref()
+        .map(|binding| resolve_cli_auth_binding_selection(&config, binding))
+        .transpose()?;
+    let model = model.unwrap_or_else(|| {
+        auth_binding_selection
+            .as_ref()
+            .and_then(|selection| selection.default_model.clone())
+            .unwrap_or_else(|| config.agent.model.clone())
+    });
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-    let resolved_provider = resolve_cli_provider(&config, &model, provider)?;
+    let resolved_provider = resolve_cli_provider_with_auth_binding(
+        &config,
+        &model,
+        provider,
+        auth_binding_selection.as_ref(),
+    )?;
 
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
@@ -2632,6 +2629,13 @@ fn new_cli_auth_lease() -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
 }
 
 fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
+    resolve_runtime_scope_with_realm(cli, cli.realm.clone())
+}
+
+fn resolve_runtime_scope_with_realm(
+    cli: &Cli,
+    realm_override: Option<String>,
+) -> anyhow::Result<RuntimeScope> {
     let default_selection = {
         let root = cli.context_root.clone().unwrap_or_else(|| {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -2640,7 +2644,7 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
         RealmSelection::WorkspaceDerived { root }
     };
     let selection =
-        RealmConfig::selection_from_inputs(cli.realm.clone(), cli.isolated, default_selection)?;
+        RealmConfig::selection_from_inputs(realm_override, cli.isolated, default_selection)?;
     let origin_hint = match &selection {
         RealmSelection::Explicit { .. } => RealmOrigin::Explicit,
         RealmSelection::Isolated => RealmOrigin::Generated,
@@ -2841,7 +2845,15 @@ async fn handle_models_catalog(scope: &RuntimeScope) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+fn auth_config_realm_or_default(config_realm_override: Option<&str>) -> String {
+    config_realm_override.unwrap_or("dev").to_string()
+}
+
+async fn handle_auth_command(
+    command: AuthCommands,
+    scope: &RuntimeScope,
+    config_realm_override: Option<&str>,
+) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
     match command {
         AuthCommands::Realms => {
@@ -2864,7 +2876,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 );
             }
         }
-        AuthCommands::Profiles { realm } => {
+        AuthCommands::Profiles => {
+            let realm = auth_config_realm_or_default(config_realm_override);
             let section = config.realm.get(&realm).ok_or_else(|| {
                 anyhow::anyhow!("Unknown realm '{realm}' — check your config file")
             })?;
@@ -2902,7 +2915,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 );
             }
         }
-        AuthCommands::Profile { realm, profile_id } => {
+        AuthCommands::Profile { profile_id } => {
+            let realm = auth_config_realm_or_default(config_realm_override);
             let section = config
                 .realm
                 .get(&realm)
@@ -2924,11 +2938,12 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 }
             }
         }
-        AuthCommands::Test { realm, binding_id } => {
+        AuthCommands::Test { binding_id } => {
             use meerkat_providers::auth_store::{
                 InMemoryCoordinator, TokenStore, TokenStoreBackend,
             };
 
+            let realm = auth_config_realm_or_default(config_realm_override);
             let section = config
                 .realm
                 .get(&realm)
@@ -2968,7 +2983,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 }
             }
         }
-        AuthCommands::Status { realm, profile_id } => {
+        AuthCommands::Status { profile_id } => {
+            let realm = auth_config_realm_or_default(config_realm_override);
             let section = config
                 .realm
                 .get(&realm)
@@ -3017,11 +3033,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 println!("note:        no live AuthMachine lease for '{realm}:{binding_id}'.");
             }
         }
-        AuthCommands::ProfileDelete {
-            realm,
-            profile_id,
-            yes,
-        } => {
+        AuthCommands::ProfileDelete { profile_id, yes } => {
+            let realm = auth_config_realm_or_default(config_realm_override);
             let section = config
                 .realm
                 .get(&realm)
@@ -3089,9 +3102,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 );
             }
         }
-        AuthCommands::Bindings {
-            realm: realm_filter,
-        } => {
+        AuthCommands::Bindings => {
+            let realm_filter = config_realm_override;
             if config.realm.is_empty() {
                 println!(
                     "No realms configured. Add a [realm.<id>] section to your config or use the \
@@ -3174,7 +3186,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 );
             }
         }
-        AuthCommands::Refresh { realm, profile_id } => {
+        AuthCommands::Refresh { profile_id } => {
+            let realm = auth_config_realm_or_default(config_realm_override);
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
                 refresh_auth_profile(&realm, &profile_id, &config, scope).await?;
@@ -3366,8 +3379,8 @@ async fn refresh_auth_profile(
 //   3. Colors + unicode glyphs when TTY; plain text otherwise. Honors
 //      NO_COLOR.
 //   4. Pre-flight: warn when the provider's env var is already set, so
-//      users understand the env-var path wins over OAuth until
-//      `--auth-binding` lands in the next CLI release.
+//      users understand the env-var path wins unless they run with
+//      `--auth-binding`.
 //   5. Provider selection: if no provider argument, present an
 //      interactive menu with one-line descriptions of each option.
 //   6. Specific, actionable error messages (user-denied, timeout, CSRF,
@@ -3474,6 +3487,27 @@ impl LoginProvider {
             }
             Self::OpenAi => meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             Self::Google => meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+        }
+    }
+
+    fn callback_path(self) -> &'static str {
+        match self {
+            Self::OpenAi => "/auth/callback",
+            Self::Anthropic | Self::Google => "/callback",
+        }
+    }
+
+    fn callback_redirect_host(self) -> &'static str {
+        match self {
+            Self::OpenAi => "localhost",
+            Self::Anthropic | Self::Google => "127.0.0.1",
+        }
+    }
+
+    fn callback_ports(self) -> &'static [u16] {
+        match self {
+            Self::OpenAi => &[1455, 1457],
+            Self::Anthropic | Self::Google => &[0],
         }
     }
 
@@ -4142,7 +4176,9 @@ async fn interactive_login(
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
-    use meerkat_providers::auth_oauth::{OAuthError, PkcePair, bind_loopback_callback};
+    use meerkat_providers::auth_oauth::{
+        OAuthError, PkcePair, bind_loopback_callback_with_redirect,
+    };
     use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreBackend};
 
     // --- Provider selection (interactive if none passed) -----------
@@ -4174,6 +4210,7 @@ async fn interactive_login(
     let auth_binding = target.auth_binding;
     let identity = provider.oauth_identity();
     let key = TokenKey::from_auth_binding(&auth_binding);
+    let cli_cmd = current_cli_command_name();
 
     eprintln!();
     eprintln!(
@@ -4193,12 +4230,13 @@ async fn interactive_login(
             "{} is set in your environment.",
             provider.env_var(),
         ));
-        print_hint("The env-var auth path will continue to handle `rkat run` without");
-        print_hint("`--auth-binding`. OAuth tokens are used when you invoke rkat with");
         print_hint(&format!(
-            "`--auth-binding dev:{}` (landing in the next CLI release).",
-            provider.binding_id(),
+            "The env-var auth path will continue to handle `{cli_cmd} run` without"
         ));
+        print_hint(&format!(
+            "`--auth-binding`. OAuth tokens are used when you invoke `{cli_cmd}` with"
+        ));
+        print_hint(&format!("`--auth-binding dev:{}`.", provider.binding_id(),));
     }
 
     // --- Step 1: bind loopback callback ---------------------------
@@ -4208,9 +4246,13 @@ async fn interactive_login(
         "Preparing a local callback to receive the authorization code",
     );
     let pkce = PkcePair::generate_s256();
-    let pending_callback = bind_loopback_callback("/callback")
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
+    let pending_callback = bind_loopback_callback_with_redirect(
+        provider.callback_path(),
+        provider.callback_redirect_host(),
+        provider.callback_ports(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
     let redirect_url = pending_callback.redirect_url.clone();
     let resolved = meerkat_providers::oauth_flow::resolve_oauth_provider(
         provider.oauth_alias(),
@@ -4300,12 +4342,13 @@ async fn interactive_login(
     // --- Step 4: exchange + persist ------------------------------
     print_step(4, 4, "Exchanging the code for access + refresh tokens");
     let http = reqwest::Client::new();
-    let result = meerkat_providers::auth_oauth::exchange_authorization_code(
+    let result = meerkat_providers::auth_oauth::exchange_authorization_code_with_state(
         &http,
         &endpoints,
         &outcome.code,
         &flow.pkce_verifier,
         client_secret,
+        Some(&outcome.state),
     )
     .await
     .map_err(|e| {
@@ -4353,7 +4396,7 @@ async fn interactive_login(
         },
     )
     .await?;
-    print_ok("Tokens persisted securely (keyring if available, file 0o600 otherwise).");
+    print_ok("Tokens persisted to the local credentials file (0o600 on Unix).");
 
     // --- Success summary + next steps -----------------------------
     let storage_location = dirs::config_dir()
@@ -4394,7 +4437,7 @@ async fn interactive_login(
     eprintln!(
         "  {}",
         auth_cyan(&format!(
-            "rkat auth test {} --realm dev",
+            "{cli_cmd} auth test --realm dev {}",
             provider.binding_id(),
         )),
     );
@@ -4406,23 +4449,23 @@ async fn interactive_login(
     eprintln!(
         "  {}",
         auth_cyan(&format!(
-            "rkat run -m {} \"hello\"",
-            provider.sample_model()
+            "{cli_cmd} run --auth-binding dev:{} \"hello\"",
+            provider.binding_id()
         )),
     );
     eprintln!(
         "  {}",
-        auth_dim(&format!(
-            "   → still uses env-var auth ({}) for now; OAuth path",
-            provider.env_var(),
-        )),
-    );
-    eprintln!(
-        "  {}",
-        auth_dim("     activates when --auth-binding lands in the next CLI release."),
+        auth_dim("   → run through the persisted OAuth credential you just created"),
     );
     eprintln!();
     Ok(())
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn current_cli_command_name() -> String {
+    std::env::args()
+        .next()
+        .unwrap_or_else(|| "rkat".to_string())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -10719,6 +10762,78 @@ fn resolve_cli_provider(
     ))
 }
 
+struct CliAuthBindingSelection {
+    provider: Provider,
+    default_model: Option<String>,
+}
+
+fn resolve_cli_auth_binding_selection(
+    config: &Config,
+    auth_binding: &AuthBindingRef,
+) -> anyhow::Result<CliAuthBindingSelection> {
+    let realm_id = auth_binding.realm.as_str();
+    let section = config
+        .realm
+        .get(realm_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm_id}'"))?;
+    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm_id, section)
+        .map_err(|e| anyhow::anyhow!("Realm config invalid for '{realm_id}': {e}"))?;
+    let (binding, backend, _auth) = realm_set.lookup_auth_binding(auth_binding).map_err(|e| {
+        anyhow::anyhow!(
+            "Auth binding '{}:{}' invalid: {e}",
+            auth_binding.realm.as_str(),
+            auth_binding.binding.as_str()
+        )
+    })?;
+    let provider = Provider::from_core(backend.provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Auth binding '{}:{}' resolves unsupported provider '{}'",
+            auth_binding.realm.as_str(),
+            auth_binding.binding.as_str(),
+            backend.provider.as_str()
+        )
+    })?;
+    Ok(CliAuthBindingSelection {
+        provider,
+        default_model: binding.default_model.clone(),
+    })
+}
+
+fn resolve_cli_provider_with_auth_binding(
+    config: &Config,
+    model: &str,
+    explicit: Option<Provider>,
+    auth_binding: Option<&CliAuthBindingSelection>,
+) -> anyhow::Result<Provider> {
+    if let Some(provider) = explicit {
+        let resolved = resolve_cli_provider(config, model, Some(provider))?;
+        if let Some(selection) = auth_binding
+            && selection.provider != resolved
+        {
+            anyhow::bail!(
+                "--auth-binding selects provider '{}', but --provider selected '{}'",
+                selection.provider.as_str(),
+                resolved.as_str()
+            );
+        }
+        return Ok(resolved);
+    }
+
+    if let Some(selection) = auth_binding {
+        if let Some(reason) = config.model_registry().ok().and_then(|registry| {
+            registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
+        }) {
+            anyhow::bail!(
+                "--auth-binding selects provider '{}', but {reason}",
+                selection.provider.as_str()
+            );
+        }
+        return Ok(selection.provider);
+    }
+
+    resolve_cli_provider(config, model, None)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -10891,8 +11006,8 @@ mod tests {
             resolve_configured_cli_interactive_oauth_target(LoginProvider::OpenAi, &reparsed)
                 .expect("reparsed OAuth login target must remain valid");
 
-        assert_eq!(target.connection_ref.realm.as_str(), "dev");
-        assert_eq!(target.connection_ref.binding.as_str(), "openai_oauth");
+        assert_eq!(target.auth_binding.realm.as_str(), "dev");
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
     }
 
@@ -12610,6 +12725,36 @@ default_model = "gemma"
                 assert_eq!(block_tools, vec!["shell"]);
             }
             _ => unreachable!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_auth_realm_option_does_not_select_runtime_realm() {
+        let cli = Cli::try_parse_from(["rkat", "auth", "test", "--realm", "dev", "google_oauth"])
+            .expect("auth test should parse");
+        assert_eq!(cli.realm.as_deref(), Some("dev"));
+        let scope = resolve_runtime_scope_with_realm(&cli, None)
+            .expect("auth command should resolve workspace runtime scope");
+        assert_ne!(
+            scope.locator.realm.as_str(),
+            "dev",
+            "auth command --realm is a config selector and must not override RuntimeScope"
+        );
+        match cli.command {
+            Commands::Auth {
+                command: AuthCommands::Test { binding_id },
+            } => assert_eq!(binding_id, "google_oauth"),
+            _ => unreachable!("expected auth test command"),
+        }
+
+        let cli = Cli::try_parse_from(["rkat", "auth", "test", "google_oauth"])
+            .expect("auth test should parse with default config realm");
+        assert!(cli.realm.is_none());
+        match cli.command {
+            Commands::Auth {
+                command: AuthCommands::Test { binding_id },
+            } => assert_eq!(binding_id, "google_oauth"),
+            _ => unreachable!("expected auth test command"),
         }
     }
 
@@ -15776,6 +15921,86 @@ supports_reasoning = true
                 && error.to_string().contains("not provider 'anthropic'")
                 && error.to_string().contains("gpt-5.4"),
             "error should identify the rejected provider/model pair: {error}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_provider_uses_auth_binding_provider() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "google_code_assist".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "gemini".to_string(),
+                backend_kind: "google_code_assist".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "google_oauth".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "gemini".to_string(),
+                auth_method: "google_oauth".to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: meerkat_core::AuthConstraints::default(),
+                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+            },
+        );
+        section.binding.insert(
+            "google_oauth".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "google_code_assist".to_string(),
+                auth_profile: "google_oauth".to_string(),
+                default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+                policy: meerkat_core::BindingPolicy::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+        let auth_binding = AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("google_oauth").expect("valid binding"),
+            profile: None,
+        };
+        let selection = resolve_cli_auth_binding_selection(&config, &auth_binding)
+            .expect("auth binding resolves");
+
+        assert_eq!(selection.provider, Provider::Gemini);
+        assert_eq!(
+            selection.default_model.as_deref(),
+            Some("gemini-3.1-flash-lite-preview")
+        );
+        assert_eq!(
+            resolve_cli_provider_with_auth_binding(
+                &config,
+                selection.default_model.as_deref().unwrap(),
+                None,
+                Some(&selection),
+            )
+            .expect("binding provider wins"),
+            Provider::Gemini
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_provider_rejects_explicit_provider_mismatching_auth_binding() {
+        let selection = CliAuthBindingSelection {
+            provider: Provider::Gemini,
+            default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+        };
+        let error = resolve_cli_provider_with_auth_binding(
+            &Config::default(),
+            "custom-provider-model",
+            Some(Provider::Anthropic),
+            Some(&selection),
+        )
+        .expect_err("explicit provider must match auth binding provider");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--auth-binding selects provider")
         );
     }
 

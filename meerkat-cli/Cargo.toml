@@ -49,7 +49,7 @@ meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini"
 meerkat-anthropic = { workspace = true, features = ["oauth"] }
 meerkat-openai = { workspace = true, features = ["oauth"] }
 meerkat-gemini = { workspace = true, features = ["oauth"] }
-meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
+meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }
 webbrowser = "1"
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }

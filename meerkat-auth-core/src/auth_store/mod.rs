@@ -79,6 +79,14 @@ pub enum TokenStoreBackend {
 
 impl TokenStoreBackend {
     pub fn default_auto() -> Result<Self, TokenStoreError> {
+        // The product-facing default is intentionally file-backed: macOS
+        // keychain reads can display app-access prompts during normal CLI
+        // runs. Callers that explicitly want OS keyring fallback can build
+        // `TokenStoreBackend::Auto` with their chosen service name.
+        Self::default_file()
+    }
+
+    pub fn default_keyring_auto() -> Result<Self, TokenStoreError> {
         let base = dirs::config_dir()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
         Ok(Self::Auto {
@@ -129,6 +137,24 @@ mod tests {
         let json = serde_json::to_string(&tokens).unwrap();
         let round: PersistedTokens = serde_json::from_str(&json).unwrap();
         assert_eq!(tokens, round);
+    }
+
+    #[test]
+    fn default_auto_uses_file_backend() {
+        let backend = TokenStoreBackend::default_auto().expect("default token store path");
+        assert!(
+            matches!(backend, TokenStoreBackend::File { .. }),
+            "default token store must not trigger OS keychain prompts"
+        );
+    }
+
+    #[test]
+    fn keyring_auto_stays_explicit() {
+        let backend = TokenStoreBackend::default_keyring_auto().expect("default token store path");
+        assert!(
+            matches!(backend, TokenStoreBackend::Auto { .. }),
+            "keyring fallback should remain available as an explicit backend"
+        );
     }
 
     #[test]

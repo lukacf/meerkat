@@ -1422,12 +1422,12 @@ impl AgentFactory {
 
     /// Create a new factory with the required session store path.
     ///
-    /// The default auto-detecting TokenStore is attached when available —
-    /// OAuth-backed bindings will read persisted tokens written by
-    /// `rkat auth login` / REST+RPC OAuth completion handlers out of the
-    /// box. If the default TokenStore location is unavailable (e.g.
-    /// no `$XDG_CONFIG_HOME`), the field stays `None` and OAuth
-    /// bindings surface `InteractiveLoginRequired`.
+    /// The default file-backed TokenStore is attached when available.
+    /// OAuth-backed bindings read persisted tokens written by `rkat auth login`
+    /// and REST/RPC OAuth completion handlers out of the box. If the default
+    /// TokenStore location is unavailable (for example no `$XDG_CONFIG_HOME`),
+    /// the field stays `None` and OAuth bindings surface
+    /// `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let token_store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
@@ -1512,7 +1512,7 @@ impl AgentFactory {
         self
     }
 
-    /// Convenience: attach an auto-detecting `TokenStore` at the user's
+    /// Convenience: attach the default file-backed `TokenStore` at the user's
     /// default credential directory ($XDG_CONFIG_HOME/meerkat/credentials).
     /// Surfaces (CLI / REST / RPC) call this during factory construction.
     #[cfg(not(target_arch = "wasm32"))]

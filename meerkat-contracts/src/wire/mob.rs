@@ -620,11 +620,7 @@ pub struct MobSpawnParams {
     pub inherited_tool_filter: Option<WireToolFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_profile: Option<WireMobProfile>,
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
 }
 
@@ -656,11 +652,7 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
 }
 
@@ -1696,13 +1688,9 @@ pub struct MobTurnStartParams {
     pub provider_params: Option<Value>,
     #[serde(default)]
     pub clear_provider_params: bool,
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
-    #[serde(default, alias = "clear_connection_ref")]
+    #[serde(default)]
     pub clear_auth_binding: bool,
 }
 

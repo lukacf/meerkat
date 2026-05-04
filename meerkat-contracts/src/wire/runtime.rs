@@ -1185,11 +1185,7 @@ pub struct WireRuntimeTurnMetadata {
     pub provider: Option<meerkat_core::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<WireKeepAlivePolicy>,
@@ -1217,7 +1213,7 @@ struct WireRuntimeTurnMetadataFields {
     provider: Option<meerkat_core::Provider>,
     #[serde(default)]
     provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default)]
     keep_alive: Option<WireKeepAlivePolicy>,
@@ -1239,7 +1235,7 @@ impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
         {
             (
                 take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &["clear_connection_ref"])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
             )
         } else {
             (false, false)

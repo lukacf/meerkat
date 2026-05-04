@@ -1755,7 +1755,7 @@ struct SpawnMemberArgs {
     /// When set, this member resolves credentials via the named
     /// realm + binding; otherwise the member uses env-default /
     /// config-realm fallback.
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 

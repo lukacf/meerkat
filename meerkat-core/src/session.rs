@@ -1507,11 +1507,7 @@ pub struct SessionMetadata {
     /// are rebuilt from the active realm connection set at resume time.
     /// Older persisted sessions without the field deserialize as `None`
     /// (backward compatible via `#[serde(default)]`).
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<crate::AuthBindingRef>,
 }
 
@@ -1545,11 +1541,7 @@ pub struct SessionLlmIdentity {
     /// Projection (dogma §1/§13): canonical owner is
     /// `SessionMetadata.auth_binding`; this field is the
     /// read/write projection used by hot-swap.
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<crate::AuthBindingRef>,
 }
 

@@ -208,26 +208,6 @@ fn auth_status_detail_wire_flattens_binding_identity() {
 }
 
 #[test]
-fn binding_identity_accepts_legacy_connection_ref_alias() {
-    let identity: WireBindingIdentity = serde_json::from_value(serde_json::json!({
-        "realm_id": "dev",
-        "binding_id": "default_openai",
-        "connection_ref": {
-            "realm": "dev",
-            "binding": "default_openai",
-        },
-    }))
-    .expect("legacy connection_ref alias should deserialize during transition");
-
-    assert_eq!(identity.auth_binding.realm.as_str(), "dev");
-    assert_eq!(identity.auth_binding.binding.as_str(), "default_openai");
-
-    let serialized = serde_json::to_value(identity).expect("serialize identity");
-    assert!(serialized.get("connection_ref").is_none());
-    assert_eq!(serialized["auth_binding"]["realm"], "dev");
-}
-
-#[test]
 fn auth_status_wire_rejects_unknown_lifecycle_state() {
     let status = serde_json::json!({
         "profile_id": "p1",

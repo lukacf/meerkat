@@ -350,7 +350,7 @@ pub struct MobSpawnParams {
     /// The mob runtime refuses ambient credential selection; callers
     /// that spawn live model-backed members must name the realm binding
     /// that owns auth resolution.
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
@@ -448,7 +448,7 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
@@ -1786,9 +1786,9 @@ pub struct MobTurnStartParams {
     pub provider_params: Option<serde_json::Value>,
     #[serde(default)]
     pub clear_provider_params: bool,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    #[serde(default, alias = "clear_connection_ref")]
+    #[serde(default)]
     pub clear_auth_binding: bool,
 }
 

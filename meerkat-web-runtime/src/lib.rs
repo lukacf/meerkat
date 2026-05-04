@@ -164,7 +164,7 @@ struct SessionConfig {
     model: String,
     /// Optional structural auth binding reference. When set, overrides the
     /// default provider-match from bootstrap-populated `config.realm`.
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     system_prompt: Option<String>,
@@ -2007,7 +2007,7 @@ struct MobSpawnHelperOptions {
     agent_identity: Option<String>,
     #[serde(default)]
     role_name: Option<String>,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
@@ -2023,7 +2023,7 @@ struct MobForkHelperOptions {
     agent_identity: Option<String>,
     #[serde(default)]
     role_name: Option<String>,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,

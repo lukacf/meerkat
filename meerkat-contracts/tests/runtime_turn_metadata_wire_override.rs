@@ -93,32 +93,6 @@ fn wire_metadata_legacy_clear_only_deserializes_as_clear_overrides() {
 }
 
 #[test]
-fn wire_metadata_accepts_legacy_connection_ref_aliases() {
-    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
-        "connection_ref": {
-            "action": "set",
-            "value": {
-                "realm": "dev",
-                "binding": "default",
-            },
-        },
-    }))
-    .expect("legacy connection_ref alias should deserialize during transition");
-
-    assert_eq!(
-        parsed.auth_binding,
-        Some(WireTurnMetadataOverride::Set(wire_auth_binding()))
-    );
-
-    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
-        "clear_connection_ref": true,
-    }))
-    .expect("legacy clear_connection_ref alias should deserialize during transition");
-
-    assert_eq!(parsed.auth_binding, Some(WireTurnMetadataOverride::Clear));
-}
-
-#[test]
 fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
     let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
         "provider_params": { "temperature": 0.2 },

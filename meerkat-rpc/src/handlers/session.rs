@@ -114,7 +114,7 @@ pub struct CreateSessionParams {
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
     /// Override the realm-scoped auth binding for this session.
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Structured skill keys to preload into the system prompt.
     #[serde(default)]

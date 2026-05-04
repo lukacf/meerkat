@@ -82,11 +82,11 @@ pub struct StartTurnParams {
     /// flows into `SessionBuildOptions.auth_binding`. Dogma §10
     /// inherit/set: `None` keeps the session's current binding;
     /// `Some(...)` sets a new one explicitly.
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Clear the durable auth binding. Omitted `auth_binding`
     /// inherits the current value; this flag explicitly disables it.
-    #[serde(default, alias = "clear_connection_ref")]
+    #[serde(default)]
     pub clear_auth_binding: bool,
 }
 

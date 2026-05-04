@@ -1242,7 +1242,6 @@ enum Commands {
         /// wave-b deletion of `AuthBindingRef::parse` / `Display`.
         #[arg(
             long = "auth-binding",
-            alias = "connection-ref",
             value_name = "REALM:BINDING[:PROFILE]",
             help_heading = "Auth options"
         )]

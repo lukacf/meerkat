@@ -36,11 +36,7 @@ pub struct CoreCreateParams {
     /// Phase 4c — realm-scoped binding reference. When set, the session
     /// is built through the realm connection set; when omitted, the
     /// legacy flat `provider + api_key` path is used.
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<super::connection::WireAuthBindingRef>,
 }
 

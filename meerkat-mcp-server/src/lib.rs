@@ -201,11 +201,7 @@ pub struct MeerkatRunInput {
     /// When set, the provider runtime registry resolves the binding's
     /// auth profile and backend profile through the standard
     /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
 }
 

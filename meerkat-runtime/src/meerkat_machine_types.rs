@@ -186,20 +186,12 @@ pub struct SessionLlmReconfigureRequest {
     /// hot-swap uses this binding to resolve credentials; when absent,
     /// the session's existing `SessionLlmIdentity.auth_binding` is preserved
     /// unless `clear_auth_binding` is true.
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Explicitly clear the session's durable auth binding reference. This is
     /// distinct from omitting `auth_binding`, which inherits the current
     /// binding for compatibility.
-    #[serde(
-        default,
-        alias = "clear_connection_ref",
-        skip_serializing_if = "is_false"
-    )]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub clear_auth_binding: bool,
 }
 

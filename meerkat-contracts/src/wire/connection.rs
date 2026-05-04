@@ -350,7 +350,6 @@ pub struct WireAuthStatus {
 pub struct WireBindingIdentity {
     pub realm_id: String,
     pub binding_id: String,
-    #[serde(alias = "connection_ref")]
     pub auth_binding: WireAuthBindingRef,
 }
 
@@ -380,7 +379,6 @@ pub struct WireAuthProfileCreated {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireAuthProfileDetail {
-    #[serde(alias = "connection_ref")]
     pub auth_binding: WireAuthBindingRef,
     pub binding_id: String,
     pub profile_id: String,

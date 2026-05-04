@@ -1342,11 +1342,7 @@ pub struct RuntimeTurnMetadata {
     pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
     /// Override, clear, or preserve the auth binding reference this turn must
     /// resolve against.
-    #[serde(
-        default,
-        alias = "connection_ref",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     /// Keep-alive policy for materialized resources for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1385,7 +1381,7 @@ struct RuntimeTurnMetadataFields {
     provider: Option<Provider>,
     #[serde(default)]
     provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
-    #[serde(default, alias = "connection_ref")]
+    #[serde(default)]
     auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     #[serde(default)]
     keep_alive: Option<KeepAlivePolicy>,
@@ -1407,7 +1403,7 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
         {
             (
                 take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &["clear_connection_ref"])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
             )
         } else {
             (false, false)

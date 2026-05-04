@@ -70,11 +70,14 @@ impl ScriptedEvent {
             ScriptedEvent::TurnCommitted => Some(Ok(Some(RealtimeSessionEvent::TurnCommitted))),
             ScriptedEvent::TurnCompleted { stop_reason } => {
                 Some(Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                    response_id: "mock_response".to_string(),
                     stop_reason,
                     usage: Default::default(),
                 })))
             }
-            ScriptedEvent::Interrupted => Some(Ok(Some(RealtimeSessionEvent::Interrupted))),
+            ScriptedEvent::Interrupted => Some(Ok(Some(RealtimeSessionEvent::Interrupted {
+                response_id: Some("mock_response".to_string()),
+            }))),
             ScriptedEvent::End => Some(Ok(None)),
         }
     }

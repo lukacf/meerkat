@@ -29,6 +29,7 @@ pub enum RealtimeTranscriptEvent {
         item_id: String,
         previous_item_id: Option<String>,
         role: RealtimeTranscriptRole,
+        response_id: Option<String>,
     },
     /// Provider finalized the transcript for a user input item.
     UserTranscriptFinal {
@@ -39,6 +40,7 @@ pub enum RealtimeTranscriptEvent {
     },
     /// Provider emitted an assistant text delta for an output item.
     AssistantTextDelta {
+        response_id: String,
         delta_id: String,
         item_id: String,
         previous_item_id: Option<String>,
@@ -48,6 +50,7 @@ pub enum RealtimeTranscriptEvent {
     /// Provider reported the assistant output item was truncated to the heard
     /// transcript prefix.
     AssistantTranscriptTruncated {
+        response_id: String,
         item_id: String,
         content_index: u32,
         text: String,
@@ -55,11 +58,12 @@ pub enum RealtimeTranscriptEvent {
     /// Provider turn reached a terminal boundary. The session decides which
     /// staged assistant items, if any, are now canonical.
     AssistantTurnCompleted {
+        response_id: String,
         stop_reason: StopReason,
         usage: Usage,
     },
     /// Provider turn was interrupted before terminal materialization.
-    AssistantTurnInterrupted,
+    AssistantTurnInterrupted { response_id: String },
 }
 
 /// Canonical message materialized by applying a realtime transcript event.
@@ -71,6 +75,7 @@ pub enum RealtimeTranscriptMaterializedMessage {
     },
     Assistant {
         item_id: String,
+        response_id: String,
         text: String,
         stop_reason: StopReason,
         usage: Usage,

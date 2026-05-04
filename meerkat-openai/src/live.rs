@@ -760,6 +760,13 @@ fn openai_realtime_item_transcript_identity(
     }
 }
 
+fn openai_realtime_item_id(item: &Item) -> Option<&str> {
+    match item {
+        Item::Message { id: Some(id), .. } | Item::McpCall { id: Some(id), .. } => Some(id),
+        _ => None,
+    }
+}
+
 const OPENAI_REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
 /// Sample rate OpenAI Realtime negotiates for PCM audio on both input and output.
 pub(crate) const OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
@@ -845,8 +852,10 @@ pub struct OpenAiRealtimeSession {
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
+    item_response: BTreeMap<String, String>,
     pending_output_audio_transcripts: BTreeMap<String, String>,
     pending_text_suppressions: VecDeque<String>,
+    active_response_id: Option<String>,
     response_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
@@ -886,8 +895,10 @@ impl OpenAiRealtimeSession {
             pending_events: VecDeque::new(),
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
+            item_response: BTreeMap::new(),
             pending_output_audio_transcripts: BTreeMap::new(),
             pending_text_suppressions: VecDeque::new(),
+            active_response_id: None,
             response_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
@@ -983,20 +994,36 @@ impl OpenAiRealtimeSession {
         self.item_previous.get(item_id).cloned().flatten()
     }
 
+    fn note_response_for_item(&mut self, response_id: &str, item_id: &str) {
+        self.active_response_id = Some(response_id.to_string());
+        self.item_response
+            .entry(item_id.to_string())
+            .or_insert_with(|| response_id.to_string());
+    }
+
+    fn response_id_for_item(&self, item_id: &str) -> Option<String> {
+        self.item_response.get(item_id).cloned()
+    }
+
     fn observe_transcript_item(
         &mut self,
         item_id: String,
         previous_item_id: Option<String>,
         role: RealtimeTranscriptRole,
+        response_id: Option<String>,
     ) -> RealtimeSessionEvent {
         self.item_previous
             .entry(item_id.clone())
             .or_insert_with(|| previous_item_id.clone());
+        if let Some(response_id) = response_id.as_deref() {
+            self.note_response_for_item(response_id, &item_id);
+        }
         RealtimeSessionEvent::RealtimeTranscript {
             event: RealtimeTranscriptEvent::ItemObserved {
                 item_id,
                 previous_item_id,
                 role,
+                response_id,
             },
         }
     }
@@ -1084,18 +1111,21 @@ impl OpenAiRealtimeSession {
 
     fn note_output_audio_transcript_delta(
         &mut self,
+        response_id: String,
         event_id: String,
         item_id: &str,
         content_index: u32,
         delta: String,
     ) -> RealtimeSessionEvent {
         self.mark_response_output_active();
+        self.note_response_for_item(&response_id, item_id);
         let key = openai_output_audio_transcript_key(item_id, content_index);
         self.pending_output_audio_transcripts
             .entry(key)
             .or_default()
             .push_str(&delta);
         RealtimeSessionEvent::OutputTextDeltaForItem {
+            response_id,
             delta_id: event_id,
             item_id: item_id.to_string(),
             previous_item_id: self.previous_item_id_for(item_id),
@@ -1124,12 +1154,14 @@ impl OpenAiRealtimeSession {
 
     fn note_output_audio_transcript_done(
         &mut self,
+        response_id: String,
         event_id: String,
         item_id: &str,
         content_index: u32,
         transcript: String,
     ) -> Option<RealtimeSessionEvent> {
         self.mark_response_output_active();
+        self.note_response_for_item(&response_id, item_id);
         let key = openai_output_audio_transcript_key(item_id, content_index);
         let seen = self
             .pending_output_audio_transcripts
@@ -1140,6 +1172,7 @@ impl OpenAiRealtimeSession {
         }
         if seen.is_empty() {
             return Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                response_id,
                 delta_id: event_id,
                 item_id: item_id.to_string(),
                 previous_item_id: self.previous_item_id_for(item_id),
@@ -1149,6 +1182,7 @@ impl OpenAiRealtimeSession {
         }
         transcript.strip_prefix(&seen).and_then(|suffix| {
             (!suffix.is_empty()).then(|| RealtimeSessionEvent::OutputTextDeltaForItem {
+                response_id,
                 delta_id: event_id,
                 item_id: item_id.to_string(),
                 previous_item_id: self.previous_item_id_for(item_id),
@@ -1178,7 +1212,7 @@ impl OpenAiRealtimeSession {
                 item,
                 ..
             } => openai_realtime_item_transcript_identity(&item).map(|(item_id, role)| {
-                self.observe_transcript_item(item_id, previous_item_id, role)
+                self.observe_transcript_item(item_id, previous_item_id, role, None)
             }),
             ServerEvent::InputAudioTranscriptionDelta { delta, .. } => {
                 Some(RealtimeSessionEvent::InputTranscriptPartial { text: delta })
@@ -1200,7 +1234,9 @@ impl OpenAiRealtimeSession {
                     self.response_interrupt_emitted = true;
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnStarted);
-                    Some(RealtimeSessionEvent::Interrupted)
+                    Some(RealtimeSessionEvent::Interrupted {
+                        response_id: self.active_response_id.clone(),
+                    })
                 } else {
                     Some(RealtimeSessionEvent::TurnStarted)
                 }
@@ -1237,16 +1273,19 @@ impl OpenAiRealtimeSession {
                         .push_back(RealtimeSessionEvent::TurnStarted);
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnCommitted);
-                    Some(RealtimeSessionEvent::Interrupted)
+                    Some(RealtimeSessionEvent::Interrupted {
+                        response_id: self.active_response_id.clone(),
+                    })
                 } else {
                     Some(RealtimeSessionEvent::TurnCommitted)
                 }
             }
-            ServerEvent::ResponseCreated { .. } => {
+            ServerEvent::ResponseCreated { response, .. } => {
                 // `response.created` proves the provider accepted a response,
                 // but it does not yet prove turn progress. Keep the adapter in
                 // a bounded waiting state until we see output, tool activity,
                 // or a terminal response event for this turn.
+                self.active_response_id = Some(response.id);
                 self.note_provider_response_acknowledged();
                 trace_openai_realtime_lifecycle("response.created");
                 None
@@ -1280,7 +1319,9 @@ impl OpenAiRealtimeSession {
                     response.status
                 ));
                 let stop_reason = openai_response_stop_reason(&response, observed_tool_call);
+                let response_id = response.id.clone();
                 let turn_completed = RealtimeSessionEvent::TurnCompleted {
+                    response_id: response_id.clone(),
                     stop_reason,
                     usage: openai_response_usage(response.usage.as_ref()),
                 };
@@ -1300,12 +1341,14 @@ impl OpenAiRealtimeSession {
                 {
                     self.response_interrupt_emitted = true;
                     self.pending_events.push_back(turn_completed);
-                    Some(RealtimeSessionEvent::Interrupted)
+                    Some(RealtimeSessionEvent::Interrupted {
+                        response_id: Some(response_id),
+                    })
                 } else {
                     Some(turn_completed)
                 }
             }
-            ServerEvent::ResponseCancelled { .. } => {
+            ServerEvent::ResponseCancelled { response, .. } => {
                 if self.awaiting_provider_response_after_commit {
                     trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
                     self.response_output_active = false;
@@ -1320,27 +1363,57 @@ impl OpenAiRealtimeSession {
                     None
                 } else {
                     self.response_interrupt_emitted = true;
-                    Some(RealtimeSessionEvent::Interrupted)
+                    Some(RealtimeSessionEvent::Interrupted {
+                        response_id: Some(response.id),
+                    })
                 }
             }
-            ServerEvent::ResponseOutputItemAdded { item, .. }
-            | ServerEvent::ResponseOutputItemDone { item, .. } => {
+            ServerEvent::ResponseOutputItemAdded {
+                response_id, item, ..
+            }
+            | ServerEvent::ResponseOutputItemDone {
+                response_id, item, ..
+            } => {
                 self.note_provider_response_progressed();
+                if let Some(item_id) = openai_realtime_item_id(&item) {
+                    self.note_response_for_item(&response_id, item_id);
+                }
+                if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item)
+                    && role == RealtimeTranscriptRole::Assistant
+                {
+                    return Ok(Some(self.observe_transcript_item(
+                        item_id,
+                        None,
+                        role,
+                        Some(response_id),
+                    )));
+                }
                 self.capture_mcp_call_item(&item)
             }
-            ServerEvent::ResponseMcpCallArgumentsDelta { item_id, delta, .. } => {
+            ServerEvent::ResponseMcpCallArgumentsDelta {
+                response_id,
+                item_id,
+                delta,
+                ..
+            } => {
                 self.note_provider_response_progressed();
+                self.note_response_for_item(&response_id, &item_id);
                 self.note_mcp_argument_delta(&item_id, delta);
                 None
             }
             ServerEvent::ResponseMcpCallArgumentsDone {
-                item_id, arguments, ..
+                response_id,
+                item_id,
+                arguments,
+                ..
             } => {
                 self.note_provider_response_progressed();
+                self.note_response_for_item(&response_id, &item_id);
                 self.note_mcp_argument_done(&item_id, arguments)
             }
             ServerEvent::ResponseOutputTextDelta {
                 event_id,
+                response_id,
                 item_id,
                 content_index,
                 delta,
@@ -1351,7 +1424,9 @@ impl OpenAiRealtimeSession {
                     None
                 } else {
                     self.mark_response_output_active();
+                    self.note_response_for_item(&response_id, &item_id);
                     Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id,
                         delta_id: event_id,
                         previous_item_id: self.previous_item_id_for(&item_id),
                         item_id,
@@ -1362,6 +1437,7 @@ impl OpenAiRealtimeSession {
             }
             ServerEvent::ResponseOutputAudioTranscriptDelta {
                 event_id,
+                response_id,
                 item_id,
                 content_index,
                 delta,
@@ -1369,6 +1445,7 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 Some(self.note_output_audio_transcript_delta(
+                    response_id,
                     event_id,
                     &item_id,
                     content_index,
@@ -1377,6 +1454,7 @@ impl OpenAiRealtimeSession {
             }
             ServerEvent::ResponseOutputAudioTranscriptDone {
                 event_id,
+                response_id,
                 item_id,
                 content_index,
                 transcript,
@@ -1384,15 +1462,22 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_output_audio_transcript_done(
+                    response_id,
                     event_id,
                     &item_id,
                     content_index,
                     transcript,
                 )
             }
-            ServerEvent::ResponseOutputAudioDelta { delta, .. } => {
+            ServerEvent::ResponseOutputAudioDelta {
+                response_id,
+                item_id,
+                delta,
+                ..
+            } => {
                 self.note_provider_response_progressed();
                 self.mark_response_output_active();
+                self.note_response_for_item(&response_id, &item_id);
                 Some(RealtimeSessionEvent::OutputAudioChunk {
                     chunk: RealtimeAudioChunk {
                         mime_type: OPENAI_REALTIME_AUDIO_MIME_TYPE.to_string(),
@@ -1403,12 +1488,15 @@ impl OpenAiRealtimeSession {
                 })
             }
             ServerEvent::ResponseFunctionCallArgumentsDone {
+                response_id,
+                item_id,
                 call_id,
                 name,
                 arguments,
                 ..
             } => {
                 self.note_provider_response_progressed();
+                self.note_response_for_item(&response_id, &item_id);
                 self.response_tool_call_observed = true;
                 Some(RealtimeSessionEvent::ToolCallRequested {
                     call_id,
@@ -1438,8 +1526,12 @@ impl OpenAiRealtimeSession {
                 // the audio-end fraction of the original duration. Providers
                 // that cannot supply an exact projection leave `None` and
                 // downstream projectors leave the existing transcript intact.
-                let truncated_text = self.pending_output_audio_transcripts.get(&item_id).cloned();
+                let truncated_text = self
+                    .pending_output_audio_transcripts
+                    .get(&openai_output_audio_transcript_key(&item_id, 0))
+                    .cloned();
                 Some(RealtimeSessionEvent::AssistantTranscriptTruncated {
+                    response_id: self.response_id_for_item(&item_id),
                     item_id,
                     audio_played_ms,
                     truncated_text,
@@ -3081,7 +3173,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
-            Some(RealtimeSessionEvent::Interrupted)
+            Some(RealtimeSessionEvent::Interrupted { .. })
         ));
         assert!(matches!(
             session.next_event().await.expect("completed"),
@@ -3734,7 +3826,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
-            Some(RealtimeSessionEvent::Interrupted)
+            Some(RealtimeSessionEvent::Interrupted { .. })
         ));
         assert!(matches!(
             session.next_event().await.expect("turn started"),
@@ -3775,7 +3867,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
-            Some(RealtimeSessionEvent::Interrupted)
+            Some(RealtimeSessionEvent::Interrupted { .. })
         ));
         assert!(matches!(
             session.next_event().await.expect("turn started"),
@@ -3828,7 +3920,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
-            Some(RealtimeSessionEvent::Interrupted)
+            Some(RealtimeSessionEvent::Interrupted { .. })
         ));
         assert!(matches!(
             session
@@ -3882,7 +3974,7 @@ mod tests {
                 .next_event()
                 .await
                 .expect("interrupted from speech_started"),
-            Some(RealtimeSessionEvent::Interrupted)
+            Some(RealtimeSessionEvent::Interrupted { .. })
         ));
         assert!(matches!(
             session.next_event().await.expect("turn started queued"),
@@ -4258,6 +4350,7 @@ mod tests {
         assert_eq!(
             opened.next_event().await.expect("buffered event"),
             Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                response_id: "resp_seed".to_string(),
                 delta_id: "evt_seed_buffered_delta".to_string(),
                 item_id: "item_seed".to_string(),
                 previous_item_id: None,

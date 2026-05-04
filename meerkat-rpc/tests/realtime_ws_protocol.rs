@@ -1326,6 +1326,7 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_assistant".to_string(),
                         delta_id: "evt_assistant_ready".to_string(),
                         item_id: "item_assistant".to_string(),
                         previous_item_id: Some("item_user".to_string()),
@@ -1333,6 +1334,7 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                         delta: "ready".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_assistant".to_string(),
                         delta_id: "evt_assistant_ready".to_string(),
                         item_id: "item_assistant".to_string(),
                         previous_item_id: Some("item_user".to_string()),
@@ -1348,6 +1350,7 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                         },
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_assistant".to_string(),
                         stop_reason: StopReason::EndTurn,
                         usage: meerkat_core::types::Usage::default(),
                     })),
@@ -1527,6 +1530,7 @@ async fn unkeyed_provider_transcript_events_are_projection_only_for_websocket() 
                         delta: "unkeyed assistant".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_unkeyed".to_string(),
                         stop_reason: StopReason::EndTurn,
                         usage: meerkat_core::types::Usage::default(),
                     })),
@@ -1667,6 +1671,7 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_assistant".to_string(),
                         delta_id: "evt_assistant_asking".to_string(),
                         item_id: "item_assistant".to_string(),
                         previous_item_id: Some("item_user".to_string()),
@@ -1674,10 +1679,12 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
                         delta: "asking ".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_assistant".to_string(),
                         stop_reason: StopReason::ToolUse,
                         usage: meerkat_core::types::Usage::default(),
                     })),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_assistant".to_string(),
                         delta_id: "evt_assistant_done".to_string(),
                         item_id: "item_assistant".to_string(),
                         previous_item_id: Some("item_user".to_string()),
@@ -1685,6 +1692,7 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
                         delta: "done".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_assistant".to_string(),
                         stop_reason: StopReason::EndTurn,
                         usage: meerkat_core::types::Usage::default(),
                     })),
@@ -1840,8 +1848,11 @@ async fn provider_interrupted_event_is_forwarded_as_public_channel_event() {
                             data: "AAEC".to_string(),
                         },
                     })),
-                    Ok(Some(RealtimeSessionEvent::Interrupted)),
+                    Ok(Some(RealtimeSessionEvent::Interrupted {
+                        response_id: Some("resp_audio".to_string()),
+                    })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_audio".to_string(),
                         stop_reason: StopReason::Cancelled,
                         usage: meerkat_core::types::Usage::default(),
                     })),
@@ -1969,8 +1980,11 @@ async fn cancelled_provider_turn_does_not_surface_public_completion_or_commit_pa
                     Ok(Some(RealtimeSessionEvent::OutputTextDelta {
                         delta: "partial".to_string(),
                     })),
-                    Ok(Some(RealtimeSessionEvent::Interrupted)),
+                    Ok(Some(RealtimeSessionEvent::Interrupted {
+                        response_id: None,
+                    })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_cancelled".to_string(),
                         stop_reason: StopReason::Cancelled,
                         usage: meerkat_core::types::Usage::default(),
                     })),
@@ -2134,13 +2148,16 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_interrupted".to_string(),
                         delta_id: "evt_assistant_interrupted".to_string(),
                         item_id: "item_assistant_1".to_string(),
                         previous_item_id: Some("item_user_1".to_string()),
                         content_index: 0,
                         delta: "the token is ".to_string(),
                     })),
-                    Ok(Some(RealtimeSessionEvent::Interrupted)),
+                    Ok(Some(RealtimeSessionEvent::Interrupted {
+                        response_id: Some("resp_interrupted".to_string()),
+                    })),
                     Ok(Some(RealtimeSessionEvent::TurnStarted)),
                     Ok(Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
                         item_id: "item_user_2".to_string(),
@@ -2150,6 +2167,7 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_final".to_string(),
                         delta_id: "evt_assistant_final_1".to_string(),
                         item_id: "item_assistant_2".to_string(),
                         previous_item_id: Some("item_user_2".to_string()),
@@ -2157,6 +2175,7 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                         delta: "amber lantern. ".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        response_id: "resp_final".to_string(),
                         delta_id: "evt_assistant_final_2".to_string(),
                         item_id: "item_assistant_2".to_string(),
                         previous_item_id: Some("item_user_2".to_string()),
@@ -2164,6 +2183,7 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                         delta: "birch seventeen.".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        response_id: "resp_final".to_string(),
                         stop_reason: StopReason::EndTurn,
                         usage: meerkat_core::types::Usage::default(),
                     })),

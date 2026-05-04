@@ -1755,7 +1755,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 }
                                                 RealtimeSessionEvent::InputTranscriptFinal { .. }
                                                 | RealtimeSessionEvent::InputTranscriptFinalForItem { .. } => Some("input_transcript_final"),
-                                                RealtimeSessionEvent::Interrupted => Some("interrupted"),
+                                                RealtimeSessionEvent::Interrupted { .. } => Some("interrupted"),
                                                 RealtimeSessionEvent::ToolCallRequested { .. } => Some("tool_call_requested"),
                                                 _ => None,
                                             };
@@ -3228,7 +3228,7 @@ fn classify_product_session_event(event: &RealtimeSessionEvent) -> ProductSessio
             | RealtimeSessionEvent::OutputVideoChunk { .. }
             | RealtimeSessionEvent::ToolCallRequested { .. }
     );
-    let interrupted = matches!(event, RealtimeSessionEvent::Interrupted);
+    let interrupted = matches!(event, RealtimeSessionEvent::Interrupted { .. });
     ProductSessionEventLifecycle {
         advances_projection_known_state,
         logical_turn_completed,
@@ -3657,52 +3657,58 @@ async fn handle_product_session_event(
         RealtimeSessionEvent::TurnCommitted => {
             Ok(vec![channel_event(RealtimeEvent::TurnCommitted)])
         }
-        RealtimeSessionEvent::TurnCompleted { stop_reason, usage } => {
-            match product_turn_completion_disposition(stop_reason) {
-                RealtimeTurnCompletionDisposition::Finalize => {
-                    append_realtime_transcript_event(
-                        runtime,
-                        binding,
-                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
-                            stop_reason,
-                            usage,
-                        },
-                    )
-                    .await?;
-                    Ok(vec![channel_event(RealtimeEvent::TurnCompleted)])
-                }
-                RealtimeTurnCompletionDisposition::SuppressKeepStaged => {
-                    append_realtime_transcript_event(
-                        runtime,
-                        binding,
-                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
-                            stop_reason,
-                            usage,
-                        },
-                    )
-                    .await?;
-                    Ok(Vec::new())
-                }
-                RealtimeTurnCompletionDisposition::SuppressDiscardStaged => {
-                    append_realtime_transcript_event(
-                        runtime,
-                        binding,
-                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
-                            stop_reason,
-                            usage,
-                        },
-                    )
-                    .await?;
-                    Ok(Vec::new())
-                }
+        RealtimeSessionEvent::TurnCompleted {
+            response_id,
+            stop_reason,
+            usage,
+        } => match product_turn_completion_disposition(stop_reason) {
+            RealtimeTurnCompletionDisposition::Finalize => {
+                append_realtime_transcript_event(
+                    runtime,
+                    binding,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                        response_id,
+                        stop_reason,
+                        usage,
+                    },
+                )
+                .await?;
+                Ok(vec![channel_event(RealtimeEvent::TurnCompleted)])
             }
-        }
+            RealtimeTurnCompletionDisposition::SuppressKeepStaged => {
+                append_realtime_transcript_event(
+                    runtime,
+                    binding,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                        response_id,
+                        stop_reason,
+                        usage,
+                    },
+                )
+                .await?;
+                Ok(Vec::new())
+            }
+            RealtimeTurnCompletionDisposition::SuppressDiscardStaged => {
+                append_realtime_transcript_event(
+                    runtime,
+                    binding,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                        response_id,
+                        stop_reason,
+                        usage,
+                    },
+                )
+                .await?;
+                Ok(Vec::new())
+            }
+        },
         RealtimeSessionEvent::OutputTextDelta { delta } => {
             Ok(vec![channel_event(RealtimeEvent::OutputTextDelta {
                 delta,
             })])
         }
         RealtimeSessionEvent::OutputTextDeltaForItem {
+            response_id,
             delta_id,
             item_id,
             previous_item_id,
@@ -3713,6 +3719,7 @@ async fn handle_product_session_event(
                 runtime,
                 binding,
                 meerkat_core::RealtimeTranscriptEvent::AssistantTextDelta {
+                    response_id,
                     delta_id,
                     item_id,
                     previous_item_id,
@@ -3735,13 +3742,15 @@ async fn handle_product_session_event(
                 chunk,
             })])
         }
-        RealtimeSessionEvent::Interrupted => {
-            append_realtime_transcript_event(
-                runtime,
-                binding,
-                meerkat_core::RealtimeTranscriptEvent::AssistantTurnInterrupted,
-            )
-            .await?;
+        RealtimeSessionEvent::Interrupted { response_id } => {
+            if let Some(response_id) = response_id {
+                append_realtime_transcript_event(
+                    runtime,
+                    binding,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id },
+                )
+                .await?;
+            }
             Ok(vec![channel_event(RealtimeEvent::Interrupted)])
         }
         RealtimeSessionEvent::ToolCallRequested {
@@ -3751,15 +3760,17 @@ async fn handle_product_session_event(
             tool_name,
         })]),
         RealtimeSessionEvent::AssistantTranscriptTruncated {
+            response_id,
             item_id,
             audio_played_ms,
             truncated_text,
         } => {
-            if let Some(text) = truncated_text.clone() {
+            if let (Some(response_id), Some(text)) = (response_id, truncated_text.clone()) {
                 append_realtime_transcript_event(
                     runtime,
                     binding,
                     meerkat_core::RealtimeTranscriptEvent::AssistantTranscriptTruncated {
+                        response_id,
                         item_id: item_id.clone(),
                         content_index: 0,
                         text,

@@ -53,6 +53,7 @@ pub enum RealtimeSessionEvent {
     TurnStarted,
     TurnCommitted,
     TurnCompleted {
+        response_id: String,
         stop_reason: StopReason,
         usage: Usage,
     },
@@ -60,6 +61,7 @@ pub enum RealtimeSessionEvent {
         delta: String,
     },
     OutputTextDeltaForItem {
+        response_id: String,
         delta_id: String,
         item_id: String,
         previous_item_id: Option<String>,
@@ -72,7 +74,9 @@ pub enum RealtimeSessionEvent {
     OutputVideoChunk {
         chunk: RealtimeVideoChunk,
     },
-    Interrupted,
+    Interrupted {
+        response_id: Option<String>,
+    },
     ToolCallRequested {
         call_id: String,
         tool_name: String,
@@ -82,6 +86,7 @@ pub enum RealtimeSessionEvent {
     /// `audio_played_ms` because the user barged in. `truncated_text` is the
     /// heard prefix, or `None` if the provider has not yet re-projected it.
     AssistantTranscriptTruncated {
+        response_id: Option<String>,
         item_id: String,
         audio_played_ms: u64,
         truncated_text: Option<String>,
@@ -128,7 +133,7 @@ impl RealtimeSessionEvent {
             Self::OutputVideoChunk { chunk } => RealtimeEvent::OutputVideoChunk {
                 chunk: chunk.clone(),
             },
-            Self::Interrupted => RealtimeEvent::Interrupted,
+            Self::Interrupted { .. } => RealtimeEvent::Interrupted,
             Self::ToolCallRequested {
                 call_id, tool_name, ..
             } => RealtimeEvent::ToolCallRequested {
@@ -136,6 +141,7 @@ impl RealtimeSessionEvent {
                 tool_name: tool_name.clone(),
             },
             Self::AssistantTranscriptTruncated {
+                response_id: _,
                 item_id,
                 audio_played_ms,
                 truncated_text,

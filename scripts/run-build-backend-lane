@@ -20,6 +20,7 @@ Lanes:
   e2e-system
   e2e-live
   e2e-smoke
+  e2e-auth
 EOF
 }
 
@@ -107,6 +108,12 @@ case "${lane}" in
       esac
     fi
     exec "${root}/scripts/e2e-smoke-lane"
+    ;;
+  e2e-auth)
+    if meerkat_buildbuddy_enabled; then
+      exec "${root}/scripts/buildbuddy-dev" e2e-auth
+    fi
+    exec "${cargo_bin}" e2e-auth
     ;;
   *)
     echo "unknown build backend lane: ${lane}" >&2

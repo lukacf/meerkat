@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory dogma-cleanup-gate dogma-cleanup-gate-fixtures dogma-cleanup-ci-gate verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory dogma-cleanup-gate dogma-cleanup-gate-fixtures dogma-cleanup-ci-gate verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -73,6 +73,11 @@ e2e-live:
 e2e-smoke:
 	@echo "$(YELLOW)Running e2e-smoke lane (ignored by default)...$(NC)"
 	@TEST="$(TEST)" SCENARIO="$(SCENARIO)" SUITE="$(SUITE)" scripts/run-build-backend-lane e2e-smoke
+
+# Release-grade auth smoke lane
+e2e-auth:
+	@echo "$(YELLOW)Running e2e-auth lane (ignored by default)...$(NC)"
+	@scripts/run-build-backend-lane e2e-auth
 
 # Live per-model catalog validation (ignored by default; on-demand / pre-release)
 e2e-models:
@@ -277,6 +282,10 @@ buildbuddy-e2e-live:
 buildbuddy-e2e-smoke:
 	@echo "$(YELLOW)Building BuildBuddy e2e-smoke foundation...$(NC)"
 	@TEST="$(TEST)" SCENARIO="$(SCENARIO)" SUITE="$(SUITE)" scripts/buildbuddy-dev e2e-smoke $(BUILDBUDDY_ARGS)
+
+buildbuddy-e2e-auth:
+	@echo "$(YELLOW)Running BuildBuddy e2e-auth lane...$(NC)"
+	@scripts/buildbuddy-dev e2e-auth $(BUILDBUDDY_ARGS)
 
 buildbuddy-agent-gate: buildbuddy-doctor
 	@echo "$(GREEN)Running BuildBuddy agent changed-path gate...$(NC)"
@@ -662,6 +671,7 @@ help:
 	@echo "  $(GREEN)e2e-live$(NC)      - Run targeted live-provider lane (ignored)"
 	@echo "  $(GREEN)e2e-smoke$(NC)     - Run kitchen-sink live smoke lane (ignored)"
 	@echo "                  Select with TEST=..., SCENARIO=..., or SUITE=...; set MEERKAT_E2E_EXECUTION_MODE=prebuilt for materialized artifacts"
+	@echo "  $(GREEN)e2e-auth$(NC)      - Run release-grade auth smoke lane (ignored)"
 	@echo "  $(GREEN)test-int-real$(NC) - Legacy alias for e2e-system"
 	@echo "  $(GREEN)test-e2e$(NC)      - Legacy alias for e2e-live + e2e-smoke"
 	@echo "  $(GREEN)test-all$(NC)      - Run all-feature fast suite"
@@ -694,6 +704,7 @@ help:
 	@echo "  $(GREEN)buildbuddy-e2e-system$(NC)- Run BuildBuddy e2e-system lane"
 	@echo "  $(GREEN)buildbuddy-e2e-live$(NC)- Run BuildBuddy e2e-live lane (requires provider keys)"
 	@echo "  $(GREEN)buildbuddy-e2e-smoke$(NC)- Build BuildBuddy e2e-smoke foundation"
+	@echo "  $(GREEN)buildbuddy-e2e-auth$(NC)- Run BuildBuddy e2e-auth lane"
 	@echo "  $(GREEN)buildbuddy-agent-gate$(NC)- Run BuildBuddy gate for changed agent files (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-ci-dispatch$(NC)- Dispatch optional BuildBuddy CI mode (BUILDBUDDY_CI_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-fast$(NC)- Run optional BuildBuddy fast test lane"

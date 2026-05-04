@@ -74,7 +74,12 @@ integration-real-tests = []
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic", "dep:meerkat-anthropic", "meerkat-providers/anthropic"]
-openai = ["meerkat-client/openai", "dep:meerkat-openai", "meerkat-providers/openai"]
+openai = [
+    "meerkat-client/openai",
+    "dep:meerkat-openai",
+    "meerkat-openai/oauth",
+    "meerkat-providers/openai",
+]
 openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
 gemini = ["meerkat-client/gemini", "dep:meerkat-gemini", "meerkat-providers/gemini"]
 all-providers = ["anthropic", "openai", "gemini"]

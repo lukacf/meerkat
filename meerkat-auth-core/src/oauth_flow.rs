@@ -66,6 +66,9 @@ const GOOGLE_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
 
+const TEST_OAUTH_ENDPOINT_OVERRIDE_ENV: &str = "MEERKAT_TEST_OAUTH_ENDPOINT_OVERRIDE";
+const TEST_OAUTH_BASE_URL_ENV: &str = "MEERKAT_TEST_OAUTH_BASE_URL";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OAuthProviderIdentity {
     AnthropicClaudeAi,
@@ -127,7 +130,7 @@ impl OAuthProviderIdentity {
     }
 
     pub fn endpoints(self, redirect_uri: impl Into<String>) -> OAuthEndpoints {
-        match self {
+        let endpoints = match self {
             Self::AnthropicClaudeAi => OAuthEndpoints {
                 client_id: ANTHROPIC_CLIENT_ID.into(),
                 authorize_url: ANTHROPIC_AUTHORIZE_URL.into(),
@@ -170,7 +173,8 @@ impl OAuthProviderIdentity {
                 scopes: strings(GOOGLE_SCOPES),
                 extra_headers: Vec::new(),
             },
-        }
+        };
+        apply_test_oauth_endpoint_override(self, endpoints)
     }
 }
 
@@ -211,6 +215,41 @@ pub fn resolve_oauth_provider(
         auth_mode: identity.auth_mode(),
         client_secret: identity.client_secret(),
     })
+}
+
+/// Apply the local OAuth fixture endpoint override used by release-grade auth
+/// smoke tests. Production code only observes this when both explicit
+/// `MEERKAT_TEST_*` environment variables are set.
+#[doc(hidden)]
+pub fn apply_test_oauth_endpoint_override(
+    identity: OAuthProviderIdentity,
+    mut endpoints: OAuthEndpoints,
+) -> OAuthEndpoints {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let enabled = std::env::var(TEST_OAUTH_ENDPOINT_OVERRIDE_ENV)
+            .map(|value| {
+                matches!(
+                    value.as_str(),
+                    "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+                )
+            })
+            .unwrap_or(false);
+        if !enabled {
+            return endpoints;
+        }
+        let Ok(base_url) = std::env::var(TEST_OAUTH_BASE_URL_ENV) else {
+            return endpoints;
+        };
+        let base_url = base_url.trim_end_matches('/');
+        let provider = identity.canonical_alias();
+        endpoints.authorize_url = format!("{base_url}/{provider}/authorize");
+        endpoints.token_url = format!("{base_url}/{provider}/token");
+        if endpoints.device_code_url.is_some() {
+            endpoints.device_code_url = Some(format!("{base_url}/{provider}/device/code"));
+        }
+    }
+    endpoints
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -68,7 +68,7 @@ pub const DEFAULT_LOOPBACK_REDIRECT: &str = "http://127.0.0.1:0/callback";
 
 /// Build endpoints for the Claude.ai subscription OAuth flow.
 pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    OAuthEndpoints {
+    let endpoints = OAuthEndpoints {
         client_id: CLAUDE_CLIENT_ID.into(),
         authorize_url: CLAUDE_AI_AUTHORIZE_URL.into(),
         token_url: TOKEN_URL.into(),
@@ -79,13 +79,17 @@ pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
             OAUTH_BETA_HEADER_NAME.into(),
             OAUTH_BETA_HEADER_VALUE.into(),
         )],
-    }
+    };
+    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicClaudeAi,
+        endpoints,
+    )
 }
 
 /// Build endpoints for the Console OAuth flow (used only for
 /// `oauth_to_api_key` provisioning).
 pub fn console_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    OAuthEndpoints {
+    let endpoints = OAuthEndpoints {
         client_id: CLAUDE_CLIENT_ID.into(),
         authorize_url: CONSOLE_AUTHORIZE_URL.into(),
         token_url: TOKEN_URL.into(),
@@ -96,7 +100,11 @@ pub fn console_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
             OAUTH_BETA_HEADER_NAME.into(),
             OAUTH_BETA_HEADER_VALUE.into(),
         )],
-    }
+    };
+    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
+        endpoints,
+    )
 }
 
 // ---------------------------------------------------------------------

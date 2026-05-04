@@ -241,6 +241,7 @@ if [[ -x scripts/run-build-backend-lane ]] &&
   grep -Fq 'scripts/run-build-backend-lane e2e-system' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane e2e-live' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane e2e-smoke' Makefile &&
+  grep -Fq 'scripts/run-build-backend-lane e2e-auth' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane lint' Makefile &&
   grep -Fq 'scripts/run-build-backend-lane test-all' Makefile &&
   grep -Fq 'buildbuddy-dev" build' scripts/run-build-backend-lane &&
@@ -255,6 +256,7 @@ if [[ -x scripts/run-build-backend-lane ]] &&
   grep -Fq 'e2e-system-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-dev &&
+  grep -Fq 'e2e-auth-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'BUILDBUDDY_DRY_RUN' scripts/buildbuddy-dev &&
   grep -Fq 'BUILDBUDDY_DRY_RUN=1' docs/architecture/buildbuddy-bazel-poc.md; then
   pass "Developer build, check, lint, and test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
@@ -350,6 +352,7 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'e2e-auth-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'machine-authority-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'rmat-audit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'seam-inventory-rbe' scripts/buildbuddy-bazel-poc &&

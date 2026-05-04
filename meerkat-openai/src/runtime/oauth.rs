@@ -61,7 +61,7 @@ pub type TokenCommitFn = Box<
 // ---------------------------------------------------------------------
 
 pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    OAuthEndpoints {
+    let endpoints = OAuthEndpoints {
         client_id: CHATGPT_CLIENT_ID.into(),
         authorize_url: CHATGPT_AUTHORIZE_URL.into(),
         token_url: CHATGPT_TOKEN_URL.into(),
@@ -69,7 +69,11 @@ pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         redirect_uri: redirect_uri.into(),
         scopes: CHATGPT_SCOPES.iter().map(|s| (*s).to_string()).collect(),
         extra_headers: Vec::new(),
-    }
+    };
+    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+        endpoints,
+    )
 }
 
 // ---------------------------------------------------------------------

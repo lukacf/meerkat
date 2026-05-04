@@ -22,6 +22,7 @@ Common commands:
   e2e-fast-rbe             Bazel-native fast e2e lane.
   e2e-live-rbe             Bazel-native live e2e lane.
   e2e-smoke-rbe            Build the Bazel-native smoke e2e foundation.
+  e2e-auth-rbe             Bazel-native release-grade auth smoke lane.
   machine-authority-rbe    Bazel-native machine authority lane.
   rmat-audit-rbe           Bazel-native RMAT + ownership audit lane.
   seam-inventory-rbe       Bazel-native strict seam inventory lane.
@@ -111,6 +112,11 @@ e2e_test_env=(
   --test_env=GEMINI_API_KEY
   --test_env=RKAT_GEMINI_API_KEY
   --test_env=GOOGLE_API_KEY
+  --test_env=GOOGLE_APPLICATION_CREDENTIALS
+  --test_env=MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON
+  --test_env=MEERKAT_E2E_AUTH_ANTHROPIC_MODEL
+  --test_env=MEERKAT_E2E_AUTH_GEMINI_MODEL
+  --test_env=MEERKAT_E2E_AUTH_VERTEX_CANARY
   --test_env=PATH
   --test_env=HOME
   --test_env=CARGO_HOME
@@ -245,6 +251,20 @@ case "${command}" in
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//tests/integration:e2e_live_lane_test"
+    extra_args+=(
+      "${e2e_test_env[@]}"
+      --test_arg=--ignored
+      --test_arg=--test-threads=1
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  e2e-auth-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tests/integration:e2e_auth_lane_test"
     extra_args+=(
       "${e2e_test_env[@]}"
       --test_arg=--ignored

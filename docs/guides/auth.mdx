@@ -143,6 +143,28 @@ rkat run --connection-ref prod:openai   "hello"
   </Step>
 </Steps>
 
+## Release auth smoke
+
+`make e2e-auth` is the CI-safe auth smoke lane. It drives Meerkat's
+browser OAuth plumbing against a local OAuth fixture, verifies token-store
+and AuthMachine lifecycle behavior across login, status, refresh, restart,
+resolve, and logout, and skips optional live-provider canaries when their
+seeded credentials are absent.
+
+Real third-party browser login pages remain a manual pre-release check.
+Do not automate provider-hosted OpenAI, Anthropic, or Google login pages in
+CI; those pages are intentionally subject to MFA, CAPTCHA, account policy,
+and provider UI changes.
+
+Manual browser-login release checklist:
+
+- Start login for the target provider.
+- Confirm the system browser opens the provider-hosted login or consent page.
+- Complete the callback and confirm Meerkat reports the login complete.
+- Check auth status and confirm the target binding is `valid`.
+- Run one tiny call through that binding.
+- Logout and confirm auth status is cleared and the credential is gone.
+
 ## Auth methods
 
 Each provider's runtime accepts a matrix of `(backend_kind,

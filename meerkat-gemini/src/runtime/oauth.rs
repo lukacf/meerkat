@@ -72,7 +72,7 @@ pub const CODE_ASSIST_SCOPES: &[&str] = &[
 // ---------------------------------------------------------------------
 
 pub fn code_assist_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    OAuthEndpoints {
+    let endpoints = OAuthEndpoints {
         client_id: CODE_ASSIST_CLIENT_ID.into(),
         authorize_url: GOOGLE_AUTHORIZE_URL.into(),
         token_url: GOOGLE_TOKEN_URL.into(),
@@ -83,7 +83,11 @@ pub fn code_assist_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints 
             .map(|s| (*s).to_string())
             .collect(),
         extra_headers: Vec::new(),
-    }
+    };
+    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
+        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+        endpoints,
+    )
 }
 
 // ---------------------------------------------------------------------

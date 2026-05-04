@@ -58,6 +58,10 @@ case "${1:-}" in
     ;;
 esac
 
+workspace_root="$(git rev-parse --show-toplevel)"
+source "${workspace_root}/scripts/build-backend-env"
+meerkat_load_local_secrets_env "${workspace_root}"
+
 if [[ -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
   key_line="$(grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?BUILDBUDDY_API_KEY=' "${HOME}/.zshrc" || true)"
   if [[ -n "${key_line}" ]]; then
@@ -82,8 +86,6 @@ if [[ -z "${BUILDBUDDY_API_KEY:-}" ]]; then
   echo "error: BUILDBUDDY_API_KEY is not set" >&2
   exit 1
 fi
-
-workspace_root="$(git rev-parse --show-toplevel)"
 
 if [[ -n "${BUILDBUDDY_BB:-}" ]]; then
   bb_bin="${BUILDBUDDY_BB}"

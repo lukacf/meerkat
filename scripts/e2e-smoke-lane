@@ -26,6 +26,9 @@ root="$(git rev-parse --show-toplevel)"
 cd "${root}"
 export WORKSPACE_ROOT="${root}"
 
+source "${root}/scripts/build-backend-env"
+meerkat_load_local_secrets_env "${root}"
+
 buildbuddy_enabled() {
   case "${MEERKAT_BUILDBUDDY:-}" in
     1|true|TRUE|yes|YES|on|ON|buildbuddy)

@@ -3430,14 +3430,6 @@ fn tool_dispatch_timeout_policy(policy: RealtimeToolTimeoutPolicy) -> ToolDispat
     }
 }
 
-fn canonical_tool_result_error_code(result: &meerkat_core::ToolResult) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(&result.text_content())
-        .ok()?
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-}
-
 async fn handle_product_session_tool_call(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
@@ -3478,8 +3470,7 @@ async fn handle_product_session_tool_call(
 
     match outcome_result {
         Ok(outcome) if outcome.result.is_error => {
-            let is_timeout = canonical_tool_result_error_code(&outcome.result)
-                .is_some_and(|code| code == "timeout");
+            let is_timeout = outcome.is_runtime_tool_timeout();
             let error_message = outcome.result.text_content();
             let _ = submit_product_session_tool_error(
                 runtime,
@@ -5189,6 +5180,15 @@ mod tests {
             !handler_source.contains("ToolError::timeout")
                 && !handler_source.contains("terminal_tool_outcome_for_error"),
             "websocket handler must not synthesize canonical timeout tool errors"
+        );
+        assert!(
+            handler_source.contains("is_runtime_tool_timeout"),
+            "websocket handler may only project timeouts from typed runtime dispatch outcome cause"
+        );
+        assert!(
+            !handler_source.contains("serde_json::from_str")
+                && !handler_source.contains("canonical_tool_result_error_code"),
+            "websocket handler must not classify timeout by parsing serialized tool-result text"
         );
         assert!(
             !handler_source.contains("tool exceeded budget"),

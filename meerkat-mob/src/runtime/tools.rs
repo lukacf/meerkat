@@ -551,11 +551,11 @@ impl MobOperatorToolDispatcher {
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
-        Ok(meerkat_core::ToolDispatchOutcome {
-            result: ToolResult::new(call.id.to_string(), content, false),
+        Ok(meerkat_core::ToolDispatchOutcome::new(
+            ToolResult::new(call.id.to_string(), content, false),
             async_ops,
-            session_effects: vec![],
-        })
+            vec![],
+        ))
     }
 
     fn member_ref_payload(

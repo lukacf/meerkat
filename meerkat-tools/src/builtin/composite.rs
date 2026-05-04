@@ -454,21 +454,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             Value::String(s) => s.clone(),
                             _ => serde_json::to_string(&value).unwrap_or_default(),
                         };
-                        return Ok(ToolDispatchOutcome {
-                            result: ToolResult::new(call.id.to_string(), content, false),
+                        return Ok(ToolDispatchOutcome::new(
+                            ToolResult::new(call.id.to_string(), content, false),
                             async_ops,
                             session_effects,
-                        });
+                        ));
                     }
                     ToolOutput::Blocks(blocks) => {
                         ToolResult::with_blocks(call.id.to_string(), blocks, false)
                     }
                 };
-                return Ok(ToolDispatchOutcome {
-                    result,
-                    async_ops,
-                    session_effects: vec![],
-                });
+                return Ok(ToolDispatchOutcome::new(result, async_ops, vec![]));
             }
         }
 
@@ -511,21 +507,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
                                 Value::String(s) => s.clone(),
                                 _ => serde_json::to_string(&value).unwrap_or_default(),
                             };
-                            return Ok(ToolDispatchOutcome {
-                                result: ToolResult::new(call.id.to_string(), content, false),
+                            return Ok(ToolDispatchOutcome::new(
+                                ToolResult::new(call.id.to_string(), content, false),
                                 async_ops,
                                 session_effects,
-                            });
+                            ));
                         }
                         ToolOutput::Blocks(blocks) => {
                             ToolResult::with_blocks(call.id.to_string(), blocks, false)
                         }
                     };
-                    return Ok(ToolDispatchOutcome {
-                        result,
-                        async_ops,
-                        session_effects: vec![],
-                    });
+                    return Ok(ToolDispatchOutcome::new(result, async_ops, vec![]));
                 }
             }
         }

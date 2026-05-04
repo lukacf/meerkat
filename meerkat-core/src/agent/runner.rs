@@ -483,6 +483,7 @@ where
 
         match dispatch_result {
             Ok(mut outcome) => {
+                outcome.clear_terminal_cause();
                 if outcome.result.tool_use_id.is_empty() {
                     outcome.result.tool_use_id = call.id;
                 }

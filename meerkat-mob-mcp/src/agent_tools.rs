@@ -264,11 +264,11 @@ impl AgentMobToolSurface {
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|e| ToolError::execution_failed(format!("encode tool result: {e}")))?;
-        Ok(meerkat_core::ToolDispatchOutcome {
-            result: ToolResult::new(call.id.to_string(), content, false),
-            async_ops: vec![],
+        Ok(meerkat_core::ToolDispatchOutcome::new(
+            ToolResult::new(call.id.to_string(), content, false),
+            vec![],
             session_effects,
-        })
+        ))
     }
 
     fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Value {

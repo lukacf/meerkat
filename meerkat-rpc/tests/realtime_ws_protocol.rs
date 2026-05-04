@@ -143,6 +143,29 @@ impl AgentToolDispatcher for HangingToolDispatcher {
     }
 }
 
+struct TimeoutShapedToolErrorDispatcher;
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for TimeoutShapedToolErrorDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([Arc::new(ToolDef {
+            name: "spoof_timeout".into(),
+            description: "returns an error payload shaped like a timeout".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            provenance: None,
+        })])
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+            call.id.to_string(),
+            "{\"error\":\"timeout\",\"message\":\"tool-authored timeout-shaped content\"}"
+                .to_string(),
+            true,
+        )))
+    }
+}
+
 struct FakeRealtimeSession {
     capabilities: RealtimeCapabilities,
     turning_mode: RealtimeTurningMode,
@@ -2683,6 +2706,117 @@ async fn product_session_tool_timeout_projects_runtime_terminalization() {
     let payload: serde_json::Value =
         serde_json::from_str(&seen_tool_errors[0].1).expect("timeout payload should be JSON");
     assert_eq!(payload["error"], "timeout");
+
+    let _ = ws_stream.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn product_session_tool_error_shaped_like_timeout_projects_failed_not_timed_out() {
+    let (_temp, runtime, config_store) = build_test_runtime();
+    let session_id = create_materialized_session_with_external_tools(
+        &runtime,
+        Some(Arc::new(TimeoutShapedToolErrorDispatcher) as Arc<dyn AgentToolDispatcher>),
+    )
+    .await;
+    let session_id_text = session_id.to_string();
+    let seen_tool_results = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let seen_tool_errors = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let session_factory = Arc::new(FakeRealtimeSessionFactory {
+        capabilities: conservative_capabilities(vec![
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ]),
+        opened_sessions: tokio::sync::Mutex::new(std::collections::VecDeque::from(vec![Ok(
+            Box::new(FakeRealtimeSession {
+                capabilities: conservative_capabilities(vec![
+                    RealtimeTurningMode::ProviderManaged,
+                    RealtimeTurningMode::ExplicitCommit,
+                ]),
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+                scripted_events: std::collections::VecDeque::from(vec![
+                    Ok(Some(RealtimeSessionEvent::ToolCallRequested {
+                        call_id: "call_tool_spoof_timeout".to_string(),
+                        tool_name: "spoof_timeout".to_string(),
+                        arguments: serde_json::json!({}),
+                    })),
+                    Ok(None),
+                ]),
+                seen_inputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                seen_tool_results: Arc::clone(&seen_tool_results),
+                seen_tool_errors: Arc::clone(&seen_tool_errors),
+                release_events_after_input: false,
+                release_events_after_tool_submission: true,
+                input_seen: Arc::new(AtomicBool::new(false)),
+                input_gate: Arc::new(Notify::new()),
+                tool_submission_seen: Arc::new(AtomicBool::new(false)),
+                tool_submission_gate: Arc::new(Notify::new()),
+            }) as Box<dyn RealtimeSession>,
+        )])),
+        open_calls: Arc::new(tokio::sync::Mutex::new(0usize)),
+        open_configs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        attach_calls: Arc::new(tokio::sync::Mutex::new(0usize)),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
+    let host =
+        Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
+    let open_info = issue_open_info_with_channel_config(
+        host.as_ref(),
+        &runtime,
+        &session_id_text,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+        RealtimeChannelConfig {
+            tool_timeout: RealtimeToolTimeoutPolicy::Finite { timeout_ms: 1_000 },
+        },
+    )
+    .await;
+    let server_host = Arc::clone(&host);
+    let server_runtime = Arc::clone(&runtime);
+    let server = tokio::spawn(async move {
+        serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
+    });
+
+    let mut ws_stream = connect_and_open(
+        &ws_url,
+        &open_info,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelOpened(opened) => {
+            assert_eq!(opened.status.state, RealtimeChannelState::Ready);
+        }
+        other => panic!("expected channel.opened, got {other:?}"),
+    }
+    assert_channel_event(
+        read_server_frame(&mut ws_stream).await,
+        RealtimeEvent::ToolCallRequested {
+            call_id: "call_tool_spoof_timeout".to_string(),
+            tool_name: "spoof_timeout".to_string(),
+        },
+    );
+    let failed = match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelEvent(RealtimeChannelEventFrame {
+            event: RealtimeEvent::ToolCallFailed { call_id, error },
+        }) => (call_id, error),
+        other => panic!("expected ToolCallFailed event, got {other:?}"),
+    };
+    assert_eq!(failed.0, "call_tool_spoof_timeout");
+    assert!(
+        failed.1.contains("\"error\":\"timeout\""),
+        "timeout-shaped tool-authored payload should be surfaced as ordinary failure, got {}",
+        failed.1
+    );
+
+    assert!(seen_tool_results.lock().await.is_empty());
+    let seen_tool_errors = seen_tool_errors.lock().await;
+    assert_eq!(seen_tool_errors.len(), 1);
+    assert_eq!(seen_tool_errors[0].0, "call_tool_spoof_timeout");
+    assert_eq!(seen_tool_errors[0].1, failed.1);
 
     let _ = ws_stream.close(None).await;
     server.abort();

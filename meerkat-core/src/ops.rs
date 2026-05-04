@@ -95,6 +95,57 @@ pub enum SessionEffect {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDispatchTerminalErrorKind {
+    NotFound,
+    Unavailable,
+    InvalidArguments,
+    ExecutionFailed,
+    Timeout,
+    AccessDenied,
+    Other,
+    CallbackPending,
+}
+
+impl From<&ToolError> for ToolDispatchTerminalErrorKind {
+    fn from(error: &ToolError) -> Self {
+        match error {
+            ToolError::NotFound { .. } => Self::NotFound,
+            ToolError::Unavailable { .. } => Self::Unavailable,
+            ToolError::InvalidArguments { .. } => Self::InvalidArguments,
+            ToolError::ExecutionFailed { .. } => Self::ExecutionFailed,
+            ToolError::Timeout { .. } => Self::Timeout,
+            ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::Other(_) => Self::Other,
+            ToolError::CallbackPending { .. } => Self::CallbackPending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDispatchTerminalCause {
+    RuntimeToolError { kind: ToolDispatchTerminalErrorKind },
+}
+
+impl ToolDispatchTerminalCause {
+    #[must_use]
+    pub fn runtime_tool_error(error: &ToolError) -> Self {
+        Self::RuntimeToolError {
+            kind: ToolDispatchTerminalErrorKind::from(error),
+        }
+    }
+
+    #[must_use]
+    pub fn is_runtime_tool_timeout(self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeToolError {
+                kind: ToolDispatchTerminalErrorKind::Timeout
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDispatchOutcome {
     /// The tool result for the conversation transcript.
@@ -110,6 +161,11 @@ pub struct ToolDispatchOutcome {
     /// changes (e.g., mob authority grants) emit typed effects here instead
     /// of calling `SessionService` from inside dispatch.
     pub session_effects: Vec<SessionEffect>,
+    /// Runtime/tool-dispatch-authored terminal cause.
+    ///
+    /// Tool-authored `is_error` results intentionally leave this empty; callers
+    /// must not infer canonical timeout/failure classes by parsing result text.
+    terminal_cause: Option<ToolDispatchTerminalCause>,
 }
 
 /// Optional timeout policy supplied by an external tool-dispatch caller.
@@ -141,13 +197,38 @@ impl ToolDispatchTimeoutPolicy {
 }
 
 impl ToolDispatchOutcome {
-    /// Create an outcome with no async operations or session effects (synchronous tool).
-    pub fn sync_result(result: crate::types::ToolResult) -> Self {
+    /// Create an outcome with explicit async operations and session effects.
+    pub fn new(
+        result: crate::types::ToolResult,
+        async_ops: Vec<AsyncOpRef>,
+        session_effects: Vec<SessionEffect>,
+    ) -> Self {
         Self {
             result,
-            async_ops: Vec::new(),
-            session_effects: Vec::new(),
+            async_ops,
+            session_effects,
+            terminal_cause: None,
         }
+    }
+
+    /// Create an outcome with no async operations or session effects (synchronous tool).
+    pub fn sync_result(result: crate::types::ToolResult) -> Self {
+        Self::new(result, Vec::new(), Vec::new())
+    }
+
+    #[must_use]
+    pub fn terminal_cause(&self) -> Option<ToolDispatchTerminalCause> {
+        self.terminal_cause
+    }
+
+    #[must_use]
+    pub fn is_runtime_tool_timeout(&self) -> bool {
+        self.terminal_cause
+            .is_some_and(ToolDispatchTerminalCause::is_runtime_tool_timeout)
+    }
+
+    pub(crate) fn clear_terminal_cause(&mut self) {
+        self.terminal_cause = None;
     }
 }
 
@@ -163,14 +244,17 @@ pub fn terminal_tool_outcome_for_error(
     tool_use_id: impl Into<String>,
     error: ToolError,
 ) -> ToolDispatchOutcome {
+    let terminal_cause = ToolDispatchTerminalCause::runtime_tool_error(&error);
     let payload = error.to_error_payload();
     let serialized = serde_json::to_string(&payload)
         .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
-    ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+    let mut outcome = ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
         tool_use_id.into(),
         serialized,
         true,
-    ))
+    ));
+    outcome.terminal_cause = Some(terminal_cause);
+    outcome
 }
 
 impl OperationId {
@@ -555,14 +639,15 @@ mod tests {
     #[test]
     fn tool_dispatch_outcome_with_session_effects() {
         let result = crate::types::ToolResult::new("t1".into(), "ok".into(), false);
-        let outcome = ToolDispatchOutcome {
+        let outcome = ToolDispatchOutcome::new(
             result,
-            async_ops: vec![],
-            session_effects: vec![SessionEffect::GrantManageMob {
+            vec![],
+            vec![SessionEffect::GrantManageMob {
                 mob_id: "mob-1".into(),
             }],
-        };
+        );
         assert_eq!(outcome.session_effects.len(), 1);
+        assert_eq!(outcome.terminal_cause(), None);
     }
 
     #[test]
@@ -570,5 +655,31 @@ mod tests {
         let result = crate::types::ToolResult::new("t1".into(), "ok".into(), false);
         let outcome = ToolDispatchOutcome::sync_result(result);
         assert!(outcome.session_effects.is_empty());
+        assert_eq!(outcome.terminal_cause(), None);
+    }
+
+    #[test]
+    fn terminal_tool_outcome_carries_runtime_timeout_cause() {
+        let outcome = terminal_tool_outcome_for_error("t1", ToolError::timeout("slow_tool", 50));
+
+        assert!(outcome.result.is_error);
+        assert!(outcome.is_runtime_tool_timeout());
+        assert_eq!(
+            outcome.terminal_cause(),
+            Some(ToolDispatchTerminalCause::RuntimeToolError {
+                kind: ToolDispatchTerminalErrorKind::Timeout,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_authored_error_result_has_no_runtime_terminal_cause() {
+        let result =
+            crate::types::ToolResult::new("t1".into(), "{\"error\":\"timeout\"}".into(), true);
+        let outcome = ToolDispatchOutcome::sync_result(result);
+
+        assert!(outcome.result.is_error);
+        assert!(!outcome.is_runtime_tool_timeout());
+        assert_eq!(outcome.terminal_cause(), None);
     }
 }

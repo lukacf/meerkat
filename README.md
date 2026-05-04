@@ -27,7 +27,7 @@
 
 Meerkat is a **library-first, modular agent harness** -- composable Rust crates that handle the hard parts of building agentic systems: state machines, retries, budgets, streaming, tool execution, MCP integration, and multi-agent coordination.
 
-In 0.6, that harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
+That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
 It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces).
 
@@ -72,7 +72,7 @@ Release artifacts include `rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rka
 
 ```bash
 rkat run "What is the capital of France?"
-rkat run --model gpt-5.4 "Explain async/await"
+rkat run --model gpt-5.5 "Explain async/await"
 rkat-mini "Summarize this repository"
 ```
 
@@ -106,7 +106,7 @@ rkat run --tools full \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-sonnet-4-6 --tools workspace \
+rkat run --model claude-opus-4-7 --tools workspace \
   --schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
@@ -240,7 +240,7 @@ Run `make buildbuddy-doctor` if remote build setup looks suspicious.
 
 **Web/WASM.** `@rkat/web` wraps `MeerkatRuntime`, browser sessions and mobs, typed event subscriptions, JS tools, structural `connectionRef`, provider proxy support, and host-page auth resolvers. Mobpacks can also be built into browser bundles with `rkat mob web build`.
 
-**Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`. Proposal-only targets such as `embed` and `compile` are not part of the shipped 0.6 surface.
+**Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`. Proposal-only targets such as `embed` and `compile` are not part of the shipped surface.
 
 **Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-mini` and `rkat-rpc-mini` are separate slim release surfaces.
 
@@ -276,7 +276,7 @@ graph TD
         WEB["@rkat/web + WASM"]
     end
 
-    RUNTIME["Shared runtime<br/>(MeerkatMachine)"]
+    RUNTIME["Shared Meerkat runtime"]
 
     CLI --> RUNTIME
     REST --> RUNTIME
@@ -337,7 +337,7 @@ Use an agent as a processing component in your service -- typed output, budget-l
 
 ```rust
 let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4-6")
+    .model("claude-opus-4-7")
     .system_prompt("You are an incident triage system.")
     .output_schema(OutputSchema::new(triage_schema)?)
     .budget(BudgetLimits::default().with_max_tokens(2000))
@@ -389,7 +389,7 @@ result = await client.create_session(
     f"Analyze these CI failures. Create a small mob for investigation, "
     f"scope shell access to the worker members, collect the findings, "
     f"and return structured JSON.\n\n{ci_log}",
-    model="claude-sonnet-4-6",
+    model="claude-opus-4-7",
     enable_shell=True,
     enable_mob=True,
     connection_ref={"realm": "ci", "binding": "default_anthropic"},
@@ -419,12 +419,12 @@ Mobs are definition/profile driven. Define the team structure and let the agent 
   "id": "audit-team",
   "profiles": {
     "analyst": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-opus-4-7",
       "peer_description": "Analyzes code for error handling gaps, security issues, and test coverage.",
       "tools": { "shell": true, "builtins": true, "comms": true }
     },
     "writer": {
-      "model": "gpt-5.4",
+      "model": "gpt-5.5",
       "peer_description": "Turns analysis findings into clear remediation plans.",
       "tools": { "builtins": true, "comms": true }
     }
@@ -450,13 +450,13 @@ import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 import { MeerkatRuntime } from "@rkat/web";
 
 const runtime = await MeerkatRuntime.init(wasm, {
-  model: "claude-sonnet-4-6",
+  model: "claude-opus-4-7",
   anthropicBaseUrl: "https://proxy.example.com/anthropic",
   anthropicApiKey: "proxy"
 });
 
 const session = runtime.createSession({
-  model: "claude-sonnet-4-6",
+  model: "claude-opus-4-7",
   connectionRef: { realm: "dev", binding: "default_anthropic" }
 });
 
@@ -501,7 +501,7 @@ export RKAT_GEMINI_API_KEY=...
 ```toml
 # .rkat/config.toml (project) or ~/.rkat/config.toml (user)
 [agent]
-model = "claude-sonnet-4-6"
+model = "claude-opus-4-7"
 max_tokens = 4096
 
 [provider_tools.anthropic]

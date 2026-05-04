@@ -64,7 +64,7 @@ same mob and prints the helper's final output when it is available.
 python3 main.py --help
 python3 main.py --text-probe
 python3 main.py --input-device 1 --output-device 2
-python3 main.py --helper-model gpt-5.2
+python3 main.py --helper-model gpt-5.5
 python3 main.py --realm realtime-demo
 ```
 

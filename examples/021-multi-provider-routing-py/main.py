@@ -54,7 +54,7 @@ async def main():
         if os.environ.get("ANTHROPIC_API_KEY"):
             models.append("claude-sonnet-4-6")
         if os.environ.get("OPENAI_API_KEY"):
-            models.append("gpt-5.2")
+            models.append("gpt-5.5")
         if os.environ.get("GEMINI_API_KEY"):
             models.append("gemini-3-flash-preview")
 
@@ -84,9 +84,7 @@ async def main():
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
                 model="claude-sonnet-4-6",
                 provider_params={
-                    "anthropic": {
-                        "thinking": {"budget_tokens": 5000}
-                    }
+                    "thinking": {"budget_tokens": 5000}
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -97,11 +95,9 @@ async def main():
             print("--- OpenAI with reasoning effort ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache?",
-                model="gpt-5.2",
+                model="gpt-5.5",
                 provider_params={
-                    "openai": {
-                        "reasoning_effort": "high"
-                    }
+                    "reasoning_effort": "high"
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -115,11 +111,11 @@ Model selection strategies:
 
 1. COST OPTIMIZATION
    - Simple tasks → claude-sonnet-4-6 or gemini-3-flash-preview
-   - Complex tasks → claude-opus-4-6 or gpt-5.2
+   - Complex tasks → claude-opus-4-7 or gpt-5.5
 
 2. CAPABILITY-BASED
    - Code generation → claude-sonnet-4-6 (strong at code)
-   - Reasoning → claude-opus-4-6 with thinking, or gpt-5.2 high effort
+   - Reasoning → claude-opus-4-7 with thinking, or gpt-5.5 high effort
    - Speed → gemini-3-flash-preview
 
 3. FALLBACK CHAIN
@@ -128,7 +124,7 @@ Model selection strategies:
    - Meerkat's retry policy handles transient failures
 
 4. PER-AGENT ROUTING (in mobs)
-   - Orchestrator: claude-opus-4-6 (complex planning)
+   - Orchestrator: claude-opus-4-7 (complex planning)
    - Workers: claude-sonnet-4-6 (execution)
    - Validators: gemini-3-flash-preview (fast checks)
 """)

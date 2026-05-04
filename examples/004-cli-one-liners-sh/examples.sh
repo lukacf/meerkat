@@ -6,7 +6,7 @@
 #
 # What you'll learn:
 # - Running single-turn prompts
-# - Managing sessions (create, resume, list, read, archive)
+# - Managing sessions (create, resume, list, show, delete)
 # - Using realms for isolation
 # - Configuring the runtime from the command line
 #
@@ -57,24 +57,19 @@ $RKAT run "List three benefits of Rust. Be concise."
 
 echo ""
 echo "=== 2. Create a session and continue it ==="
-SESSION_OUTPUT=$($RKAT run "Remember: my favorite color is blue." 2>&1)
-echo "$SESSION_OUTPUT"
-# Extract session ID from output (rkat prints it to stderr)
-SESSION_ID=$(echo "$SESSION_OUTPUT" | sed -n 's/.*Session: \([a-f0-9-]*\).*/\1/p' | head -1)
+$RKAT run "Remember: my favorite color is blue."
 
-if [ -n "$SESSION_ID" ]; then
-    echo ""
-    echo "=== 3. Resume the session ==="
-    $RKAT resume "$SESSION_ID" "What is my favorite color?"
-fi
+echo ""
+echo "=== 3. Resume the latest session ==="
+$RKAT run --resume last "What is my favorite color?"
 
 echo ""
 echo "=== 4. List sessions ==="
-$RKAT sessions list
+$RKAT session list
 
 echo ""
 echo "=== 5. Isolated realm (ephemeral workspace) ==="
-$RKAT --isolated run "This session lives in its own isolated realm."
+$RKAT run --isolated "This session lives in its own isolated realm."
 
 echo ""
 echo "=== 6. Configuration from CLI ==="

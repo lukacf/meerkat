@@ -6,6 +6,7 @@ WORK="$ROOT/.work"
 MOB_DIR="$WORK/release-triage"
 PACK="$WORK/release-triage.mobpack"
 KEY="$WORK/release.key"
+SIGNER_ID="release-triage-demo"
 WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
 
 resolve_rkat() {
@@ -55,7 +56,7 @@ capabilities = ["comms"]
 
 [models]
 default = "claude-sonnet-4-6"
-lead = "claude-opus-4-6"
+lead = "claude-opus-4-7"
 TOML
 
 cat > "$MOB_DIR/config/defaults.toml" <<'TOML'
@@ -74,7 +75,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
   "orchestrator": { "profile": "lead" },
   "profiles": {
     "lead": {
-      "model": "claude-opus-4-6",
+      "model": "claude-opus-4-7",
       "skills": ["lead-playbook"],
       "peer_description": "Release lead who owns severity, decisions, and executive updates",
       "external_addressable": true,
@@ -238,7 +239,7 @@ printf '0707070707070707070707070707070707070707070707070707070707070707' > "$KE
 
 echo ""
 echo "==> Packing and signing portable artifact"
-"$RKAT" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY"
+"$RKAT" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY" --signer-id "$SIGNER_ID"
 
 echo ""
 echo "==> Inspecting artifact contents"

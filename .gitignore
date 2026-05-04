@@ -26,6 +26,7 @@
 # Temporary files
 nohup.out
 .release-hook-done
+examples/*/.work/
 .rct/*
 !.rct/round5/
 !.rct/round5/**
@@ -37,6 +38,7 @@ test-project/
 vendor
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 *.pyo

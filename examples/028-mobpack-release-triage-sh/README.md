@@ -40,7 +40,7 @@ with:
 ## Concepts
 
 - `rkat mob pack` for artifact creation from generated mob source
-- `--sign` to attach provenance to the packed artifact
+- `--sign` / `--signer-id` to attach provenance to the packed artifact
 - `rkat mob inspect` to see what was embedded
 - `rkat mob validate` to check the artifact contract before use
 - `rkat mob deploy` to run the same signed artifact with a real prompt

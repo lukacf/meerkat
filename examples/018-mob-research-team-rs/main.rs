@@ -33,7 +33,7 @@ id = "research_team"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -124,7 +124,7 @@ id = "market-research"
 orchestrator = "lead-analyst"
 
 [profiles.lead-analyst]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["research-lead"]
 peer_description = "Lead analyst -- defines research questions, synthesizes findings"
 external_addressable = true

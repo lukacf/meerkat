@@ -199,10 +199,20 @@ export interface ConnectOptions {
   userConfigRoot?: string;
 }
 
+interface WireSkillKey {
+  [key: string]: string;
+  source_uuid: string;
+  skill_name: string;
+}
+
+interface WireSkillRef extends WireSkillKey {
+  kind: "structured";
+}
+
 /**
- * Normalize a structured SkillRef to the wire format { source_uuid, skill_name }.
+ * Normalize a structured SkillRef to the bare SkillKey wire format.
  */
-function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: string } {
+function normalizeSkillKey(ref: SkillRef): WireSkillKey {
   if (
     ref === null ||
     typeof ref !== "object" ||
@@ -214,9 +224,14 @@ function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: st
   return { source_uuid: ref.sourceUuid, skill_name: ref.skillName };
 }
 
-function skillRefsToWire(refs: SkillRef[] | undefined): Array<{ source_uuid: string; skill_name: string }> | undefined {
+function skillKeysToWire(refs: SkillRef[] | undefined): WireSkillKey[] | undefined {
   if (!refs) return undefined;
-  return refs.map(normalizeSkillRef);
+  return refs.map(normalizeSkillKey);
+}
+
+function skillRefsToWire(refs: SkillRef[] | undefined): WireSkillRef[] | undefined {
+  const keys = skillKeysToWire(refs);
+  return keys?.map((key) => ({ kind: "structured", ...key }));
 }
 
 function setIfDefined<T extends object, K extends keyof T>(
@@ -3188,7 +3203,7 @@ export class MeerkatClient {
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams != null) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) {
-      params.preload_skills = skillRefsToWire(options.preloadSkills);
+      params.preload_skills = skillKeysToWire(options.preloadSkills);
     }
     const wireRefs = skillRefsToWire(options.skillRefs);
     if (wireRefs) params.skill_refs = wireRefs;

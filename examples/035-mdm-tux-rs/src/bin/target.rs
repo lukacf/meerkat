@@ -2405,7 +2405,7 @@ mod tests {
         let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
 
         let req = CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
             render_metadata: None,
             system_prompt: Some("test target".to_string()),
@@ -2474,7 +2474,7 @@ mod tests {
             &surface.service,
             &surface.runtime_adapter,
             None,
-            "gpt-5.2",
+            "gpt-5.5",
             "test",
             &surface.mob_state,
             "openai",
@@ -2550,7 +2550,7 @@ mod tests {
             .await
             .unwrap();
         let req = CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text(String::new()),
             render_metadata: None,
             system_prompt: Some("cleanup".to_string()),
@@ -2579,7 +2579,7 @@ mod tests {
 
         surface
             .mob_state
-            .get_or_create_implicit_mob_for_bridge_session(&session_id.to_string(), "gpt-5.2")
+            .get_or_create_implicit_mob_for_bridge_session(&session_id.to_string(), "gpt-5.5")
             .await
             .unwrap();
         assert!(
@@ -2666,7 +2666,7 @@ mod tests {
             &surface.service,
             &surface.runtime_adapter,
             None,
-            "gpt-5.2",
+            "gpt-5.5",
             "test background shell",
             &surface.mob_state,
             "openai",
@@ -2697,7 +2697,14 @@ mod tests {
                     skill_references: None,
                     flow_tool_overlay: None,
                     pre_turn_context_appends: Vec::new(),
-                    turn_metadata: None,
+                    turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
                 },
             )
             .await
@@ -2774,7 +2781,7 @@ mod tests {
 
         let capture2: Arc<CaptureClient> = Arc::new(CaptureClient::default());
         let req2 = CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             render_metadata: None,
             system_prompt: Some("test".into()),
@@ -2878,7 +2885,7 @@ mod tests {
             &surface.service,
             &surface.runtime_adapter,
             None,
-            "gpt-5.2",
+            "gpt-5.5",
             "test",
             &surface.mob_state,
             "openai",
@@ -2921,7 +2928,7 @@ mod tests {
         ));
 
         let req = CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             render_metadata: None,
             system_prompt: Some("test".into()),

@@ -6,6 +6,11 @@ WEB_DIR="$ROOT/web"
 WEB_DIST="$WEB_DIR/dist"
 REPO_ROOT="$(cd "$ROOT/../.." && pwd)"
 
+if [[ -x "$REPO_ROOT/scripts/repo-cargo" ]]; then
+  REPO_CARGO_HOME="$("$REPO_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_HOME=//p')"
+  export PATH="$REPO_CARGO_HOME/bin:$PATH"
+fi
+
 if [[ "${1:-}" == "--clean" ]]; then
   echo "Cleaning generated web artifacts..."
   rm -rf "$WEB_DIR/public/meerkat-pkg" "$WEB_DIST"

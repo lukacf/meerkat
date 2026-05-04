@@ -17,7 +17,10 @@ export ANTHROPIC_API_KEY=sk-...
 export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 
 # Install/build local SDK dependencies
-python3 -m pip install -e sdks/python
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e sdks/python
 npm --prefix sdks/typescript install
 npm --prefix sdks/typescript run build
 
@@ -180,7 +183,10 @@ ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
 
 ### Python Examples
 ```bash
-python3 -m pip install -e sdks/python
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e sdks/python
 ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
 export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ```

@@ -33,7 +33,7 @@ id = "coding_swarm"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -129,7 +129,7 @@ id = "my-dev-team"
 orchestrator = "architect"
 
 [profiles.architect]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["system-design"]
 peer_description = "System architect and task coordinator"
 external_addressable = true

@@ -375,72 +375,17 @@ pub enum AuthStatusRehydrateError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn oauth_marker_payload_valid_for_status(tokens: &PersistedTokens) -> bool {
-    let Some(publication) = tokens_lifecycle_publication_with_explicit_expiry(tokens) else {
-        return false;
-    };
-    publication.expires_at == persisted_token_expires_at_epoch_secs(tokens)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn auth_status_snapshot_allows_oauth_marker_rehydrate(
-    now: DateTime<Utc>,
-    snapshot: &AuthLeaseSnapshot,
-) -> bool {
-    if AuthStatusPhase::from_lease_snapshot(now, snapshot) != AuthStatusPhase::Unknown
-        || snapshot.credential_present
-    {
-        return false;
-    }
-    if snapshot.generation == 0 && snapshot.phase.is_none() {
-        return true;
-    }
-    snapshot.phase == Some(AuthLeasePhase::ReauthRequired)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub async fn rehydrate_marked_oauth_tokens_for_status(
-    token_store: &dyn TokenStore,
-    auth_lease: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
-    expected_mode: PersistedAuthMode,
-    now: DateTime<Utc>,
+    _token_store: &dyn TokenStore,
+    _auth_lease: &dyn AuthLeaseHandle,
+    _connection_ref: &ConnectionRef,
+    _expected_mode: PersistedAuthMode,
+    _now: DateTime<Utc>,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    if !persisted_auth_mode_uses_oauth_login_lifecycle(expected_mode) {
-        return Ok(None);
-    }
-    let key = TokenKey::from_connection_ref(connection_ref);
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    let _guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let Some(mut tokens) = token_store.load(&key).await? else {
-        return Ok(None);
-    };
-    if tokens.auth_mode != expected_mode || !oauth_marker_payload_valid_for_status(&tokens) {
-        return Ok(None);
-    }
-    let previous_snapshot = auth_lease.snapshot(&lease_key);
-    if !auth_status_snapshot_allows_oauth_marker_rehydrate(now, &previous_snapshot) {
-        return Ok(None);
-    }
-    let transition = publish_token_lifecycle_acquired(auth_lease, connection_ref, &tokens)
-        .map_err(AuthStatusRehydrateError::LifecycleAcquire)?;
-    let marked = mark_tokens_lifecycle_published_for_transition(&tokens, transition);
-    if marked != tokens {
-        if let Err(save_error) = token_store.save(&key, &marked).await {
-            if let Err(rollback_error) = auth_lease.restore_auth_lifecycle_snapshot(
-                &lease_key,
-                &previous_snapshot,
-                previous_snapshot
-                    .expires_at
-                    .or_else(|| Some(persisted_token_expires_at_epoch_secs(&tokens))),
-            ) {
-                return Err(AuthStatusRehydrateError::LifecycleRollback(rollback_error));
-            }
-            return Err(AuthStatusRehydrateError::MarkerSave(save_error));
-        }
-        tokens = marked;
-    }
-    Ok(Some(tokens))
+    // Lifecycle markers in persisted OAuth material are projection data only.
+    // Auth status must not recreate an AuthMachine credential lease from token
+    // JSON, otherwise durable material can shadow machine-owned lease truth.
+    Ok(None)
 }
 
 pub fn project_published_auth_status<'a>(

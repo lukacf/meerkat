@@ -2,21 +2,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
-use axum::Router;
-use axum::extract::Form;
-use axum::response::Json;
-use axum::routing::post;
 use chrono::{Duration as ChronoDuration, Utc};
-use tokio::net::TcpListener;
 
-use meerkat_auth_core::auth_oauth::OAuthEndpoints;
 use meerkat_auth_core::auth_store::{
-    EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
+    EphemeralTokenStore, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
+    RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
@@ -168,6 +160,182 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     }
 }
 
+struct MutableAuthLeaseHandle {
+    snapshot: Mutex<AuthLeaseSnapshot>,
+}
+
+impl MutableAuthLeaseHandle {
+    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: Mutex::new(AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
+                credential_present: true,
+                generation: 1,
+                credential_published_at_millis: Some(1_000),
+            }),
+        })
+    }
+}
+
+impl AuthLeaseHandle for MutableAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        _lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        self.complete_refresh(_lease_key, expires_at, 0)
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.phase = Some(AuthLeasePhase::Refreshing);
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        new_expires_at: u64,
+        _now: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.phase = Some(AuthLeasePhase::Valid);
+        snapshot.expires_at = Some(new_expires_at);
+        snapshot.credential_present = true;
+        snapshot.generation = snapshot.generation.saturating_add(1);
+        snapshot.credential_published_at_millis = Some(2_000);
+        Ok(AuthLeaseTransition {
+            generation: snapshot.generation,
+            credential_published_at_millis: snapshot.credential_published_at_millis,
+        })
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+struct ReauthRequiredAuthLeaseHandle;
+
+impl AuthLeaseHandle for ReauthRequiredAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        _lease_key: &LeaseKey,
+        _expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Err(DslTransitionError::guard_rejected(
+            "acquire_lease",
+            "reauth required",
+        ))
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Err(DslTransitionError::guard_rejected(
+            "complete_refresh",
+            "reauth required",
+        ))
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::ReauthRequired),
+            expires_at: None,
+            credential_present: false,
+            generation: 1,
+            credential_published_at_millis: None,
+        }
+    }
+}
+
+struct StaticRefreshCoordinator {
+    tokens: PersistedTokens,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for StaticRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        _key: TokenKey,
+        _refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        Ok(self.tokens.clone())
+    }
+}
+
+struct FailingRefreshCoordinator {
+    error: RefreshError,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for FailingRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        _key: TokenKey,
+        _refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        Err(self.error.clone())
+    }
+}
+
 fn persisted_google_oauth(secret: &str) -> PersistedTokens {
     PersistedTokens {
         auth_mode: PersistedAuthMode::GoogleOauth,
@@ -242,7 +410,46 @@ async fn google_oauth_rejects_token_without_auth_lifecycle() {
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
+                meerkat_core::AuthError::StaleCredential
+            )
+        ),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn google_oauth_reauth_required_is_typed() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = persisted_google_oauth("reauth-google-access");
+    store
+        .save(
+            &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(Arc::new(ReauthRequiredAuthLeaseHandle));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::UserReauthRequired
             )
         ),
         "got {err:?}"
@@ -334,177 +541,146 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
 }
 
 #[tokio::test]
-async fn google_oauth_runtime_refresh_is_uncommitted() {
-    let app = Router::new().route(
-        "/token",
-        post(|Form(_form): Form<serde_json::Value>| async {
-            Json(serde_json::json!({
-                "access_token": "refreshed-google-access",
-                "refresh_token": "rotated-google-refresh",
-                "expires_in": 3600,
-                "token_type": "Bearer",
-                "scope": "https://www.googleapis.com/auth/cloud-platform",
-            }))
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
+async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runtime() {
     let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
     let store = Arc::new(EphemeralTokenStore::new());
     let old_expiry = Utc::now() - ChronoDuration::minutes(5);
+    let mut expired = persisted_google_oauth("expired-google-access");
+    expired.expires_at = Some(old_expiry);
+    expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
     store
         .save(
             &key,
-            &PersistedTokens {
-                auth_mode: PersistedAuthMode::GoogleOauth,
-                primary_secret: Some("expired-google-access".into()),
-                refresh_token: Some("refresh-google".into()),
-                id_token: None,
-                expires_at: Some(old_expiry),
-                last_refresh: Some(Utc::now() - ChronoDuration::hours(2)),
-                scopes: vec![],
-                account_id: None,
-                metadata: serde_json::Value::Null,
-            },
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &expired,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
         )
         .await
         .unwrap();
+    let mut refreshed = persisted_google_oauth("refreshed-google-access");
+    refreshed.refresh_token = Some("rotated-google-refresh".into());
 
-    let endpoints = OAuthEndpoints {
-        client_id: oauth::CODE_ASSIST_CLIENT_ID.into(),
-        authorize_url: oauth::GOOGLE_AUTHORIZE_URL.into(),
-        token_url: format!("http://{addr}/token"),
-        device_code_url: None,
-        redirect_uri: "http://127.0.0.1:0/callback".into(),
-        scopes: oauth::CODE_ASSIST_SCOPES
-            .iter()
-            .map(|scope| (*scope).into())
-            .collect(),
-        extra_headers: vec![],
-    };
-    let runtime = oauth::GoogleCodeAssistOAuthRuntime::new_with_default_coordinator(
-        store.clone(),
-        endpoints,
-        key,
-    );
-    let before_refresh = Utc::now();
-    let refreshed = runtime.get_or_refresh_tokens().await.unwrap();
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let connection = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .await
+        .expect("expired Google OAuth lease should refresh through AuthMachine gate");
 
     assert_eq!(
-        refreshed.primary_secret.as_deref(),
+        connection.resolved_secret(),
+        Some("refreshed-google-access".to_string())
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        stored.primary_secret.as_deref(),
         Some("refreshed-google-access")
     );
     assert_eq!(
-        refreshed.refresh_token.as_deref(),
+        stored.refresh_token.as_deref(),
         Some("rotated-google-refresh")
     );
-    assert!(
-        refreshed.expires_at.expect("refreshed expiry")
-            > before_refresh + ChronoDuration::minutes(50),
-        "refreshed lease expiry must be the new provider expiry, not the old expired value"
-    );
-    let stored = store.load(runtime.key()).await.unwrap().unwrap();
-    assert_eq!(
-        stored.primary_secret.as_deref(),
-        Some("expired-google-access")
-    );
-    assert_eq!(stored.refresh_token.as_deref(), Some("refresh-google"));
-    assert_eq!(stored.expires_at, Some(old_expiry));
-    assert!(!meerkat_core::tokens_lifecycle_published(&stored));
+    assert!(meerkat_core::tokens_lifecycle_published(&stored));
 }
 
 #[tokio::test]
-async fn google_oauth_runtime_force_refresh_hits_endpoint_for_fresh_tokens() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let endpoint_calls = Arc::clone(&calls);
-    let app = Router::new().route(
-        "/token",
-        post(move |Form(_form): Form<serde_json::Value>| {
-            let endpoint_calls = Arc::clone(&endpoint_calls);
-            async move {
-                endpoint_calls.fetch_add(1, Ordering::SeqCst);
-                Json(serde_json::json!({
-                    "access_token": "forced-google-access",
-                    "refresh_token": "forced-google-refresh",
-                    "expires_in": 3600,
-                    "token_type": "Bearer",
-                    "scope": "https://www.googleapis.com/auth/cloud-platform",
-                }))
-            }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
+async fn google_oauth_refresh_failure_is_typed() {
     let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
-    let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+    let store = Arc::new(EphemeralTokenStore::new());
+    let old_expiry = Utc::now() - ChronoDuration::minutes(5);
+    let mut expired = persisted_google_oauth("expired-google-access");
+    expired.expires_at = Some(old_expiry);
+    expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
     store
         .save(
             &key,
-            &PersistedTokens {
-                auth_mode: PersistedAuthMode::GoogleOauth,
-                primary_secret: Some("fresh-google-access".into()),
-                refresh_token: Some("refresh-google".into()),
-                id_token: None,
-                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
-                last_refresh: Some(Utc::now()),
-                scopes: vec![],
-                account_id: None,
-                metadata: serde_json::Value::Null,
-            },
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &expired,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
         )
         .await
         .unwrap();
 
-    let endpoints = OAuthEndpoints {
-        client_id: oauth::CODE_ASSIST_CLIENT_ID.into(),
-        authorize_url: oauth::GOOGLE_AUTHORIZE_URL.into(),
-        token_url: format!("http://{addr}/token"),
-        device_code_url: None,
-        redirect_uri: "http://127.0.0.1:0/callback".into(),
-        scopes: oauth::CODE_ASSIST_SCOPES
-            .iter()
-            .map(|scope| (*scope).into())
-            .collect(),
-        extra_headers: vec![],
-    };
-    let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
-        Arc::clone(&store),
-        Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
-        endpoints,
-        key.clone(),
-    );
-    let commit_store = Arc::clone(&store);
-    let commit_key = key.clone();
-    let refreshed = runtime
-        .force_refresh_tokens_with_commit(Box::new(move |tokens| {
-            Box::pin(async move {
-                commit_store.save(&commit_key, &tokens).await.map_err(|e| {
-                    meerkat_auth_core::auth_store::RefreshError::Refresh(e.to_string())
-                })?;
-                Ok(tokens)
-            })
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
+            error: RefreshError::Refresh("google refresh transport failed".into()),
         }))
+        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
         .await
-        .expect(
-            "manual force refresh must exchange with provider even when cached tokens are fresh",
-        );
+        .unwrap_err();
 
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshFailed(detail),
+        ) => assert!(
+            detail.contains("google refresh transport failed"),
+            "got {detail}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
+    let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let fresh = persisted_google_oauth("fresh-google-access");
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &fresh,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let mut refreshed = persisted_google_oauth("forced-google-access");
+    refreshed.refresh_token = Some("forced-google-refresh".into());
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&fresh))
+        .with_force_refresh(true);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let connection = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .await
+        .expect("forced Google OAuth refresh should resolve through AuthMachine gate");
+
     assert_eq!(
-        refreshed.primary_secret.as_deref(),
-        Some("forced-google-access")
+        connection.resolved_secret(),
+        Some("forced-google-access".to_string())
     );
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),
         Some("forced-google-access")
+    );
+    assert_eq!(
+        stored.refresh_token.as_deref(),
+        Some("forced-google-refresh")
     );
 }

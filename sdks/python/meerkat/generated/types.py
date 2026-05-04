@@ -1990,6 +1990,18 @@ class WireAuthErrorWorkspaceMismatch(TypedDict, total=False):
 class WireAuthErrorExpired(TypedDict, total=False):
     kind: Required[Literal['expired']]
 
+class WireAuthErrorStaleCredential(TypedDict, total=False):
+    kind: Required[Literal['stale_credential']]
+
+class WireAuthErrorRefreshRequired(TypedDict, total=False):
+    kind: Required[Literal['refresh_required']]
+
+class WireAuthErrorLeaseAbsent(TypedDict, total=False):
+    kind: Required[Literal['lease_absent']]
+
+class WireAuthErrorUserReauthRequired(TypedDict, total=False):
+    kind: Required[Literal['user_reauth_required']]
+
 class WireAuthErrorRefreshFailed(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['refresh_failed']]
@@ -2008,7 +2020,7 @@ class WireAuthErrorOther(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['other']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):

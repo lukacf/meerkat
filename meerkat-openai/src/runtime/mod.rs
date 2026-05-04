@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use meerkat_core::AuthError;
 use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
+use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
@@ -19,8 +21,7 @@ use meerkat_auth_core::resolver::{
     publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
-    resolve_simple_secret,
+    finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -51,6 +52,28 @@ fn openai_oauth_refresh_failure_is_permanent(error: &oauth::OpenAiOAuthError) ->
         }
         _ => false,
     }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn openai_oauth_refresh_error(
+    error: oauth::OpenAiOAuthError,
+    authmachine_failure: String,
+) -> ProviderAuthError {
+    let detail = if authmachine_failure.is_empty() {
+        error.to_string()
+    } else {
+        format!("{error}{authmachine_failure}")
+    };
+    if authmachine_failure.is_empty() {
+        match error {
+            oauth::OpenAiOAuthError::InteractiveLoginRequired
+            | oauth::OpenAiOAuthError::MissingRefreshToken => {
+                return ProviderAuthError::Auth(AuthError::UserReauthRequired);
+            }
+            _ => {}
+        }
+    }
+    ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
 pub struct OpenAiProviderRuntime;
@@ -129,7 +152,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     let effective_tokens = match auth_method {
                         OpenAiAuthMethod::ExternalChatGptTokens => {
                             if lifecycle == ManagedStoreLifecycle::RefreshRequired {
-                                return Err(ProviderAuthError::Auth(AuthError::Expired));
+                                return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
                             }
                             persisted
                         }
@@ -141,7 +164,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 persisted
                             } else {
                                 if !refresh_allowed(binding) {
-                                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                                    return Err(ProviderAuthError::Auth(
+                                        AuthError::RefreshRequired,
+                                    ));
                                 }
                                 let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
                                     env,
@@ -181,11 +206,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                         })
                                     })
                                 });
-                                let refreshed = if env.force_refresh {
-                                    runtime.force_refresh_tokens_with_commit(commit).await
-                                } else {
-                                    runtime.get_or_refresh_tokens_with_commit(commit).await
-                                };
+                                let refreshed = runtime
+                                    .refresh_tokens_with_commit(commit, env.force_refresh)
+                                    .await;
                                 refreshed.map_err(|e| {
                                     let permanent = openai_oauth_refresh_failure_is_permanent(&e);
                                     let failure = mark_managed_store_oauth_refresh_failed(
@@ -197,20 +220,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     .err()
                                     .map(|err| format!("; {err}"))
                                     .unwrap_or_default();
-                                    match e {
-                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                            let mut err = interactive_login_error(binding);
-                                            if !failure.is_empty() {
-                                                err = ProviderAuthError::SourceResolutionFailed(
-                                                    format!("{err}{failure}"),
-                                                );
-                                            }
-                                            err
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            format!("{other}{failure}"),
-                                        ),
-                                    }
+                                    openai_oauth_refresh_error(e, failure)
                                 })?
                             }
                         }

@@ -3791,7 +3791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_rehydrates_marked_oauth_token_after_restart() {
+    async fn rest_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3830,13 +3830,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
-        assert!(detail.expires_at.is_some());
-        assert_eq!(detail.account_id.as_deref(), Some("acct-1"));
-        assert!(detail.has_refresh_token);
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(detail.expires_at, None);
+        assert_eq!(detail.account_id, None);
+        assert!(!detail.has_refresh_token);
         let snapshot = state.auth_lease.snapshot(&lease_key);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert!(snapshot.credential_present);
+        assert_eq!(snapshot.phase, None);
+        assert!(!snapshot.credential_present);
     }
 
     #[tokio::test]

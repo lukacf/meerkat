@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { Auth } from '../dist/auth.js';
 import {
+  parseWireAuthError,
   parseWireAuthProfile,
   parseWireBackendProfile,
   parseWireRealmConnectionSet,
@@ -310,6 +311,22 @@ test('Auth.status and device-complete ready parse generated terminal payloads', 
     ready,
   );
   assert.equal(calls[0].method, 'auth/login/device_complete');
+});
+
+test('generated auth error parser preserves typed freshness failures', () => {
+  for (const kind of [
+    'stale_credential',
+    'refresh_required',
+    'lease_absent',
+    'user_reauth_required',
+  ]) {
+    assert.deepEqual(parseWireAuthError({ kind }), { kind });
+  }
+
+  assert.throws(
+    () => parseWireAuthError({ kind: 'provider_local_fallback' }),
+    /kind/,
+  );
 });
 
 function identityPayload() {

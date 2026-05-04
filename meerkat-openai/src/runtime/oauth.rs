@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
@@ -187,33 +187,12 @@ impl OpenAiOAuthRuntime {
         &self.key
     }
 
-    async fn load(&self) -> Result<Option<PersistedTokens>, OpenAiOAuthError> {
-        self.token_store
-            .load(&self.key)
-            .await
-            .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
-    }
-
-    fn token_is_fresh(tokens: &PersistedTokens) -> bool {
-        tokens
-            .expires_at
-            .is_some_and(|expiry| expiry - Utc::now() > Duration::seconds(60))
-            && tokens.primary_secret.is_some()
-    }
-
-    async fn get_or_refresh_tokens_with_commit_slot(
+    async fn refresh_tokens_with_commit_slot(
         &self,
-        commit_fn: Option<TokenCommitFn>,
-        force_refresh: bool,
+        commit_fn: TokenCommitFn,
+        force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        let persisted = self
-            .load()
-            .await?
-            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
-        if Self::token_is_fresh(&persisted) && commit_fn.is_none() && !force_refresh {
-            return Ok(persisted);
-        }
-        let commit_slot = Arc::new(Mutex::new(commit_fn));
+        let commit_slot = Arc::new(Mutex::new(Some(commit_fn)));
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
         let token_store = Arc::clone(&self.token_store);
@@ -235,16 +214,6 @@ impl OpenAiOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                if OpenAiOAuthRuntime::token_is_fresh(&current) && !force_refresh {
-                    let commit = commit_slot
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    return match commit {
-                        Some(commit) => commit(current).await,
-                        None => Ok(current),
-                    };
-                }
                 let refresh_token = current
                     .refresh_token
                     .clone()
@@ -270,7 +239,7 @@ impl OpenAiOAuthRuntime {
                 }
             })
         });
-        let refreshed = if force_refresh {
+        let refreshed = if force_refresh_coordination {
             self.refresh_coord
                 .with_forced_refresh(self.key.clone(), refresh_fn)
                 .await?
@@ -289,38 +258,13 @@ impl OpenAiOAuthRuntime {
         }
     }
 
-    pub async fn get_or_refresh_tokens_uncommitted(
-        &self,
-    ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(None, false)
-            .await
-    }
-
-    pub async fn get_or_refresh_tokens_with_commit(
+    pub(crate) async fn refresh_tokens_with_commit(
         &self,
         commit_fn: TokenCommitFn,
+        force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), false)
+        self.refresh_tokens_with_commit_slot(commit_fn, force_refresh_coordination)
             .await
-    }
-
-    pub async fn force_refresh_tokens_with_commit(
-        &self,
-        commit_fn: TokenCommitFn,
-    ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), true)
-            .await
-    }
-
-    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_uncommitted().await
-    }
-
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, OpenAiOAuthError> {
-        let refreshed = self.get_or_refresh_tokens().await?;
-        refreshed
-            .primary_secret
-            .ok_or(OpenAiOAuthError::InteractiveLoginRequired)
     }
 
     pub async fn complete_login(

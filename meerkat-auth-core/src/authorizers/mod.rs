@@ -53,7 +53,7 @@ impl LeaseFreshnessObserver {
         match snapshot.phase {
             Some(AuthLeasePhase::Valid) => {}
             Some(AuthLeasePhase::ReauthRequired) => {
-                return Err(AuthError::Expired);
+                return Err(AuthError::UserReauthRequired);
             }
             Some(
                 AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing | AuthLeasePhase::Released,
@@ -149,7 +149,7 @@ impl LeaseFreshnessObserver {
                     .map_err(|err| self.observer_error(authorizer_label, "begin_refresh", err))?;
                 Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh))
             }
-            Some(AuthLeasePhase::ReauthRequired) => Err(AuthError::Expired),
+            Some(AuthLeasePhase::ReauthRequired) => Err(AuthError::UserReauthRequired),
             Some(AuthLeasePhase::Refreshing) => Ok(LeaseRefreshStart::WaitForInFlight),
             Some(AuthLeasePhase::Released) | None => Ok(LeaseRefreshStart::Started(
                 LeaseRefreshLifecycle::InitialAcquire,

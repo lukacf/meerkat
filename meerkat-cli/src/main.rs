@@ -11024,8 +11024,8 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
-        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+    async fn test_cli_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
+        use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
 
         let store = EphemeralTokenStore::new();
@@ -11059,11 +11059,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(projection.phase, AuthStatusPhase::Valid);
-        assert!(projection.expires_at.is_some());
+        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
+        assert!(projection.expires_at.is_none());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert!(snapshot.credential_present);
+        assert_eq!(snapshot.phase, None);
+        assert!(!snapshot.credential_present);
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

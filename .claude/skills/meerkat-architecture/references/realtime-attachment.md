@@ -15,15 +15,18 @@ modifying the implementation.
 
 Realtime is a delivery mode of the session's LLM, not a separate
 subsystem. `ModelCapabilities.realtime: bool` (defined in
-`meerkat-models/src/capabilities/mod.rs`, projected onto
-`ModelProfile.realtime` in `meerkat-models/src/profile/mod.rs`) drives
-all transport attach/detach decisions. There is no caller-initiated
-attach/detach RPC.
+`meerkat-core/src/model_profile/capabilities.rs`, projected onto
+`ModelProfile.realtime` in `meerkat-core/src/model_profile/mod.rs`)
+drives all transport attach/detach decisions. There is no
+caller-initiated attach/detach RPC.
+
+(`meerkat-models` is now a compatibility shim that re-exports
+`meerkat_core::model_profile`; new architectural references should use
+the canonical path.)
 
 Public vocabulary:
 
-- `session/realtime_attachment_status` — runtime-owned status projection (single session)
-- `session/realtime_attachment_statuses` — batch projection
+- `session/realtime_attachment_status` — runtime-owned status projection (single session). There is **no** `session/realtime_attachment_statuses` plural sibling — the batch shape was removed; surfaces fan out by calling the singular method per session.
 - `realtime/open_info` / `realtime/status` / `realtime/capabilities` — product-layer bootstrap
 
 Previously public methods, now deleted:
@@ -217,9 +220,9 @@ validation happens inside the DSL guard, not in shell pre-checks.
 
 ## Key files
 
-- `meerkat-models/src/capabilities/mod.rs` — `ModelCapabilities.realtime`
-- `meerkat-models/src/profile/mod.rs` — `ModelProfile.realtime` (projection)
-- `meerkat-models/src/profile/openai.rs` — `realtime: m.contains("realtime")`
+- `meerkat-core/src/model_profile/capabilities.rs` — `ModelCapabilities.realtime`
+- `meerkat-core/src/model_profile/mod.rs` — `ModelProfile.realtime` (projection)
+- `meerkat-core/src/model_profile/openai.rs` — `realtime: m.contains("realtime")`
 - `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` — catalog DSL
 - `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` — catalog DSL
 - `meerkat-runtime/src/meerkat_machine/dsl.rs` — runtime DSL (production)

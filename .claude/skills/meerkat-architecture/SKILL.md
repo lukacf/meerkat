@@ -83,8 +83,7 @@ the session's resolved model decides attach/detach. There is no
 caller-initiated attach/detach RPC. Converged terms:
 
 - `ModelCapabilities.realtime` — the capability bit that drives transport
-- `session/realtime_attachment_status` — single-session status projection
-- `session/realtime_attachment_statuses` — batch status projection
+- `session/realtime_attachment_status` — single-session status projection (no plural sibling exists; fan out per session)
 - `mob/member_status.realtime_attachment_status` — per-member projection
 - `realtime/open_info` / `realtime/status` / `realtime/capabilities` — product-layer bootstrap
 

@@ -3,38 +3,53 @@
 ## Dependency Order (bottom to top)
 
 ```
-meerkat-models        (leaf crate — model catalog, provider profiles, parameter schemas)
+meerkat-models            (compatibility shim — re-exports meerkat-core::model_profile)
+meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
+meerkat-auth-core         (token stores, OAuth helpers, cloud authorizers — no meerkat-core deps)
 
-meerkat-core          (depends on meerkat-models — pure types, traits, agent loop, session-store contract)
-  ├── meerkat-contracts   (wire types, capability registry, error codes)
-  ├── meerkat-client      (LLM providers: Anthropic, OpenAI, Gemini)
-  ├── meerkat-store       (session persistence: SQLite, Jsonl, Memory)
-  ├── meerkat-tools       (tool registry, builtins, shell, session-scoped task store)
-  ├── meerkat-session     (session service: Ephemeral, Persistent)
-  ├── meerkat-runtime     (runtime control plane, input lifecycle, policy engine, detached wake)
-  ├── meerkat-comms       (inter-agent: inproc, TCP, UDS, Ed25519)
-  ├── meerkat-hooks       (hook engine: in-process, command, HTTP)
-  ├── meerkat-skills      (skill loading: filesystem, git, HTTP, embedded)
-  ├── meerkat-memory      (semantic memory: HNSW, simple)
-  └── meerkat-mcp         (MCP protocol client)
+meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile catalog,
+                           DSL handle traits)
+  ├── meerkat-contracts       (wire types, capability registry, error codes, schema codegen source)
+  ├── meerkat-anthropic       (Anthropic streaming client, implements AgentLlmClient through llm-core)
+  ├── meerkat-openai          (OpenAI client, including realtime transport — implements AgentLlmClient)
+  ├── meerkat-gemini          (Gemini client, including inline video and live capability — implements AgentLlmClient)
+  ├── meerkat-providers       (compatibility shim: ProviderRuntimeRegistry surface + cloud authorizer wiring)
+  ├── meerkat-client          (compatibility shim: re-exports provider crates — do NOT add new code here)
+  ├── meerkat-store           (session persistence: SQLite, Jsonl, Memory)
+  ├── meerkat-tools           (tool registry, builtins, shell, session-scoped task store)
+  ├── meerkat-session         (session service: Ephemeral, Persistent)
+  ├── meerkat-runtime         (runtime control plane, policy engine, detached wake, DSL handle impls,
+                                live-topology reconfigure, realtime attachment public methods)
+  ├── meerkat-comms           (inter-agent: inproc, TCP, UDS, Ed25519)
+  ├── meerkat-hooks           (hook engine: in-process, command, HTTP)
+  ├── meerkat-skills          (skill loading: filesystem, git, HTTP, embedded)
+  ├── meerkat-memory          (semantic memory: HNSW, simple)
+  └── meerkat-mcp             (MCP protocol client)
 
-meerkat-machine-schema    (formal machine/composition catalog + seam/handoff protocol metadata)
-meerkat-machine-kernels   (generated kernel interpreter — centralized, no owner-crate re-exports)
-meerkat-machine-codegen   (TLA+ generation, TLC verification, drift detection)
+meerkat-machine-dsl-core      (DSL primitives: machine/composition modeling base)
+meerkat-machine-derive        (proc macros for machine DSL)
+meerkat-machine-dsl           (DSL frontend — used by catalog sources)
+meerkat-machine-schema        (formal machine/composition catalog + seam/handoff protocol metadata)
+meerkat-machine-kernels       (generated kernel interpreter — centralized, no owner-crate re-exports)
+meerkat-machine-codegen       (TLA+ generation, TLC verification, drift detection)
 
-meerkat (facade)          (AgentFactory, wiring, re-exports)
-  ├── meerkat-mob          (multi-agent: MobBuilder, MobActor, FlowEngine, FlowFrameEngine, member provisioning)
-  ├── meerkat-mob-pack     (mobpack archive: signing, trust, validation)
-  ├── meerkat-mob-mcp      (mob tools as MCP dispatcher + agent delegation surface)
-  ├── meerkat-schedule     (scheduler: cron/interval triggers, occurrence lifecycle, delivery, schedule tools)
-  └── meerkat-web-runtime  (WASM embedded runtime)
+meerkat (facade)              (AgentFactory, FactoryAgentBuilder, persistence helpers, re-exports,
+                                SessionLlmReconfigureHost wiring)
+  ├── meerkat-mob              (multi-agent: MobBuilder, MobActor, FlowEngine, FlowFrameEngine,
+                                  member provisioning, identity-first binding, supervisor bridge)
+  ├── meerkat-mob-pack         (mobpack archive: signing, trust, validation)
+  ├── meerkat-mob-mcp          (mob tools as MCP dispatcher + agent delegation surface, profile tools)
+  ├── meerkat-schedule         (scheduler: cron/interval triggers, occurrence lifecycle, delivery, schedule tools)
+  └── meerkat-web-runtime      (WASM embedded runtime — wasm_bindgen exports)
 
 Surface binaries:
-  ├── meerkat-cli (rkat)
-  ├── meerkat-rpc (rkat-rpc)
-  ├── meerkat-rest (rkat-rest)
-  └── meerkat-mcp-server (rkat-mcp)
+  ├── meerkat-cli           → rkat, rkat-mini             (full CLI + reduced/embeddable CLI)
+  ├── meerkat-rpc           → rkat-rpc, rkat-rpc-mini     (full and reduced JSON-RPC; stdio default, --tcp opt-in)
+  ├── meerkat-rest          → rkat-rest                   (REST + SSE)
+  └── meerkat-mcp-server    → rkat-mcp                    (MCP server)
 ```
+
+The `*-mini` binaries are intentional reduced-surface builds — same wire protocol as the full binaries but with a smaller command/method set, suitable for embedded hosts and constrained build budgets.
 
 ## Key Traits
 

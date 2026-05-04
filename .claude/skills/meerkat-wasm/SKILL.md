@@ -1,6 +1,6 @@
 ---
 name: meerkat-wasm
-description: "Developer guide for the Meerkat WASM embedded runtime (meerkat-web-runtime). This skill should be used when working on wasm32 compilation, building/deploying WASM bundles, writing wasm_bindgen exports, debugging browser runtime issues, or making crates wasm32-compatible. Covers the override-first resource injection pattern, tokio_with_wasm aliasing, cfg-gating patterns, mobpack bootstrap, and common wasm32 gotchas."
+description: "Developer guide for the Meerkat WASM embedded runtime (meerkat-web-runtime) and the `@rkat/web` browser SDK. Covers wasm32 compilation, building/deploying WASM bundles, writing/auditing wasm_bindgen exports (sessions, mobs, comms, JS tool callbacks, external auth resolver, subscription handles), the connection_ref + registerExternalAuthResolver auth model, tokio_with_wasm aliasing, cfg-gating patterns, mobpack bootstrap, and common wasm32 gotchas. Use when touching meerkat-web-runtime, sdks/web, browser auth flows, or making a meerkat crate wasm32-compatible."
 ---
 
 # Meerkat WASM Embedded Runtime
@@ -70,7 +70,7 @@ binding.
 
 The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around the wasm_bindgen exports with an idiomatic camelCase API. Ships with the pre-built WASM binary and a Node.js provider proxy.
 
-**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`.
+**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `withConnectionRef`, `Auth` types).
 
 **Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests.
 
@@ -90,6 +90,40 @@ const runtime = await MeerkatRuntime.init(wasm, {
   anthropicBaseUrl: 'http://localhost:3100/anthropic',
 });
 ```
+
+### Browser auth model (0.6)
+
+For OAuth, cloud IAM, or any flow more dynamic than a static global key, use the external auth resolver path. The agent factory inside the WASM bundle calls back into the host page via `register_external_auth_resolver` to obtain a typed `AuthCredential` for a given `connectionRef`:
+
+```typescript
+import {
+  MeerkatRuntime,
+  registerExternalAuthResolver,
+  withConnectionRef,
+} from '@rkat/web';
+import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
+
+registerExternalAuthResolver(wasm, async (connectionRef) => {
+  const token = await myHostFetchToken(connectionRef);
+  return { kind: 'bearer_token', token };
+});
+
+const runtime = await MeerkatRuntime.init(wasm, { anthropicBaseUrl: '/proxy/anthropic' });
+// withConnectionRef takes (connectionRef, config) and returns config with `connectionRef` set;
+// you can also set `connectionRef` directly on the config object.
+const session = runtime.createSession(withConnectionRef(
+  connectionRef,
+  { model: 'claude-sonnet-4-6' },
+));
+```
+
+Notes:
+
+- `connectionRef` is structural and supported on `runtime.createSession({...})`, `mob.spawn({...})`, etc.
+- Per-session `apiKey` fields were removed in 0.6. Use init-time global keys, the proxy, or the resolver.
+- Pass `JsValue::NULL` / `undefined` to the resolver helper to clear the registration.
+- The `register_js_tool` export is the modern JS tool registration entrypoint; `register_tool_callback` remains for legacy callers.
+- `destroy_runtime` zeroes runtime state, sessions, subscriptions, and the resolver — call it on host teardown.
 
 For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane
 harness in `tests/integration/src/e2e_lanes.rs`. Prefer

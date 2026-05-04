@@ -1,24 +1,17 @@
 ---
 name: meerkat-platform
-description: "Comprehensive guide for building applications with the Meerkat agent platform. Covers all surfaces (CLI, REST, RPC, MCP, Python SDK, TypeScript SDK, Rust SDK), configuration, sessions, streaming, skills, hooks, memory, inter-agent communication, and mob orchestration (spawn, fork, helpers, flows). This skill should be used when users ask how to integrate with Meerkat, build agents, configure the runtime, use the SDK, set up multi-agent systems, or work with any Meerkat feature."
+description: "Build on the Meerkat agent platform. Covers every shipping surface (CLI, REST, JSON-RPC stdio/TCP, MCP, Python/TypeScript/Web/Rust SDKs, the `rkat-mini`/`rkat-rpc-mini` reduced binaries), realm-scoped sessions, streaming, skills, hooks, memory, multimodal content, mob orchestration (spawn/fork/helpers/flows/profiles), durable scheduling, and provider auth via `connection_ref` + AuthMachine (env keys, OAuth, cloud IAM). Use when integrating with Meerkat, picking a surface, wiring auth, building agents, scheduling automated runs, deploying mobpacks, or asking how a feature exposes through a particular SDK."
 ---
 
 # Meerkat Platform Guide
 
-Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, state is realm-scoped, and the current runtime-backed semantics are the default product path.
+Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. One execution pipeline, realm-scoped state, runtime-backed semantics by default. This guide is task-oriented; deeper schemas live under `references/`.
 
-If the request is about upgrading older integrations or mental models, load:
+References:
 
-- `references/migration_0_5.md`
-
-Use that migration guide for:
-
-- `host_mode` -> `keep_alive`
-- `--host` -> `--keep-alive`
-- runtime-backed ownership vs substrate
-- request cancellation / commit semantics
-- external-event behavior
-- SDK and wire-shape changes
+- `references/api_reference.md` — per-surface methods, schemas, examples (CLI, REST, RPC, MCP, Python/TS/Rust SDKs).
+- `references/mobs.md` — multi-agent orchestration in depth.
+- `references/migration_0_5.md` — only if you're upgrading from 0.5 (`host_mode` → `keep_alive`, etc.).
 
 ## Realm-first model
 
@@ -50,42 +43,29 @@ rkat-mcp --realm team-alpha
 
 ## Runtime-backed vs standalone
 
-Meerkat uses an explicit runtime-binding contract:
+- **Runtime-backed** (CLI, REST, `rkat-rpc`, `rkat-mcp`): keep-alive sessions, durable comms drain, completion-feed wakeups, recovery on restart. This is the default product path for daemons and long-running agents.
+- **Standalone / embedded** (Web SDK / WASM, in-process Rust SDK without a runtime, tests): in-memory substrate, no keep-alive, no cross-process recovery.
 
-- runtime-backed surfaces should call `MeerkatMachine::prepare_bindings(session_id)`
-- those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
-- standalone/testing/embedded paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly
+The Rust SDK lets you pick: `RuntimeBuildMode::SessionOwned(bindings)` (runtime-backed) or `RuntimeBuildMode::StandaloneEphemeral` (default). Surfaces other than the Rust SDK make this choice for you.
 
-Use this mental model when helping users:
+## External mob members (advanced)
 
-- **runtime-backed**: CLI, REST, RPC, MCP server, long-lived mob/member surfaces, keep-alive, comms drain, runtime wake/recovery
-- **standalone/embedded**: direct in-memory substrate, WASM embedded sessions, examples/tests that intentionally do not want runtime-owned semantics
-
-## Mob runtime binding (identity-first)
-
-`RuntimeBinding` separates "what kind of backend" from "which specific runtime":
-
-- `MobBackendKind` (definition/profile level): `Session` or `External` — declares what kind of backend a mob uses
-- `RuntimeBinding` (spawn/provision level): `Session` or `External { peer_id, address }` — binds a specific member to a concrete runtime
-
-External members must provide `RuntimeBinding::External` at spawn time with the real process comms identity. The provisioner uses that backend peer binding for the concrete `peer_id` and `address` instead of deriving them from the placeholder session.
-
-The bridge session (placeholder) still exists for lifecycle transport (notifications, kickoff events) within the orchestrator process. `trusted_peer_spec` uses the bridge key for transport trust, not `BackendPeer.peer_id` (which is the real identity).
-
-This is the first step toward identity-first mobs where `AgentIdentity` is the durable member identity and everything else (runtime incarnation, comms, bridge/session transport) is hidden binding detail.
+When a mob member runs in a different process or host, declare it with `MobBackendKind::External` and pass `RuntimeBinding::External { peer_id, address }` at spawn time so the orchestrator can route comms to the real backend. Internal-process members use `Session` and need no extra wiring. Members are addressed everywhere by stable `AgentIdentity`; runtime/binding identity rotates underneath.
 
 ## Surfaces
 
-| Surface | Protocol | Use Case |
+| Surface | Protocol | Use case |
 |---------|----------|----------|
-| CLI | Shell commands | Developer workflows, scripting |
-| REST | HTTP/JSON | Services and language-agnostic clients |
-| RPC | JSON-RPC 2.0 (stdio) | IDE integration and SDK backend |
-| MCP | Model Context Protocol | Expose Meerkat as tools |
-| Python SDK | Async Python over RPC | Python applications |
-| TypeScript SDK | TypeScript over RPC | Node.js applications |
-| Web SDK | `@rkat/web` (WASM) | Browser applications |
-| Rust SDK | Direct library API | Embedded Rust systems |
+| `rkat` CLI | Shell commands | Developer workflows, scripting |
+| `rkat-mini` CLI | Shell commands | Reduced/embeddable CLI build (intentionally smaller command set) |
+| REST (`rkat-rest`) | HTTP/JSON + SSE | Services and language-agnostic clients |
+| JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional realtime websocket hosting | IDE integration, SDK backend, embeddable services |
+| `rkat-rpc-mini` | JSON-RPC 2.0 (reduced method set) | Minimal embeddable RPC binary |
+| MCP (`rkat-mcp`) | Model Context Protocol | Expose Meerkat as tools to other agents |
+| Python SDK (`meerkat`) | Async Python over RPC | Python applications |
+| TypeScript SDK (`@rkat/sdk`) | TypeScript over RPC | Node.js applications |
+| Web SDK (`@rkat/web`) | WASM in-browser | Browser applications, mobpack deployment target |
+| Rust SDK (`meerkat`) | Direct library API | Embedded Rust systems |
 
 For full per-surface schemas and examples, load: `references/api_reference.md`.
 For detailed mob behavior across all surfaces, load: `references/mobs.md`.
@@ -101,77 +81,29 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
-- Public realtime attachment capability is named `realtime`, not `voice`: surfaces should describe `ModelCapabilities.realtime`, `session/realtime_attachment_status`, `session/realtime_attachment_statuses`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-1.5`) and the runtime manages attach/detach automatically.
-- OpenAI realtime integration is an internal runtime-backed companion, not a
-  public protocol authority: host/facade composition wires it, and RPC/REST
-  surfaces expose only the `session/realtime_attachment_status(es)` status
-  projections plus the `realtime/*` bootstrap methods.
-
+- Public realtime attachment capability is named `realtime`, not `voice`: surfaces describe `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-1.5`) and the runtime manages attach/detach automatically.
 ### Realtime voice attachment
 
-Realtime is a delivery mode of the session's LLM, not a separate
-subsystem. Enable it by pointing the session at a realtime-capable
-model (currently `gpt-realtime-1.5`, with `gpt-realtime` as a compatibility alias); the runtime reads
-`ModelCapabilities.realtime` and attaches an OpenAI Realtime transport
-automatically. The session retains a single canonical history; audio
-commits into it at turn boundaries.
+Realtime is a delivery mode of the session's LLM, not a separate subsystem. Enable it by setting the session's model to a realtime-capable one (today `gpt-realtime-1.5`; `gpt-realtime` is a compatibility alias). The runtime reads `ModelCapabilities.realtime` and attaches an OpenAI Realtime transport automatically. The session keeps a single canonical history; audio commits at turn boundaries.
 
-User-facing entry point: `docs/guides/realtime.mdx`.
-Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`.
-
-**Public API surface (all surfaces):**
-
-| Surface | Enable realtime | Observe status | Open audio channel |
-|---------|-----------------|----------------|---------------------|
-| JSON-RPC | `session/create` (or profile default) with `model: "gpt-realtime-1.5"` | `session/realtime_attachment_status`, `session/realtime_attachment_statuses`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
-| REST | `POST /sessions` with `{"model":"gpt-realtime-1.5"}` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
-| MCP (public) | (set model via host composition) | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
+| Surface | Enable | Observe status | Open audio channel |
+|---------|--------|----------------|--------------------|
+| JSON-RPC | `session/create` with `model: "gpt-realtime-1.5"` | `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
+| REST | `POST /sessions` `{ "model": "gpt-realtime-1.5" }` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
+| MCP (public) | host sets model via composition | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
 | Python SDK | `client.create_session(model="gpt-realtime-1.5", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
 | TypeScript SDK | `client.createSession({ model: "gpt-realtime-1.5", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
-| Rust | `SessionBuildOptions { model: Some("gpt-realtime-1.5".into()), ... }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-client` |
+| Rust | `SessionBuildOptions { model: Some("gpt-realtime-1.5".into()), .. }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-openai` |
 
-There is **no** caller-initiated attach/detach RPC. Transport lifecycle
-is a function of the session's resolved model capability.
+`RealtimeAttachmentStatus` reports `Unattached` / `IntentPresentUnbound` / `BindingNotReady` / `BindingReady` / `ReplacementPending` / `ReattachRequired`. There is no caller-initiated attach/detach RPC — transport follows the resolved model capability.
 
-**Capability source.** `ModelCapabilities.realtime: bool` is set per
-model in `meerkat-models`. OpenAI capability derivation matches any
-model name containing `realtime` (production: canonical `gpt-realtime-1.5`; `gpt-realtime` remains a compatibility alias).
-Gemini derivation matches `*-live*` (no production entries today).
-Anthropic and self-hosted default to `false`.
+Practical caveats:
 
-**Attachment states** (`RealtimeAttachmentStatus` enum):
-`Unattached` (model is not realtime-capable), `IntentPresentUnbound`,
-`BindingNotReady`, `BindingReady` (stable, audio flowing),
-`ReplacementPending`, `ReattachRequired` (stable, requires a
-reconfigure retry).
+- Single realtime binding per session. For per-member realtime in mobs, spawn members on realtime-capable profiles.
+- Idle sessions can't host a binding — start a turn or spawn via a mob.
+- Provider-native web search and tool-calling capability is per-model; check `ModelProfile` flat fields like `supports_web_search` if a tool unexpectedly disappears under a realtime model.
 
-**Authority token.** `RealtimeAttachmentSignalAuthority { session_id,
-authority_epoch }` is minted by the runtime (via internal
-`BeginRealtimeBinding` / `ReplaceRealtimeBinding` DSL transitions) and
-required on every provider callback. The DSL `PublishRealtimeSignal`
-guard validates the epoch against the current binding — stale tokens
-are rejected before any mutation.
-
-**Live-topology reconfigure.** `MeerkatMachine::reconfigure_live_topology`
-(invoked by host composition through `SessionLlmReconfigureHost`) swaps
-provider/model on a session via a 6-phase DSL-guarded flow
-(Idle → Reconfiguring → Detached → HostIdentityApplied →
-HostVisibilityApplied → Idle). The final step branches on the target
-model's `realtime` capability — realtime-capable → `attach_live`
-(mints fresh authority); non-realtime → `ValidationFailed` (binding is
-gone). Two typed failure modes:
-`AbortLiveTopologyBeforeDetach` (pre-detach failure, binding preserved)
-and `FailLiveTopologyAfterDetach` (post-detach failure, binding gone,
-reattach required).
-
-**Known limitations:**
-- `gpt-realtime-1.5` is the canonical production realtime-capable model today (`gpt-realtime` remains a compatibility alias).
-- Single realtime binding per session; per-member realtime in mobs is
-  achieved by spawning members on realtime-capable profiles.
-- Idle sessions cannot host a binding — the transport is brought up as
-  part of the executor binding, so start a turn first or spawn via a mob.
-- No remote-callable reconfigure RPC; `SessionLlmReconfigureHost` is the
-  integration seam for host-driven model swaps.
+User-facing guide: `docs/guides/realtime.mdx`. Internal authority/reconfigure flow: load the architecture skill's `references/realtime-attachment.md`.
 
 ### Mob lifecycle (standard/default usage)
 
@@ -198,7 +130,8 @@ rkat mob wait-kickoff <mob_id> [--member <agent_identity>...]
 
 ```bash
 # Build portable artifact
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
 
@@ -215,102 +148,54 @@ Web build env overrides:
 - `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
 - `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
 
-### WASM runtime + Web SDK (embedded deployment target)
+### WASM runtime + Web SDK (browser embedded)
 
-The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks** — the JavaScript equivalent of the Rust SDK. It compiles the real meerkat agent stack to wasm32, routing through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
-
-**`@rkat/web` npm package** (`sdks/web/`): TypeScript wrapper with `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription` classes. Ships with pre-built WASM binary and a Node.js provider proxy.
-
-**Not a protocol server** — unlike RPC/REST, the WASM runtime is deployed INTO a host application (browser). A mobpack defines what it is. The host provides credentials and drives interaction.
-
-**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy so API keys stay server-side. The WASM runtime uses per-provider base URLs (`anthropicBaseUrl`, `openaiBaseUrl`, `geminiBaseUrl`) to point at the proxy natively — no fetch override needed.
-
-```bash
-ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
-```
+`@rkat/web` runs the full meerkat agent stack — agent loop, all three providers via browser `fetch`, sessions, mob orchestration, inproc comms, embedded skills/hooks — inside the browser. It's a deployment *target* for mobpacks, not a protocol server: the host page provides config and drives interaction.
 
 ```typescript
 import { MeerkatRuntime } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
 const runtime = await MeerkatRuntime.init(wasm, {
-  anthropicApiKey: 'proxy',
+  anthropicApiKey: 'proxy',                                   // dummy; proxy injects real key
   anthropicBaseUrl: 'http://localhost:3100/anthropic',
 });
 const mob = await runtime.createMob(definition);
 await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
 ```
 
-**Architecture:**
-- Routes through `EphemeralSessionService<FactoryAgentBuilder>` → `AgentFactory::build_agent()` with override-first resource injection
-- Uses explicit standalone runtime mode (`RuntimeBuildMode::StandaloneEphemeral`) for embedded sessions rather than relying on runtime-backed bindings
-- `MobMcpState` handles all mob lifecycle operations (same state manager as native MCP mob surface)
-- `tokio_with_wasm` provides the async runtime (single-threaded, JS event loop backed)
-- `reqwest` uses browser `fetch` on wasm32
-- `InprocRegistry` provides peer discovery for comms (all sessions share one process-global registry)
-- 10 dependency crates compile for wasm32 (core, client, store, tools, session, hooks, comms, mob, mob-mcp, facade)
-- Gemini uses `x-goog-api-key` header (not query param) for auth
+Run the auth-injecting proxy beside any Node host so API keys stay server-side:
 
-**Fully available on wasm32:**
-- Agent loop (streaming, retries, error recovery, budget enforcement)
-- All three LLM providers (Anthropic, OpenAI, Gemini) via browser fetch
-- Session lifecycle (EphemeralSessionService)
-- Mob orchestration (MobBuilder, MobActor, FlowEngine, FlowFrameEngine, in-memory storage)
-- Comms (inproc — InprocRegistry, Ed25519 signing, peer discovery)
-- Tool dispatch (task tools, `datetime`, comms tools, skill tools — no shell and no filesystem-mutating builtins)
-- Skills (embedded + memory sources from mobpack)
-- Hooks (in-process + HTTP — no command hooks)
-- Config (in-memory, programmatic)
-- Compaction (DefaultCompactor)
-
-**Not available on wasm32 (inherent browser limitations):**
-- Filesystem (config loading, AGENTS.md, skill files, session persistence)
-- Shell tool, process spawning
-- MCP protocol client (rmcp blocked by tokio/mio)
-- Network comms (TCP/UDS sockets — inproc only)
-
-**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. The 0.5 notes in `references/migration_0_5.md` are legacy migration context, not the current release contract.
-
-**Build:**
 ```bash
-RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack build meerkat-web-runtime --target web --out-dir <dir>
-# Note: --out-dir is relative to crate root (meerkat-web-runtime/), not workspace root
+ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
 ```
+
+For OAuth, cloud IAM, or any "auth handled by the host page" flow, register an external resolver instead of shipping bare API keys to the browser:
+
+```typescript
+import { registerExternalAuthResolver, withConnectionRef } from '@rkat/web';
+registerExternalAuthResolver(wasm, async (connectionRef) => {
+  const token = await myHostFetchToken(connectionRef);
+  return { kind: 'bearer_token', token };
+});
+// withConnectionRef takes (connectionRef, config) and returns a config with `connectionRef` set.
+const session = runtime.createSession(withConnectionRef(connectionRef, { model: 'claude-sonnet-4-6' }));
+```
+
+`connectionRef` is the structural way to scope a session/mob member to a specific realm + binding — set it on `runtime.createSession({...})`, `mob.spawn(...)`, etc. Per-session `apiKey` fields were removed; use `anthropicApiKey`/`openaiApiKey`/`geminiApiKey` at runtime init or rely on the resolver.
+
+Browser scope: filesystem, shell, MCP client (rmcp), and network comms (TCP/UDS) are excluded by browser limitations. Everything else is intentionally wasm32-equivalent. For wasm internals, build commands, and full export table, see the meerkat-wasm skill.
 
 ### Mob flows (DAG runtime)
 
-Flow commands are now part of the CLI mob lifecycle:
-
 ```bash
-rkat mob flows <mob_id>
-rkat mob run-flow <mob_id> --flow <flow_id> [--params <json-object>]
+rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"k":"v"}']
 rkat mob flow-status <mob_id> <run_id>
 ```
 
-Flow model highlights:
+Flow model: declarative DAG (`depends_on`, `depends_on_mode = all|any`), dispatch modes (`one_to_one`, `fan_out`, `fan_in`), optional `branch` + `condition`, topology rules (`strict|permissive`, `"*"` wildcard), persisted `MobRun` snapshots with `step_ledger`/`failure_ledger`. Frame-based v2 flows add nested `FlowSpec.root: FrameSpec` and `repeat_until` loop nodes (`until`, `max_iterations`, nested `body`). `run-flow` blocks until terminal and persists the terminal snapshot; `flow-status` checks live state then falls back to the snapshot. Per-flow limits live under mob `limits` (`max_flow_duration_ms`, `max_step_retries`, `cancel_grace_timeout_ms`, `max_orphaned_turns`).
 
-- declarative DAG step graph (`depends_on`),
-- dependency mode (`all` or `any`),
-- branching via `branch` + `condition`,
-- dispatch mode (`one_to_one`, `fan_out`, `fan_in`),
-- topology policy enforcement (`strict|permissive` + role rules including `"*"` wildcard),
-- persisted run snapshots (`MobRun`) with `step_ledger` and `failure_ledger`,
-- frame-based execution via `FlowSpec.root: FrameSpec` (v2 flows),
-- `repeat_until` loop nodes with `until` condition, `max_iterations` guard, and nested `body: FrameSpec`,
-- `FlowFrameEngine` drives frame execution as a shell executor. `MobMachine` owns frame-local state, loop iteration lifecycle, scheduler grants, frame-step projection, and flow terminalization. The `flow_run`, `flow_frame`, and `loop_iteration` modules are MobMachine-owned fail-closed projection reducers for `MobRun` persistence shape, not standalone machines.
-
-Operational notes:
-
-- `run-flow` waits until terminal and persists a terminal snapshot.
-- `flow-status` checks live run state first and falls back to terminal snapshots.
-- flow limits are defined in mob `limits` (`max_flow_duration_ms`, `max_step_retries`, `cancel_grace_timeout_ms`, `max_orphaned_turns`).
-
-Terminology:
-
-- **Mob runtime contract**: where `mob_*` tools and `rkat mob` lifecycle are exposed.
-- **Backend selection**: realm-level storage backend (`sqlite`/`jsonl`) pinned in `realm_manifest.json`.
-
-Do not conflate the two: mob tool availability is a surface behavior, backend is a realm storage choice.
+Don't conflate **mob tool availability** (surface behavior — `mob_*` tools and `rkat mob` lifecycle) with **realm backend** (`sqlite`/`jsonl` in `realm_manifest.json`).
 
 ## Scheduling
 
@@ -480,46 +365,30 @@ Config APIs return a realm-scoped envelope:
 
 `config/set` and `config/patch` support `expected_generation` for CAS.
 
-## Auth (realm/binding model)
+## Auth
 
-Every session resolves credentials through `ProviderRuntimeRegistry`.
-Two paths:
+Every session resolves credentials through realm-scoped bindings. Two onramps:
 
-- **Env fallback**: set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
-  `GEMINI_API_KEY` (or `RKAT_*` variants) and Meerkat synthesizes a
-  default realm + binding for you. No config changes needed.
-- **Realm bindings**: declare `[realm.<id>.{backend,auth,binding}]` in
-  config, run `rkat auth login <provider>`, then pass
-  `--connection-ref <realm>:<binding>` on `rkat run` / session-create /
-  `mob_spawn_member` to scope a specific session or mob member.
+**Quick start — env keys**: set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or `RKAT_*` variants). Meerkat synthesizes a default realm + binding. No config edits.
 
-Key facts:
+**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config, then run `rkat auth login <provider>` and pass `--connection-ref <realm>:<binding>` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding.
 
-- The canonical owner of credential acquisition is
-  `meerkat_providers::ProviderRuntimeRegistry`. No other code reads
-  `std::env::var` for provider keys (dogma §5/§7/§14).
-- `SessionLlmIdentity.connection_ref` is persisted; hot-swap
-  (`apply_live_session_llm_identity`) re-enters `resolve` against
-  the same binding — no cross-realm credential bleed.
-- `AuthMachine` (per-binding) owns refresh semantics: Valid →
-  Expiring → Refreshing → (Valid | ReauthRequired). Refresh dedup is
-  DSL-owned (in-process) + filesystem-lockfile (cross-process, feature
-  `refresh-file-lock`).
-- OAuth methods: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth`
-  (OpenAI), `google_oauth` (Code Assist). All PKCE S256.
-- Cloud IAM: Bedrock (SigV4), Vertex (GoogleAuth), Foundry (Azure AD).
-- Every accepted transition emits a `target = "meerkat::auth::audit"`
-  tracing event (deferral §5). REST/RPC login/logout emit matching
-  events for user-initiated actions.
+```bash
+rkat auth login anthropic                                            # OAuth (PKCE S256)
+rkat --connection-ref prod:claude run "ship the release notes"
+```
 
-Provider-runtime/auth compatibility shims live in `meerkat-providers` and
-`meerkat-client`, but the concrete provider implementations now live in the
-provider-specific crates such as `meerkat-openai`, `meerkat-anthropic`, and
-`meerkat-gemini`.
+Supported auth methods:
 
-See `docs/guides/auth.mdx` for the full walkthrough and
-`docs/architecture/meerkat-runtime-dogma.md` for the §1/§10/§12
-rationale.
+- API keys (env or per-binding)
+- OAuth: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth` (OpenAI), `google_oauth` (Code Assist)
+- Cloud IAM: AWS Bedrock (SigV4), GCP Vertex (GoogleAuth), Azure Foundry (Azure AD)
+
+Tokens refresh automatically per binding. `connection_ref` is persisted on the session — hot-swapping the model re-resolves through the same binding (no cross-realm bleed).
+
+In the Web SDK, ship a `connectionRef` plus `registerExternalAuthResolver` instead of API keys; see the Web SDK section above.
+
+Surfaces: `auth/profile/{create,get,list,delete}`, `auth/login/{start,complete,device_start,device_complete,provision_api_key}`, `auth/status/get`, `auth/logout` over RPC; equivalent over REST and SDKs. Full walkthrough: `docs/guides/auth.mdx`.
 
 ## Feature composition
 
@@ -551,7 +420,7 @@ Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`)
 
 ### Model catalog
 
-The compatibility `meerkat-models` crate re-exports the curated model catalog queryable from all surfaces:
+The curated model catalog (canonical: `meerkat_core::model_profile`; `meerkat-models` is now a thin compatibility shim) is queryable from all surfaces:
 
 - CLI: `rkat models`
 - RPC: `models/catalog`
@@ -608,23 +477,13 @@ Sessions are realm-scoped and surface-neutral. Visibility depends on `realm_id` 
 
 Real-time events include `text_delta`, tool lifecycle events, hook events, and terminal run events.
 
-### Background completion delivery (CompletionFeed)
+### Background work and recovery
 
-Background shell job completions, mob member terminals, and async external tool results are delivered through the `CompletionFeed` seam. The feed is a monotonic append-only event log owned by the runtime epoch. Consumers (agent boundary, idle wake) read through cursor-based `list_since()`.
+Background shell jobs (shell tool with `&` or `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. Each completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands.
 
-Key types: `CompletionFeed` trait (meerkat-core), `CompletionEntry`, `CompletionSeq`, `CompletionBatch`. Runtime implementation: `RuntimeCompletionFeed` in meerkat-runtime.
+If the runtime is backed by persistent storage, completion state and cursors survive process restarts (bounded-loss; you may see one duplicate notice on the seam). Without persistence, conversation history resumes but pending background work doesn't.
 
-The agent boundary injects `[BG_JOB]` system notices at the `CallingLlm` boundary for each new terminal entry. The runtime loop's idle wake fires on `wait_for_advance()` to inject continuation turns for quiescent sessions.
-
-Background shell jobs (started by the shell tool with `&` or via the `background` parameter) are tracked through the `OpsLifecycleRegistry` as detached operations. When a background job completes, the `CompletionFeed` delivers a `BackgroundJobCompleted` event. The agent receives a `[SYSTEM NOTICE][BG_JOB]` message containing the job name, ID, exit status, and output at the next `CallingLlm` boundary. Idle keep-alive sessions are woken via `DetachedWakeState` to process these completions.
-
-### Durable runtime epoch recovery
-
-Runtime epoch state (ops lifecycle, completion feed entries, consumer cursors) can be durably persisted via `PersistedOpsSnapshot`. On process restart with a persistent `RuntimeStore`, the epoch is recovered with the same `RuntimeEpochId`, preserving completion entries and cursor positions. Without a store, the epoch rotates (fresh state, conversation resumed only).
-
-Recovery contract: bounded-loss, no invisible completions, possible duplicate notices. Terminal transitions are persisted via a bounded persistence channel; the loss window is the time between channel send and store commit.
-
-Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Recovery seam: `MeerkatMachine::recover_or_create_ops_state()`.
+For internal seams (`CompletionFeed`, `OpsLifecycleRegistry`, `DetachedWakeState`, `RuntimeEpochId`) load the architecture skill.
 
 ### Skills
 
@@ -699,42 +558,12 @@ Semantic memory (`memory_search`) and compaction integrate through the same sess
 
 ## Repo test lanes
 
-For repository development and regression triage, use the standardized Make
-lanes rather than ad hoc per-surface commands. Cargo is the default backend;
-`MEERKAT_BUILDBUDDY=1` opts supported broad lanes into the optional
-BuildBuddy/Bazel backend:
-
-- `make build`
-- `make check`
-- `make lint`
-- `make test`
-- `make test-unit`
-- `make test-int`
-- `make e2e-fast`
-- `make e2e-system`
-- `make e2e-live`
-- `make e2e-smoke`
-
-Use explicit `make buildbuddy-build`, `make buildbuddy-check`,
-`make buildbuddy-clippy`, `make buildbuddy-test`, and the matching
-`make buildbuddy-e2e-*` targets only when you want BuildBuddy without exporting
-the env var. Set `BUILDBUDDY_DRY_RUN=1` to inspect the selected BuildBuddy
-commands through Make. For narrow Cargo-only package checks, use
-`./scripts/repo-cargo`:
-
-- `./scripts/repo-cargo unit`
-- `./scripts/repo-cargo int`
-- `./scripts/repo-cargo e2e-fast`
-- `./scripts/repo-cargo e2e-system`
-- `./scripts/repo-cargo e2e-live`
-- `./scripts/repo-cargo e2e-smoke`
-
-Authoritative end-to-end lane ownership lives in
-`tests/integration/src/e2e_lanes.rs`. Python, TypeScript, and browser live
-scenarios may still shell out internally, but the supported top-level runner is
-the Rust-owned lane harness.
+For repo development, prefer the Make lanes over ad-hoc commands: `make build`, `make check`, `make lint`, `make test`, `make test-unit`, `make test-int`, `make e2e-fast`, `make e2e-system`, `make e2e-live`, `make e2e-smoke`. Cargo is default; `MEERKAT_BUILDBUDDY=1` routes the same lanes through Bazel/RBE when available. Per-package checks: `./scripts/repo-cargo {unit,int,e2e-fast,e2e-system,e2e-live,e2e-smoke}`. End-to-end lane ownership lives in `tests/integration/src/e2e_lanes.rs`.
 
 ## Reference
 
 For complete method signatures and multi-surface examples, load:
-`references/api_reference.md`
+
+- `references/api_reference.md`
+- `references/mobs.md`
+- `references/migration_0_5.md` (only if migrating from 0.5)

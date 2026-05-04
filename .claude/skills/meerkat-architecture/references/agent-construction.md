@@ -8,19 +8,20 @@ The single entry point for ALL surfaces. Key steps:
 
 1. Validate `keep_alive`
 2. Resolve provider (infer from model or explicit)
-3. Create LLM client (override > factory credentials > config)
-4. Create LLM adapter (with event channel and event tap)
-5. Resolve `max_tokens`
-6. Build skill engine, tool dispatcher, and any session-scoped task store
-7. Create session store (contract lives in `meerkat-core`; impls live in `meerkat-store`)
-8. Compose tools with comms, then optionally late-bind mob tools via `MobToolsFactory`
-9. Resolve hooks (override > filesystem layered config)
-10. Build system prompt + `AgentBuilder` + wire memory / compactor / skill engine / ops-lifecycle / event-tap / checkpointer
-11. Build agent, set `SessionMetadata` (persist override intent, not flattened booleans)
+3. Resolve credentials through `ProviderRuntimeRegistry` against the build's realm + binding (or the persisted `SessionLlmIdentity.connection_ref` on hot-swap). The registry is the **only** legitimate path to provider credentials — no `std::env::var` reads outside it. The published `AuthMachine` lease is what the LLM client consumes; refresh is owned by `AuthMachine` per binding (Valid → Expiring → Refreshing → Valid|ReauthRequired).
+4. Create LLM client (`build_config` override > registry-resolved binding lease > deny). There is no env-fallback at this layer — env keys are absorbed by the registry as a synthetic default binding upstream.
+5. Create LLM adapter (with event channel and event tap)
+6. Resolve `max_tokens`
+7. Build skill engine, tool dispatcher, and any session-scoped task store
+8. Create session store (contract lives in `meerkat-core`; impls live in `meerkat-store`)
+9. Compose tools with comms, then optionally late-bind mob tools via `MobToolsFactory`
+10. Resolve hooks (override > filesystem layered config)
+11. Build system prompt + `AgentBuilder` + wire memory / compactor / skill engine / ops-lifecycle / event-tap / checkpointer
+12. Build agent, set `SessionMetadata` (persist override intent + `connection_ref`, not flattened booleans)
 
 The factory validates `bindings.session_id == session.id()` for `SessionOwned` builds. Cross-wired bindings are rejected with `BuildAgentError::Config`.
 
-**Precedence at every step:** `build_config override > factory field > config resolution > default`
+**Precedence at every step:** `build_config override > factory field > registry/config resolution > default`. For credentials specifically, "registry resolution" means the realm/binding lookup against `ProviderRuntimeRegistry`, not raw config or env reads.
 
 **Dynamic tooling gotcha:** if a child dispatcher can change between turns (callback tools, agent mob tools), compose with `DynamicToolComposite` rather than a gateway that snapshots tool definitions once at construction.
 

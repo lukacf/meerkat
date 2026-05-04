@@ -15,7 +15,7 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 | `register_tool_callback` | name, description, schema JSON, callback | `()` | Must be called BEFORE init; legacy compat for registered tool callbacks |
 | `register_js_tool` | name, description, schema JSON, callback | `()` | Newer JS tool registration entrypoint with promise-aware handling |
 | `clear_tool_callbacks` | — | `()` | Clear all registered JS tool callbacks |
-| `register_external_auth_resolver` | callback (or `undefined` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain typed `AuthCredential` for a given `connectionRef`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
+| `register_external_auth_resolver` | callback (or `undefined` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain typed `AuthCredential` for a given `authBinding`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
 
 ### Session Lifecycle
 
@@ -29,7 +29,7 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 | `destroy_session` | handle | `()` | Remove session |
 | `poll_events` | handle | AgentEvent[] JSON | Drain buffered direct-session events |
 
-`config` for `create_session_simple` accepts an optional `connection_ref` that scopes credential resolution to a realm/binding through the registered external auth resolver (see auth section).
+`config` for `create_session_simple` accepts an optional `auth_binding` that scopes credential resolution to a realm/binding through the registered external auth resolver (see auth section).
 
 ### Mob Lifecycle (delegates to MobMcpState)
 
@@ -84,20 +84,20 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 
 Browser-hosted authentication is done through three concepts:
 
-1. **`connectionRef`** (structural): every `runtime.createSession({...})`, `mob.spawn(...)`, etc. accepts an optional `connectionRef` (realm + binding identifier). It scopes the agent build to a specific provider auth context, exactly the same way `--connection-ref` works on the CLI.
-2. **`registerExternalAuthResolver`** (TS helper in `sdks/web/src/auth.ts`): wraps the wasm-bundled `register_external_auth_resolver` binding. The host page provides a function that maps a `ConnectionRef` to a typed `AuthCredential` (bearer token, OAuth lease, etc.). The WASM agent factory calls this resolver instead of reading API keys.
+1. **`authBinding`** (structural): every `runtime.createSession({...})`, `mob.spawn(...)`, etc. accepts an optional `authBinding` (realm + binding identifier). It scopes the agent build to a specific provider auth context, exactly the same way `--auth-binding` works on the CLI.
+2. **`registerExternalAuthResolver`** (TS helper in `sdks/web/src/auth.ts`): wraps the wasm-bundled `register_external_auth_resolver` binding. The host page provides a function that maps a `AuthBindingRef` to a typed `AuthCredential` (bearer token, OAuth lease, etc.). The WASM agent factory calls this resolver instead of reading API keys.
 3. **Per-runtime credentials** (init-only): `init_runtime` / `init_runtime_from_config` accept the legacy `anthropicApiKey` / `openaiApiKey` / `geminiApiKey` plus `*_base_url` overrides for proxy deployments. Per-session `apiKey` fields were removed in 0.6 — use the resolver pattern for anything more sophisticated than a global static key.
 
 ```typescript
 import {
   MeerkatRuntime,
   registerExternalAuthResolver,
-  withConnectionRef,
+  withAuthBinding,
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
-registerExternalAuthResolver(wasm, async (connectionRef) => {
-  const token = await myHostFetchToken(connectionRef);
+registerExternalAuthResolver(wasm, async (authBinding) => {
+  const token = await myHostFetchToken(authBinding);
   return { kind: 'bearer_token', token };
 });
 
@@ -106,10 +106,10 @@ const runtime = await MeerkatRuntime.init(wasm, {
   anthropicBaseUrl: 'https://my-proxy.example/anthropic',
 });
 
-// withConnectionRef(connectionRef, config) returns a config with `connectionRef` set;
+// withAuthBinding(authBinding, config) returns a config with `authBinding` set;
 // alternatively just set the field directly on the config object.
-const session = runtime.createSession(withConnectionRef(
-  connectionRef,
+const session = runtime.createSession(withAuthBinding(
+  authBinding,
   { model: 'claude-sonnet-4-6' },
 ));
 ```
@@ -118,7 +118,7 @@ Surface notes:
 
 - The resolver is **session-build-time**, not request-time — once a session is built, the resolved lease is pinned for that build.
 - `registerExternalAuthResolver(wasm, undefined)` (or passing `JsValue::NULL` directly to the WASM export) clears the registration.
-- `connectionRef` is also accepted on `mob.spawn(...)` member specs so an individual member can be bound to a different binding from its parent mob.
+- `authBinding` is also accepted on `mob.spawn(...)` member specs so an individual member can be bound to a different binding from its parent mob.
 
 ## Config JSON Formats
 
@@ -136,11 +136,11 @@ Surface notes:
   "anthropic_base_url": "https://proxy.example.com/anthropic",
   "openai_base_url": "https://proxy.example.com/openai",
   "gemini_base_url": "https://proxy.example.com/gemini",
-  "connection_ref": { "realm": "team-alpha", "binding": "claude" }
+  "auth_binding": { "realm": "team-alpha", "binding": "claude" }
 }
 ```
 
-Per-provider base URLs take precedence over `base_url`. `connection_ref`, when present, is required to resolve through the registered external auth resolver.
+Per-provider base URLs take precedence over `base_url`. `auth_binding`, when present, is required to resolve through the registered external auth resolver.
 
 ## State Architecture
 
@@ -175,7 +175,7 @@ RuntimeState {
     "additional_instructions": ["Extra context for this member"],
     "labels": { "role": "lead" },
     "context": { "custom": "data" },
-    "connection_ref": { "realm": "team-alpha", "binding": "claude" }
+    "auth_binding": { "realm": "team-alpha", "binding": "claude" }
   }
 ]
 ```
@@ -225,7 +225,7 @@ The `@rkat/web` npm package provides a camelCase TypeScript wrapper:
 import {
   MeerkatRuntime,
   registerExternalAuthResolver,
-  withConnectionRef,
+  withAuthBinding,
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
@@ -268,5 +268,5 @@ session.destroy();
 - `SpawnResult` is identity-native: `agent_identity`, `agent_runtime_id`, `fence_token`, optional `generation`
 - `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
 - `MobStatus` uses `state` field instead of `status` + `member_count`
-- Per-session `apiKey` fields were removed; use `runtime.init({ ... globalKeys })` and/or `registerExternalAuthResolver` plus `connectionRef`
+- Per-session `apiKey` fields were removed; use `runtime.init({ ... globalKeys })` and/or `registerExternalAuthResolver` plus `authBinding`
 - `start_turn` now takes only `(handle, prompt)`; the legacy options-JSON third argument was removed

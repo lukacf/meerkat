@@ -11,13 +11,13 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::connection::{BindingId, ConnectionRef, IdentityError, ProfileId, RealmId};
+use crate::connection::{AuthBindingRef, BindingId, IdentityError, ProfileId, RealmId};
 
 /// Key for a persisted token bundle: realm + binding + optional auth profile override.
 ///
 /// Wave-c C-12 / C-1 follow-up: `realm_id: String` / `binding_id: String`
 /// retyped to `realm: RealmId` / `binding: BindingId` to match the typed-atom
-/// rename C-1 did on `ConnectionRef`. Consumers that need the flat string
+/// rename C-1 did on `AuthBindingRef`. Consumers that need the flat string
 /// form use `.realm.as_str()` / `.binding.as_str()` at the exact site that
 /// needs it (path segments, log lines, keyring account keys).
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
@@ -31,7 +31,7 @@ pub struct TokenKey {
 impl TokenKey {
     /// Construct a token key from already-typed atoms. The primary
     /// constructor — call sites that have the typed forms (e.g. from
-    /// `ConnectionRef.realm` / `ConnectionRef.binding`) use this
+    /// `AuthBindingRef.realm` / `AuthBindingRef.binding`) use this
     /// directly. Raw-string call sites build the atoms at their CLI /
     /// wire boundary via `RealmId::parse` / `BindingId::parse` and
     /// fold the resulting `Result<TokenKey, IdentityError>` into their
@@ -56,11 +56,11 @@ impl TokenKey {
         }
     }
 
-    pub fn from_connection_ref(connection_ref: &ConnectionRef) -> Self {
+    pub fn from_auth_binding(auth_binding: &AuthBindingRef) -> Self {
         Self::new_with_profile(
-            connection_ref.realm.clone(),
-            connection_ref.binding.clone(),
-            connection_ref.profile.clone(),
+            auth_binding.realm.clone(),
+            auth_binding.binding.clone(),
+            auth_binding.profile.clone(),
         )
     }
 
@@ -68,7 +68,7 @@ impl TokenKey {
     /// against the slug grammar enforced by
     /// `meerkat_core::connection::{RealmId,BindingId}::parse`. This is
     /// the right entry point for callers that only have flat-string
-    /// input — the CLI `--connection-ref` parser, wire-layer handlers,
+    /// input — the CLI `--auth-binding` parser, wire-layer handlers,
     /// test fixtures.
     pub fn parse(realm: impl AsRef<str>, binding: impl AsRef<str>) -> Result<Self, IdentityError> {
         Self::parse_with_profile(realm, binding, None::<&str>)

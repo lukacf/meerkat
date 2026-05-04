@@ -2353,7 +2353,7 @@ initial_delay = "750ms"
     // Plan §6.9 deleted the ProviderConfig enum and the
     // `test_provider_config_serialization` test that exercised its
     // serde discriminator. Realm-based credential configs are round-
-    // tripped by tests in meerkat-contracts/tests/connection_ref_wire.rs.
+    // tripped by tests in meerkat-contracts/tests/auth_binding_wire.rs.
 
     #[test]
     fn test_budget_config_serialization() {

@@ -244,7 +244,7 @@ impl AuthLease for DynamicLease {
     }
     async fn refresh(&self, reason: AuthRefreshReason) -> Result<(), AuthError> {
         Err(AuthError::RefreshFailed(format!(
-            "dynamic lease '{}' cannot refresh in place for reason {reason:?}; re-resolve the typed connection_ref",
+            "dynamic lease '{}' cannot refresh in place for reason {reason:?}; re-resolve the typed auth_binding",
             self.source_label
         )))
     }

@@ -171,8 +171,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ExecutionPlacementIdentity": schema_for!(meerkat_core::ExecutionPlacementIdentity),
         "ScheduleListResult": schema_for!(crate::wire::ScheduleListResult),
         "ScheduleOccurrencesResult": schema_for!(crate::wire::ScheduleOccurrencesResult),
-        // Phase 4c — connection/auth wire types.
-        "WireConnectionRef": schema_for!(crate::wire::WireConnectionRef),
+        // Phase 4c — auth-binding wire types.
+        "WireAuthBindingRef": schema_for!(crate::wire::WireAuthBindingRef),
         "WireBackendProfile": schema_for!(crate::wire::WireBackendProfile),
         "WireAuthProfile": schema_for!(crate::wire::WireAuthProfile),
         "WireProviderBinding": schema_for!(crate::wire::WireProviderBinding),
@@ -1331,7 +1331,7 @@ mod tests {
         for field in [
             "realm_id",
             "binding_id",
-            "connection_ref",
+            "auth_binding",
             "profile_id",
             "has_refresh_token",
         ] {
@@ -1749,8 +1749,8 @@ mod tests {
             "structured_output_retries",
             "provider_params",
             "clear_provider_params",
-            "connection_ref",
-            "clear_connection_ref",
+            "auth_binding",
+            "clear_auth_binding",
         ] {
             assert!(
                 properties.contains_key(field),

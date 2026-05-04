@@ -860,7 +860,7 @@ configured outside this endpoint.
 {
   "realm_id": "prod",
   "binding_id": "openai",
-  "connection_ref": {
+  "auth_binding": {
     "realm": "prod",
     "binding": "openai",
     "profile": "prod_openai"
@@ -966,7 +966,7 @@ Begin a loopback OAuth login. The server owns the OAuth state and PKCE verifier.
 ### POST /auth/login/complete
 
 Complete a loopback OAuth login and store the resulting tokens under an explicit
-binding-scoped `ConnectionRef`.
+binding-scoped `AuthBindingRef`.
 
 ```json Request
 {
@@ -1005,7 +1005,7 @@ Begin a device-code OAuth login.
 ### POST /auth/login/device/complete
 
 Poll one device-code OAuth completion attempt and, when ready, store the tokens
-under an explicit binding-scoped `ConnectionRef`.
+under an explicit binding-scoped `AuthBindingRef`.
 
 ```json Request
 {

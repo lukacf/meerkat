@@ -5,7 +5,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 from .generated.types import (
     MobSpawnManyResult,
     WireBudgetSplitPolicy,
-    WireConnectionRef,
+    WireAuthBindingRef,
     WireContentInput,
     WireMemberLaunchMode,
     WireMobBackendKind,
@@ -181,7 +181,7 @@ MobSpawnSpec = TypedDict(
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
         "additional_instructions": NotRequired[list[str] | None],
-        "connection_ref": NotRequired[WireConnectionRef | dict[str, str] | None],
+        "auth_binding": NotRequired[WireAuthBindingRef | dict[str, str] | None],
     },
 )
 
@@ -244,7 +244,7 @@ class Mob:
         budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
+        auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         return await self._client.spawn_mob_member(
             self.id,
@@ -264,7 +264,7 @@ class Mob:
             budget_split_policy=budget_split_policy,
             inherited_tool_filter=inherited_tool_filter,
             override_profile=override_profile,
-            connection_ref=connection_ref,
+            auth_binding=auth_binding,
         )
 
     async def spawn_many(

@@ -18,7 +18,7 @@ import type {
   MobTurnStartParams,
   MobWiringRulesInput,
   WireBudgetSplitPolicy,
-  WireConnectionRef,
+  WireAuthBindingRef,
   WireContentInput,
   WireMemberLaunchMode,
   WireMobBackendKind,
@@ -309,7 +309,7 @@ export interface SpawnManySpec {
   readonly labels?: Record<string, string>;
   readonly context?: unknown;
   readonly additionalInstructions?: string[];
-  readonly connectionRef?: WireConnectionRef;
+  readonly authBinding?: WireAuthBindingRef;
 }
 
 export interface SpawnSpec extends SpawnManySpec {
@@ -387,8 +387,8 @@ export interface MobTurnStartOptions {
   readonly structuredOutputRetries?: MobTurnStartWireOptions["structured_output_retries"];
   readonly providerParams?: MobTurnStartWireOptions["provider_params"];
   readonly clearProviderParams?: MobTurnStartWireOptions["clear_provider_params"];
-  readonly connectionRef?: MobTurnStartWireOptions["connection_ref"];
-  readonly clearConnectionRef?: MobTurnStartWireOptions["clear_connection_ref"];
+  readonly authBinding?: MobTurnStartWireOptions["auth_binding"];
+  readonly clearAuthBinding?: MobTurnStartWireOptions["clear_auth_binding"];
 }
 
 export interface MobEventsOptions {

@@ -185,11 +185,11 @@ export interface MobLifecycleResult {
 export interface MobSpawnParams {
   additional_instructions?: string[];
   agent_identity: string;
+  auth_binding?: WireAuthBindingRef;
   auto_wire_parent?: boolean;
   backend?: WireMobBackendKind;
   binding?: WireRuntimeBinding;
   budget_split_policy?: WireBudgetSplitPolicy;
-  connection_ref?: WireConnectionRef;
   context?: unknown;
   inherited_tool_filter?: WireToolFilter;
   initial_message?: WireContentInput;
@@ -212,8 +212,8 @@ export interface MobSpawnResult {
 export interface MobSpawnSpecParams {
   additional_instructions?: string[];
   agent_identity: string;
+  auth_binding?: WireAuthBindingRef;
   backend?: WireMobBackendKind;
-  connection_ref?: WireConnectionRef;
   context?: unknown;
   initial_message?: WireContentInput;
   labels?: Record<string, string>;
@@ -469,9 +469,9 @@ export interface MobForceCancelResult {
 export interface MobTurnStartParams {
   additional_instructions?: string[];
   agent_identity: string;
-  clear_connection_ref?: boolean;
+  auth_binding?: WireAuthBindingRef;
+  clear_auth_binding?: boolean;
   clear_provider_params?: boolean;
-  connection_ref?: WireConnectionRef;
   flow_tool_overlay?: Record<string, unknown>;
   keep_alive?: boolean;
   max_tokens?: number;
@@ -1874,8 +1874,8 @@ export interface RealtimeToolTimeoutPolicyDisabled {
 }
 
 export interface RealtimeToolTimeoutPolicyFinite {
-  type: "finite";
   timeout_ms: number;
+  type: "finite";
 }
 
 export type RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite;
@@ -2139,7 +2139,7 @@ export interface WireImageGenerationToolResult {
   warnings?: Record<string, unknown>[];
 }
 
-export interface WireConnectionRef {
+export interface WireAuthBindingRef {
   binding: string;
   profile?: string;
   realm: string;
@@ -2179,15 +2179,15 @@ export interface WireRealmConnectionSet {
 }
 
 export interface WireBindingIdentity {
+  auth_binding: WireAuthBindingRef;
   binding_id: string;
-  connection_ref: WireConnectionRef;
   realm_id: string;
 }
 
 export interface WireAuthProfileCreated {
+  auth_binding: WireAuthBindingRef;
   auth_method: string;
   binding_id: string;
-  connection_ref: WireConnectionRef;
   profile_id: string;
   provider: string;
   realm_id: string;
@@ -2195,16 +2195,16 @@ export interface WireAuthProfileCreated {
 }
 
 export interface WireAuthProfileDetail {
+  auth_binding: WireAuthBindingRef;
   auth_profile: Record<string, unknown>;
   binding_id: string;
-  connection_ref: WireConnectionRef;
   profile_id: string;
 }
 
 export interface WireAuthProfileCleared {
+  auth_binding: WireAuthBindingRef;
   binding_id: string;
   cleared: boolean;
-  connection_ref: WireConnectionRef;
   profile_id: string;
   realm_id: string;
 }
@@ -2217,8 +2217,8 @@ export interface WireLoginStart {
 }
 
 export interface WireLoginReady {
+  auth_binding: WireAuthBindingRef;
   binding_id: string;
-  connection_ref: WireConnectionRef;
   expires_at?: string;
   has_refresh_token: boolean;
   profile_id: string;
@@ -2270,9 +2270,9 @@ export interface WireAuthStatus {
 
 export interface WireAuthStatusDetail {
   account_id?: string;
+  auth_binding: WireAuthBindingRef;
   auth_method: string;
   binding_id: string;
-  connection_ref: WireConnectionRef;
   expires_at?: string;
   has_refresh_token: boolean;
   last_refresh_at?: string;

@@ -372,10 +372,10 @@ where
     }
 
     /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
-    pub fn rotate_auth_lease_connection_ref(
+    pub fn rotate_auth_lease_auth_binding(
         &self,
-        previous: Option<&crate::ConnectionRef>,
-        target: Option<&crate::ConnectionRef>,
+        previous: Option<&crate::AuthBindingRef>,
+        target: Option<&crate::AuthBindingRef>,
     ) -> Result<(), AgentError> {
         let Some(handle) = self.auth_lease_handle.as_deref() else {
             return Ok(());
@@ -384,18 +384,18 @@ where
             return Ok(());
         }
         if let Some(previous) = previous {
-            let previous_key = crate::handles::LeaseKey::from_connection_ref(previous);
+            let previous_key = crate::handles::LeaseKey::from_auth_binding(previous);
             let _ = handle.release_lease(&previous_key);
         }
         if let Some(target) = target {
-            let target_key = crate::handles::LeaseKey::from_connection_ref(target);
+            let target_key = crate::handles::LeaseKey::from_auth_binding(target);
             let target_snapshot = handle.snapshot(&target_key);
             if target_snapshot.credential_present && target_snapshot.phase.is_some() {
                 return Ok(());
             }
             handle.acquire_lease(&target_key, u64::MAX).map_err(|err| {
                 AgentError::ConfigError(format!(
-                    "failed to rotate auth lease to connection_ref {target_key}: {err}"
+                    "failed to rotate auth lease to auth_binding {target_key}: {err}"
                 ))
             })?;
         }

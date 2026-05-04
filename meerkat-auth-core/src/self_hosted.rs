@@ -97,13 +97,13 @@ mod tests {
     use super::*;
     use meerkat_core::provider_matrix::{SelfHostedAuthMethod, SelfHostedBackendKind};
     use meerkat_core::{
-        AuthProfile, BackendProfile, BindingId, BindingPolicy, ConnectionRef, CredentialSourceSpec,
-        RealmId,
+        AuthBindingRef, AuthProfile, BackendProfile, BindingId, BindingPolicy,
+        CredentialSourceSpec, RealmId,
     };
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
 
-    fn connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default").unwrap(),
             profile: None,
@@ -140,7 +140,7 @@ mod tests {
         );
         let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
         ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend,
             &auth,
             &BindingPolicy::default(),
@@ -170,7 +170,7 @@ mod tests {
         );
         let auth = auth_profile(Provider::OpenAI, "api_key");
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend,
             &auth,
             &BindingPolicy::default(),
@@ -186,7 +186,7 @@ mod tests {
         let auth = auth_profile(Provider::SelfHosted, SelfHostedAuthMethod::None.as_str());
         let err = ProviderRuntimeCatalog::validate_binding_for_provider(
             Provider::SelfHosted,
-            &connection_ref(),
+            &auth_binding(),
             &backend,
             &auth,
             &BindingPolicy::default(),

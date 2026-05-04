@@ -970,7 +970,7 @@ async fn resolve_validation_identity(
         provider,
         self_hosted_server_id,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     })
 }
 
@@ -4012,7 +4012,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: None,
+        auth_binding: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -4826,7 +4826,7 @@ async fn continue_session_inner(
             instance_id: state.instance_id.clone(),
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
-            connection_ref: None,
+            auth_binding: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -6471,7 +6471,7 @@ mod tests {
             provider,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         }
     }
 
@@ -6560,7 +6560,7 @@ mod tests {
         bootstrap.realm.backend_hint = Some("sqlite".to_string());
         bootstrap.realm.state_root = Some(temp.path().join("realms"));
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
-        let target = meerkat_core::ConnectionRef {
+        let target = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm fixture"),
             binding: meerkat_core::BindingId::parse("default_openai")
                 .expect("valid binding fixture"),

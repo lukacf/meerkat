@@ -1,10 +1,10 @@
 //! T3 top-down integration test for Phase 3 of the provider-auth redesign.
 //!
-//! Exercises the full factory-side dispatch: `AgentBuildConfig.connection_ref`
+//! Exercises the full factory-side dispatch: `AgentBuildConfig.auth_binding`
 //! → `ProviderRuntimeRegistry::resolve` → `build_client` → live `DynAgent`
 //! with the expected provider identity. Plus the resume round-trip over
-//! `SessionMetadata.connection_ref` and the coexistence properties
-//! (llm_client_override beats connection_ref; absent connection_ref falls
+//! `SessionMetadata.auth_binding` and the coexistence properties
+//! (llm_client_override beats auth_binding; absent auth_binding falls
 //! through to the legacy flat path unchanged).
 //!
 //! This is the RCT Mini top-down test that drives Phase 3 implementation.
@@ -23,8 +23,8 @@ use futures::stream;
 use meerkat::{AgentBuildConfig, AgentFactory, BuildAgentError};
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_core::{
-    AuthProfileConfig, BackendProfileConfig, Config, ConnectionRef, CredentialSourceSpec, Provider,
-    ProviderBindingConfig, RealmConfigSection,
+    AuthBindingRef, AuthProfileConfig, BackendProfileConfig, Config, CredentialSourceSpec,
+    Provider, ProviderBindingConfig, RealmConfigSection,
 };
 use std::collections::BTreeMap;
 
@@ -119,8 +119,8 @@ fn config_with_realm() -> Config {
     config
 }
 
-fn conn_ref(binding: &str) -> ConnectionRef {
-    ConnectionRef {
+fn conn_ref(binding: &str) -> AuthBindingRef {
+    AuthBindingRef {
         realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::BindingId::parse(binding).expect("valid binding"),
         profile: None,
@@ -158,18 +158,18 @@ impl LlmClient for MockLlmClient {
 }
 
 #[tokio::test]
-async fn build_agent_with_openai_connection_ref_resolves_through_registry() {
+async fn build_agent_with_openai_auth_binding_resolves_through_registry() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-5.4");
-    build.connection_ref = Some(conn_ref("default_openai"));
+    build.auth_binding = Some(conn_ref("default_openai"));
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("connection_ref resolves through ProviderRuntimeRegistry");
+        .expect("auth_binding resolves through ProviderRuntimeRegistry");
     // C5 observable: SessionMetadata.provider identity matches the binding's backend provider.
     let metadata = agent
         .session()
@@ -179,18 +179,18 @@ async fn build_agent_with_openai_connection_ref_resolves_through_registry() {
 }
 
 #[tokio::test]
-async fn build_agent_with_anthropic_connection_ref_resolves_through_registry() {
+async fn build_agent_with_anthropic_auth_binding_resolves_through_registry() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("claude-sonnet-4-6");
-    build.connection_ref = Some(conn_ref("default_anthropic"));
+    build.auth_binding = Some(conn_ref("default_anthropic"));
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("connection_ref resolves through ProviderRuntimeRegistry");
+        .expect("auth_binding resolves through ProviderRuntimeRegistry");
     let metadata = agent
         .session()
         .session_metadata()
@@ -199,18 +199,18 @@ async fn build_agent_with_anthropic_connection_ref_resolves_through_registry() {
 }
 
 #[tokio::test]
-async fn build_agent_with_google_connection_ref_resolves_through_registry() {
+async fn build_agent_with_google_auth_binding_resolves_through_registry() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gemini-3.1-pro-preview");
-    build.connection_ref = Some(conn_ref("default_google"));
+    build.auth_binding = Some(conn_ref("default_google"));
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("connection_ref resolves through ProviderRuntimeRegistry");
+        .expect("auth_binding resolves through ProviderRuntimeRegistry");
     let metadata = agent
         .session()
         .session_metadata()
@@ -236,7 +236,7 @@ async fn build_agent_with_gpt_realtime_selects_realtime_text_adapter() {
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
-    build.connection_ref = Some(conn_ref("default_openai"));
+    build.auth_binding = Some(conn_ref("default_openai"));
 
     let agent = factory
         .build_agent(build, &config)
@@ -257,7 +257,7 @@ async fn build_agent_with_gpt_realtime_without_feature_returns_typed_error() {
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
-    build.connection_ref = Some(conn_ref("default_openai"));
+    build.auth_binding = Some(conn_ref("default_openai"));
 
     let result = factory.build_agent(build, &config).await;
     match result {
@@ -282,7 +282,7 @@ async fn build_agent_unknown_binding_surfaces_connection_resolution_error() {
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-5.4");
-    build.connection_ref = Some(conn_ref("does_not_exist"));
+    build.auth_binding = Some(conn_ref("does_not_exist"));
 
     let result = factory.build_agent(build, &config).await;
     match result {
@@ -300,7 +300,7 @@ async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
     let config = Config::default();
 
     let mut build = AgentBuildConfig::new("gpt-5.4");
-    build.connection_ref = Some(conn_ref("default_openai"));
+    build.auth_binding = Some(conn_ref("default_openai"));
 
     let result = factory.build_agent(build, &config).await;
     match result {
@@ -311,12 +311,12 @@ async fn build_agent_unknown_realm_surfaces_connection_resolution_error() {
 }
 
 // ---------------------------------------------------------------------
-// Precedence: llm_client_override beats connection_ref
+// Precedence: llm_client_override beats auth_binding
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn llm_client_override_beats_connection_ref() {
-    // Observable proof: connection_ref points to an invalid binding
+async fn llm_client_override_beats_auth_binding() {
+    // Observable proof: auth_binding points to an invalid binding
     // ("does_not_exist"). Without override, this returns
     // ConnectionResolution. With override set, the build succeeds —
     // proving the override path bypasses the registry dispatch entirely.
@@ -325,23 +325,23 @@ async fn llm_client_override_beats_connection_ref() {
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-5.4");
-    build.connection_ref = Some(conn_ref("does_not_exist"));
+    build.auth_binding = Some(conn_ref("does_not_exist"));
     build.llm_client_override = Some(Arc::new(MockLlmClient));
 
     let _agent = factory
         .build_agent(build, &config)
         .await
-        .expect("llm_client_override bypasses connection_ref resolution even for invalid bindings");
+        .expect("llm_client_override bypasses auth_binding resolution even for invalid bindings");
 }
 
 // ---------------------------------------------------------------------
-// Coexistence: absent connection_ref still resolves the configured default
+// Coexistence: absent auth_binding still resolves the configured default
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn build_agent_without_connection_ref_uses_default_realm_binding() {
-    // A missing connection_ref is not an ambient-credential bypass. It resolves
-    // through the same typed realm binding machinery as explicit connection_ref
+async fn build_agent_without_auth_binding_uses_default_realm_binding() {
+    // A missing auth_binding is not an ambient-credential bypass. It resolves
+    // through the same typed realm binding machinery as explicit auth_binding
     // builds, choosing config.realm["default"].default_binding when present and
     // persisting the resolved ref into SessionMetadata.
     let temp = tempfile::tempdir().unwrap();
@@ -351,19 +351,19 @@ async fn build_agent_without_connection_ref_uses_default_realm_binding() {
     config.realm.insert("default".to_string(), section);
 
     let build = AgentBuildConfig::new("gpt-5.4");
-    assert!(build.connection_ref.is_none());
+    assert!(build.auth_binding.is_none());
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("default realm binding should resolve without explicit connection_ref");
+        .expect("default realm binding should resolve without explicit auth_binding");
     let metadata = agent
         .session()
         .session_metadata()
         .expect("session metadata written");
     assert_eq!(metadata.provider, Provider::OpenAI);
     assert_eq!(
-        metadata.connection_ref.as_ref().map(|conn_ref| {
+        metadata.auth_binding.as_ref().map(|conn_ref| {
             (
                 conn_ref.realm.as_str().to_string(),
                 conn_ref.binding.as_str().to_string(),
@@ -374,22 +374,22 @@ async fn build_agent_without_connection_ref_uses_default_realm_binding() {
 }
 
 // ---------------------------------------------------------------------
-// C4: SessionMetadata persists connection_ref
+// C4: SessionMetadata persists auth_binding
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn session_metadata_persists_connection_ref_across_build() {
+async fn session_metadata_persists_auth_binding_across_build() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
     let mut build = AgentBuildConfig::new("gpt-5.4");
-    build.connection_ref = Some(conn_ref("default_openai"));
+    build.auth_binding = Some(conn_ref("default_openai"));
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("build_agent with connection_ref");
+        .expect("build_agent with auth_binding");
 
     let metadata = agent
         .session()
@@ -397,8 +397,8 @@ async fn session_metadata_persists_connection_ref_across_build() {
         .expect("SessionMetadata should be populated after build_agent");
 
     assert_eq!(
-        metadata.connection_ref.as_ref(),
+        metadata.auth_binding.as_ref(),
         Some(&conn_ref("default_openai")),
-        "persisted SessionMetadata must round-trip the connection_ref so resume re-resolves the same binding",
+        "persisted SessionMetadata must round-trip the auth_binding so resume re-resolves the same binding",
     );
 }

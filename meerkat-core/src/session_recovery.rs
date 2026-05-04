@@ -8,9 +8,10 @@ use crate::service::{
     SessionBuildOptions,
 };
 use crate::{
-    AgentToolDispatcher, BudgetLimits, ConnectionRef, ContentInput, HookRunOverrides, OutputSchema,
-    PeerMeta, Provider, Session, SessionBuildState, SessionDeferredTurnState, SessionMetadata,
-    ToolCategoryOverride, ToolDef, checkpoint::SessionCheckpointer, skills::SkillKey,
+    AgentToolDispatcher, AuthBindingRef, BudgetLimits, ContentInput, HookRunOverrides,
+    OutputSchema, PeerMeta, Provider, Session, SessionBuildState, SessionDeferredTurnState,
+    SessionMetadata, ToolCategoryOverride, ToolDef, checkpoint::SessionCheckpointer,
+    skills::SkillKey,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
@@ -26,8 +27,8 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub provider: Option<Provider>,
     pub provider_params: Option<serde_json::Value>,
     pub clear_provider_params: bool,
-    pub connection_ref: Option<ConnectionRef>,
-    pub clear_connection_ref: bool,
+    pub auth_binding: Option<AuthBindingRef>,
+    pub clear_auth_binding: bool,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
@@ -200,8 +201,8 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.provider.is_some()
         || overrides.provider_params.is_some()
         || overrides.clear_provider_params
-        || overrides.connection_ref.is_some()
-        || overrides.clear_connection_ref
+        || overrides.auth_binding.is_some()
+        || overrides.clear_auth_binding
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
         || overrides.comms_name.is_some()
@@ -281,9 +282,9 @@ pub fn resolve_effective_turn_config(
             "clear_provider_params cannot be combined with provider_params".to_string(),
         ));
     }
-    if overrides.clear_connection_ref && overrides.connection_ref.is_some() {
+    if overrides.clear_auth_binding && overrides.auth_binding.is_some() {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_connection_ref cannot be combined with connection_ref".to_string(),
+            "clear_auth_binding cannot be combined with auth_binding".to_string(),
         ));
     }
     if has_build_only_turn_overrides(overrides) && !allows_first_turn_build_overrides {
@@ -309,7 +310,7 @@ pub fn resolve_effective_turn_config(
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
         provider_params: overrides.provider_params.is_some() || overrides.clear_provider_params,
-        connection_ref: overrides.connection_ref.is_some() || overrides.clear_connection_ref,
+        auth_binding: overrides.auth_binding.is_some() || overrides.clear_auth_binding,
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
@@ -406,16 +407,16 @@ pub fn resolve_effective_turn_config(
         config_generation: metadata
             .config_generation
             .or(realm_defaults.config_generation),
-        // Phase 3: persisted connection_ref re-entered at resume time so
+        // Phase 3: persisted auth_binding re-entered at resume time so
         // the binding re-resolves through the same realm entry unless this
         // recovery request explicitly sets or clears it.
-        connection_ref: if overrides.clear_connection_ref {
+        auth_binding: if overrides.clear_auth_binding {
             None
         } else {
             overrides
-                .connection_ref
+                .auth_binding
                 .clone()
-                .or_else(|| metadata.connection_ref.clone())
+                .or_else(|| metadata.auth_binding.clone())
         },
         keep_alive,
         checkpointer: context.checkpointer,
@@ -478,8 +479,8 @@ mod tests {
         )
     }
 
-    fn connection_ref(realm: &str, binding: &str) -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding(realm: &str, binding: &str) -> AuthBindingRef {
+        AuthBindingRef {
             realm: crate::connection::RealmId::parse(realm).expect("valid realm fixture"),
             binding: crate::connection::BindingId::parse(binding).expect("valid binding fixture"),
             profile: None,
@@ -516,7 +517,7 @@ mod tests {
                 instance_id: Some("instance-a".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("session metadata");
         session
@@ -572,9 +573,9 @@ mod tests {
     #[test]
     fn resolve_effective_turn_config_plain_resume_inherits_session_defaults_before_realm() {
         let mut session = sample_session();
-        let persisted_ref = connection_ref("persisted", "default");
+        let persisted_ref = auth_binding("persisted", "default");
         let mut metadata = session.session_metadata().expect("session metadata");
-        metadata.connection_ref = Some(persisted_ref.clone());
+        metadata.auth_binding = Some(persisted_ref.clone());
         metadata.keep_alive = true;
         session
             .set_session_metadata(metadata.clone())
@@ -598,7 +599,7 @@ mod tests {
         assert!(effective.keep_alive);
         assert_eq!(effective.build.provider, Some(metadata.provider));
         assert_eq!(effective.build.provider_params, metadata.provider_params);
-        assert_eq!(effective.build.connection_ref, Some(persisted_ref));
+        assert_eq!(effective.build.auth_binding, Some(persisted_ref));
         assert_eq!(effective.build.override_builtins, metadata.tooling.builtins);
         assert_eq!(effective.build.override_shell, metadata.tooling.shell);
         assert_eq!(effective.build.override_memory, metadata.tooling.memory);
@@ -748,45 +749,45 @@ mod tests {
     }
 
     #[test]
-    fn build_recovered_session_connection_ref_override_and_clear_stay_explicit() {
+    fn build_recovered_session_auth_binding_override_and_clear_stay_explicit() {
         let mut session = sample_session();
         let mut metadata = session.session_metadata().expect("session metadata");
-        metadata.connection_ref = Some(connection_ref("persisted", "default"));
+        metadata.auth_binding = Some(auth_binding("persisted", "default"));
         session
             .set_session_metadata(metadata)
             .expect("updated session metadata");
 
-        let override_ref = connection_ref("override", "default");
+        let override_ref = auth_binding("override", "default");
         let recovered = build_recovered_session(
             session.clone(),
             &SurfaceSessionRecoveryOverrides {
-                connection_ref: Some(override_ref.clone()),
+                auth_binding: Some(override_ref.clone()),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
         )
-        .expect("recovered session with connection_ref override");
+        .expect("recovered session with auth_binding override");
 
-        assert_eq!(recovered.build.connection_ref, Some(override_ref));
+        assert_eq!(recovered.build.auth_binding, Some(override_ref));
         assert!(
-            recovered.build.resume_override_mask.connection_ref,
-            "set connection_ref must prevent persisted metadata overwrite"
+            recovered.build.resume_override_mask.auth_binding,
+            "set auth_binding must prevent persisted metadata overwrite"
         );
 
         let recovered = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                clear_connection_ref: true,
+                clear_auth_binding: true,
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
         )
-        .expect("recovered session with connection_ref clear");
+        .expect("recovered session with auth_binding clear");
 
-        assert_eq!(recovered.build.connection_ref, None);
+        assert_eq!(recovered.build.auth_binding, None);
         assert!(
-            recovered.build.resume_override_mask.connection_ref,
-            "clear connection_ref must prevent factory metadata rehydration"
+            recovered.build.resume_override_mask.auth_binding,
+            "clear auth_binding must prevent factory metadata rehydration"
         );
     }
 
@@ -810,17 +811,15 @@ mod tests {
         let connection_error = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                connection_ref: Some(connection_ref("override", "default")),
-                clear_connection_ref: true,
+                auth_binding: Some(auth_binding("override", "default")),
+                clear_auth_binding: true,
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
         )
-        .expect_err("set plus clear connection_ref must be rejected");
+        .expect_err("set plus clear auth_binding must be rejected");
         assert!(
-            connection_error
-                .to_string()
-                .contains("clear_connection_ref"),
+            connection_error.to_string().contains("clear_auth_binding"),
             "unexpected error: {connection_error}"
         );
     }

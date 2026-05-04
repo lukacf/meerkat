@@ -822,7 +822,7 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::LlmStreamResult;
-    use crate::connection::{BindingId, ConnectionRef, RealmId};
+    use crate::connection::{AuthBindingRef, BindingId, RealmId};
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
@@ -1175,8 +1175,8 @@ mod tests {
         }
     }
 
-    fn connection_ref(binding: &str) -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding(binding: &str) -> AuthBindingRef {
+        AuthBindingRef {
             realm: RealmId::parse("dev").expect("valid realm fixture"),
             binding: BindingId::parse(binding).expect("valid binding fixture"),
             profile: None,
@@ -1313,9 +1313,9 @@ mod tests {
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
         let auth_lease = Arc::new(RecordingAuthLeaseHandle::default());
-        let previous = connection_ref("previous");
-        let target = connection_ref("target");
-        let target_key = LeaseKey::from_connection_ref(&target);
+        let previous = auth_binding("previous");
+        let target = auth_binding("target");
+        let target_key = LeaseKey::from_auth_binding(&target);
         auth_lease.seed(
             target_key.clone(),
             AuthLeaseSnapshot {
@@ -1332,7 +1332,7 @@ mod tests {
             .await;
 
         agent
-            .rotate_auth_lease_connection_ref(Some(&previous), Some(&target))
+            .rotate_auth_lease_auth_binding(Some(&previous), Some(&target))
             .unwrap();
 
         let snapshot = auth_lease.snapshot(&target_key);

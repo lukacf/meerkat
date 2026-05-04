@@ -3,7 +3,7 @@
 //!
 //! Plan choke point K5 reads: "`rkat auth login openai --backend
 //! openai_api --method api_key` … → profile saved; `rkat auth profile
-//! list` shows it; `rkat run --connection-ref realm:binding "hi"` builds
+//! list` shows it; `rkat run --auth-binding realm:binding "hi"` builds
 //! agent". The live-provider half of that flow requires real credentials
 //! and belongs in the `e2e-auth` lane; this file exercises the offline
 //! command-surface half: the subcommand dispatch table, argument
@@ -562,7 +562,7 @@ fn rkat_auth_profile_list_returns_cleanly_for_empty_realm() {
     }
 }
 
-/// `rkat run --connection-ref realm:binding "hi"` without a configured
+/// `rkat run --auth-binding realm:binding "hi"` without a configured
 /// realm must return a typed `ConnectionResolution` error, not an
 /// `unknown argument` or panic. This proves the flag is registered and
 /// flows into build_agent.
@@ -570,7 +570,7 @@ fn rkat_auth_profile_list_returns_cleanly_for_empty_realm() {
 /// The test does not require a live LLM; the error path triggers before
 /// any network call.
 #[test]
-fn rkat_run_connection_ref_flag_is_registered_and_routes() {
+fn rkat_run_auth_binding_flag_is_registered_and_routes() {
     let Some(rkat) = rkat_binary() else {
         eprintln!("SKIP: rkat binary unavailable");
         return;
@@ -581,7 +581,7 @@ fn rkat_run_connection_ref_flag_is_registered_and_routes() {
     std::fs::create_dir_all(tmp.path().join(".rkat")).expect("mkdir .rkat");
 
     let out = Command::new(&rkat)
-        .args(["run", "--connection-ref", "nonexistent:binding", "hi"])
+        .args(["run", "--auth-binding", "nonexistent:binding", "hi"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
@@ -596,8 +596,8 @@ fn rkat_run_connection_ref_flag_is_registered_and_routes() {
     assert!(
         !stderr.contains("unrecognized argument")
             && !stderr.contains("unexpected argument")
-            && !stderr.contains("found argument '--connection-ref'"),
-        "--connection-ref must be a registered CLI flag; stderr:\n{stderr}"
+            && !stderr.contains("found argument '--auth-binding'"),
+        "--auth-binding must be a registered CLI flag; stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("thread 'main' panicked"),

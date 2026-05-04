@@ -101,21 +101,21 @@ slug_newtype!(
 
 /// Session-facing reference to a binding inside a realm.
 ///
-/// `ConnectionRef` is purely structural — it does NOT carry a `"realm:binding"`
+/// `AuthBindingRef` is purely structural — it does NOT carry a `"realm:binding"`
 /// string form. Wave-b deleted `parse` and `Display` so that no code path
 /// accidentally ferries the opaque join through the runtime. CLI input that
 /// arrives as `"realm:binding[:profile]"` must be split at the CLI boundary
 /// and constructed field-by-field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ConnectionRef {
+pub struct AuthBindingRef {
     pub realm: RealmId,
     pub binding: BindingId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileId>,
 }
 
-impl ConnectionRef {
+impl AuthBindingRef {
     pub fn is_env_default(&self) -> bool {
         self.realm.as_str() == "env_default"
             && self.binding.as_str() == "default"
@@ -279,7 +279,7 @@ pub struct RealmConnectionSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConnectionTarget {
     pub realm: RealmConnectionSet,
-    pub connection_ref: ConnectionRef,
+    pub auth_binding: AuthBindingRef,
     pub binding: ProviderBinding,
     pub backend: BackendProfile,
     pub auth_profile: AuthProfile,
@@ -413,19 +413,19 @@ pub fn resolve_realm_binding_target_for_provider(
     Err(ConnectionTargetError::MissingRealm)
 }
 
-/// Resolve an explicit [`ConnectionRef`] or the configured default target for
+/// Resolve an explicit [`AuthBindingRef`] or the configured default target for
 /// the selected provider. This is the shared factory/runtime path for
-/// connection-ref-less provider resolution.
-pub fn resolve_connection_ref_or_default_for_provider(
+/// auth-binding-less provider resolution.
+pub fn resolve_auth_binding_or_default_for_provider(
     config: &Config,
     provider: Provider,
-    connection_ref: Option<&ConnectionRef>,
+    auth_binding: Option<&AuthBindingRef>,
     preferred_realm: Option<&RealmId>,
     allow_env_default: bool,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
-    if let Some(connection_ref) = connection_ref {
-        let realm_id = connection_ref.realm.as_str();
-        if connection_ref.is_env_default() {
+    if let Some(auth_binding) = auth_binding {
+        let realm_id = auth_binding.realm.as_str();
+        if auth_binding.is_env_default() {
             return Err(ConnectionTargetError::UnknownRealm(realm_id.to_string()));
         }
         let section = config
@@ -441,8 +441,8 @@ pub fn resolve_connection_ref_or_default_for_provider(
         return materialize_connection_target(
             realm,
             provider,
-            connection_ref.binding.clone(),
-            connection_ref.profile.clone(),
+            auth_binding.binding.clone(),
+            auth_binding.profile.clone(),
         );
     }
 
@@ -469,23 +469,23 @@ fn materialize_connection_target(
             source,
         }
     })?;
-    let connection_ref = ConnectionRef {
+    let auth_binding = AuthBindingRef {
         realm: realm_typed,
         binding,
         profile,
     };
     let (binding, backend, auth_profile) =
-        realm
-            .lookup_connection_ref(&connection_ref)
-            .map_err(|source| ConnectionTargetError::BindingInvalid {
-                realm: connection_ref.realm.to_string(),
-                binding: connection_ref.binding.to_string(),
+        realm.lookup_auth_binding(&auth_binding).map_err(|source| {
+            ConnectionTargetError::BindingInvalid {
+                realm: auth_binding.realm.to_string(),
+                binding: auth_binding.binding.to_string(),
                 source,
-            })?;
+            }
+        })?;
     if backend.provider != provider || auth_profile.provider != provider {
         return Err(ConnectionTargetError::ProviderMismatch {
-            realm: connection_ref.realm.to_string(),
-            binding: connection_ref.binding.to_string(),
+            realm: auth_binding.realm.to_string(),
+            binding: auth_binding.binding.to_string(),
             expected: provider,
             backend: backend.provider,
             auth: auth_profile.provider,
@@ -496,7 +496,7 @@ fn materialize_connection_target(
     let auth_profile = auth_profile.clone();
     Ok(ResolvedConnectionTarget {
         realm,
-        connection_ref,
+        auth_binding,
         binding,
         backend,
         auth_profile,
@@ -700,24 +700,24 @@ impl RealmConnectionSet {
         Ok((binding, backend, auth))
     }
 
-    /// Resolve a typed connection reference. `ConnectionRef.profile`, when
+    /// Resolve a typed auth binding reference. `AuthBindingRef.profile`, when
     /// present, overrides the binding's configured auth profile while keeping
     /// the binding's backend and policy authoritative.
-    pub fn lookup_connection_ref(
+    pub fn lookup_auth_binding(
         &self,
-        connection_ref: &ConnectionRef,
+        auth_binding: &AuthBindingRef,
     ) -> Result<(&ProviderBinding, &BackendProfile, &AuthProfile), ProviderBindingError> {
         let binding = self
             .bindings
-            .get(connection_ref.binding.as_str())
+            .get(auth_binding.binding.as_str())
             .ok_or_else(|| {
-                ProviderBindingError::UnknownBinding(connection_ref.binding.to_string())
+                ProviderBindingError::UnknownBinding(auth_binding.binding.to_string())
             })?;
         let backend = self
             .backends
             .get(&binding.backend_profile)
             .ok_or_else(|| ProviderBindingError::UnknownBackend(binding.backend_profile.clone()))?;
-        let auth_profile_id = connection_ref
+        let auth_profile_id = auth_binding
             .profile
             .as_ref()
             .map(ProfileId::as_str)
@@ -794,7 +794,7 @@ impl RealmConfigSection {
     ///   - a `ProviderBindingConfig` wiring the two
     ///
     /// The first provider in the input list becomes the
-    /// `default_binding` so that build_agent's connection_ref-less
+    /// `default_binding` so that build_agent's auth_binding-less
     /// code path can resolve through this realm. Plan §6.10 replacement
     /// for the deleted `ProviderSettings.api_keys` map.
     pub fn from_inline_api_keys(entries: &[(&str, &str)]) -> Self {
@@ -931,8 +931,8 @@ auth_profile = "openai_oauth"
     }
 
     #[test]
-    fn connection_ref_is_purely_structural() {
-        let c = ConnectionRef {
+    fn auth_binding_is_purely_structural() {
+        let c = AuthBindingRef {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
@@ -943,8 +943,8 @@ auth_profile = "openai_oauth"
     }
 
     #[test]
-    fn connection_ref_serde_roundtrip_with_profile() {
-        let c = ConnectionRef {
+    fn auth_binding_serde_roundtrip_with_profile() {
+        let c = AuthBindingRef {
             realm: RealmId::parse("prod").unwrap(),
             binding: BindingId::parse("gpt5").unwrap(),
             profile: Some(ProfileId::parse("override").unwrap()),
@@ -953,12 +953,12 @@ auth_profile = "openai_oauth"
         assert!(s.contains("\"realm\":\"prod\""));
         assert!(s.contains("\"binding\":\"gpt5\""));
         assert!(s.contains("\"profile\":\"override\""));
-        let back: ConnectionRef = serde_json::from_str(&s).unwrap();
+        let back: AuthBindingRef = serde_json::from_str(&s).unwrap();
         assert_eq!(back, c);
     }
 
     #[test]
-    fn connection_ref_profile_overrides_binding_auth_profile() {
+    fn auth_binding_profile_overrides_binding_auth_profile() {
         let toml = r#"
 realm_id = "prod"
 default_binding = "primary"
@@ -984,13 +984,13 @@ auth_profile = "default_profile"
 "#;
         let section: RealmConfigSection = toml::from_str(toml).unwrap();
         let realm = RealmConnectionSet::from_config("prod", &section).unwrap();
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("prod").unwrap(),
             binding: BindingId::parse("primary").unwrap(),
             profile: Some(ProfileId::parse("override_profile").unwrap()),
         };
 
-        let (_binding, _backend, auth) = realm.lookup_connection_ref(&connection_ref).unwrap();
+        let (_binding, _backend, auth) = realm.lookup_auth_binding(&auth_binding).unwrap();
         assert_eq!(auth.id, "override_profile");
     }
 
@@ -1071,8 +1071,8 @@ auth_profile = "default_profile"
         )
         .unwrap();
 
-        assert_eq!(target.connection_ref.realm.as_str(), "prod");
-        assert_eq!(target.connection_ref.binding.as_str(), "primary");
+        assert_eq!(target.auth_binding.realm.as_str(), "prod");
+        assert_eq!(target.auth_binding.binding.as_str(), "primary");
         assert_eq!(target.binding.id, "primary");
     }
 
@@ -1092,8 +1092,8 @@ auth_profile = "default_profile"
         )
         .unwrap();
 
-        assert_eq!(target.connection_ref.realm.as_str(), "prod");
-        assert_eq!(target.connection_ref.binding.as_str(), "secondary");
+        assert_eq!(target.auth_binding.realm.as_str(), "prod");
+        assert_eq!(target.auth_binding.binding.as_str(), "secondary");
         assert_eq!(target.binding.id, "secondary");
     }
 

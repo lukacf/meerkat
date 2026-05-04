@@ -2413,7 +2413,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 self_hosted_server_id: None,
                 provider_params: None,
-                connection_ref: None,
+                auth_binding: None,
             },
             vec![ToolDef {
                 name: "send_request".into(),
@@ -4540,7 +4540,7 @@ mod tests {
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         assert_eq!(
             openai_realtime_connect_model(&realtime_identity),
@@ -4557,7 +4557,7 @@ mod tests {
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         assert_eq!(
             openai_realtime_connect_model(&semantic_identity),

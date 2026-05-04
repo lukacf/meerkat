@@ -6,7 +6,7 @@
         "model": "gpt-4o-mini"
     },
     "session_metadata": {
-        "connection_ref": {
+        "auth_binding": {
             "realm": "prod",
             "binding": "openai_main",
             "profile": null

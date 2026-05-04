@@ -245,10 +245,10 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
 
 /// 2. `build_agent` without LLM override fails when no API key is set.
 ///
-/// Superseded by `build_agent_without_connection_ref_rejects_ambient_realm_config_api_key`
+/// Superseded by `build_agent_without_auth_binding_rejects_ambient_realm_config_api_key`
 /// (test 2b below): the wave-c auth-seam cleanup deleted env-default realm
 /// synthesis and first-matching-provider promotion, so `build_agent` now
-/// rejects at the ConnectionRef gate before ever reaching the API-key check.
+/// rejects at the AuthBindingRef gate before ever reaching the API-key check.
 /// This test's original path (config → ambient provider resolution → MissingApiKey)
 /// is unreachable. Environments with `ANTHROPIC_API_KEY` set would early-return
 /// "Skipping"; environments without it now hit `ConnectionResolution` refusal,
@@ -289,11 +289,11 @@ async fn build_agent_without_override_fails_missing_api_key() {
     );
 }
 
-/// 2b. A missing connection_ref resolves through the configured default realm
+/// 2b. A missing auth_binding resolves through the configured default realm
 ///     binding. This is a valid typed auth path, distinct from first-provider
 ///     ambient credential search.
 #[tokio::test]
-async fn build_agent_without_connection_ref_uses_default_realm_config_api_key() {
+async fn build_agent_without_auth_binding_uses_default_realm_config_api_key() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
@@ -302,18 +302,18 @@ async fn build_agent_without_connection_ref_uses_default_realm_config_api_key() 
     config.realm.insert("default".to_string(), section);
 
     let build_config = AgentBuildConfig::new("gpt-5.4");
-    assert!(build_config.connection_ref.is_none());
+    assert!(build_config.auth_binding.is_none());
     let agent = factory
         .build_agent(build_config, &config)
         .await
-        .expect("default realm config API key should resolve without explicit connection_ref");
+        .expect("default realm config API key should resolve without explicit auth_binding");
     let metadata = agent
         .session()
         .session_metadata()
         .expect("session should have metadata");
     assert_eq!(metadata.provider, Provider::OpenAI);
     assert_eq!(
-        metadata.connection_ref.as_ref().map(|conn_ref| {
+        metadata.auth_binding.as_ref().map(|conn_ref| {
             (
                 conn_ref.realm.as_str().to_string(),
                 conn_ref.binding.as_str().to_string(),
@@ -478,7 +478,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
                 provider: Provider::SelfHosted,
                 self_hosted_server_id: Some("other".to_string()),
                 provider_params: None,
-                connection_ref: None,
+                auth_binding: None,
             },
         )
         .await
@@ -711,7 +711,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         instance_id: None,
         backend: None,
         config_generation: None,
-        connection_ref: None,
+        auth_binding: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 
@@ -788,7 +788,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -874,7 +874,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -928,7 +928,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -982,7 +982,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1061,7 +1061,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1397,7 +1397,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .expect("resume metadata");
 
@@ -1539,7 +1539,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1592,7 +1592,7 @@ async fn resume_with_disable_mob_stays_disabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1643,7 +1643,7 @@ async fn resume_with_enable_mob_stays_enabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1716,7 +1716,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1792,7 +1792,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
 
@@ -1886,7 +1886,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .unwrap();
     session
@@ -2200,19 +2200,19 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
 }
 
 // ---------------------------------------------------------------------------
-// Deferral §2: connection_ref hot-swap mid-session
+// Deferral §2: auth_binding hot-swap mid-session
 // ---------------------------------------------------------------------------
 //
 // Dogma §12 (dynamic policy follows dynamic identity) requires that when a
-// session persists a `connection_ref`, `build_llm_client_for_identity`
+// session persists a `auth_binding`, `build_llm_client_for_identity`
 // pins the credential resolve to that specific realm + binding — not a
 // synthesized env-default realm. The tests below cover the three failure
 // modes we most care about preventing: silent realm substitution,
 // swallowing of unknown realms, and ignoring a per-hot-swap override.
 
 #[tokio::test]
-async fn hot_swap_scopes_resolve_to_session_connection_ref() {
-    // identity.connection_ref = Some(ref) but config.realm has no matching
+async fn hot_swap_scopes_resolve_to_session_auth_binding() {
+    // identity.auth_binding = Some(ref) but config.realm has no matching
     // realm → typed error. Confirms the factory no longer falls through to
     // synthesize_realm_from_config + env-default, which would have silently
     // resolved credentials belonging to a different realm in multi-tenant
@@ -2220,7 +2220,7 @@ async fn hot_swap_scopes_resolve_to_session_connection_ref() {
     //
     // Assumes RKAT_TEST_CLIENT is not set in the test process env — if it
     // were, the factory would short-circuit to TestClient before even
-    // reaching the connection_ref branch. Nothing else in this test file
+    // reaching the auth_binding branch. Nothing else in this test file
     // sets that variable, so this assumption holds.
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
@@ -2230,7 +2230,7 @@ async fn hot_swap_scopes_resolve_to_session_connection_ref() {
         provider: Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: Some(meerkat_core::ConnectionRef {
+        auth_binding: Some(meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
             profile: None,
@@ -2251,10 +2251,10 @@ async fn hot_swap_scopes_resolve_to_session_connection_ref() {
 }
 
 #[test]
-fn session_metadata_projects_connection_ref_into_llm_identity() {
+fn session_metadata_projects_auth_binding_into_llm_identity() {
     // Dogma §1/§13: SessionMetadata is the canonical owner;
     // SessionLlmIdentity is a read/write projection. Verify round-trip.
-    let conn_ref = meerkat_core::ConnectionRef {
+    let conn_ref = meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse("prod").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("openai_default").expect("valid binding"),
         profile: None,
@@ -2275,13 +2275,13 @@ fn session_metadata_projects_connection_ref_into_llm_identity() {
         instance_id: None,
         backend: None,
         config_generation: None,
-        connection_ref: Some(conn_ref.clone()),
+        auth_binding: Some(conn_ref.clone()),
     };
     let identity = metadata.llm_identity();
-    assert_eq!(identity.connection_ref, Some(conn_ref));
+    assert_eq!(identity.auth_binding, Some(conn_ref));
 
-    // Overwrite via apply_llm_identity — connection_ref should change.
-    let swapped_ref = meerkat_core::ConnectionRef {
+    // Overwrite via apply_llm_identity — auth_binding should change.
+    let swapped_ref = meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
         profile: None,
@@ -2291,8 +2291,8 @@ fn session_metadata_projects_connection_ref_into_llm_identity() {
         provider: Provider::OpenAI,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: Some(swapped_ref.clone()),
+        auth_binding: Some(swapped_ref.clone()),
     };
     metadata.apply_llm_identity(&new_identity);
-    assert_eq!(metadata.connection_ref, Some(swapped_ref));
+    assert_eq!(metadata.auth_binding, Some(swapped_ref));
 }

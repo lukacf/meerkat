@@ -157,19 +157,19 @@ impl SessionAgent for FactoryAgent {
     ) -> Result<(), meerkat_core::error::AgentError> {
         // Atomically update the live client and the session's durable
         // LLM request policy/identity so subsequent turns run against the
-        // new model/provider/provider_params/connection_ref and persisted
+        // new model/provider/provider_params/auth_binding and persisted
         // recovery sees the swap.
-        let previous_connection_ref = self
+        let previous_auth_binding = self
             .agent
             .session()
             .session_metadata()
-            .and_then(|metadata| metadata.connection_ref);
+            .and_then(|metadata| metadata.auth_binding);
         self.agent
             .replace_client_with_request_policy(client, request_policy);
         self.agent
-            .rotate_auth_lease_connection_ref(
-                previous_connection_ref.as_ref(),
-                identity.connection_ref.as_ref(),
+            .rotate_auth_lease_auth_binding(
+                previous_auth_binding.as_ref(),
+                identity.auth_binding.as_ref(),
             )
             .map_err(|e| {
                 meerkat_core::error::AgentError::ConfigError(format!(
@@ -800,7 +800,7 @@ mod tests {
             provider: Provider::SelfHosted,
             self_hosted_server_id: Some("local".to_string()),
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
 
         assert_eq!(
@@ -1431,7 +1431,7 @@ mod tests {
     fn make_session_request_with_connection(model: &str, binding: &str) -> CreateSessionRequest {
         let mut req = make_session_request(model);
         let build = meerkat_core::service::SessionBuildOptions {
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("default").expect("valid test realm"),
                 binding: meerkat_core::BindingId::parse(binding).expect("valid test binding"),
                 profile: None,

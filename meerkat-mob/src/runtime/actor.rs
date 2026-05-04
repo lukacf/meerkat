@@ -3840,7 +3840,7 @@ impl MobActor {
             override_profile,
             model_override,
             provider_params_override,
-            connection_ref,
+            auth_binding,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -4148,8 +4148,8 @@ impl MobActor {
                 config.llm_client_override = Some(client.clone());
             }
             // Deferral §1: per-member auth binding.
-            if let Some(ref cref) = connection_ref {
-                config.connection_ref = Some(cref.clone());
+            if let Some(ref cref) = auth_binding {
+                config.auth_binding = Some(cref.clone());
             }
 
             let base_prompt = initial_message.clone().unwrap_or_else(|| {

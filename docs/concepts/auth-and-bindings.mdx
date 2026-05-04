@@ -12,7 +12,7 @@ The core pieces are:
 - auth profiles
 - backend profiles
 - bindings
-- `connection_ref`
+- `auth_binding`
 
 This model matters because the same app/session/mob can:
 
@@ -29,7 +29,7 @@ realm
   -> bindings
 
 session / turn / mob member
-  -> connection_ref
+  -> auth_binding
   -> provider runtime resolution
 ```
 

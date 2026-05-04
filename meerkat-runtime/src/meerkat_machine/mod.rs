@@ -205,7 +205,7 @@ impl UnavailableOAuthFlowAuthority {
 impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowAuthority {
     fn start(
         &self,
-        _target: meerkat_core::ConnectionRef,
+        _target: meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
         _redirect_uri: String,
         _pkce_verifier: String,
@@ -216,7 +216,7 @@ impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowA
     fn verify(
         &self,
         _state: &str,
-        _target: &meerkat_core::ConnectionRef,
+        _target: &meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
         _redirect_uri: &str,
     ) -> Result<
@@ -229,7 +229,7 @@ impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowA
     fn consume(
         &self,
         _state: &str,
-        _target: &meerkat_core::ConnectionRef,
+        _target: &meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
         _redirect_uri: &str,
     ) -> Result<
@@ -241,7 +241,7 @@ impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowA
 
     fn admit_device_code(
         &self,
-        _target: meerkat_core::ConnectionRef,
+        _target: meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
         _device_code: String,
         _expires_in: std::time::Duration,
@@ -252,7 +252,7 @@ impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowA
     fn verify_device_code(
         &self,
         _device_code: &str,
-        _target: &meerkat_core::ConnectionRef,
+        _target: &meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
     ) -> Result<
         meerkat_auth_core::oauth_flow::OAuthDeviceFlowRecord,
@@ -264,7 +264,7 @@ impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowA
     fn begin_device_code_poll(
         &self,
         _device_code: &str,
-        _target: &meerkat_core::ConnectionRef,
+        _target: &meerkat_core::AuthBindingRef,
         _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
     ) -> Result<
         meerkat_auth_core::oauth_flow::OAuthDevicePollLease,

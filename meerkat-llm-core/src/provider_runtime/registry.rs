@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use meerkat_core::{
-    AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::ConnectionRef,
+    AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::AuthBindingRef,
     handles::AuthLeaseHandle,
 };
 
@@ -199,25 +199,21 @@ impl ProviderRuntimeRegistry {
     pub async fn resolve(
         &self,
         realm: &RealmConnectionSet,
-        connection_ref: &ConnectionRef,
+        auth_binding: &AuthBindingRef,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
         let (binding, backend, auth) = realm
-            .lookup_connection_ref(connection_ref)
+            .lookup_auth_binding(auth_binding)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        if connection_ref.realm.as_str() != realm.realm_id {
+        if auth_binding.realm.as_str() != realm.realm_id {
             return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                "connection_ref realm '{}' does not match resolved realm '{}'",
-                connection_ref.realm, realm.realm_id
+                "auth_binding realm '{}' does not match resolved realm '{}'",
+                auth_binding.realm, realm.realm_id
             )));
         }
-        let validated = ProviderRuntimeCatalog::validate_binding(
-            connection_ref,
-            backend,
-            auth,
-            &binding.policy,
-        )
-        .map_err(ProviderAuthError::Binding)?;
+        let validated =
+            ProviderRuntimeCatalog::validate_binding(auth_binding, backend, auth, &binding.policy)
+                .map_err(ProviderAuthError::Binding)?;
         let runtime = self
             .runtimes
             .get(&validated.provider())
@@ -311,8 +307,8 @@ mod tests {
         assert!((env.env_lookup)("OTHER").is_none());
     }
 
-    fn connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default").unwrap(),
             profile: None,
@@ -429,7 +425,7 @@ mod tests {
         let err = ProviderRuntimeRegistry::empty()
             .resolve(
                 &realm(Provider::OpenAI, "bogus_backend", "api_key"),
-                &connection_ref(),
+                &auth_binding(),
                 &ResolverEnvironment::testing(),
             )
             .await
@@ -446,7 +442,7 @@ mod tests {
         let err = ProviderRuntimeRegistry::empty()
             .resolve(
                 &realm(Provider::OpenAI, "openai_api", "bogus_auth"),
-                &connection_ref(),
+                &auth_binding(),
                 &ResolverEnvironment::testing(),
             )
             .await
@@ -469,7 +465,7 @@ mod tests {
         let err = registry
             .resolve(
                 &realm(Provider::OpenAI, "openai_api", "managed_chatgpt_oauth"),
-                &connection_ref(),
+                &auth_binding(),
                 &ResolverEnvironment::testing(),
             )
             .await
@@ -494,7 +490,7 @@ mod tests {
         let err = registry
             .resolve(
                 &realm(Provider::Other, "other_api", "api_key"),
-                &connection_ref(),
+                &auth_binding(),
                 &ResolverEnvironment::testing(),
             )
             .await

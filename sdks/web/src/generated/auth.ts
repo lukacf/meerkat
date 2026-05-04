@@ -158,7 +158,7 @@ export const AUTH_RPC_METHODS = {
 
 export type AuthRpcMethod = typeof AUTH_RPC_METHODS[keyof typeof AUTH_RPC_METHODS];
 
-export interface WireConnectionRef {
+export interface WireAuthBindingRef {
   realm: string;
   binding: string;
   profile?: string | null;
@@ -243,7 +243,7 @@ export interface WireRealmConnectionSet {
 export interface WireBindingIdentity {
   realm_id: string;
   binding_id: string;
-  connection_ref: WireConnectionRef;
+  auth_binding: WireAuthBindingRef;
 }
 
 export interface WireAuthProfileCreated extends WireBindingIdentity {
@@ -254,7 +254,7 @@ export interface WireAuthProfileCreated extends WireBindingIdentity {
 }
 
 export interface WireAuthProfileDetail {
-  connection_ref: WireConnectionRef;
+  auth_binding: WireAuthBindingRef;
   binding_id: string;
   profile_id: string;
   auth_profile: WireAuthProfile;
@@ -482,20 +482,20 @@ export function parseWireAuthStatusState(value: unknown, path = 'state'): WireAu
   return parseLiteral(value, WIRE_AUTH_STATUS_STATES, path, 'wire auth status state');
 }
 
-export function parseWireConnectionRef(value: unknown, path = 'connection_ref'): WireConnectionRef {
+export function parseWireAuthBindingRef(value: unknown, path = 'auth_binding'): WireAuthBindingRef {
   const record = expectRecord(value, path);
   expectString(record.realm, `${path}.realm`);
   expectString(record.binding, `${path}.binding`);
   optionalString(record, 'profile', `${path}.profile`);
-  return value as WireConnectionRef;
+  return value as WireAuthBindingRef;
 }
 
 function validateBindingIdentity(record: Record<string, unknown>, path: string): void {
   const realmId = expectString(record.realm_id, `${path}.realm_id`);
   const bindingId = expectString(record.binding_id, `${path}.binding_id`);
-  const connectionRef = parseWireConnectionRef(record.connection_ref, `${path}.connection_ref`);
-  if (connectionRef.realm !== realmId) fail(`${path}.connection_ref.realm`, `same value as ${path}.realm_id`);
-  if (connectionRef.binding !== bindingId) fail(`${path}.connection_ref.binding`, `same value as ${path}.binding_id`);
+  const authBinding = parseWireAuthBindingRef(record.auth_binding, `${path}.auth_binding`);
+  if (authBinding.realm !== realmId) fail(`${path}.auth_binding.realm`, `same value as ${path}.realm_id`);
+  if (authBinding.binding !== bindingId) fail(`${path}.auth_binding.binding`, `same value as ${path}.binding_id`);
 }
 
 export function parseWireBackendProfile(value: unknown, path = 'backend_profile'): WireBackendProfile {
@@ -600,8 +600,8 @@ export function parseWireAuthProfileDetail(
 ): WireAuthProfileDetail {
   const record = expectRecord(value, path);
   const bindingId = expectString(record.binding_id, `${path}.binding_id`);
-  const connectionRef = parseWireConnectionRef(record.connection_ref, `${path}.connection_ref`);
-  if (connectionRef.binding !== bindingId) fail(`${path}.connection_ref.binding`, `same value as ${path}.binding_id`);
+  const authBinding = parseWireAuthBindingRef(record.auth_binding, `${path}.auth_binding`);
+  if (authBinding.binding !== bindingId) fail(`${path}.auth_binding.binding`, `same value as ${path}.binding_id`);
   expectString(record.profile_id, `${path}.profile_id`);
   parseWireAuthProfile(record.auth_profile, `${path}.auth_profile`);
   return value as WireAuthProfileDetail;

@@ -812,8 +812,8 @@ impl AgentMobToolSurface {
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
-        if let Some(cref) = args.connection_ref {
-            spec.connection_ref = Some(cref);
+        if let Some(cref) = args.auth_binding {
+            spec.auth_binding = Some(cref);
         }
 
         let spawn_result = self
@@ -1755,8 +1755,8 @@ struct SpawnMemberArgs {
     /// When set, this member resolves credentials via the named
     /// realm + binding; otherwise the member uses env-default /
     /// config-realm fallback.
-    #[serde(default)]
-    connection_ref: Option<meerkat_core::ConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
 #[derive(Deserialize)]

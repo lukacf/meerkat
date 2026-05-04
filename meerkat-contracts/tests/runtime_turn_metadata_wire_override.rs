@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
-use meerkat_contracts::wire::WireConnectionRef;
+use meerkat_contracts::wire::WireAuthBindingRef;
 use meerkat_contracts::wire::runtime::{
     WireProviderParamsOverride, WireRuntimeTurnMetadata, WireTurnMetadataOverride,
 };
@@ -8,8 +8,8 @@ use meerkat_core::lifecycle::run_primitive::{
     ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
 };
 
-fn wire_connection_ref() -> WireConnectionRef {
-    WireConnectionRef {
+fn wire_auth_binding() -> WireAuthBindingRef {
+    WireAuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
         profile: None,
@@ -22,10 +22,10 @@ fn wire_metadata_tagged_overrides_round_trip() {
         temperature: Some(0.25),
         ..Default::default()
     };
-    let connection_ref = wire_connection_ref();
+    let auth_binding = wire_auth_binding();
     let meta = WireRuntimeTurnMetadata {
         provider_params: Some(WireTurnMetadataOverride::Set(provider_params.clone())),
-        connection_ref: Some(WireTurnMetadataOverride::Set(connection_ref.clone())),
+        auth_binding: Some(WireTurnMetadataOverride::Set(auth_binding.clone())),
         ..Default::default()
     };
 
@@ -37,7 +37,7 @@ fn wire_metadata_tagged_overrides_round_trip() {
                 "action": "set",
                 "value": { "temperature": 0.25 },
             },
-            "connection_ref": {
+            "auth_binding": {
                 "action": "set",
                 "value": {
                     "realm": "dev",
@@ -52,8 +52,8 @@ fn wire_metadata_tagged_overrides_round_trip() {
         Some(WireTurnMetadataOverride::Set(provider_params))
     );
     assert_eq!(
-        parsed.connection_ref,
-        Some(WireTurnMetadataOverride::Set(connection_ref))
+        parsed.auth_binding,
+        Some(WireTurnMetadataOverride::Set(auth_binding))
     );
 }
 
@@ -61,7 +61,7 @@ fn wire_metadata_tagged_overrides_round_trip() {
 fn wire_metadata_clear_overrides_round_trip() {
     let meta = WireRuntimeTurnMetadata {
         provider_params: Some(WireTurnMetadataOverride::Clear),
-        connection_ref: Some(WireTurnMetadataOverride::Clear),
+        auth_binding: Some(WireTurnMetadataOverride::Clear),
         ..Default::default()
     };
 
@@ -70,7 +70,7 @@ fn wire_metadata_clear_overrides_round_trip() {
         json,
         serde_json::json!({
             "provider_params": { "action": "clear" },
-            "connection_ref": { "action": "clear" },
+            "auth_binding": { "action": "clear" },
         })
     );
     let parsed: WireRuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
@@ -81,7 +81,7 @@ fn wire_metadata_clear_overrides_round_trip() {
 fn wire_metadata_legacy_clear_only_deserializes_as_clear_overrides() {
     let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
         "clear_provider_params": true,
-        "clear_connection_ref": true,
+        "clear_auth_binding": true,
     }))
     .expect("legacy clear-only payloads remain accepted");
 
@@ -89,7 +89,33 @@ fn wire_metadata_legacy_clear_only_deserializes_as_clear_overrides() {
         parsed.provider_params,
         Some(WireTurnMetadataOverride::Clear)
     );
-    assert_eq!(parsed.connection_ref, Some(WireTurnMetadataOverride::Clear));
+    assert_eq!(parsed.auth_binding, Some(WireTurnMetadataOverride::Clear));
+}
+
+#[test]
+fn wire_metadata_accepts_legacy_connection_ref_aliases() {
+    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+        "connection_ref": {
+            "action": "set",
+            "value": {
+                "realm": "dev",
+                "binding": "default",
+            },
+        },
+    }))
+    .expect("legacy connection_ref alias should deserialize during transition");
+
+    assert_eq!(
+        parsed.auth_binding,
+        Some(WireTurnMetadataOverride::Set(wire_auth_binding()))
+    );
+
+    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+        "clear_connection_ref": true,
+    }))
+    .expect("legacy clear_connection_ref alias should deserialize during transition");
+
+    assert_eq!(parsed.auth_binding, Some(WireTurnMetadataOverride::Clear));
 }
 
 #[test]
@@ -105,15 +131,15 @@ fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
     );
 
     let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
-        "connection_ref": {
+        "auth_binding": {
             "realm": "dev",
             "binding": "default",
         },
-        "clear_connection_ref": true,
+        "clear_auth_binding": true,
     }))
-    .expect_err("connection_ref set plus legacy clear must fail");
+    .expect_err("auth_binding set plus legacy clear must fail");
     assert!(
-        err.to_string().contains("clear_connection_ref"),
+        err.to_string().contains("clear_auth_binding"),
         "unexpected error: {err}"
     );
 }
@@ -133,7 +159,7 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
     );
 
     let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
-        "connection_ref": {
+        "auth_binding": {
             "action": "clear",
             "value": {
                 "realm": "dev",

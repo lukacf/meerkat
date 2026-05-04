@@ -264,7 +264,7 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "budget_split_policy", spec.budgetSplitPolicy);
   setIfDefined(payload, "inherited_tool_filter", spec.inheritedToolFilter);
   setIfDefined(payload, "override_profile", spec.overrideProfile);
-  setIfDefined(payload, "connection_ref", spec.connectionRef);
+  setIfDefined(payload, "auth_binding", spec.authBinding);
   return payload;
 }
 
@@ -279,7 +279,7 @@ function mobSpawnManySpecPayload(spec: SpawnManySpec): Record<string, unknown> {
   setIfDefined(payload, "labels", spec.labels);
   setIfDefined(payload, "context", spec.context);
   setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
-  setIfDefined(payload, "connection_ref", spec.connectionRef);
+  setIfDefined(payload, "auth_binding", spec.authBinding);
   return payload;
 }
 
@@ -316,8 +316,8 @@ function mobTurnStartPayload(
   setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
   setIfDefined(payload, "provider_params", options?.providerParams);
   setIfDefined(payload, "clear_provider_params", options?.clearProviderParams);
-  setIfDefined(payload, "connection_ref", options?.connectionRef);
-  setIfDefined(payload, "clear_connection_ref", options?.clearConnectionRef);
+  setIfDefined(payload, "auth_binding", options?.authBinding);
+  setIfDefined(payload, "clear_auth_binding", options?.clearAuthBinding);
   return payload;
 }
 

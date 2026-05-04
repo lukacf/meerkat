@@ -13,7 +13,7 @@ use crate::connection::{IdentityError, RealmId};
 ///
 /// Wave-c C-12 / C-1 follow-up: `realm_id: String` retyped to
 /// `realm: RealmId` to match the typed-atom rename C-1 did on
-/// `ConnectionRef`. Consumers must use `self.realm.as_str()` where a
+/// `AuthBindingRef`. Consumers must use `self.realm.as_str()` where a
 /// `&str` is required (path construction, logging, wire projection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealmLocator {

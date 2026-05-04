@@ -90,7 +90,7 @@ Same realm means shared sessions, config, backend, credentials, schedules, blobs
 ```bash
 rkat auth login openai
 rkat auth profiles --realm dev
-rkat run --model gpt-5.5 --connection-ref dev:openai_oauth "Summarize this pull request"
+rkat run --model gpt-5.5 --auth-binding dev:openai_oauth "Summarize this pull request"
 ```
 
 Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys. Bindings are provider-checked against the selected model, so an OpenAI binding should be paired with an OpenAI model, an Anthropic binding with an Anthropic model, and so on.
@@ -159,7 +159,7 @@ rkat run -m gemma-4-31b "Explain the code in main.rs"
 rkat doctor
 ```
 
-Self-hosted credential resolution uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. Legacy compatibility is intentionally fail-closed for credentials: if a legacy server defines bearer material but no usable connection/auth binding is configured, Meerkat refuses to synthesize bearer auth; a selected realm without a self-hosted binding also fails instead of falling back to legacy config.
+Self-hosted credential resolution uses the same auth binding resolver as hosted providers. Precedence is: explicit `auth_binding`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. Legacy compatibility is intentionally fail-closed for credentials: if a legacy server defines bearer material but no usable auth binding is configured, Meerkat refuses to synthesize bearer auth; a selected realm without a self-hosted binding also fails instead of falling back to legacy config.
 
 ## Testing
 
@@ -215,7 +215,7 @@ make release-preflight
 
 **Providers and streaming.** Anthropic, OpenAI, Gemini, and self-hosted models share one streaming interface. The model catalog carries defaults, capability gates, parameter schemas, provider-native web-search behavior, image defaults, and provider/model mismatch checks.
 
-**Sessions, realms, and auth.** Sessions are realm-scoped and resumable across surfaces. Env vars are the fast path; realm bindings add backend profiles, auth profiles, `connection_ref`, OAuth/device flows, TokenStore persistence, cloud IAM, external resolvers, auth freshness, and per-member overrides.
+**Sessions, realms, and auth.** Sessions are realm-scoped and resumable across surfaces. Env vars are the fast path; realm bindings add backend profiles, auth profiles, `auth_binding`, OAuth/device flows, TokenStore persistence, cloud IAM, external resolvers, auth freshness, and per-member overrides.
 
 **Tools and integration.** Custom dispatchers, builtins, shell, scheduler tools, comms, skills, memory, MCP servers, and structured output compose into one tool surface. Applications can discover deferred tools with `tool_catalog_search` and `tool_catalog_load`, live-add or reload MCP servers, and scope tool visibility by profile, session, or turn.
 
@@ -229,7 +229,7 @@ make release-preflight
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 
-**Web/WASM.** `@rkat/web` wraps `MeerkatRuntime`, browser sessions and mobs, typed event subscriptions, JS tools, structural `connectionRef`, provider proxy support, and host-page auth resolvers. Mobpacks can also be built into browser bundles with `rkat mob web build`.
+**Web/WASM.** `@rkat/web` wraps `MeerkatRuntime`, browser sessions and mobs, typed event subscriptions, JS tools, structural `authBinding`, provider proxy support, and host-page auth resolvers. Mobpacks can also be built into browser bundles with `rkat mob web build`.
 
 **Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`.
 
@@ -348,11 +348,11 @@ The agent returns validated JSON matching your schema, enforced by budget limits
 After defining a realm binding and storing its credentials, pass the binding explicitly:
 
 ```bash
-rkat run --realm prod --model gpt-5.5 --connection-ref prod:openai \
+rkat run --realm prod --model gpt-5.5 --auth-binding prod:openai \
   "Summarize the incident queue with the production OpenAI binding."
 ```
 
-The same structural `connection_ref` shape is accepted by RPC, REST, SDKs, and mob member launch requests.
+The same structural `auth_binding` shape is accepted by RPC, REST, SDKs, and mob member launch requests.
 
 ### Durable scheduled work (CLI)
 
@@ -383,7 +383,7 @@ result = await client.create_session(
     model="claude-opus-4-7",
     enable_shell=True,
     enable_mob=True,
-    connection_ref={"realm": "ci", "binding": "default_anthropic"},
+    auth_binding={"realm": "ci", "binding": "default_anthropic"},
     output_schema={
         "type": "object",
         "properties": {
@@ -432,7 +432,7 @@ rkat run --tools full --realm prod \
    Keep shell access scoped to the analyst and return a prioritized remediation plan."
 ```
 
-The orchestrating agent creates the mob from the definition, launches profile-backed members, wires communication, and collects the final report. Use realm profile references or per-member `connection_ref` values when different roles need different credentials. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for flows, task boards, `mob_spawn_member`, and direct host APIs.
+The orchestrating agent creates the mob from the definition, launches profile-backed members, wires communication, and collects the final report. Use realm profile references or per-member `auth_binding` values when different roles need different credentials. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for flows, task boards, `mob_spawn_member`, and direct host APIs.
 
 ### Browser runtime (Web/WASM)
 
@@ -448,7 +448,7 @@ const runtime = await MeerkatRuntime.init(wasm, {
 
 const session = runtime.createSession({
   model: "claude-opus-4-7",
-  connectionRef: { realm: "dev", binding: "default_anthropic" }
+  authBinding: { realm: "dev", binding: "default_anthropic" }
 });
 
 const sub = session.subscribe();
@@ -458,7 +458,7 @@ console.log(sub.poll());
 sub.close();
 ```
 
-Browser auth can be supplied at runtime bootstrap, through the `@rkat/web` provider proxy, or through a host-page external auth resolver for structural `connectionRef` values. The same package supports browser mobs, JS tools, typed subscriptions, and mobpack deployment.
+Browser auth can be supplied at runtime bootstrap, through the `@rkat/web` provider proxy, or through a host-page external auth resolver for structural `authBinding` values. The same package supports browser mobs, JS tools, typed subscriptions, and mobpack deployment.
 
 ### Portable Mob Deployment (CLI + Web)
 

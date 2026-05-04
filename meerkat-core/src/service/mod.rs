@@ -227,9 +227,9 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
-    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
-    /// Flows into `AgentBuildConfig.connection_ref` via `FactoryAgentBuilder`.
-    pub connection_ref: Option<crate::ConnectionRef>,
+    /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
+    /// Flows into `AgentBuildConfig.auth_binding` via `FactoryAgentBuilder`.
+    pub auth_binding: Option<crate::AuthBindingRef>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -587,7 +587,7 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
-    pub connection_ref: bool,
+    pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
     pub override_memory: bool,
@@ -659,7 +659,7 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

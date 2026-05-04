@@ -587,7 +587,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 self_hosted_server_id: None,
                 provider_params: None,
-                connection_ref: None,
+                auth_binding: None,
             },
             capability_surface: realtime_test_capability_surface(),
         }));

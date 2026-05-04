@@ -220,8 +220,8 @@ fn named_type_id(name: &str) -> NamedTypeId {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn oauth_target() -> meerkat_core::ConnectionRef {
-    meerkat_core::ConnectionRef {
+fn oauth_target() -> meerkat_core::AuthBindingRef {
+    meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
         profile: None,
@@ -636,9 +636,7 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
         .expect("persistent runtime authority admits device OAuth state");
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
-            &target,
-        ))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
         .expect("auth lease release clears OAuth lifecycle authority");
     drop(machine);
     drop(store);
@@ -736,9 +734,7 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
 
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
-            &target,
-        ))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
         .expect("auth lease release clears the shared AuthMachine authority");
 
     assert!(matches!(
@@ -778,9 +774,7 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
 
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
-            &target,
-        ))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
         .expect("custom auth handle release clears paired OAuth lifecycle");
 
     assert!(matches!(
@@ -2198,7 +2192,7 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
         provider: meerkat_core::Provider::OpenAI,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     }));
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
@@ -2211,7 +2205,7 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(true),
@@ -15712,8 +15706,8 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
             provider: Some("openai".to_string()),
             provider_params: None,
             clear_provider_params: false,
-            connection_ref: None,
-            clear_connection_ref: false,
+            auth_binding: None,
+            clear_auth_binding: false,
         },
     )
     .await
@@ -15776,8 +15770,8 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
             provider: Some("openai".to_string()),
             provider_params: None,
             clear_provider_params: false,
-            connection_ref: None,
-            clear_connection_ref: false,
+            auth_binding: None,
+            clear_auth_binding: false,
         },
     )
     .await
@@ -15982,7 +15976,7 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         })),
         current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
         target_identity: meerkat_core::SessionLlmIdentity {
@@ -15990,7 +15984,7 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
@@ -16008,8 +16002,8 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16080,7 +16074,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     }));
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
@@ -16093,7 +16087,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
@@ -16111,8 +16105,8 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                 provider: Some("openai".to_string()),
                 provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16206,7 +16200,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     }));
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
@@ -16219,7 +16213,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
@@ -16260,8 +16254,8 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16353,7 +16347,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     }));
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
@@ -16366,7 +16360,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
@@ -16384,8 +16378,8 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16496,7 +16490,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                     provider: meerkat_core::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 },
                 target_capability_surface: test_llm_capability_surface(false),
             })
@@ -16567,7 +16561,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         })),
         current_visibility_state: Arc::new(std::sync::Mutex::new(
             meerkat_core::SessionToolVisibilityState::default(),
@@ -16585,8 +16579,8 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16683,7 +16677,7 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
         provider: meerkat_core::Provider::OpenAI,
         self_hosted_server_id: None,
         provider_params: None,
-        connection_ref: None,
+        auth_binding: None,
     }));
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
@@ -16701,7 +16695,7 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface_realtime()),
         target_capability_surface: test_llm_capability_surface_realtime(),
@@ -16749,8 +16743,8 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
                         provider: Some("openai".to_string()),
                         provider_params: None,
                         clear_provider_params: false,
-                        connection_ref: None,
-                        clear_connection_ref: false,
+                        auth_binding: None,
+                        clear_auth_binding: false,
                     },
                 )
                 .await
@@ -16811,7 +16805,7 @@ async fn reconfigure_live_topology_failure_before_detach_restores_prior_binding(
                     provider: meerkat_core::Provider::Anthropic,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 },
                 current_visibility_state: meerkat_core::SessionToolVisibilityState::default(),
                 current_capability_surface: Some(test_llm_capability_surface(true)),
@@ -16893,8 +16887,8 @@ async fn reconfigure_live_topology_failure_before_detach_restores_prior_binding(
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -16938,7 +16932,7 @@ async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_re
                     provider: meerkat_core::Provider::Anthropic,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 },
                 current_visibility_state: meerkat_core::SessionToolVisibilityState::default(),
                 current_capability_surface: Some(test_llm_capability_surface(true)),
@@ -16960,7 +16954,7 @@ async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_re
                     provider: meerkat_core::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 },
                 target_capability_surface: test_llm_capability_surface(false),
             })
@@ -17033,8 +17027,8 @@ async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_re
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await
@@ -18400,7 +18394,7 @@ fn runtime_modeled_kernel_input(
                     provider: meerkat_core::Provider::Anthropic,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 })
                 .unwrap_or_else(|_| "\"<previous-identity>\"".into()),
             ),
@@ -18423,7 +18417,7 @@ fn runtime_modeled_kernel_input(
                     provider: meerkat_core::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 })
                 .unwrap_or_else(|_| "\"<target-identity>\"".into()),
             ),
@@ -19359,7 +19353,7 @@ fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         })),
         current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
         target_identity: meerkat_core::SessionLlmIdentity {
@@ -19367,7 +19361,7 @@ fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         },
         current_capability_surface: Some(test_llm_capability_surface(true)),
         target_capability_surface: test_llm_capability_surface(false),
@@ -19986,8 +19980,8 @@ async fn execute_runtime_parity_probe(
                 provider: Some("openai".to_string()),
                 provider_params: None,
                 clear_provider_params: false,
-                connection_ref: None,
-                clear_connection_ref: false,
+                auth_binding: None,
+                clear_auth_binding: false,
             },
         )
         .await

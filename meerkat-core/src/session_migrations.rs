@@ -16,12 +16,12 @@
 //!
 //! # What actually changes v0 → v1
 //!
-//! - `ConnectionRef` inner field names (`realm_id` / `binding_id` →
+//! - `AuthBindingRef` inner field names (`realm_id` / `binding_id` →
 //!   `realm` / `binding`) — structural rename inside `SessionMetadata`
 //!   and inside `SessionLlmIdentity`. Slug validation is deferred to
 //!   `RealmId::parse` / `BindingId::parse`. Invalid slugs are slugified
 //!   (`[^a-z0-9_.-]` → `_`) and the original payload is retained under
-//!   `legacy_connection_ref` so no binding intent is dropped silently.
+//!   `legacy_auth_binding` so no binding intent is dropped silently.
 //! - `SessionMetadata.schema_version` byte is stamped with the current
 //!   `SESSION_METADATA_SCHEMA_VERSION` on write; on read, rows lacking the
 //!   field default to `1` via `#[serde(default)]`.
@@ -163,7 +163,7 @@ pub fn migrate_session_value(mut value: Value) -> Result<Session, SessionMigrati
         migrate_metadata_object(sess_meta, &mut legacy);
     }
 
-    // Migrate SessionLlmIdentity sub-tree (identical connection_ref logic).
+    // Migrate SessionLlmIdentity sub-tree (identical auth_binding logic).
     if let Some(ident) = root
         .get_mut("session_llm_identity")
         .and_then(Value::as_object_mut)
@@ -198,7 +198,7 @@ pub fn migrate_input_state_value(mut value: Value) -> Result<Value, SessionMigra
     };
 
     // StoredInputState.persisted_input.Prompt.turn_metadata may carry
-    // v0 connection_ref / legacy provider string. Rewrite in place.
+    // v0 auth_binding / legacy provider string. Rewrite in place.
     if let Some(persisted) = root
         .get_mut("persisted_input")
         .and_then(Value::as_object_mut)
@@ -232,15 +232,12 @@ pub fn migrate_input_state_value(mut value: Value) -> Result<Value, SessionMigra
 pub const STORED_INPUT_STATE_VERSION: u32 = 2;
 
 fn migrate_metadata_object(meta: &mut Map<String, Value>, legacy: &mut BTreeMap<String, Value>) {
-    // ConnectionRef on metadata itself.
-    if let Some(cref) = meta.get_mut("connection_ref") {
-        rewrite_connection_ref(cref, legacy, "legacy_connection_ref_session_metadata");
-    }
+    migrate_auth_binding_field(meta, legacy, "legacy_auth_binding_session_metadata");
 
     // `realm_id` on SessionMetadata is kept as Option<String> for v1;
-    // cross-check dogma §5 of persistence-migration.md: if connection_ref
+    // cross-check dogma §5 of persistence-migration.md: if auth_binding
     // is absent but realm_id is present, lift realm_id into a
-    // connection_ref shell so resume doesn't fall back to env defaults.
+    // auth_binding shell so resume doesn't fall back to env defaults.
     // We only do this when binding_id is also inferrable — otherwise we
     // leave realm_id alone (resume handles the absence cleanly).
     // NB: field population happens through `default_binding` inference,
@@ -256,34 +253,50 @@ fn migrate_metadata_object(meta: &mut Map<String, Value>, legacy: &mut BTreeMap<
 }
 
 fn migrate_identity_object(ident: &mut Map<String, Value>, legacy: &mut BTreeMap<String, Value>) {
-    if let Some(cref) = ident.get_mut("connection_ref") {
-        rewrite_connection_ref(cref, legacy, "legacy_connection_ref_session_llm_identity");
-    }
+    migrate_auth_binding_field(ident, legacy, "legacy_auth_binding_session_llm_identity");
 }
 
 fn migrate_turn_metadata_object(tm: &mut Map<String, Value>) {
-    if let Some(cref) = tm.get_mut("connection_ref") {
-        // Turn-metadata ConnectionRef is salvage-best-effort; we drop
+    if let Some(old) = tm.remove("connection_ref")
+        && !tm.contains_key("auth_binding")
+    {
+        tm.insert("auth_binding".to_string(), old);
+    }
+    if let Some(cref) = tm.get_mut("auth_binding") {
+        // Turn-metadata AuthBindingRef is salvage-best-effort; we drop
         // ill-formed values to None (the turn already ran; the override
         // only matters on a *future* retry).
         let mut throwaway = BTreeMap::new();
-        rewrite_connection_ref(cref, &mut throwaway, "__discard__");
+        rewrite_auth_binding(cref, &mut throwaway, "__discard__");
     }
     // Provider string that no longer parses: leave it; serde will
     // surface the typed-Provider error on the way out and the deserialize
     // path will propagate. Fixture #11 exercises this.
 }
 
-/// Rewrite `{realm_id, binding_id, profile}` → `{realm, binding, profile}`
-/// in place on a `ConnectionRef` JSON object. If the slug validation
-/// embedded in the typed newtypes would reject the raw value, slugify
-/// (`[^a-z0-9_.-]` → `_`) and retain the original under
-/// `legacy[legacy_key]`.
-fn rewrite_connection_ref(
-    cref: &mut Value,
+fn migrate_auth_binding_field(
+    map: &mut Map<String, Value>,
     legacy: &mut BTreeMap<String, Value>,
     legacy_key: &str,
 ) {
+    if let Some(old) = map.remove("connection_ref") {
+        if map.contains_key("auth_binding") {
+            legacy.insert(format!("{legacy_key}_compat_alias"), old);
+        } else {
+            map.insert("auth_binding".to_string(), old);
+        }
+    }
+    if let Some(cref) = map.get_mut("auth_binding") {
+        rewrite_auth_binding(cref, legacy, legacy_key);
+    }
+}
+
+/// Rewrite `{realm_id, binding_id, profile}` → `{realm, binding, profile}`
+/// in place on a `AuthBindingRef` JSON object. If the slug validation
+/// embedded in the typed newtypes would reject the raw value, slugify
+/// (`[^a-z0-9_.-]` → `_`) and retain the original under
+/// `legacy[legacy_key]`.
+fn rewrite_auth_binding(cref: &mut Value, legacy: &mut BTreeMap<String, Value>, legacy_key: &str) {
     let Some(obj) = cref.as_object_mut() else {
         return;
     };

@@ -6,7 +6,7 @@
 //! (status code + JSON content-type) even without live credentials.
 //!
 //! Plan choke point K6 reads: "POST /auth/profiles -> GET
-//! /auth/bindings/{binding_id} -> POST /sessions with connection_ref". The
+//! /auth/bindings/{binding_id} -> POST /sessions with auth_binding". The
 //! live-provider half belongs in the `e2e-auth` lane; this file
 //! exercises the offline router half: each route is registered,
 //! dispatches, and returns a structured response.
@@ -252,16 +252,16 @@ async fn create_auth_profile_accepts_valid_body() {
     }
 }
 
-/// `POST /sessions` accepts a `connection_ref: {realm_id, binding_id}`
+/// `POST /sessions` accepts a `auth_binding: {realm_id, binding_id}`
 /// field on the body. When the referenced realm doesn't exist, the
 /// server returns a structured error — not 404 or a panic.
 #[tokio::test]
-async fn post_sessions_accepts_connection_ref_field() {
+async fn post_sessions_accepts_auth_binding_field() {
     let app = build_app();
 
     let body = serde_json::json!({
         "prompt": "hi",
-        "connection_ref": {"realm_id": "test-realm", "binding_id": "default"}
+        "auth_binding": {"realm_id": "test-realm", "binding_id": "default"}
     });
 
     let req = Request::builder()
@@ -280,6 +280,6 @@ async fn post_sessions_accepts_connection_ref_field() {
     );
     assert!(
         status.is_success() || status.is_client_error() || status.is_server_error(),
-        "status must be valid HTTP code for connection_ref body, got {status}"
+        "status must be valid HTTP code for auth_binding body, got {status}"
     );
 }

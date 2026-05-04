@@ -39,7 +39,7 @@ export interface InitResult {
 // ─── Session config ─────────────────────────────────────────────
 
 /** Structural reference to a realm binding. */
-export interface ConnectionRef {
+export interface AuthBindingRef {
   realm: string;
   binding: string;
   profile?: string;
@@ -56,7 +56,7 @@ export interface SessionConfig {
   /** LLM model identifier. */
   model: string;
   /** Optional structural auth binding reference. */
-  connectionRef?: ConnectionRef;
+  authBinding?: AuthBindingRef;
   /** System prompt. */
   systemPrompt?: string;
   /** Max tokens per response. Default: 4096. */

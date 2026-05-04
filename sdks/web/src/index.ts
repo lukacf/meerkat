@@ -10,7 +10,7 @@ export {
   WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
   registerExternalAuthResolver,
   clearExternalAuthResolver,
-  withConnectionRef,
+  withAuthBinding,
 } from './auth.js';
 export type {
   ExternalAuthFailure,

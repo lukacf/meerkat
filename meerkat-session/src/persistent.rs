@@ -3657,7 +3657,7 @@ mod tests {
                         instance_id: None,
                         backend: None,
                         config_generation: None,
-                        connection_ref: None,
+                        auth_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -4391,7 +4391,7 @@ mod tests {
                         instance_id: None,
                         backend: None,
                         config_generation: None,
-                        connection_ref: None,
+                        auth_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -4647,7 +4647,7 @@ mod tests {
                         instance_id: None,
                         backend: None,
                         config_generation: None,
-                        connection_ref: None,
+                        auth_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -9158,7 +9158,7 @@ mod tests {
                 instance_id: Some("instance-test".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("session metadata should serialize");
         store
@@ -9544,7 +9544,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         session.set_session_metadata(metadata).unwrap();
         let mut req = create_request(prompt, initial_turn);

@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instance_id: None,
         backend: None,
         config_generation: None,
-        connection_ref: None,
+        auth_binding: None,
     })?;
     memory_session.set_build_state(meerkat_core::SessionBuildState::default())?;
 

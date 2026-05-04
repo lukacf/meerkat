@@ -4653,18 +4653,18 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
 -> Result<(), Box<dyn std::error::Error>> {
     // SCOPE-DEFERRED — wave-c auth-seam cleanup deleted ambient credential
     // selection + first-matching-provider promotion; `build_agent` now
-    // requires an explicit `ConnectionRef (realm + binding)`. The RPC
+    // requires an explicit `AuthBindingRef (realm + binding)`. The RPC
     // `mob/spawn` path in this scenario threads a profile `model` but no
-    // `connection_ref`, and `write_project_config`'s `[agent]` section
+    // `auth_binding`, and `write_project_config`'s `[agent]` section
     // alone doesn't wire a default binding. The spawn therefore fails
     // with `"ambient credential selection refused: build_agent requires
-    // an explicit ConnectionRef"`. Preserved with an early skip so the
+    // an explicit AuthBindingRef"`. Preserved with an early skip so the
     // intent (RPC-persisted mob restores query runtime-backed session state
     // without a live API call) is retained for the eventual harness
-    // update that threads an explicit ConnectionRef through the mob
+    // update that threads an explicit AuthBindingRef through the mob
     // definition or realm config.
     eprintln!(
-        "Skipping: RPC mob/spawn path requires explicit ConnectionRef \
+        "Skipping: RPC mob/spawn path requires explicit AuthBindingRef \
          (wave-c auth-seam cleanup deleted ambient-credential promotion); \
          test harness migration pending"
     );
@@ -4766,7 +4766,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
                 "agent_identity": "worker-1",
                 "runtime_mode": "turn_driven",
                 "initial_turn": "deferred",
-                "connection_ref": {
+                "auth_binding": {
                     "realm": realm_id,
                     "binding": "default_anthropic"
                 }

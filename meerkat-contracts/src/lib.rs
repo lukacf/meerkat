@@ -308,7 +308,8 @@ pub use wire::{
     WireAgentRuntimeId,
     WireAssistantBlock,
     WireAssistantImageRef,
-    // Phase 4c — connection/auth wire types.
+    WireAuthBindingRef,
+    // Phase 4c — auth-binding wire types.
     WireAuthError,
     WireAuthProfile,
     WireAuthProfileCleared,
@@ -319,7 +320,6 @@ pub use wire::{
     WireAuthStatusDetail,
     WireBackendProfile,
     WireBindingIdentity,
-    WireConnectionRef,
     WireContentBlock,
     WireContentInput,
     WireDeviceCompleteResult,

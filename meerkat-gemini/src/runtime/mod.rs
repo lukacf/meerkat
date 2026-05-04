@@ -147,8 +147,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     if let Some(handle) = env.auth_lease_handle.clone() {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                binding.connection_ref(),
+                            meerkat_core::handles::LeaseKey::from_auth_binding(
+                                binding.auth_binding_ref(),
                             ),
                         );
                     }
@@ -190,8 +190,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     if let Some(handle) = env.auth_lease_handle.clone() {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                binding.connection_ref(),
+                            meerkat_core::handles::LeaseKey::from_auth_binding(
+                                binding.auth_binding_ref(),
                             ),
                         );
                     }

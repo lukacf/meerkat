@@ -216,17 +216,17 @@ fn fixture_05_session_provider_params_unknown_scalar() {
     assert_eq!(params.as_u64(), Some(42));
 }
 
-/// Fixture #6: clean ConnectionRef — `{realm_id, binding_id}` → typed
+/// Fixture #6: clean AuthBindingRef — `{realm_id, binding_id}` → typed
 /// `{realm, binding}`.
 #[test]
-fn fixture_06_connection_ref_clean_v0_rename() {
+fn fixture_06_auth_binding_clean_v0_rename() {
     let session =
-        migrate_metadata_scenario("session_connection_ref_slug_valid").expect("must migrate");
+        migrate_metadata_scenario("session_auth_binding_slug_valid").expect("must migrate");
     let cref = session
         .metadata()
         .get("session_metadata")
-        .and_then(|m| m.get("connection_ref"))
-        .expect("connection_ref preserved");
+        .and_then(|m| m.get("auth_binding"))
+        .expect("auth_binding preserved");
     assert_eq!(cref.get("realm").and_then(Value::as_str), Some("dev"));
     assert_eq!(
         cref.get("binding").and_then(Value::as_str),
@@ -243,16 +243,16 @@ fn fixture_06_connection_ref_clean_v0_rename() {
 /// (`dev_mode`) and returns `SessionMigrationError::Partial` carrying
 /// the original payload.
 #[test]
-fn fixture_07_connection_ref_invalid_slug_slugified() {
-    let result = migrate_metadata_scenario("session_connection_ref_slug_invalid");
+fn fixture_07_auth_binding_invalid_slug_slugified() {
+    let result = migrate_metadata_scenario("session_auth_binding_slug_invalid");
     match result {
         Err(SessionMigrationError::Partial(partial)) => {
             let cref = partial
                 .session
                 .metadata()
                 .get("session_metadata")
-                .and_then(|m| m.get("connection_ref"))
-                .expect("connection_ref coerced to valid slug");
+                .and_then(|m| m.get("auth_binding"))
+                .expect("auth_binding coerced to valid slug");
             assert_eq!(
                 cref.get("realm").and_then(Value::as_str),
                 Some("dev_mode"),
@@ -262,7 +262,7 @@ fn fixture_07_connection_ref_invalid_slug_slugified() {
             // Legacy payload retained under the documented key.
             let salvaged = partial
                 .legacy
-                .get("legacy_connection_ref_session_metadata")
+                .get("legacy_auth_binding_session_metadata")
                 .expect("legacy payload retained");
             assert_eq!(
                 salvaged.get("realm_id").and_then(Value::as_str),
@@ -284,8 +284,8 @@ fn fixture_08_hot_swap_identity_mixed() {
     let cref = session
         .metadata()
         .get("session_metadata")
-        .and_then(|m| m.get("connection_ref"))
-        .expect("connection_ref preserved");
+        .and_then(|m| m.get("auth_binding"))
+        .expect("auth_binding preserved");
     // The fixture's metadata already used v1 shape (realm/binding); the
     // migrator must not duplicate or churn the fields.
     assert_eq!(cref.get("realm").and_then(Value::as_str), Some("prod"));

@@ -28,7 +28,7 @@ async fn forged_factory_policy_entrypoint() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .expect("compile-only metadata serializes");
     session

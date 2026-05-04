@@ -9,7 +9,7 @@ import {
   parseWireRealmConnectionSet,
 } from '../dist/generated/auth.js';
 
-const connectionRef = { realm: 'dev', binding: 'default_openai' };
+const authBinding = { realm: 'dev', binding: 'default_openai' };
 
 const authProfile = {
   id: 'prod_env_key',
@@ -291,7 +291,7 @@ test('Auth.status and device-complete ready parse generated terminal payloads', 
   const ready = {
     realm_id: 'dev',
     binding_id: 'anthropic_main',
-    connection_ref: { realm: 'dev', binding: 'anthropic_main' },
+    auth_binding: { realm: 'dev', binding: 'anthropic_main' },
     profile_id: 'console',
     state: 'ready',
     provider: 'anthropic',
@@ -333,7 +333,7 @@ function identityPayload() {
   return {
     realm_id: 'dev',
     binding_id: 'default_openai',
-    connection_ref: connectionRef,
+    auth_binding: authBinding,
     profile_id: 'prod_env_key',
   };
 }

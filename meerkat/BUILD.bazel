@@ -1320,7 +1320,7 @@ rust_test(
 )
 
 rust_test(
-    name = "agent_factory_connection_ref_test",
+    name = "agent_factory_auth_binding_test",
     aliases = aliases(
         package_name = "meerkat",
         normal = True,
@@ -1328,8 +1328,8 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "agent_factory_connection_ref",
-    crate_root = "tests/agent_factory_connection_ref.rs",
+    crate_name = "agent_factory_auth_binding",
+    crate_root = "tests/agent_factory_auth_binding.rs",
     crate_features = [
         "anthropic",
         "comms",
@@ -1352,11 +1352,11 @@ rust_test(
         "src/surface/request_execution.rs",
     ],
     srcs = [
-        "tests/agent_factory_connection_ref.rs",
+        "tests/agent_factory_auth_binding.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_BIN_NAME": "agent_factory_connection_ref",
+        "CARGO_BIN_NAME": "agent_factory_auth_binding",
         "CARGO_MANIFEST_DIR": "./meerkat",
     },
     tags = [
@@ -2646,7 +2646,7 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":agent_builder_policy_canary_test",
-        ":agent_factory_connection_ref_test",
+        ":agent_factory_auth_binding_test",
         ":catalog_control_agent_boundary_test",
         ":embedded_skill_registration_test",
         ":factory_build_agent_test",

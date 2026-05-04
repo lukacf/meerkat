@@ -11,7 +11,7 @@ Baseline commit: `97981e314` (post-prerequisite-patchwork merge)
 The first pass of this audit (fields 1–12) missed three projection-shaped
 fields that the lead review caught: `McpRouter.projection`, the four
 `*_cache` fallback copies on `McpRouterAdapter`, and
-`SessionLlmIdentity.connection_ref` (which carries an explicit dogma §1/§13
+`SessionLlmIdentity.auth_binding` (which carries an explicit dogma §1/§13
 comment in its own docstring). Fields 13–15 below are the corrective
 extension. The framing of the audit as repo-wide-exhaustive is preserved;
 the extension is the honest acknowledgement that the first sweep was not.
@@ -25,7 +25,7 @@ it further):
   meerkat-store, meerkat-providers, meerkat-cli, meerkat,
   meerkat-rpc).
 - `grep -rn "dogma" --include="*.rs"` — any field whose own comments
-  flag dogma §1/§13 responsibility. Only `connection_ref` surfaced this
+  flag dogma §1/§13 responsibility. Only `auth_binding` surfaced this
   way on the second pass; future fields with similar callouts should be
   added here rather than in a follow-up audit.
 - Field-name patterns `_cache`, `_snapshot`, `_shadow`, `_mirror`,
@@ -550,32 +550,32 @@ B for a combined McpRouter/adapter hygiene pass if it is done at all.
 
 ---
 
-### 15. `SessionLlmIdentity.connection_ref` (dogma-flagged write-through projection)
+### 15. `SessionLlmIdentity.auth_binding` (dogma-flagged write-through projection)
 
 Location: `meerkat-core/src/session.rs:921`; projection construction
 in `SessionMetadata::llm_identity()` (`session.rs:926–934`); write-back
 in `SessionMetadata::apply_llm_identity()` (`session.rs:937–943`);
-canonical owner `SessionMetadata.connection_ref` at `session.rs:891`;
+canonical owner `SessionMetadata.auth_binding` at `session.rs:891`;
 resume re-install in
 `meerkat-core/src/session_recovery.rs:278–281`; downstream consumers
 in `meerkat-core/src/agent/builder.rs:577–582`
-(`with_connection_ref_binding_key`) and
+(`with_auth_binding_binding_key`) and
 `meerkat-core/src/agent.rs:866–869` (runner binding key).
 
-- **Canonical source.** `SessionMetadata.connection_ref` — persisted,
+- **Canonical source.** `SessionMetadata.auth_binding` — persisted,
   dogma-§1 canonical owner. The field docstring at `session.rs:917–919`
   is explicit: *"Projection (dogma §1/§13): canonical owner is
-  `SessionMetadata.connection_ref`; this field is the read/write
+  `SessionMetadata.auth_binding`; this field is the read/write
   projection used by hot-swap."*
 - **Rebuild trigger sites.**
   - Construction: `llm_identity()` builds the projection from
     canonical metadata every time it is called. Pure read-through.
   - Write-back: `apply_llm_identity()` writes the projection's
-    `connection_ref` back onto canonical metadata, so the projection is
+    `auth_binding` back onto canonical metadata, so the projection is
     also the sole mutation path on hot-swap
     (`apply_live_session_llm_identity`).
   - Resume: `session_recovery.rs:278–281` clones canonical metadata
-    into `AgentBuildConfig.connection_ref` on session restore so the
+    into `AgentBuildConfig.auth_binding` on session restore so the
     rebuilt agent re-resolves against the same realm binding. This is
     a projection *into* `AgentBuildConfig`, not on the identity
     struct — parallel plumbing, not a second shadow.
@@ -621,7 +621,7 @@ here, not be rediscovered by grep.
 | 12 | `session_runtime` comms-drain ownership | Shadow truth | W2-G |
 | 13 | `McpRouter.projection` (tool-routing snapshot) | Compliant projection (soft policy) | ITEM-6 seed B (optional tightening) |
 | 14 | `McpRouterAdapter` fallback caches (`tools_cache`, `catalog_cache`, `pending_sources_cache`, `surface_snapshot_cache`) | Compliant projection (soft policy) | ITEM-6 seed B (optional tightening) |
-| 15 | `SessionLlmIdentity.connection_ref` | Compliant projection | — |
+| 15 | `SessionLlmIdentity.auth_binding` | Compliant projection | — |
 
 Five entries are shadow truth. Four of them are already scoped to named
 Wave 2/3 PRs. One is a net-new finding. The extension pass (fields

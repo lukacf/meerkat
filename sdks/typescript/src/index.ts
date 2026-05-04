@@ -213,7 +213,7 @@ export type {
   WireStopReason,
   WireInputState,
   WireBudgetSplitPolicy,
-  WireConnectionRef,
+  WireAuthBindingRef,
   WireMemberLaunchMode,
   WireMemberRef,
   WireMemberState,

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use meerkat_core::connection::ConnectionRef;
+use meerkat_core::connection::AuthBindingRef;
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
     OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
@@ -51,7 +51,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 ..Default::default()
             })),
         })),
-        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
+        auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("valid binding"),
@@ -130,7 +130,7 @@ fn empty_metadata_round_trips_without_allocating_fields() {
 fn clear_overrides_round_trip_and_are_not_empty() {
     let meta = RuntimeTurnMetadata {
         provider_params: Some(TurnMetadataOverride::Clear),
-        connection_ref: Some(TurnMetadataOverride::Clear),
+        auth_binding: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     assert!(!meta.is_empty());
@@ -140,7 +140,7 @@ fn clear_overrides_round_trip_and_are_not_empty() {
         json,
         serde_json::json!({
             "provider_params": { "action": "clear" },
-            "connection_ref": { "action": "clear" },
+            "auth_binding": { "action": "clear" },
         })
     );
     let parsed: RuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
@@ -153,14 +153,14 @@ fn set_overrides_round_trip_with_explicit_action() {
         temperature: Some(0.25),
         ..Default::default()
     };
-    let connection_ref = ConnectionRef {
+    let auth_binding = AuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
         profile: None,
     };
     let meta = RuntimeTurnMetadata {
         provider_params: Some(TurnMetadataOverride::Set(provider_params.clone())),
-        connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
+        auth_binding: Some(TurnMetadataOverride::Set(auth_binding.clone())),
         ..Default::default()
     };
 
@@ -172,7 +172,7 @@ fn set_overrides_round_trip_with_explicit_action() {
                 "action": "set",
                 "value": { "temperature": 0.25 },
             },
-            "connection_ref": {
+            "auth_binding": {
                 "action": "set",
                 "value": {
                     "realm": "dev",
@@ -187,8 +187,8 @@ fn set_overrides_round_trip_with_explicit_action() {
         Some(TurnMetadataOverride::Set(provider_params))
     );
     assert_eq!(
-        parsed.connection_ref,
-        Some(TurnMetadataOverride::Set(connection_ref))
+        parsed.auth_binding,
+        Some(TurnMetadataOverride::Set(auth_binding))
     );
 }
 
@@ -196,7 +196,7 @@ fn set_overrides_round_trip_with_explicit_action() {
 fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
     let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
         "clear_provider_params": true,
-        "clear_connection_ref": true,
+        "clear_auth_binding": true,
     }))
     .expect("legacy clear-only payloads remain accepted");
 
@@ -206,7 +206,7 @@ fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
         "legacy provider clear must become a clear override"
     );
     assert_eq!(
-        parsed.connection_ref,
+        parsed.auth_binding,
         Some(TurnMetadataOverride::Clear),
         "legacy connection clear must become a clear override"
     );
@@ -225,15 +225,15 @@ fn legacy_set_and_clear_payloads_fail_at_boundary() {
     );
 
     let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
-        "connection_ref": {
+        "auth_binding": {
             "realm": "dev",
             "binding": "default",
         },
-        "clear_connection_ref": true,
+        "clear_auth_binding": true,
     }))
-    .expect_err("connection_ref set plus legacy clear must fail");
+    .expect_err("auth_binding set plus legacy clear must fail");
     assert!(
-        err.to_string().contains("clear_connection_ref"),
+        err.to_string().contains("clear_auth_binding"),
         "unexpected error: {err}"
     );
 }
@@ -253,7 +253,7 @@ fn malformed_tagged_override_payloads_fail_at_boundary() {
     );
 
     let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
-        "connection_ref": {
+        "auth_binding": {
             "action": "clear",
             "value": {
                 "realm": "dev",
@@ -337,9 +337,9 @@ fn merge_scalar_conflict_refuses_provider() {
 }
 
 #[test]
-fn merge_scalar_conflict_refuses_connection_ref() {
+fn merge_scalar_conflict_refuses_auth_binding() {
     let mut left = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
+        auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("a").expect("valid binding"),
             profile: None,
@@ -347,7 +347,7 @@ fn merge_scalar_conflict_refuses_connection_ref() {
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
+        auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("b").expect("valid binding"),
             profile: None,
@@ -355,7 +355,7 @@ fn merge_scalar_conflict_refuses_connection_ref() {
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
-    assert_eq!(err.field, "connection_ref");
+    assert_eq!(err.field, "auth_binding");
 }
 
 #[test]
@@ -390,33 +390,33 @@ fn merge_refuses_provider_params_set_and_clear() {
 }
 
 #[test]
-fn merge_refuses_connection_ref_set_and_clear() {
-    let connection_ref = ConnectionRef {
+fn merge_refuses_auth_binding_set_and_clear() {
+    let auth_binding = AuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
         profile: None,
     };
     let mut left = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
+        auth_binding: Some(TurnMetadataOverride::Set(auth_binding.clone())),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Clear),
+        auth_binding: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
-    assert_eq!(err.field, "connection_ref");
+    assert_eq!(err.field, "auth_binding");
 
     let mut left = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Clear),
+        auth_binding: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        connection_ref: Some(TurnMetadataOverride::Set(connection_ref)),
+        auth_binding: Some(TurnMetadataOverride::Set(auth_binding)),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
-    assert_eq!(err.field, "connection_ref");
+    assert_eq!(err.field, "auth_binding");
 }
 
 #[test]

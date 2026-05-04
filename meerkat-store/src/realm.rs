@@ -59,7 +59,7 @@ impl RealmOrigin {
 /// Realm-scoped manifest pinned at creation time.
 ///
 /// Wave-c C-12 / C-1 follow-up: `realm_id: String` retyped to
-/// `realm: RealmId` (matching the C-1 `ConnectionRef` rename).
+/// `realm: RealmId` (matching the C-1 `AuthBindingRef` rename).
 /// Serde-renamed to `"realm_id"` on-wire so existing persisted
 /// manifests on disk remain readable byte-identical — the retype is
 /// purely a domain-side typing improvement; the serialization

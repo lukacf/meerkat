@@ -1,6 +1,6 @@
 ---
 name: meerkat-platform
-description: "Build on the Meerkat agent platform. Covers every shipping surface (CLI, REST, JSON-RPC stdio/TCP, MCP, Python/TypeScript/Web/Rust SDKs, the `rkat-mini`/`rkat-rpc-mini` reduced binaries), realm-scoped sessions, streaming, skills, hooks, memory, multimodal content, mob orchestration (spawn/fork/helpers/flows/profiles), durable scheduling, and provider auth via `connection_ref` + AuthMachine (env keys, OAuth, cloud IAM). Use when integrating with Meerkat, picking a surface, wiring auth, building agents, scheduling automated runs, deploying mobpacks, or asking how a feature exposes through a particular SDK."
+description: "Build on the Meerkat agent platform. Covers every shipping surface (CLI, REST, JSON-RPC stdio/TCP, MCP, Python/TypeScript/Web/Rust SDKs, the `rkat-mini`/`rkat-rpc-mini` reduced binaries), realm-scoped sessions, streaming, skills, hooks, memory, multimodal content, mob orchestration (spawn/fork/helpers/flows/profiles), durable scheduling, and provider auth via `auth_binding` + AuthMachine (env keys, OAuth, cloud IAM). Use when integrating with Meerkat, picking a surface, wiring auth, building agents, scheduling automated runs, deploying mobpacks, or asking how a feature exposes through a particular SDK."
 ---
 
 # Meerkat Platform Guide
@@ -173,16 +173,16 @@ ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
 For OAuth, cloud IAM, or any "auth handled by the host page" flow, register an external resolver instead of shipping bare API keys to the browser:
 
 ```typescript
-import { registerExternalAuthResolver, withConnectionRef } from '@rkat/web';
-registerExternalAuthResolver(wasm, async (connectionRef) => {
-  const token = await myHostFetchToken(connectionRef);
+import { registerExternalAuthResolver, withAuthBinding } from '@rkat/web';
+registerExternalAuthResolver(wasm, async (authBinding) => {
+  const token = await myHostFetchToken(authBinding);
   return { kind: 'bearer_token', token };
 });
-// withConnectionRef takes (connectionRef, config) and returns a config with `connectionRef` set.
-const session = runtime.createSession(withConnectionRef(connectionRef, { model: 'claude-sonnet-4-6' }));
+// withAuthBinding takes (authBinding, config) and returns a config with `authBinding` set.
+const session = runtime.createSession(withAuthBinding(authBinding, { model: 'claude-sonnet-4-6' }));
 ```
 
-`connectionRef` is the structural way to scope a session/mob member to a specific realm + binding — set it on `runtime.createSession({...})`, `mob.spawn(...)`, etc. Per-session `apiKey` fields were removed; use `anthropicApiKey`/`openaiApiKey`/`geminiApiKey` at runtime init or rely on the resolver.
+`authBinding` is the structural way to scope a session/mob member to a specific realm + binding — set it on `runtime.createSession({...})`, `mob.spawn(...)`, etc. Per-session `apiKey` fields were removed; use `anthropicApiKey`/`openaiApiKey`/`geminiApiKey` at runtime init or rely on the resolver.
 
 Browser scope: filesystem, shell, MCP client (rmcp), and network comms (TCP/UDS) are excluded by browser limitations. Everything else is intentionally wasm32-equivalent. For wasm internals, build commands, and full export table, see the meerkat-wasm skill.
 
@@ -371,11 +371,11 @@ Every session resolves credentials through realm-scoped bindings. Two onramps:
 
 **Quick start — env keys**: set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or `RKAT_*` variants). Meerkat synthesizes a default realm + binding. No config edits.
 
-**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config, then run `rkat auth login <provider>` and pass `--connection-ref <realm>:<binding>` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding.
+**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config, then run `rkat auth login <provider>` and pass `--auth-binding <realm>:<binding>` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding.
 
 ```bash
 rkat auth login anthropic                                            # OAuth (PKCE S256)
-rkat --connection-ref prod:claude run "ship the release notes"
+rkat --auth-binding prod:claude run "ship the release notes"
 ```
 
 Supported auth methods:
@@ -384,9 +384,9 @@ Supported auth methods:
 - OAuth: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth` (OpenAI), `google_oauth` (Code Assist)
 - Cloud IAM: AWS Bedrock (SigV4), GCP Vertex (GoogleAuth), Azure Foundry (Azure AD)
 
-Tokens refresh automatically per binding. `connection_ref` is persisted on the session — hot-swapping the model re-resolves through the same binding (no cross-realm bleed).
+Tokens refresh automatically per binding. `auth_binding` is persisted on the session — hot-swapping the model re-resolves through the same binding (no cross-realm bleed).
 
-In the Web SDK, ship a `connectionRef` plus `registerExternalAuthResolver` instead of API keys; see the Web SDK section above.
+In the Web SDK, ship a `authBinding` plus `registerExternalAuthResolver` instead of API keys; see the Web SDK section above.
 
 Surfaces: `auth/profile/{create,get,list,delete}`, `auth/login/{start,complete,device_start,device_complete,provision_api_key}`, `auth/status/get`, `auth/logout` over RPC; equivalent over REST and SDKs. Full walkthrough: `docs/guides/auth.mdx`.
 

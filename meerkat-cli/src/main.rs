@@ -39,7 +39,7 @@ use meerkat_core::service::{
     SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, AuthStatusPhase, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator,
+    AgentEvent, AuthBindingRef, AuthStatusPhase, BlobId, EventEnvelope, RealmConfig, RealmLocator,
     RealmSelection, ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
@@ -1232,20 +1232,21 @@ enum Commands {
         )]
         line_format: LineFormat,
 
-        /// Typed connection reference `realm:binding[:profile]`.
+        /// Typed auth binding reference `realm:binding[:profile]`.
         ///
         /// Parsed at the CLI boundary by
-        /// `cli_parse::parse_connection_ref_user_input`; a typed
-        /// [`meerkat_core::ConnectionRef`] is threaded through
-        /// `SessionBuildOptions.connection_ref`. Opaque-string
+        /// `cli_parse::parse_auth_binding_user_input`; a typed
+        /// [`meerkat_core::AuthBindingRef`] is threaded through
+        /// `SessionBuildOptions.auth_binding`. Opaque-string
         /// ferry through the runtime is prohibited by the
-        /// wave-b deletion of `ConnectionRef::parse` / `Display`.
+        /// wave-b deletion of `AuthBindingRef::parse` / `Display`.
         #[arg(
-            long = "connection-ref",
+            long = "auth-binding",
+            alias = "connection-ref",
             value_name = "REALM:BINDING[:PROFILE]",
-            help_heading = "Connection options"
+            help_heading = "Auth options"
         )]
-        connection_ref: Option<String>,
+        auth_binding: Option<String>,
     },
 
     /// Session management
@@ -2045,7 +2046,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             keep_alive,
             stdin,
             line_format,
-            connection_ref,
+            auth_binding,
         } => {
             #[cfg(feature = "skills")]
             let run_skills = skills;
@@ -2057,12 +2058,12 @@ async fn main() -> anyhow::Result<ExitCode> {
             let wait_for_mcp_enabled = false;
             // Wave-c C-12: parse user-supplied `realm:binding[:profile]`
             // at the CLI argument boundary. Downstream receives the
-            // typed `Option<ConnectionRef>`; the opaque-string form
+            // typed `Option<AuthBindingRef>`; the opaque-string form
             // never crosses into session-build options.
-            let connection_ref = match connection_ref.as_deref() {
+            let auth_binding = match auth_binding.as_deref() {
                 None => None,
                 Some(raw) => Some(
-                    cli_parse::parse_connection_ref_user_input(raw)
+                    cli_parse::parse_auth_binding_user_input(raw)
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
                 ),
             };
@@ -2095,7 +2096,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 keep_alive,
                 stdin,
                 line_format,
-                connection_ref,
+                auth_binding,
                 &cli_scope,
             ))
             .await
@@ -2193,7 +2194,7 @@ async fn handle_run_command(
     keep_alive: bool,
     stdin: StdinMode,
     line_format: LineFormat,
-    connection_ref: Option<ConnectionRef>,
+    auth_binding: Option<AuthBindingRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let output = if json { "json".to_string() } else { output };
@@ -2223,7 +2224,7 @@ async fn handle_run_command(
             no_stream,
             stdin,
             line_format,
-            connection_ref,
+            auth_binding,
             scope,
             verbose,
             wait_for_mcp,
@@ -2303,7 +2304,7 @@ async fn handle_run_command(
                 app_context,
                 config_base_dir,
                 hooks_override,
-                connection_ref.clone(),
+                auth_binding.clone(),
                 scope,
             )
             .await
@@ -2944,14 +2945,14 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 .with_token_store(store)
                 .with_refresh_coordinator(Arc::new(InMemoryCoordinator::default()))
                 .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
-            let connection_ref = meerkat_core::ConnectionRef {
+            let auth_binding = meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
                 binding: meerkat_core::BindingId::parse(binding_id.clone())
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
             };
-            match registry.resolve(&realm_set, &connection_ref, &env).await {
+            match registry.resolve(&realm_set, &auth_binding, &env).await {
                 Ok(conn) => {
                     println!("state: {}", AuthStatusPhase::Valid.as_public_str());
                     println!("provider: {}", conn.provider.as_str());
@@ -2984,7 +2985,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             println!("source_kind: {}", source_kind_label(&profile.source));
             let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
             println!("binding_id:  {binding_id}");
-            let connection_ref = ConnectionRef {
+            let auth_binding = AuthBindingRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
                 binding: meerkat_core::BindingId::parse(binding_id)
@@ -3004,7 +3005,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             let projection = project_cli_auth_status(
                 scope.auth_lease.as_ref(),
                 token_store.as_deref(),
-                &connection_ref,
+                &auth_binding,
                 profile,
                 chrono::Utc::now(),
             )
@@ -3062,7 +3063,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
                 };
                 if should_clear {
-                    let connection_ref = meerkat_core::ConnectionRef {
+                    let auth_binding = meerkat_core::AuthBindingRef {
                         realm: key.realm.clone(),
                         binding: key.binding.clone(),
                         profile: key.profile.clone(),
@@ -3070,7 +3071,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     meerkat_core::clear_tokens_and_publish_lifecycle_released(
                         store.as_ref(),
                         scope.auth_lease.as_ref(),
-                        &connection_ref,
+                        &auth_binding,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
@@ -3286,7 +3287,7 @@ async fn refresh_auth_profile(
         .with_auth_lease_handle(Arc::clone(&scope.auth_lease))
         .with_force_refresh(true);
     let registry = cli_provider_registry();
-    let connection_ref = meerkat_core::ConnectionRef {
+    let auth_binding = meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse(realm)
             .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
         binding: meerkat_core::BindingId::parse(binding_id.clone())
@@ -3294,7 +3295,7 @@ async fn refresh_auth_profile(
         profile: None,
     };
     let connection = registry
-        .resolve(&realm_set, &connection_ref, &env)
+        .resolve(&realm_set, &auth_binding, &env)
         .await
         .map_err(|e| anyhow::anyhow!("Binding resolution failed: {e}"))?;
 
@@ -3313,12 +3314,12 @@ async fn refresh_auth_profile(
     let Some(after_tokens) = after.as_ref() else {
         anyhow::bail!("Refresh completed but TokenStore no longer has '{realm}:{binding_id}'");
     };
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
     let snapshot = scope.auth_lease.snapshot(&lease_key);
     if !snapshot.credential_present {
         let transition = meerkat_core::publish_token_lifecycle_acquired(
             scope.auth_lease.as_ref(),
-            &connection_ref,
+            &auth_binding,
             after_tokens,
         )
         .map_err(|e| anyhow::anyhow!("AuthMachine lifecycle acquire failed: {e}"))?;
@@ -3367,7 +3368,7 @@ async fn refresh_auth_profile(
 //      NO_COLOR.
 //   4. Pre-flight: warn when the provider's env var is already set, so
 //      users understand the env-var path wins over OAuth until
-//      `--connection-ref` lands in the next CLI release.
+//      `--auth-binding` lands in the next CLI release.
 //   5. Provider selection: if no provider argument, present an
 //      interactive menu with one-line descriptions of each option.
 //   6. Specific, actionable error messages (user-denied, timeout, CSRF,
@@ -3620,7 +3621,7 @@ fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 #[derive(Debug)]
 struct CliOAuthLoginTarget {
-    connection_ref: ConnectionRef,
+    auth_binding: AuthBindingRef,
     auth_profile: meerkat_core::AuthProfile,
 }
 
@@ -3700,16 +3701,15 @@ fn resolve_configured_cli_interactive_oauth_target(
     })?;
     let realm_set = meerkat_core::RealmConnectionSet::from_config(realm_id, section)
         .map_err(|e| anyhow::anyhow!("Realm config invalid for '{realm_id}': {e}"))?;
-    let connection_ref = ConnectionRef {
+    let auth_binding = AuthBindingRef {
         realm: meerkat_core::RealmId::parse(realm_id)
             .map_err(|e| anyhow::anyhow!("invalid realm id '{realm_id}': {e}"))?,
         binding: meerkat_core::BindingId::parse(binding_id)
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
     };
-    let (_, backend_profile, auth_profile) = realm_set
-        .lookup_connection_ref(&connection_ref)
-        .map_err(|e| {
+    let (_, backend_profile, auth_profile) =
+        realm_set.lookup_auth_binding(&auth_binding).map_err(|e| {
             anyhow::anyhow!("OAuth login target '{realm_id}:{binding_id}' invalid: {e}")
         })?;
     meerkat_providers::oauth_flow::validate_oauth_login_binding(
@@ -3724,7 +3724,7 @@ fn resolve_configured_cli_interactive_oauth_target(
         )
     })?;
     Ok(CliOAuthLoginTarget {
-        connection_ref,
+        auth_binding,
         auth_profile: auth_profile.clone(),
     })
 }
@@ -3752,8 +3752,8 @@ fn resolve_cli_interactive_oauth_target(
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn connection_ref_from_token_key(key: &meerkat_providers::auth_store::TokenKey) -> ConnectionRef {
-    ConnectionRef {
+fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) -> AuthBindingRef {
+    AuthBindingRef {
         realm: key.realm.clone(),
         binding: key.binding.clone(),
         profile: key.profile.clone(),
@@ -3779,16 +3779,16 @@ struct CliTokenCommitSnapshot {
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn prepare_cli_token_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
 ) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
-    let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
+    let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
     let previous = store
         .load(&key)
         .await
         .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
     Ok(CliPreparedTokenCommitSnapshot {
         key,
-        lease_key: meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref),
+        lease_key: meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding),
         previous,
     })
 }
@@ -3797,12 +3797,12 @@ async fn prepare_cli_token_commit_unlocked(
 async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     mark_for_rehydration: bool,
 ) -> anyhow::Result<CliTokenCommitSnapshot> {
-    let key = meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref);
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let previous_lifecycle = auth_lease.snapshot(&lease_key);
     let previous = store
         .load(&key)
@@ -3814,7 +3814,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         .map_err(|e| anyhow::anyhow!("Failed to persist tokens: {e}"))?;
     let transition = match meerkat_core::publish_token_lifecycle_acquired(
         auth_lease,
-        connection_ref,
+        auth_binding,
         tokens,
     ) {
         Ok(transition) => transition,
@@ -3876,13 +3876,13 @@ async fn mark_cli_token_commit_lifecycle_published_unlocked(
 async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     prepared: CliPreparedTokenCommitSnapshot,
 ) -> anyhow::Result<()> {
     let previous_lifecycle = auth_lease.snapshot(&prepared.lease_key);
     let transition =
-        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens) {
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
             Ok(transition) => transition,
             Err(e) => {
                 anyhow::bail!("AuthMachine lifecycle acquire failed after OAuth consume: {e}")
@@ -3914,15 +3914,15 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
 async fn save_cli_tokens_and_publish_lifecycle(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
 ) -> anyhow::Result<()> {
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
     save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         store,
         auth_lease,
-        connection_ref,
+        auth_binding,
         tokens,
         true,
     )
@@ -4013,23 +4013,23 @@ struct CliBrowserFlowConsume<'a> {
 async fn save_cli_oauth_tokens_and_consume_browser_flow(
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     flow: CliBrowserFlowConsume<'_>,
 ) -> anyhow::Result<()> {
     flow.authority
-        .verify(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .verify(flow.state, auth_binding, flow.provider, flow.redirect_uri)
         .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let prepared = prepare_cli_token_commit_unlocked(store, connection_ref).await?;
+    let prepared = prepare_cli_token_commit_unlocked(store, auth_binding).await?;
     flow.authority
-        .consume(flow.state, connection_ref, flow.provider, flow.redirect_uri)
+        .consume(flow.state, auth_binding, flow.provider, flow.redirect_uri)
         .map_err(|err| anyhow::anyhow!("oauth state terminal consume failed: {err}"))?;
     save_prepared_cli_tokens_after_terminal_consume_unlocked(
         store,
         auth_lease,
-        connection_ref,
+        auth_binding,
         tokens,
         prepared,
     )
@@ -4123,11 +4123,11 @@ async fn noninteractive_login(
             "source": "rkat auth login --non-interactive",
         }),
     };
-    let connection_ref = connection_ref_from_token_key(&key);
+    let auth_binding = auth_binding_from_token_key(&key);
     save_cli_tokens_and_publish_lifecycle(
         store.as_ref(),
         scope.auth_lease.as_ref(),
-        &connection_ref,
+        &auth_binding,
         &persisted,
     )
     .await?;
@@ -4165,16 +4165,16 @@ async fn interactive_login(
             .map_err(|e| anyhow::anyhow!("Failed to persist OAuth login target config: {e}"))?;
     }
     tracing::debug!(
-        realm = %target.connection_ref.realm.as_str(),
-        binding = %target.connection_ref.binding.as_str(),
+        realm = %target.auth_binding.realm.as_str(),
+        binding = %target.auth_binding.binding.as_str(),
         auth_profile = %target.auth_profile.id,
         auth_method = %target.auth_profile.auth_method,
         config_provisioned = config_changed,
         "validated CLI OAuth login target"
     );
-    let connection_ref = target.connection_ref;
+    let auth_binding = target.auth_binding;
     let identity = provider.oauth_identity();
-    let key = TokenKey::from_connection_ref(&connection_ref);
+    let key = TokenKey::from_auth_binding(&auth_binding);
 
     eprintln!();
     eprintln!(
@@ -4195,9 +4195,9 @@ async fn interactive_login(
             provider.env_var(),
         ));
         print_hint("The env-var auth path will continue to handle `rkat run` without");
-        print_hint("`--connection-ref`. OAuth tokens are used when you invoke rkat with");
+        print_hint("`--auth-binding`. OAuth tokens are used when you invoke rkat with");
         print_hint(&format!(
-            "`--connection-ref dev:{}` (landing in the next CLI release).",
+            "`--auth-binding dev:{}` (landing in the next CLI release).",
             provider.binding_id(),
         ));
     }
@@ -4222,7 +4222,7 @@ async fn interactive_login(
     let state_token = scope
         .oauth_flow_authority
         .start(
-            connection_ref.clone(),
+            auth_binding.clone(),
             identity,
             redirect_url.clone(),
             pkce.verifier.secret().clone(),
@@ -4295,7 +4295,7 @@ async fn interactive_login(
     print_ok("Received authorization code from the provider.");
     let flow = scope
         .oauth_flow_authority
-        .verify(&outcome.state, &connection_ref, identity, &redirect_url)
+        .verify(&outcome.state, &auth_binding, identity, &redirect_url)
         .map_err(|e| anyhow::anyhow!("OAuth flow verification failed: {e}"))?;
 
     // --- Step 4: exchange + persist ------------------------------
@@ -4344,7 +4344,7 @@ async fn interactive_login(
     save_cli_oauth_tokens_and_consume_browser_flow(
         store.as_ref(),
         scope.auth_lease.as_ref(),
-        &connection_ref,
+        &auth_binding,
         &tokens,
         CliBrowserFlowConsume {
             authority: scope.oauth_flow_authority.as_ref(),
@@ -4420,7 +4420,7 @@ async fn interactive_login(
     );
     eprintln!(
         "  {}",
-        auth_dim("     activates when --connection-ref lands in the next CLI release."),
+        auth_dim("     activates when --auth-binding lands in the next CLI release."),
     );
     eprintln!();
     Ok(())
@@ -4441,7 +4441,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
     // Wave-c C-12: TokenKey now takes typed atoms; parse the raw
     // `profile_id` form at this logout boundary. This is the
-    // non-ConnectionRef carve-out `split_once(':')` site explicitly
+    // non-AuthBindingRef carve-out `split_once(':')` site explicitly
     // documented in `cli_parse.rs` — TokenKey shares the same flat
     // `realm:binding` grammar but has no profile component.
     let keys = match profile_id.split_once(':') {
@@ -4462,7 +4462,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
             Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
         };
         if should_clear {
-            let connection_ref = meerkat_core::ConnectionRef {
+            let auth_binding = meerkat_core::AuthBindingRef {
                 realm: key.realm.clone(),
                 binding: key.binding.clone(),
                 profile: key.profile.clone(),
@@ -4470,7 +4470,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
             meerkat_core::clear_tokens_and_publish_lifecycle_released(
                 store.as_ref(),
                 scope.auth_lease.as_ref(),
-                &connection_ref,
+                &auth_binding,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
@@ -4516,11 +4516,11 @@ struct CliAuthStatusProjection {
 async fn project_cli_auth_status(
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
     token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     auth_profile: &meerkat_core::AuthProfile,
     now: chrono::DateTime<chrono::Utc>,
 ) -> CliAuthStatusProjection {
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let mut snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
         &auth_profile.auth_method,
@@ -4538,7 +4538,7 @@ async fn project_cli_auth_status(
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_oauth_tokens_for_status(
                 store,
                 auth_lease,
-                connection_ref,
+                auth_binding,
                 expected_mode,
                 now,
             )
@@ -4548,7 +4548,9 @@ async fn project_cli_auth_status(
             snapshot = auth_lease.snapshot(&lease_key);
         } else if phase != AuthStatusPhase::Unknown {
             stored = store
-                .load(&meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref))
+                .load(&meerkat_providers::auth_store::TokenKey::from_auth_binding(
+                    auth_binding,
+                ))
                 .await
                 .ok()
                 .flatten();
@@ -4696,7 +4698,7 @@ fn doctor_configured_self_hosted_target(
         return Ok(Some(target));
     }
 
-    match meerkat_core::resolve_connection_ref_or_default_for_provider(
+    match meerkat_core::resolve_auth_binding_or_default_for_provider(
         config,
         meerkat_core::Provider::SelfHosted,
         None,
@@ -4731,7 +4733,7 @@ fn doctor_legacy_self_hosted_binding_id(
 fn doctor_legacy_self_hosted_connection(
     server_id: &str,
     server: &meerkat_core::SelfHostedServerConfig,
-) -> anyhow::Result<(meerkat_core::RealmConnectionSet, ConnectionRef)> {
+) -> anyhow::Result<(meerkat_core::RealmConnectionSet, AuthBindingRef)> {
     let realm_id = meerkat_core::RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
         anyhow::anyhow!(
             "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
@@ -4798,7 +4800,7 @@ fn doctor_legacy_self_hosted_connection(
             bindings,
             default_binding: Some(binding_key),
         },
-        ConnectionRef {
+        AuthBindingRef {
             realm: realm_id,
             binding: binding_id,
             profile: None,
@@ -4812,21 +4814,21 @@ async fn resolve_doctor_self_hosted_probe_connection(
     server_id: &str,
     server: &meerkat_core::SelfHostedServerConfig,
 ) -> anyhow::Result<DoctorSelfHostedProbeConnection> {
-    let (realm, connection_ref) =
+    let (realm, auth_binding) =
         if let Some(target) = doctor_configured_self_hosted_target(config, preferred_realm)? {
-            (target.realm, target.connection_ref)
+            (target.realm, target.auth_binding)
         } else {
             doctor_legacy_self_hosted_connection(server_id, server)?
         };
 
     let connection = doctor_self_hosted_registry()
-        .resolve(&realm, &connection_ref, &doctor_resolver_environment())
+        .resolve(&realm, &auth_binding, &doctor_resolver_environment())
         .await
         .map_err(|err| {
             anyhow::anyhow!(
                 "self-hosted credential resolution failed for server '{server_id}' through '{}:{}': {err}",
-                connection_ref.realm.as_str(),
-                connection_ref.binding.as_str()
+                auth_binding.realm.as_str(),
+                auth_binding.binding.as_str()
             )
         })?;
 
@@ -6299,7 +6301,7 @@ async fn run_agent(
     app_context: Option<String>,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
-    connection_ref: Option<ConnectionRef>,
+    auth_binding: Option<AuthBindingRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
@@ -6336,7 +6338,7 @@ async fn run_agent(
             app_context,
             _config_base_dir,
             hooks_override,
-            connection_ref,
+            auth_binding,
             scope,
         );
         anyhow::bail!("rkat built without session-store support");
@@ -6547,7 +6549,7 @@ async fn run_agent(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: mob_tools_factory,
-            connection_ref,
+            auth_binding,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -6818,7 +6820,7 @@ async fn resume_session(
     no_stream: bool,
     stdin: StdinMode,
     line_format: LineFormat,
-    connection_ref: Option<ConnectionRef>,
+    auth_binding: Option<AuthBindingRef>,
     scope: &RuntimeScope,
     verbose: bool,
     wait_for_mcp: bool,
@@ -6854,7 +6856,7 @@ async fn resume_session(
         no_stream,
         stdin,
         line_format,
-        connection_ref,
+        auth_binding,
         scope,
         None,
         verbose,
@@ -6891,7 +6893,7 @@ async fn resume_session_with_llm_override(
     no_stream: bool,
     stdin: StdinMode,
     line_format: LineFormat,
-    connection_ref: Option<ConnectionRef>,
+    auth_binding: Option<AuthBindingRef>,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
@@ -6926,7 +6928,7 @@ async fn resume_session_with_llm_override(
             no_stream,
             stdin,
             line_format,
-            connection_ref,
+            auth_binding,
             scope,
             llm_override,
             verbose,
@@ -7199,8 +7201,8 @@ async fn resume_session_with_llm_override(
         build.llm_client_override =
             llm_override.map(meerkat::encode_llm_client_override_for_service);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings);
-        if let Some(connection_ref) = connection_ref {
-            build.connection_ref = Some(connection_ref);
+        if let Some(auth_binding) = auth_binding {
+            build.auth_binding = Some(auth_binding);
         }
         build.mob_tools = mob_tools_factory;
 
@@ -7956,7 +7958,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     render_metadata: dispatch.render_metadata.clone(),
                     execution_kind: None,
                     peer_response_terminal_apply_intent: None,
-                    connection_ref: None,
+                    auth_binding: None,
                 },
             ),
         );
@@ -10836,7 +10838,7 @@ mod tests {
 
         let store = EphemeralTokenStore::new();
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let connection_ref = meerkat_core::ConnectionRef {
+        let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
@@ -10853,11 +10855,11 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
 
-        save_cli_tokens_and_publish_lifecycle(&store, &auth_lease, &connection_ref, &tokens)
+        save_cli_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding, &tokens)
             .await
             .expect("login save boundary should publish lease lifecycle");
 
-        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         assert_eq!(
             auth_lease.snapshot(&lease_key).phase,
             Some(AuthLeasePhase::Valid),
@@ -10865,7 +10867,7 @@ mod tests {
         );
         assert!(
             store
-                .load(&TokenKey::from_connection_ref(&connection_ref))
+                .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
                 .expect("token load succeeds")
                 .is_some(),
@@ -10924,8 +10926,8 @@ mod tests {
         let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
             .expect("configured OAuth binding resolves");
 
-        assert_eq!(target.connection_ref.realm.as_str(), "dev");
-        assert_eq!(target.connection_ref.binding.as_str(), "openai_oauth");
+        assert_eq!(target.auth_binding.realm.as_str(), "dev");
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
     }
 
@@ -10937,8 +10939,8 @@ mod tests {
         let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
             .expect("fresh config should synthesize the default OpenAI OAuth login target");
 
-        assert_eq!(target.connection_ref.realm.as_str(), "dev");
-        assert_eq!(target.connection_ref.binding.as_str(), "openai_oauth");
+        assert_eq!(target.auth_binding.realm.as_str(), "dev");
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
         assert_eq!(
             target.auth_profile.source,
@@ -10999,8 +11001,8 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    fn openai_connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn openai_auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("openai_oauth").expect("binding id parses"),
             profile: None,
@@ -11030,11 +11032,11 @@ mod tests {
 
         let store = EphemeralTokenStore::new();
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let connection_ref = openai_connection_ref();
+        let auth_binding = openai_auth_binding();
         let tokens = openai_oauth_tokens();
         store
             .save(
-                &TokenKey::from_connection_ref(&connection_ref),
+                &TokenKey::from_auth_binding(&auth_binding),
                 &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
             )
             .await
@@ -11047,13 +11049,13 @@ mod tests {
         let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
             .expect("realm config parses");
         let (_, _, auth_profile) = realm
-            .lookup_connection_ref(&connection_ref)
+            .lookup_auth_binding(&auth_binding)
             .expect("binding resolves");
 
         let projection = project_cli_auth_status(
             &auth_lease,
             Some(&store as &dyn TokenStore),
-            &connection_ref,
+            &auth_binding,
             auth_profile,
             chrono::Utc::now(),
         )
@@ -11061,7 +11063,7 @@ mod tests {
 
         assert_eq!(projection.phase, AuthStatusPhase::Unknown);
         assert!(projection.expires_at.is_none());
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
         assert_eq!(snapshot.phase, None);
         assert!(!snapshot.credential_present);
     }
@@ -11073,10 +11075,10 @@ mod tests {
         use meerkat_providers::auth_store::TokenStore;
 
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-        let connection_ref = openai_connection_ref();
+        let auth_binding = openai_auth_binding();
         auth_lease
             .acquire_lease(
-                &LeaseKey::from_connection_ref(&connection_ref),
+                &LeaseKey::from_auth_binding(&auth_binding),
                 (chrono::Utc::now() + chrono::Duration::minutes(30)).timestamp() as u64,
             )
             .expect("lease acquire succeeds");
@@ -11091,13 +11093,13 @@ mod tests {
         let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
             .expect("realm config parses");
         let (_, _, auth_profile) = realm
-            .lookup_connection_ref(&connection_ref)
+            .lookup_auth_binding(&auth_binding)
             .expect("binding resolves");
 
         let projection = project_cli_auth_status(
             &auth_lease,
             None::<&dyn TokenStore>,
-            &connection_ref,
+            &auth_binding,
             auth_profile,
             chrono::Utc::now(),
         )
@@ -11120,12 +11122,12 @@ mod tests {
             Arc::clone(&auth_lease),
         );
         let store = EphemeralTokenStore::new();
-        let connection_ref = openai_connection_ref();
+        let auth_binding = openai_auth_binding();
         let redirect_uri = "http://127.0.0.1:12345/callback";
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let state = authority
             .start(
-                connection_ref.clone(),
+                auth_binding.clone(),
                 provider,
                 redirect_uri.to_string(),
                 "pkce-verifier".into(),
@@ -11135,7 +11137,7 @@ mod tests {
         save_cli_oauth_tokens_and_consume_browser_flow(
             &store,
             auth_lease.as_ref(),
-            &connection_ref,
+            &auth_binding,
             &openai_oauth_tokens(),
             CliBrowserFlowConsume {
                 authority: &authority,
@@ -11147,25 +11149,25 @@ mod tests {
         .await
         .expect("CLI OAuth save consumes terminal flow");
 
-        let second_consume = authority.consume(&state, &connection_ref, provider, redirect_uri);
+        let second_consume = authority.consume(&state, &auth_binding, provider, redirect_uri);
         assert!(
             second_consume.is_err(),
             "consumed runtime browser flow must not remain callable: {second_consume:?}"
         );
         assert_eq!(
             auth_lease
-                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .snapshot(&LeaseKey::from_auth_binding(&auth_binding))
                 .phase,
             Some(AuthLeasePhase::Valid)
         );
         let stored = store
-            .load(&TokenKey::from_connection_ref(&connection_ref))
+            .load(&TokenKey::from_auth_binding(&auth_binding))
             .await
             .expect("token load succeeds")
             .expect("token should be persisted");
         let marker = meerkat_core::tokens_lifecycle_publication(&stored)
             .expect("CLI OAuth login should stamp durable lifecycle marker");
-        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
         assert_eq!(marker.generation, Some(snapshot.generation));
         assert_eq!(
             marker.credential_published_at_millis,
@@ -11180,7 +11182,7 @@ mod tests {
     impl meerkat_providers::oauth_flow::OAuthFlowAuthority for RejectCliBrowserConsumeAuthority {
         fn start(
             &self,
-            _target: ConnectionRef,
+            _target: AuthBindingRef,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _redirect_uri: String,
             _pkce_verifier: String,
@@ -11191,7 +11193,7 @@ mod tests {
         fn verify(
             &self,
             _state: &str,
-            target: &ConnectionRef,
+            target: &AuthBindingRef,
             provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             redirect_uri: &str,
         ) -> Result<
@@ -11210,7 +11212,7 @@ mod tests {
         fn consume(
             &self,
             _state: &str,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _redirect_uri: &str,
         ) -> Result<
@@ -11227,7 +11229,7 @@ mod tests {
 
         fn admit_device_code(
             &self,
-            _target: ConnectionRef,
+            _target: AuthBindingRef,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _device_code: String,
             _expires_in: std::time::Duration,
@@ -11238,7 +11240,7 @@ mod tests {
         fn verify_device_code(
             &self,
             _device_code: &str,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthDeviceFlowRecord,
@@ -11250,7 +11252,7 @@ mod tests {
         fn begin_device_code_poll(
             &self,
             _device_code: &str,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthDevicePollLease,
@@ -11332,13 +11334,13 @@ mod tests {
 
         let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
         let store = SaveCountingCliTokenStore::new();
-        let connection_ref = openai_connection_ref();
+        let auth_binding = openai_auth_binding();
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
 
         let err = save_cli_oauth_tokens_and_consume_browser_flow(
             &store,
             &auth_lease,
-            &connection_ref,
+            &auth_binding,
             &openai_oauth_tokens(),
             CliBrowserFlowConsume {
                 authority: &RejectCliBrowserConsumeAuthority,
@@ -11358,7 +11360,7 @@ mod tests {
         );
         assert!(
             store
-                .load(&TokenKey::from_connection_ref(&connection_ref))
+                .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
                 .expect("token load succeeds")
                 .is_none(),
@@ -11366,7 +11368,7 @@ mod tests {
         );
         assert_ne!(
             auth_lease
-                .snapshot(&LeaseKey::from_connection_ref(&connection_ref))
+                .snapshot(&LeaseKey::from_auth_binding(&auth_binding))
                 .phase,
             Some(AuthLeasePhase::Valid),
             "failed terminal consume must not leave the newly acquired credential lifecycle valid"
@@ -12279,7 +12281,7 @@ default_model = "gemma"
         yolo: bool,
         stdin: StdinMode,
         line_format: LineFormat,
-        connection_ref: Option<meerkat_core::ConnectionRef>,
+        auth_binding: Option<meerkat_core::AuthBindingRef>,
     ) -> String {
         let temp = tempfile::tempdir().expect("temp dir");
         let state_root = temp.path().join("state");
@@ -12314,7 +12316,7 @@ default_model = "gemma"
             false,
             stdin,
             line_format,
-            connection_ref,
+            auth_binding,
             &scope,
         )
         .await
@@ -12387,24 +12389,24 @@ default_model = "gemma"
             "`--line-format json` should be allowed through run --resume; got: {line_format_err}"
         );
 
-        let connection_ref = meerkat_core::ConnectionRef {
+        let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("test").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
             profile: None,
         };
-        let connection_ref_err = run_resume_probe_error(
-            "resume-connection-ref",
+        let auth_binding_err = run_resume_probe_error(
+            "resume-auth-binding",
             None,
             false,
             StdinMode::Off,
             LineFormat::Text,
-            Some(connection_ref),
+            Some(auth_binding),
         )
         .await;
         assert!(
-            !connection_ref_err.contains("create-only")
-                && !connection_ref_err.contains("--connection-ref"),
-            "`--connection-ref` should be allowed through run --resume; got: {connection_ref_err}"
+            !auth_binding_err.contains("create-only")
+                && !auth_binding_err.contains("--auth-binding"),
+            "`--auth-binding` should be allowed through run --resume; got: {auth_binding_err}"
         );
     }
 
@@ -15071,7 +15073,7 @@ capabilities = ["definitely_missing_capability"]
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         );
         let persistence_adapter = persistence.runtime_adapter();
-        let connection_ref = meerkat_core::ConnectionRef {
+        let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
@@ -15081,7 +15083,7 @@ capabilities = ["definitely_missing_capability"]
         let state = persistence_adapter
             .oauth_flow_authority()
             .start(
-                connection_ref.clone(),
+                auth_binding.clone(),
                 provider,
                 redirect_uri.to_string(),
                 "cli-persistence-verifier".to_string(),
@@ -15099,7 +15101,7 @@ capabilities = ["definitely_missing_capability"]
         );
         let flow = runtime_adapter
             .oauth_flow_authority()
-            .consume(&state, &connection_ref, provider, redirect_uri)
+            .consume(&state, &auth_binding, provider, redirect_uri)
             .expect("CLI service construction must preserve PersistenceBundle OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "cli-persistence-verifier");
@@ -15135,12 +15137,12 @@ capabilities = ["definitely_missing_capability"]
             .prepare_bindings(session_id.clone())
             .await
             .expect("runtime bindings should be prepared");
-        let connection_ref = meerkat_core::ConnectionRef {
+        let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
         };
-        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
         bindings
             .auth_lease()
             .acquire_lease(&lease_key, u64::MAX)

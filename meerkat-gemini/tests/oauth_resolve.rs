@@ -15,7 +15,7 @@ use meerkat_core::handles::{
     LeaseKey,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
+    AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_gemini::runtime::oauth;
@@ -72,8 +72,8 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
     .unwrap()
 }
 
-fn default_connection_ref() -> ConnectionRef {
-    ConnectionRef {
+fn default_auth_binding() -> AuthBindingRef {
+    AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_code_assist").expect("valid binding"),
         profile: None,
@@ -377,7 +377,7 @@ async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let connection = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .expect("fresh Google OAuth tokens should resolve");
 
@@ -402,7 +402,7 @@ async fn google_oauth_rejects_token_without_auth_lifecycle() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -441,7 +441,7 @@ async fn google_oauth_reauth_required_is_typed() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -483,7 +483,7 @@ async fn google_oauth_rejects_wrong_persisted_mode() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -521,7 +521,7 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
             &code_assist_realm_with_source(CredentialSourceSpec::ExternalResolver {
                 handle: "external-google".into(),
             }),
-            &default_connection_ref(),
+            &default_auth_binding(),
             &env,
         )
         .await
@@ -571,7 +571,7 @@ async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runti
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let connection = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .expect("expired Google OAuth lease should refresh through AuthMachine gate");
 
@@ -622,7 +622,7 @@ async fn google_oauth_refresh_failure_is_typed() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -666,7 +666,7 @@ async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let connection = registry
-        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
         .await
         .expect("forced Google OAuth refresh should resolve through AuthMachine gate");
 

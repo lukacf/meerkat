@@ -8,7 +8,7 @@ Meerkat's auth story has two layers. The **fast path** is an env var
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — set it and
 `rkat run` works. The **powerful path** is realm-scoped bindings:
 declare a realm in your config, register credentials via `rkat auth
-login` or the REST/RPC surfaces, and pass `--connection-ref
+login` or the REST/RPC surfaces, and pass `--auth-binding
 <realm>:<binding>` to scope a session or mob member to that specific
 binding.
 
@@ -108,8 +108,8 @@ The current CLI login flow is convenient for local setup, but it does not yet le
 ### Use the binding
 
 ```bash
-rkat run --connection-ref prod:default "hello"
-rkat run --connection-ref prod:openai   "hello"
+rkat run --auth-binding prod:default "hello"
+rkat run --auth-binding prod:openai   "hello"
 ```
 
 ## Subcommands
@@ -218,11 +218,11 @@ keychain or a 0o600 file) or `Env`.
 
 ## Hot-swap mid-session
 
-When a session is created with `--connection-ref prod:default`, its
-persisted `SessionMetadata.connection_ref` carries that binding through
+When a session is created with `--auth-binding prod:default`, its
+persisted `SessionMetadata.auth_binding` carries that binding through
 resume and hot-swap. Changing the model/provider mid-turn via the RPC
 `turn/start` override keeps the binding by default; pass an explicit
-`connection_ref` on the turn request to scope the swap to a different
+`auth_binding` on the turn request to scope the swap to a different
 realm or binding.
 
 ```json
@@ -233,7 +233,7 @@ realm or binding.
     "session_id": "...",
     "prompt": "...",
     "model": "gpt-5.4",
-    "connection_ref": {"realm": "prod", "binding": "openai"}
+    "auth_binding": {"realm": "prod", "binding": "openai"}
   }
 }
 ```
@@ -244,7 +244,7 @@ binding — no env-default fallback, no cross-realm credential bleed.
 ## Per-mob-member override
 
 Mob members default to env-default / config-realm fallback credentials.
-Pass `connection_ref` on the host-side mob spawn surface to scope a member to a
+Pass `auth_binding` on the host-side mob spawn surface to scope a member to a
 specific binding:
 
 ```json
@@ -254,14 +254,14 @@ specific binding:
     "mob_id": "research",
     "profile": "analyst",
     "agent_identity": "a1",
-    "connection_ref": {"realm": "prod", "binding": "openai"}
+    "auth_binding": {"realm": "prod", "binding": "openai"}
   }
 }
 ```
 
 Members in the same mob can use different providers or tenants
 without cross-contamination. Public wire surfaces accept the structural
-`connection_ref` object only; the colon-joined `realm:binding[:profile]`
+`auth_binding` object only; the colon-joined `realm:binding[:profile]`
 form is a CLI input convenience and is converted before it crosses the
 wire boundary.
 
@@ -317,5 +317,5 @@ Bedrock/Vertex/Foundry.
 
 - [Hooks](/guides/hooks) — observe auth events or gate turns on
   credential state
-- [Mobs](/guides/mobs) — per-member `connection_ref` overrides
+- [Mobs](/guides/mobs) — per-member `auth_binding` overrides
 - [Meerkat Runtime Dogma](/architecture/meerkat-runtime-dogma) — rationale behind the realm/binding model

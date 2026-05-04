@@ -43,7 +43,7 @@ import type {
   MobSubmitWorkParams,
   MobTurnStartParams,
   WireBudgetSplitPolicy,
-  WireConnectionRef,
+  WireAuthBindingRef,
   WireMemberLaunchMode,
   WireMemberRef,
   WireMobBackendKind,
@@ -168,7 +168,7 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
     model: "claude-sonnet-4-6",
     tools: { shell: true },
   },
-  connectionRef: { realm: "dev", binding: "default_anthropic" },
+  authBinding: { realm: "dev", binding: "default_anthropic" },
 };
 
 void publicSpawnSpecWithAdvancedFields;
@@ -176,7 +176,7 @@ void publicSpawnSpecWithAdvancedFields;
 const publicSpawnManySpec: SpawnManySpec = {
   profile: "worker",
   agentIdentity: "worker-many",
-  connectionRef: { realm: "dev", binding: "default_anthropic" },
+  authBinding: { realm: "dev", binding: "default_anthropic" },
 };
 
 void publicSpawnManySpec;
@@ -203,8 +203,8 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   structuredOutputRetries: 2,
   providerParams: { temperature: 0.2 },
   clearProviderParams: true,
-  connectionRef: { realm: "dev", binding: "default_openai" },
-  clearConnectionRef: true,
+  authBinding: { realm: "dev", binding: "default_openai" },
+  clearAuthBinding: true,
 };
 
 const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
@@ -215,9 +215,9 @@ const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
 
 type MobTurnStartSupportedWireOptionKeys =
   | "additional_instructions"
-  | "clear_connection_ref"
+  | "clear_auth_binding"
   | "clear_provider_params"
-  | "connection_ref"
+  | "auth_binding"
   | "flow_tool_overlay"
   | "keep_alive"
   | "max_tokens"
@@ -449,17 +449,17 @@ const generatedMobSpawnManySpec: MobSpawnSpecParams = {
   agent_identity: "worker-3",
   initial_message: "hello",
   backend: "session",
-  connection_ref: { realm: "dev", binding: "default_anthropic" },
+  auth_binding: { realm: "dev", binding: "default_anthropic" },
 };
 
 const generatedMobSpawnManyBackend: WireMobBackendKind = "session";
-const generatedMobSpawnManyConnectionRef: WireConnectionRef = {
+const generatedMobSpawnManyAuthBindingRef: WireAuthBindingRef = {
   realm: "dev",
   binding: "default_anthropic",
 };
 
 void generatedMobSpawnManyBackend;
-void generatedMobSpawnManyConnectionRef;
+void generatedMobSpawnManyAuthBindingRef;
 
 const generatedMobSpawnManySpecWithBadContent: MobSpawnSpecParams = {
   profile: "worker",

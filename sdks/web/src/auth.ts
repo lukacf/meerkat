@@ -9,9 +9,9 @@
  *   - `registerExternalAuthResolver` — wraps the WASM-bundled
  *     `register_external_auth_resolver` binding so a browser host page
  *     can install an OAuth-backed resolver callback that hands Meerkat a
- *     typed lease envelope per structural connection reference.
- *   - `withConnectionRef` — convenience helper that wires an existing
- *     session config with a connection reference for `createSession`.
+ *     typed lease envelope per structural auth binding reference.
+ *   - `withAuthBinding` — convenience helper that wires an existing
+ *     session config with an auth binding reference for `createSession`.
  *
  * The WASM runtime's session-creation path (plan §4d.wasm.2) takes
  * credentials either from bootstrap-time realm config (populated via
@@ -64,7 +64,7 @@ import type {
   WireLoginStart,
   WireProvisionApiKeyResult,
 } from './generated/auth.js';
-import type { ConnectionRef, SessionConfig } from './types.js';
+import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
   WireAuthMethod,
@@ -131,11 +131,11 @@ export type ExternalAuthResolverResult = ExternalAuthLease;
 
 /** Host-page resolver callback that the WASM runtime invokes when the
  * selected binding's credential source is `external_resolver`. Takes a
- * structural connection reference, and returns a typed lease envelope. Reject
+ * structural auth binding reference, and returns a typed lease envelope. Reject
  * the returned promise with `ExternalAuthFailure` to preserve stable failure
  * truth. */
 export type ExternalAuthResolver = (
-  connectionRef: ConnectionRef,
+  authBinding: AuthBindingRef,
 ) => ExternalAuthResolverResult | Promise<ExternalAuthResolverResult>;
 
 /** JSON-RPC-style transport used by the `Auth` class. Minimal: just
@@ -331,9 +331,9 @@ export function registerExternalAuthResolver(
   resolver: ExternalAuthResolver,
 ): void {
   const adapter = (
-    connectionRef: ConnectionRef,
+    authBinding: AuthBindingRef,
   ): Promise<ExternalAuthResolverResult> =>
-    Promise.resolve(resolver(connectionRef));
+    Promise.resolve(resolver(authBinding));
   wasm.register_external_auth_resolver(adapter);
 }
 
@@ -348,13 +348,13 @@ export function clearExternalAuthResolver(wasm: {
   wasm.register_external_auth_resolver(undefined);
 }
 
-/** Return a session config with an explicit auth connection binding. */
-export function withConnectionRef<T extends SessionConfig>(
-  connectionRef: ConnectionRef,
+/** Return a session config with an explicit auth auth binding. */
+export function withAuthBinding<T extends SessionConfig>(
+  authBinding: AuthBindingRef,
   config: T,
-): T & { connectionRef: ConnectionRef } {
+): T & { authBinding: AuthBindingRef } {
   return {
     ...config,
-    connectionRef,
+    authBinding,
   };
 }

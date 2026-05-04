@@ -3382,51 +3382,8 @@
         "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only — clients that do not carry this struct inherit the\nserver-default behavior via `#[serde(default)]` on the parent\n[`RealtimeOpenRequest`].",
         "properties": {
           "tool_timeout": {
-            "description": "Realtime-specific timeout policy for product-session tool dispatch.",
-            "oneOf": [
-              {
-                "properties": {
-                  "type": {
-                    "const": "default",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type"
-                ],
-                "type": "object"
-              },
-              {
-                "properties": {
-                  "type": {
-                    "const": "disabled",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type"
-                ],
-                "type": "object"
-              },
-              {
-                "properties": {
-                  "timeout_ms": {
-                    "format": "uint64",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": {
-                    "const": "finite",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "timeout_ms"
-                ],
-                "type": "object"
-              }
-            ]
+            "$ref": "#/components/schemas/RealtimeToolTimeoutPolicy",
+            "description": "Realtime-specific timeout policy for product-session tool dispatch."
           }
         },
         "type": "object"
@@ -3697,6 +3654,56 @@
         ],
         "title": "RealtimeStatusResult",
         "type": "object"
+      },
+      "RealtimeToolTimeoutPolicy": {
+        "description": "Typed per-channel tool timeout policy.",
+        "oneOf": [
+          {
+            "description": "Use the server's default realtime tool timeout.",
+            "properties": {
+              "type": {
+                "const": "default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Do not apply a realtime-specific timeout. The runtime/tool dispatcher\nmay still enforce its own normal execution policy.",
+            "properties": {
+              "type": {
+                "const": "disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Apply this finite realtime-specific timeout.",
+            "properties": {
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "timeout_ms"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",
@@ -5396,7 +5403,7 @@
           },
           {
             "const": "auth_reauth_required",
-            "description": "Auth lease transitioned to `reauth_required` — the active\n`connection_ref` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
             "type": "string"
           }
         ]
@@ -5738,6 +5745,33 @@
         ],
         "title": "WireAssistantBlock"
       },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/components/schemas/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "title": "WireAuthBindingRef",
+        "type": "object"
+      },
       "WireAuthProfile": {
         "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
         "properties": {
@@ -5767,14 +5801,14 @@
       "WireAuthProfileCleared": {
         "description": "`DELETE /auth/bindings/{binding_id}` /\n`POST /auth/bindings/{binding_id}/logout` success body.",
         "properties": {
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
           "binding_id": {
             "type": "string"
           },
           "cleared": {
             "type": "boolean"
-          },
-          "connection_ref": {
-            "$ref": "#/components/schemas/WireConnectionRef"
           },
           "profile_id": {
             "type": "string"
@@ -5786,7 +5820,7 @@
         "required": [
           "realm_id",
           "binding_id",
-          "connection_ref",
+          "auth_binding",
           "profile_id",
           "cleared"
         ],
@@ -5796,14 +5830,14 @@
       "WireAuthProfileCreated": {
         "description": "`POST /auth/profiles` (create) success body.",
         "properties": {
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
           "auth_method": {
             "type": "string"
           },
           "binding_id": {
             "type": "string"
-          },
-          "connection_ref": {
-            "$ref": "#/components/schemas/WireConnectionRef"
           },
           "profile_id": {
             "type": "string"
@@ -5821,7 +5855,7 @@
         "required": [
           "realm_id",
           "binding_id",
-          "connection_ref",
+          "auth_binding",
           "profile_id",
           "provider",
           "auth_method",
@@ -5833,21 +5867,21 @@
       "WireAuthProfileDetail": {
         "description": "`GET /auth/bindings/{binding_id}` success body.",
         "properties": {
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
           "auth_profile": {
             "$ref": "#/components/schemas/WireAuthProfile"
           },
           "binding_id": {
             "type": "string"
           },
-          "connection_ref": {
-            "$ref": "#/components/schemas/WireConnectionRef"
-          },
           "profile_id": {
             "type": "string"
           }
         },
         "required": [
-          "connection_ref",
+          "auth_binding",
           "binding_id",
           "profile_id",
           "auth_profile"
@@ -5890,7 +5924,7 @@
         "type": "object"
       },
       "WireAuthStatusDetail": {
-        "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`connection_ref` / `has_refresh_token` so the caller can key by\nbinding directly.",
+        "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`auth_binding` / `has_refresh_token` so the caller can key by\nbinding directly.",
         "properties": {
           "account_id": {
             "type": [
@@ -5898,14 +5932,14 @@
               "null"
             ]
           },
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
           "auth_method": {
             "type": "string"
           },
           "binding_id": {
             "type": "string"
-          },
-          "connection_ref": {
-            "$ref": "#/components/schemas/WireConnectionRef"
           },
           "expires_at": {
             "type": [
@@ -5938,7 +5972,7 @@
         "required": [
           "realm_id",
           "binding_id",
-          "connection_ref",
+          "auth_binding",
           "profile_id",
           "provider",
           "auth_method",
@@ -5973,32 +6007,6 @@
           "id",
           "provider",
           "backend_kind"
-        ],
-        "type": "object"
-      },
-      "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
-        "properties": {
-          "binding": {
-            "$ref": "#/components/schemas/BindingId"
-          },
-          "profile": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "realm": {
-            "$ref": "#/components/schemas/RealmId"
-          }
-        },
-        "required": [
-          "realm",
-          "binding"
         ],
         "type": "object"
       },
@@ -6192,13 +6200,13 @@
             "type": "object"
           },
           {
-            "description": "Identifies a binding inside a realm on the wire. Shared by every\nauth REST response that returns a `{realm_id, binding_id, connection_ref}`\ntrio. Built from a typed [`meerkat_core::ConnectionRef`] so the three\nfields always agree; the `realm_id`/`binding_id` strings carry the\nslug form for wire consumers that key by string.",
+            "description": "Identifies a binding inside a realm on the wire. Shared by every\nauth REST response that returns a `{realm_id, binding_id, auth_binding}`\ntrio. Built from a typed [`meerkat_core::AuthBindingRef`] so the three\nfields always agree; the `realm_id`/`binding_id` strings carry the\nslug form for wire consumers that key by string.",
             "properties": {
+              "auth_binding": {
+                "$ref": "#/components/schemas/WireAuthBindingRef"
+              },
               "binding_id": {
                 "type": "string"
-              },
-              "connection_ref": {
-                "$ref": "#/components/schemas/WireConnectionRef"
               },
               "expires_at": {
                 "type": [
@@ -6233,7 +6241,7 @@
               "state",
               "realm_id",
               "binding_id",
-              "connection_ref",
+              "auth_binding",
               "profile_id",
               "provider",
               "has_refresh_token",
@@ -6322,11 +6330,11 @@
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
         "properties": {
+          "auth_binding": {
+            "$ref": "#/components/schemas/WireAuthBindingRef"
+          },
           "binding_id": {
             "type": "string"
-          },
-          "connection_ref": {
-            "$ref": "#/components/schemas/WireConnectionRef"
           },
           "expires_at": {
             "type": [
@@ -6362,7 +6370,7 @@
         "required": [
           "realm_id",
           "binding_id",
-          "connection_ref",
+          "auth_binding",
           "profile_id",
           "provider",
           "has_refresh_token",

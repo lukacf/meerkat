@@ -361,13 +361,13 @@ await client.connect(
 
 Client methods:
 
-- `create_session(prompt, *, model, connection_ref=None, ...)` → `Session` — `connection_ref` scopes credentials to a realm/binding
+- `create_session(prompt, *, model, auth_binding=None, ...)` → `Session` — `auth_binding` scopes credentials to a realm/binding
 - `create_session_streaming(prompt, ...)` → `EventStream`
 - `list_sessions()` → `list[SessionInfo]`
 - `read_session(session_id)` → dict
 - `read_session_history(session_id, offset=0, limit=None)` → `SessionHistory`
 - `get_blob(blob_id)` → `BlobPayload`
-- `create_mob(definition, ..., connection_ref=None)` → `Mob`
+- `create_mob(definition, ..., auth_binding=None)` → `Mob`
 - `list_mobs()` → `list[MobSummary]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(params)` / `mcp_remove(params)` / `mcp_reload(params)`
@@ -448,13 +448,13 @@ await client.connect({
 
 Client methods:
 
-- `createSession(prompt, options?)` → `Session` — `options.connectionRef` scopes credentials to a realm/binding
+- `createSession(prompt, options?)` → `Session` — `options.authBinding` scopes credentials to a realm/binding
 - `createSessionStreaming(prompt, options?)` → `EventStream`
 - `listSessions()` → `SessionInfo[]`
 - `readSession(sessionId)` → object
 - `readSessionHistory(sessionId, { offset, limit }?)` → `SessionHistory`
 - `getBlob(blobId)` → `BlobPayload`
-- `createMob(definition, options?)` → `Mob` — accepts `connectionRef`
+- `createMob(definition, options?)` → `Mob` — accepts `authBinding`
 - `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`

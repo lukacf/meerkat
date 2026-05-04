@@ -957,7 +957,7 @@ pub enum SystemNoticeKind {
     ToolScope,
     ToolScopeWarning,
     /// Auth lease transitioned to `reauth_required` — the active
-    /// `connection_ref` needs manual re-authentication before the next LLM
+    /// `auth_binding` needs manual re-authentication before the next LLM
     /// call can proceed (Phase 1.5-rev).
     AuthReauthRequired,
 }

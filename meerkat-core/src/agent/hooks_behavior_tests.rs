@@ -189,7 +189,7 @@ fn factory_policy_session() -> meerkat_core::Session {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .expect("test metadata serializes");
     session

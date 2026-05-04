@@ -7,7 +7,7 @@ use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
-use crate::connection::ConnectionRef;
+use crate::connection::AuthBindingRef;
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
@@ -1340,10 +1340,14 @@ pub struct RuntimeTurnMetadata {
     /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
-    /// Override, clear, or preserve the connection reference this turn must
+    /// Override, clear, or preserve the auth binding reference this turn must
     /// resolve against.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     /// Keep-alive policy for materialized resources for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlivePolicy>,
@@ -1381,8 +1385,8 @@ struct RuntimeTurnMetadataFields {
     provider: Option<Provider>,
     #[serde(default)]
     provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
-    #[serde(default)]
-    connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     #[serde(default)]
     keep_alive: Option<KeepAlivePolicy>,
     #[serde(default)]
@@ -1399,15 +1403,15 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
         D: serde::Deserializer<'de>,
     {
         let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_connection_ref) =
-            if let Some(object) = raw.as_object_mut() {
-                (
-                    take_legacy_clear_bool(object, "clear_provider_params")?,
-                    take_legacy_clear_bool(object, "clear_connection_ref")?,
-                )
-            } else {
-                (false, false)
-            };
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &["clear_connection_ref"])?,
+            )
+        } else {
+            (false, false)
+        };
         let fields: RuntimeTurnMetadataFields =
             serde_json::from_value(raw).map_err(de::Error::custom)?;
         let provider_params = legacy_override_from_split_fields(
@@ -1416,11 +1420,11 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
             "provider_params",
             "clear_provider_params",
         )?;
-        let connection_ref = legacy_override_from_split_fields(
-            fields.connection_ref,
-            clear_connection_ref,
-            "connection_ref",
-            "clear_connection_ref",
+        let auth_binding = legacy_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
         )?;
 
         Ok(Self {
@@ -1431,7 +1435,7 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
             model: fields.model,
             provider: fields.provider,
             provider_params,
-            connection_ref,
+            auth_binding,
             keep_alive: fields.keep_alive,
             render_metadata: fields.render_metadata,
             execution_kind: fields.execution_kind,
@@ -1451,7 +1455,7 @@ impl RuntimeTurnMetadata {
             && self.model.is_none()
             && self.provider.is_none()
             && self.provider_params.is_none()
-            && self.connection_ref.is_none()
+            && self.auth_binding.is_none()
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
@@ -1459,7 +1463,7 @@ impl RuntimeTurnMetadata {
     }
 
     /// Merge another metadata carrier into this one. Scalar conflicts (two
-    /// inputs in a batch disagreeing on `model`, `provider`, `connection_ref`,
+    /// inputs in a batch disagreeing on `model`, `provider`, `auth_binding`,
     /// etc.) return a typed [`TurnMetadataMergeConflict`] rather than
     /// last-wins. Collection fields accumulate.
     pub fn merge(&mut self, other: Self) -> Result<(), TurnMetadataMergeConflict> {
@@ -1481,11 +1485,7 @@ impl RuntimeTurnMetadata {
             other.provider_params,
             "provider_params",
         )?;
-        merge_override(
-            &mut self.connection_ref,
-            other.connection_ref,
-            "connection_ref",
-        )?;
+        merge_override(&mut self.auth_binding, other.auth_binding, "auth_binding")?;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
         merge_scalar(
             &mut self.render_metadata,
@@ -1591,15 +1591,28 @@ where
 fn take_legacy_clear_bool<E>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     field: &'static str,
+    aliases: &[&'static str],
 ) -> Result<bool, E>
 where
     E: de::Error,
 {
-    match object.remove(field) {
-        None => Ok(false),
-        Some(serde_json::Value::Bool(value)) => Ok(value),
-        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
+    let mut seen = None;
+    for key in std::iter::once(field).chain(aliases.iter().copied()) {
+        match object.remove(key) {
+            None => {}
+            Some(serde_json::Value::Bool(value)) => match seen {
+                None => seen = Some(value),
+                Some(previous) if previous == value => {}
+                Some(_) => {
+                    return Err(E::custom(format!(
+                        "{field} and its compatibility aliases disagree"
+                    )));
+                }
+            },
+            Some(_) => return Err(E::custom(format!("{key} must be a boolean"))),
+        }
     }
+    Ok(seen.unwrap_or(false))
 }
 
 mod duration_seconds {
@@ -1644,7 +1657,7 @@ pub struct StagedRunInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "primitive_type", rename_all = "snake_case")]
 // StagedInput is intentionally large — it carries the full
-// RuntimeTurnMetadata (model/provider/connection_ref overrides,
+// RuntimeTurnMetadata (model/provider/auth_binding overrides,
 // rendering metadata, skill refs, etc.). Boxing would force an
 // allocation on every input construction, which is in the hot path.
 #[allow(clippy::large_enum_variant)]

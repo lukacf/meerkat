@@ -97,7 +97,7 @@ from .generated.types import (
     RuntimeStateResult as RuntimeStateResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
-    WireConnectionRef as WireConnectionRef,
+    WireAuthBindingRef as WireAuthBindingRef,
     WireGenerateImageExecutionPlan as WireGenerateImageExecutionPlan,
     WireGenerateImageRequest as WireGenerateImageRequest,
     WireImageGenerationToolResult as WireImageGenerationToolResult,

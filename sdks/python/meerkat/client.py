@@ -51,7 +51,7 @@ from .generated.types import (
     RealtimeStatusResult,
     RuntimeRealtimeAttachmentStatusResult,
     WireBudgetSplitPolicy,
-    WireConnectionRef,
+    WireAuthBindingRef,
     WireContentInput,
     WireMemberLaunchMode,
     WireMobBackendKind,
@@ -569,7 +569,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        auth_binding: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -603,7 +603,7 @@ class MeerkatClient:
             print(session.text)
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -631,7 +631,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        auth_binding: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -669,7 +669,7 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -708,7 +708,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        auth_binding: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -746,7 +746,7 @@ class MeerkatClient:
             result = await deferred.start_turn("Begin")
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -1307,7 +1307,7 @@ class MeerkatClient:
         budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
+        auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         params: dict[str, Any] = {
             "mob_id": mob_id,
@@ -1329,7 +1329,7 @@ class MeerkatClient:
             "budget_split_policy": budget_split_policy,
             "inherited_tool_filter": inherited_tool_filter,
             "override_profile": override_profile,
-            "connection_ref": connection_ref,
+            "auth_binding": auth_binding,
         }.items():
             if value is not None:
                 params[key] = _wire_value(value)
@@ -1554,8 +1554,8 @@ class MeerkatClient:
         structured_output_retries: int | None = None,
         provider_params: Any | None = None,
         clear_provider_params: bool | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
+        clear_auth_binding: bool | None = None,
     ) -> dict[str, Any]:
         params = MobTurnStartParams(
             mob_id=mob_id,
@@ -1573,8 +1573,8 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             provider_params=provider_params,
             clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
+            auth_binding=auth_binding,
+            clear_auth_binding=clear_auth_binding,
         )
         return await self._request("mob/turn_start", _wire_value(params))
 
@@ -2601,7 +2601,7 @@ class MeerkatClient:
         *,
         model: str | None = None,
         provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        auth_binding: dict[str, str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -2629,8 +2629,8 @@ class MeerkatClient:
             params["model"] = model
         if provider:
             params["provider"] = provider
-        if connection_ref is not None:
-            params["connection_ref"] = connection_ref
+        if auth_binding is not None:
+            params["auth_binding"] = auth_binding
         if system_prompt:
             params["system_prompt"] = system_prompt
         if max_tokens:

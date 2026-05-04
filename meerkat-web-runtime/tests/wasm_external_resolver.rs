@@ -5,10 +5,10 @@
 //!
 //! Plan choke point K9 reads: "browser host registers
 //! `ExternalAuthResolverHandle` via `wasm-bindgen`; calls
-//! `build_session_request_with_connection_ref` → stream yields
+//! `build_session_request_with_auth_binding` → stream yields
 //! tokens". This file exercises the registration + invoke half; the
 //! full fetch-stream path is covered by the existing
-//! `tests/browser_contract.rs` once a connection_ref binding is
+//! `tests/browser_contract.rs` once an auth binding is
 //! resolved through the external resolver (future extension).
 //!
 //! Runs on `wasm32` only via wasm-bindgen-test. Non-wasm coverage of
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use js_sys::Function;
 use meerkat_core::{
-    AuthError, AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, CredentialSourceSpec,
+    AuthBindingRef, AuthError, AuthProfile, BackendProfile, BindingPolicy, CredentialSourceSpec,
     Provider, ResolvedAuthEnvelope,
     connection::{BindingId, ProfileId, RealmId},
 };
@@ -51,7 +51,7 @@ fn test_binding() -> ValidatedBinding {
         metadata_defaults: Default::default(),
     };
     ProviderRuntimeCatalog::validate_binding(
-        &ConnectionRef {
+        &AuthBindingRef {
             realm: RealmId::parse("browser").expect("realm"),
             binding: BindingId::parse("openai").expect("binding"),
             profile: Some(ProfileId::parse("primary").expect("profile")),
@@ -88,10 +88,10 @@ fn resolver_is_absent_before_registration() {
 fn register_callback_sets_resolver_present() {
     let cb = js_sys::eval(
         r#"
-            (function (connectionRef) {
+            (function (authBinding) {
                 return Promise.resolve({
                     kind: "inline_secret",
-                    secret: "bearer-" + connectionRef.realm + "-" + connectionRef.binding,
+                    secret: "bearer-" + authBinding.realm + "-" + authBinding.binding,
                     metadata: {},
                     expires_at: "2030-01-02T03:04:05Z"
                 });
@@ -139,8 +139,8 @@ fn register_non_function_returns_error() {
 async fn resolver_rejects_bare_bearer_string_without_creating_inline_secret() {
     register_eval_callback(
         r#"
-            (function (connectionRef) {
-                return Promise.resolve("bearer-" + connectionRef.realm + "-" + connectionRef.binding);
+            (function (authBinding) {
+                return Promise.resolve("bearer-" + authBinding.realm + "-" + authBinding.binding);
             })
         "#,
     );
@@ -161,15 +161,15 @@ async fn resolver_rejects_bare_bearer_string_without_creating_inline_secret() {
 async fn resolver_preserves_typed_inline_secret_expiration_and_metadata() {
     register_eval_callback(
         r#"
-            (function (connectionRef) {
+            (function (authBinding) {
                 if (
-                    connectionRef.realm !== "browser" ||
-                    connectionRef.binding !== "openai" ||
-                    connectionRef.profile !== "primary"
+                    authBinding.realm !== "browser" ||
+                    authBinding.binding !== "openai" ||
+                    authBinding.profile !== "primary"
                 ) {
                     return Promise.reject({
                         kind: "other",
-                        detail: "connectionRef projection changed: " + JSON.stringify(connectionRef)
+                        detail: "authBinding projection changed: " + JSON.stringify(authBinding)
                     });
                 }
                 return Promise.resolve({
@@ -336,13 +336,13 @@ async fn resolver_rejects_non_promise_js_results() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
+async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
     register_external_auth_resolver(JsValue::NULL).expect("clear");
     let cb = js_sys::eval(
         r#"
-            (function (connectionRef) {
+            (function (authBinding) {
                 globalThis.__meerkat_self_hosted_external_ref =
-                    connectionRef.realm + ":" + connectionRef.binding;
+                    authBinding.realm + ":" + authBinding.binding;
                 return Promise.resolve({
                     kind: "inline_secret",
                     secret: "wasm-self-hosted-token",
@@ -426,7 +426,7 @@ async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
     );
     config.realm.insert("default".to_string(), realm);
 
-    let connection_ref = meerkat_core::ConnectionRef {
+    let auth_binding = meerkat_core::AuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("default").expect("realm"),
         binding: meerkat_core::connection::BindingId::parse("local_binding").expect("binding"),
         profile: None,
@@ -437,7 +437,7 @@ async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
     );
     let mut build = meerkat::AgentBuildConfig::new("gemma-4-e2b");
     build.provider = Some(meerkat_core::Provider::SelfHosted);
-    build.connection_ref = Some(connection_ref.clone());
+    build.auth_binding = Some(auth_binding.clone());
     build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
 
     let agent = factory
@@ -446,8 +446,8 @@ async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
         .expect("self-hosted build should resolve through wasm external auth");
 
     assert_eq!(
-        agent.session().session_metadata().unwrap().connection_ref,
-        Some(connection_ref)
+        agent.session().session_metadata().unwrap().auth_binding,
+        Some(auth_binding)
     );
     let observed = js_sys::Reflect::get(
         &js_sys::global(),

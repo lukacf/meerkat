@@ -882,10 +882,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             provider,
             self_hosted_server_id: None,
             provider_params,
-            connection_ref: req
+            auth_binding: req
                 .build
                 .as_ref()
-                .and_then(|build| build.connection_ref.clone()),
+                .and_then(|build| build.auth_binding.clone()),
         }
     }
 
@@ -4539,7 +4539,7 @@ mod inline_video_admission_tests {
             provider,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         }
     }
 

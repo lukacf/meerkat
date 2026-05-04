@@ -15,7 +15,7 @@ use meerkat_auth_core::oauth_flow::{
     OAuthFlowError, OAuthFlowRecord, OAuthFlowRegistry, OAuthFlowRegistrySnapshot,
     OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
 };
-use meerkat_core::ConnectionRef;
+use meerkat_core::AuthBindingRef;
 use meerkat_core::handles::{DslTransitionError, LeaseKey};
 use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
@@ -95,7 +95,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             .payload_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target = ConnectionRef {
+        let target = AuthBindingRef {
             realm: lease_key.realm.clone(),
             binding: lease_key.binding.clone(),
             profile: lease_key.profile.clone(),
@@ -132,7 +132,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             .payload_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target = ConnectionRef {
+        let target = AuthBindingRef {
             realm: released.lease_key.realm.clone(),
             binding: released.lease_key.binding.clone(),
             profile: released.lease_key.profile.clone(),
@@ -298,7 +298,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn apply(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         input: auth_dsl::AuthMachineInput,
         operation: &'static str,
         create_if_missing: bool,
@@ -313,7 +313,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn admit_browser(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
@@ -335,7 +335,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn verify_browser(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
@@ -355,7 +355,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn consume_browser(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
@@ -373,7 +373,7 @@ impl RuntimeOAuthFlowHandle {
         )
     }
 
-    fn expire_browser(&self, target: &ConnectionRef, flow_id: &str) -> Result<(), OAuthFlowError> {
+    fn expire_browser(&self, target: &AuthBindingRef, flow_id: &str) -> Result<(), OAuthFlowError> {
         self.apply(
             target,
             auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow {
@@ -386,7 +386,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn admit_device(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
         expires_at_millis: u64,
@@ -406,7 +406,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn verify_device(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError> {
@@ -424,7 +424,7 @@ impl RuntimeOAuthFlowHandle {
 
     fn begin_device_poll(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError> {
@@ -1016,7 +1016,7 @@ type BrowserSnapshotKey = (String, String, Option<String>, String);
 type DeviceSnapshotKey = (String, String, Option<String>, String);
 const DURABLE_OAUTH_CAPACITY_EXCEEDED: &str = "oauth durable capacity exceeded";
 
-fn target_snapshot_key(target: &ConnectionRef) -> (String, String, Option<String>) {
+fn target_snapshot_key(target: &AuthBindingRef) -> (String, String, Option<String>) {
     (
         target.realm.to_string(),
         target.binding.to_string(),
@@ -1024,12 +1024,12 @@ fn target_snapshot_key(target: &ConnectionRef) -> (String, String, Option<String
     )
 }
 
-fn browser_snapshot_key(target: &ConnectionRef, state: &str) -> BrowserSnapshotKey {
+fn browser_snapshot_key(target: &AuthBindingRef, state: &str) -> BrowserSnapshotKey {
     let (realm, binding, profile) = target_snapshot_key(target);
     (realm, binding, profile, state.to_string())
 }
 
-fn device_snapshot_key(target: &ConnectionRef, device_code: &str) -> DeviceSnapshotKey {
+fn device_snapshot_key(target: &AuthBindingRef, device_code: &str) -> DeviceSnapshotKey {
     let (realm, binding, profile) = target_snapshot_key(target);
     (realm, binding, profile, device_code.to_string())
 }
@@ -1202,7 +1202,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
 
     fn finish_device_poll(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError> {
         self.apply_oauth_input(
@@ -1221,7 +1221,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
 
     fn consume_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError> {
@@ -1243,7 +1243,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
 
     fn expire_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError> {
         self.apply_oauth_input(
@@ -1291,7 +1291,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 
     fn finish_device_poll(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError> {
         self.lifecycle.finish_device_poll(target, device_code)
@@ -1299,7 +1299,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 
     fn consume_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError> {
@@ -1309,7 +1309,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
 
     fn expire_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError> {
         self.lifecycle.expire_device_flow(target, device_code)
@@ -1369,7 +1369,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
 
     fn start(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -1438,7 +1438,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
     fn verify(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -1461,7 +1461,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
     fn consume(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -1511,7 +1511,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
 
     fn admit_device_code(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         expires_in: Duration,
@@ -1577,7 +1577,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
     fn verify_device_code(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
         let _payload_guard = self
@@ -1602,7 +1602,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
     fn begin_device_code_poll(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
         let _payload_guard = self
@@ -1658,16 +1658,16 @@ mod tests {
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
 
-    fn target() -> ConnectionRef {
-        ConnectionRef {
+    fn target() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
         }
     }
 
-    fn alternate_target() -> ConnectionRef {
-        ConnectionRef {
+    fn alternate_target() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("secondary_openai").expect("valid binding"),
             profile: None,
@@ -1918,10 +1918,10 @@ mod tests {
 
     fn snapshot_phase(
         lifecycle: &RuntimeAuthLeaseHandle,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
     ) -> Option<AuthLeasePhase> {
         lifecycle
-            .snapshot(&LeaseKey::from_connection_ref(target))
+            .snapshot(&LeaseKey::from_auth_binding(target))
             .phase
     }
 
@@ -3061,7 +3061,7 @@ mod tests {
             &store_dyn,
         );
         let target = target();
-        let lease_key = LeaseKey::from_connection_ref(&target);
+        let lease_key = LeaseKey::from_auth_binding(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
         let state = authority
@@ -3102,7 +3102,7 @@ mod tests {
             &store_dyn,
         );
         let target = target();
-        let lease_key = LeaseKey::from_connection_ref(&target);
+        let lease_key = LeaseKey::from_auth_binding(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
         let state = admitting_authority
@@ -3156,7 +3156,7 @@ mod tests {
             &admitting_store,
         );
         let target = target();
-        let lease_key = LeaseKey::from_connection_ref(&target);
+        let lease_key = LeaseKey::from_auth_binding(&target);
         let browser_provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
         let browser_state = admitting_authority
@@ -3230,7 +3230,7 @@ mod tests {
         let authority =
             RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
         let target = target();
-        let lease_key = LeaseKey::from_connection_ref(&target);
+        let lease_key = LeaseKey::from_auth_binding(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
         let transition = lifecycle
@@ -3459,7 +3459,7 @@ mod tests {
             )
             .expect("first browser flow admitted");
         lifecycle
-            .release_lease(&LeaseKey::from_connection_ref(&target))
+            .release_lease(&LeaseKey::from_auth_binding(&target))
             .expect("credential lifecycle release succeeds");
 
         authority
@@ -3480,7 +3480,7 @@ mod tests {
             lifecycle.clone(),
         ));
         let target = target();
-        let lease_key = LeaseKey::from_connection_ref(&target);
+        let lease_key = LeaseKey::from_auth_binding(&target);
         let provider = OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1/callback";
         let old_state = authority

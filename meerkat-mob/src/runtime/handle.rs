@@ -645,7 +645,7 @@ pub struct HelperOptions {
     /// Tool access policy for the helper.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// Explicit auth binding used for the helper member's agent build.
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Pre-resolved inherited tool filter from scheduled or agent-owned tooling resolution.
     pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
     /// Override profile resolved from scheduled or agent-owned tooling resolution.
@@ -952,11 +952,11 @@ pub struct SpawnMemberSpec {
     /// Provider params override resolved outside the mob runtime while keeping the selected role profile.
     pub provider_params_override: Option<serde_json::Value>,
     /// Per-member auth binding. When set, this member's agent builds with
-    /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
+    /// `AgentBuildConfig.auth_binding = Some(this)`, scoping credential
     /// resolution to the named realm + binding. `None` means the caller did not
     /// provide binding authority; build paths that require a binding must reject
     /// the spawn instead of promoting an ambient fallback.
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
 impl SpawnMemberSpec {
@@ -980,13 +980,13 @@ impl SpawnMemberSpec {
             override_profile: None,
             model_override: None,
             provider_params_override: None,
-            connection_ref: None,
+            auth_binding: None,
         }
     }
 
     /// Set the per-member auth binding (deferral §1).
-    pub fn with_connection_ref(mut self, conn_ref: meerkat_core::ConnectionRef) -> Self {
-        self.connection_ref = Some(conn_ref);
+    pub fn with_auth_binding(mut self, conn_ref: meerkat_core::AuthBindingRef) -> Self {
+        self.auth_binding = Some(conn_ref);
         self
     }
 
@@ -3794,7 +3794,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
-        spec.connection_ref = options.connection_ref;
+        spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
         spec.model_override = options.model_override;
@@ -3844,7 +3844,7 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
-        spec.connection_ref = options.connection_ref;
+        spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
         spec.model_override = options.model_override;

@@ -1,6 +1,6 @@
 //! Mob RPC wire contracts.
 
-use super::connection::WireConnectionRef;
+use super::connection::WireAuthBindingRef;
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -620,8 +620,12 @@ pub struct MobSpawnParams {
     pub inherited_tool_filter: Option<WireToolFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_profile: Option<WireMobProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<WireAuthBindingRef>,
 }
 
 /// Response payload for `mob/spawn`.
@@ -652,8 +656,12 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<WireAuthBindingRef>,
 }
 
 /// Request payload for `mob/spawn_many`.
@@ -1688,10 +1696,14 @@ pub struct MobTurnStartParams {
     pub provider_params: Option<Value>,
     #[serde(default)]
     pub clear_provider_params: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
-    #[serde(default)]
-    pub clear_connection_ref: bool,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<WireAuthBindingRef>,
+    #[serde(default, alias = "clear_connection_ref")]
+    pub clear_auth_binding: bool,
 }
 
 /// Response payload for `mob/member_status`.

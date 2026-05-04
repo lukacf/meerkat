@@ -113,9 +113,9 @@ pub struct CreateSessionParams {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
-    /// Override the realm-scoped connection binding for this session.
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    /// Override the realm-scoped auth binding for this session.
+    #[serde(default, alias = "connection_ref")]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Structured skill keys to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<SkillKey>>,
@@ -323,7 +323,7 @@ pub async fn handle_create(
     // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
-    build_config.connection_ref = params.connection_ref;
+    build_config.auth_binding = params.auth_binding;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;

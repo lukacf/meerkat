@@ -140,7 +140,7 @@ rust_test(
 )
 
 rust_test(
-    name = "connection_ref_no_string_form_test",
+    name = "auth_binding_no_string_form_test",
     aliases = aliases(
         package_name = "meerkat-core",
         normal = True,
@@ -148,8 +148,8 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "connection_ref_no_string_form",
-    crate_root = "tests/connection_ref_no_string_form.rs",
+    crate_name = "auth_binding_no_string_form",
+    crate_root = "tests/auth_binding_no_string_form.rs",
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "jsonschema",
@@ -161,11 +161,11 @@ rust_test(
         "src/config_template.toml",
     ],
     srcs = [
-        "tests/connection_ref_no_string_form.rs",
+        "tests/auth_binding_no_string_form.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_BIN_NAME": "connection_ref_no_string_form",
+        "CARGO_BIN_NAME": "auth_binding_no_string_form",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
     },
     tags = [
@@ -661,7 +661,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
-        ":connection_ref_no_string_form_test",
+        ":auth_binding_no_string_form_test",
         ":fork_at_rotates_session_id_test",
         ":hooks_contracts_test",
         ":image_generation_contracts_test",

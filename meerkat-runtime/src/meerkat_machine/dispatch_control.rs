@@ -609,8 +609,8 @@ impl MeerkatMachine {
                                         provider: None,
                                         provider_params: None,
                                         clear_provider_params: false,
-                                        connection_ref: None,
-                                        clear_connection_ref: false,
+                                        auth_binding: None,
+                                        clear_auth_binding: false,
                                     },
                                 )
                                 .await

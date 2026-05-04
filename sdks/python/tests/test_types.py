@@ -239,7 +239,7 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     spec_hints = get_type_hints(GeneratedMobSpawnSpecParams)
     assert "Any" not in str(spec_hints["initial_message"])
     assert "Any" not in str(spec_hints["backend"])
-    assert "WireConnectionRef" in str(spec_hints["connection_ref"])
+    assert "WireAuthBindingRef" in str(spec_hints["auth_binding"])
 
     result_hints = get_type_hints(GeneratedMobSpawnManyResult)
     assert get_origin(result_hints["results"]) is list
@@ -2080,8 +2080,8 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         structured_output_retries=2,
         provider_params={"temperature": 0.2},
         clear_provider_params=True,
-        connection_ref={"realm": "dev", "binding": "default_openai"},
-        clear_connection_ref=True,
+        auth_binding={"realm": "dev", "binding": "default_openai"},
+        clear_auth_binding=True,
     )
 
     assert calls == [
@@ -2112,8 +2112,8 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 "structured_output_retries": 2,
                 "provider_params": {"temperature": 0.2},
                 "clear_provider_params": True,
-                "connection_ref": {"realm": "dev", "binding": "default_openai"},
-                "clear_connection_ref": True,
+                "auth_binding": {"realm": "dev", "binding": "default_openai"},
+                "clear_auth_binding": True,
             },
         )
     ]
@@ -2305,7 +2305,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             "model": "claude-sonnet-4-6",
             "tools": {"shell": True},
         },
-        connection_ref={"realm": "dev", "binding": "default_anthropic"},
+        auth_binding={"realm": "dev", "binding": "default_anthropic"},
     )
     assert spawn_receipt == {
         "mob_id": "mob-1",
@@ -2440,7 +2440,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             "model": "claude-sonnet-4-6",
             "tools": {"shell": True},
         },
-        "connection_ref": {"realm": "dev", "binding": "default_anthropic"},
+        "auth_binding": {"realm": "dev", "binding": "default_anthropic"},
     }
 
 

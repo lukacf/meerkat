@@ -21,7 +21,7 @@ use std::sync::Weak;
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::ConnectionRef;
+use meerkat_core::AuthBindingRef;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
     LeaseKey,
@@ -424,12 +424,12 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_oauth_input(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
     ) -> Result<(), DslTransitionError> {
-        let lease_key = LeaseKey::from_connection_ref(target);
+        let lease_key = LeaseKey::from_auth_binding(target);
         let action = Self::audit_action_for(&input);
         let mut guard = self
             .machines
@@ -492,8 +492,8 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn has_oauth_browser_flow(&self, target: &ConnectionRef, flow_id: &str) -> bool {
-        let lease_key = LeaseKey::from_connection_ref(target);
+    pub(crate) fn has_oauth_browser_flow(&self, target: &AuthBindingRef, flow_id: &str) -> bool {
+        let lease_key = LeaseKey::from_auth_binding(target);
         self.machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -503,8 +503,8 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn has_oauth_device_flow(&self, target: &ConnectionRef, flow_id: &str) -> bool {
-        let lease_key = LeaseKey::from_connection_ref(target);
+    pub(crate) fn has_oauth_device_flow(&self, target: &AuthBindingRef, flow_id: &str) -> bool {
+        let lease_key = LeaseKey::from_auth_binding(target);
         self.machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -516,7 +516,7 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(test)]
     pub(crate) fn has_oauth_browser_flow_for_test(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
     ) -> bool {
         self.has_oauth_browser_flow(target, flow_id)
@@ -525,7 +525,7 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(test)]
     pub(crate) fn has_oauth_device_flow_for_test(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         flow_id: &str,
     ) -> bool {
         self.has_oauth_device_flow(target, flow_id)

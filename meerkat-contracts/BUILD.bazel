@@ -166,7 +166,7 @@ rust_binary(
 )
 
 rust_test(
-    name = "connection_ref_wire_test",
+    name = "auth_binding_wire_test",
     aliases = aliases(
         package_name = "meerkat-contracts",
         normal = True,
@@ -174,8 +174,8 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "connection_ref_wire",
-    crate_root = "tests/connection_ref_wire.rs",
+    crate_name = "auth_binding_wire",
+    crate_root = "tests/auth_binding_wire.rs",
     crate_features = [
         "schema",
     ],
@@ -184,11 +184,11 @@ rust_test(
         "Cargo.toml",
     ],
     srcs = [
-        "tests/connection_ref_wire.rs",
+        "tests/auth_binding_wire.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_BIN_NAME": "connection_ref_wire",
+        "CARGO_BIN_NAME": "auth_binding_wire",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
     tags = [
@@ -670,7 +670,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
-        ":connection_ref_wire_test",
+        ":auth_binding_wire_test",
         ":image_generation_wire_test",
         ":meerkat_contracts_unit_test",
         ":realtime_audio_format_test",

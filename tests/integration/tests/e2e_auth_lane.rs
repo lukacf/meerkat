@@ -30,10 +30,10 @@ use meerkat_client::{
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
-    AuthConstraints, AuthMetadataDefaults, AuthProfileConfig, BackendProfileConfig, BindingId,
-    BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore, ConnectionRef,
-    CredentialSourceSpec, HttpAuthorizationRequest, HttpAuthorizer, MemoryConfigStore, Message,
-    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId, UserMessage,
+    AuthBindingRef, AuthConstraints, AuthMetadataDefaults, AuthProfileConfig, BackendProfileConfig,
+    BindingId, BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore, CredentialSourceSpec,
+    HttpAuthorizationRequest, HttpAuthorizer, MemoryConfigStore, Message, ProviderBindingConfig,
+    RealmConfigSection, RealmConnectionSet, RealmId, UserMessage,
 };
 use meerkat_providers::ResolverEnvironment;
 use meerkat_providers::auth_store::{
@@ -565,7 +565,7 @@ impl AuthHarness {
     }
 
     fn token_key(&self) -> TokenKey {
-        TokenKey::from_connection_ref(&openai_connection_ref())
+        TokenKey::from_auth_binding(&openai_auth_binding())
     }
 
     async fn stored_tokens(&self) -> Option<PersistedTokens> {
@@ -616,8 +616,8 @@ fn openai_oauth_config() -> Config {
     config
 }
 
-fn openai_connection_ref() -> ConnectionRef {
-    ConnectionRef {
+fn openai_auth_binding() -> AuthBindingRef {
+    AuthBindingRef {
         realm: RealmId::parse(REALM_ID).expect("valid realm"),
         binding: BindingId::parse(BINDING_ID).expect("valid binding"),
         profile: None,
@@ -790,11 +790,7 @@ async fn resolve_openai_binding(
     }
     harness
         .registry
-        .resolve(
-            &openai_realm(&harness.config),
-            &openai_connection_ref(),
-            &env,
-        )
+        .resolve(&openai_realm(&harness.config), &openai_auth_binding(), &env)
         .await
 }
 
@@ -1009,7 +1005,7 @@ async fn auth_mock_oauth_logout_clears_token_and_releases_authmachine_lifecycle(
     let status = auth_status(&harness).await;
     assert_eq!(status.state, "unknown");
     assert!(!status.has_refresh_token);
-    let lease_key = LeaseKey::from_connection_ref(&openai_connection_ref());
+    let lease_key = LeaseKey::from_auth_binding(&openai_auth_binding());
     let snapshot = harness.runtime.auth_lease_handle().snapshot(&lease_key);
     assert_eq!(snapshot.phase, None);
     assert!(!snapshot.credential_present);
@@ -1043,7 +1039,7 @@ async fn auth_mock_concurrent_resolve_dedupes_refresh() {
                 .with_auth_lease_handle(auth_lease)
                 .with_refresh_coordinator(coordinator);
             registry
-                .resolve(&realm, &openai_connection_ref(), &env)
+                .resolve(&realm, &openai_auth_binding(), &env)
                 .await
                 .map(|connection| connection.resolved_secret())
         }));
@@ -1240,7 +1236,7 @@ fn seeded_openai_oauth_tokens() -> Option<PersistedTokens> {
 }
 
 async fn save_seeded_tokens_with_lifecycle(harness: &AuthHarness, tokens: &PersistedTokens) {
-    let lease_key = LeaseKey::from_connection_ref(&openai_connection_ref());
+    let lease_key = LeaseKey::from_auth_binding(&openai_auth_binding());
     let transition = harness
         .runtime
         .auth_lease_handle()

@@ -300,7 +300,7 @@ impl SessionRuntime {
                 render_metadata: dispatch.render_metadata.clone(),
                 execution_kind: None,
                 peer_response_terminal_apply_intent: None,
-                connection_ref: None,
+                auth_binding: None,
             },
         );
         let mut prompt_input =

@@ -1,5 +1,5 @@
 //! Wire-facing projections of the realm connection types
-//! (`ConnectionRef`, `BackendProfile`, `AuthProfile`, `ProviderBinding`,
+//! (`AuthBindingRef`, `BackendProfile`, `AuthProfile`, `ProviderBinding`,
 //! `RealmConnectionSet`, `AuthStatus`).
 //!
 //! `meerkat-core` owns the domain types; this module re-projects them
@@ -14,22 +14,22 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Wire projection of [`meerkat_core::ConnectionRef`].
+/// Wire projection of [`meerkat_core::AuthBindingRef`].
 ///
 /// Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
 /// `parse` and `Display` on both the core type and the wire projection so
 /// the colon-joined form cannot travel across wire boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireConnectionRef {
+pub struct WireAuthBindingRef {
     pub realm: meerkat_core::connection::RealmId,
     pub binding: meerkat_core::connection::BindingId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<meerkat_core::connection::ProfileId>,
 }
 
-impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
-    fn from(value: meerkat_core::ConnectionRef) -> Self {
+impl From<meerkat_core::AuthBindingRef> for WireAuthBindingRef {
+    fn from(value: meerkat_core::AuthBindingRef) -> Self {
         Self {
             realm: value.realm,
             binding: value.binding,
@@ -38,8 +38,8 @@ impl From<meerkat_core::ConnectionRef> for WireConnectionRef {
     }
 }
 
-impl From<WireConnectionRef> for meerkat_core::ConnectionRef {
-    fn from(value: WireConnectionRef) -> Self {
+impl From<WireAuthBindingRef> for meerkat_core::AuthBindingRef {
+    fn from(value: WireAuthBindingRef) -> Self {
         Self {
             realm: value.realm,
             binding: value.binding,
@@ -341,8 +341,8 @@ pub struct WireAuthStatus {
 // --- Auth REST response envelopes ------------------------------------
 
 /// Identifies a binding inside a realm on the wire. Shared by every
-/// auth REST response that returns a `{realm_id, binding_id, connection_ref}`
-/// trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
+/// auth REST response that returns a `{realm_id, binding_id, auth_binding}`
+/// trio. Built from a typed [`meerkat_core::AuthBindingRef`] so the three
 /// fields always agree; the `realm_id`/`binding_id` strings carry the
 /// slug form for wire consumers that key by string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,15 +350,16 @@ pub struct WireAuthStatus {
 pub struct WireBindingIdentity {
     pub realm_id: String,
     pub binding_id: String,
-    pub connection_ref: WireConnectionRef,
+    #[serde(alias = "connection_ref")]
+    pub auth_binding: WireAuthBindingRef,
 }
 
-impl From<&meerkat_core::ConnectionRef> for WireBindingIdentity {
-    fn from(cref: &meerkat_core::ConnectionRef) -> Self {
+impl From<&meerkat_core::AuthBindingRef> for WireBindingIdentity {
+    fn from(cref: &meerkat_core::AuthBindingRef) -> Self {
         Self {
             realm_id: cref.realm.to_string(),
             binding_id: cref.binding.to_string(),
-            connection_ref: WireConnectionRef::from(cref.clone()),
+            auth_binding: WireAuthBindingRef::from(cref.clone()),
         }
     }
 }
@@ -379,7 +380,8 @@ pub struct WireAuthProfileCreated {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireAuthProfileDetail {
-    pub connection_ref: WireConnectionRef,
+    #[serde(alias = "connection_ref")]
+    pub auth_binding: WireAuthBindingRef,
     pub binding_id: String,
     pub profile_id: String,
     pub auth_profile: WireAuthProfile,
@@ -507,7 +509,7 @@ pub struct WireAuthProfilesList {
 
 /// `GET /auth/bindings/{binding_id}/status` success body. Richer than
 /// [`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
-/// `connection_ref` / `has_refresh_token` so the caller can key by
+/// `auth_binding` / `has_refresh_token` so the caller can key by
 /// binding directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -533,23 +535,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connection_ref_roundtrip() {
-        let r = meerkat_core::ConnectionRef {
+    fn auth_binding_roundtrip() {
+        let r = meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
             profile: None,
         };
-        let w: WireConnectionRef = r.clone().into();
+        let w: WireAuthBindingRef = r.clone().into();
         assert_eq!(w.realm.as_str(), "dev");
         assert_eq!(w.binding.as_str(), "default_openai");
         assert!(w.profile.is_none());
-        let back: meerkat_core::ConnectionRef = w.into();
+        let back: meerkat_core::AuthBindingRef = w.into();
         assert_eq!(back, r);
     }
 
     #[test]
-    fn connection_ref_wire_json_has_no_string_form() {
-        let w = WireConnectionRef {
+    fn auth_binding_wire_json_has_no_string_form() {
+        let w = WireAuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("openai_main").unwrap(),
             profile: Some(meerkat_core::connection::ProfileId::parse("ci").unwrap()),
@@ -590,7 +592,7 @@ mod tests {
         let pending = serde_json::to_value(WireDeviceCompleteResult::Pending).unwrap();
         assert_eq!(pending, serde_json::json!({ "state": "pending" }));
 
-        let cref = meerkat_core::ConnectionRef {
+        let cref = meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("anthropic_main").unwrap(),
             profile: None,
@@ -608,15 +610,15 @@ mod tests {
         assert_eq!(ready["state"], "ready");
         assert_eq!(ready["realm_id"], "prod");
         assert_eq!(ready["binding_id"], "anthropic_main");
-        assert_eq!(ready["connection_ref"]["realm"], "prod");
-        assert_eq!(ready["connection_ref"]["binding"], "anthropic_main");
+        assert_eq!(ready["auth_binding"]["realm"], "prod");
+        assert_eq!(ready["auth_binding"]["binding"], "anthropic_main");
         assert_eq!(ready["profile_id"], "console");
         assert_eq!(ready["has_refresh_token"], true);
     }
 
     #[test]
     fn provision_api_key_result_serializes_binding_identity() {
-        let cref = meerkat_core::ConnectionRef {
+        let cref = meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("anthropic_main").unwrap(),
             profile: Some(meerkat_core::connection::ProfileId::parse("console").unwrap()),
@@ -633,7 +635,7 @@ mod tests {
 
         assert_eq!(value["realm_id"], "prod");
         assert_eq!(value["binding_id"], "anthropic_main");
-        assert_eq!(value["connection_ref"]["profile"], "console");
+        assert_eq!(value["auth_binding"]["profile"], "console");
         assert_eq!(value["auth_mode"], "oauth_to_api_key");
         assert_eq!(value["has_api_key"], true);
     }

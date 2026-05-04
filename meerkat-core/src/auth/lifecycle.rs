@@ -18,7 +18,7 @@ use super::status::AuthStatusPhase;
 use super::token_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
 };
-use crate::connection::ConnectionRef;
+use crate::connection::AuthBindingRef;
 use crate::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
     LeaseKey,
@@ -229,18 +229,18 @@ pub fn tokens_lifecycle_published_credential_time(tokens: &PersistedTokens) -> O
 
 pub fn publish_token_lifecycle_acquired(
     handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
     handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
 }
 
 pub fn publish_token_lifecycle_released(
     handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
 ) -> Result<(), DslTransitionError> {
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
     handle.release_lease(&lease_key)
 }
 
@@ -275,10 +275,10 @@ pub enum TokenLifecycleClearError {
 pub async fn clear_tokens_and_publish_lifecycle_released(
     store: &dyn TokenStore,
     handle: &dyn AuthLeaseHandle,
-    connection_ref: &ConnectionRef,
+    auth_binding: &AuthBindingRef,
 ) -> Result<(), TokenLifecycleClearError> {
-    let key = TokenKey::from_connection_ref(connection_ref);
-    let lease_key = LeaseKey::from_connection_ref(connection_ref);
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
     let previous_lifecycle = handle.snapshot(&lease_key);
     let previous = match store.load(&key).await {
         Ok(previous) => previous,
@@ -289,12 +289,12 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
                     clear_error,
                 });
             }
-            publish_token_lifecycle_released(handle, connection_ref)
+            publish_token_lifecycle_released(handle, auth_binding)
                 .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
             return Ok(());
         }
     };
-    publish_token_lifecycle_released(handle, connection_ref)
+    publish_token_lifecycle_released(handle, auth_binding)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
     if let Err(clear_error) = store.clear(&key).await {
         if let Err(restore_error) = restore_token_lifecycle_snapshot(
@@ -378,7 +378,7 @@ pub enum AuthStatusRehydrateError {
 pub async fn rehydrate_marked_oauth_tokens_for_status(
     _token_store: &dyn TokenStore,
     _auth_lease: &dyn AuthLeaseHandle,
-    _connection_ref: &ConnectionRef,
+    _auth_binding: &AuthBindingRef,
     _expected_mode: PersistedAuthMode,
     _now: DateTime<Utc>,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
@@ -537,8 +537,8 @@ mod tests {
         }
     }
 
-    fn connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: RealmId::parse("dev").expect("valid realm"),
             binding: BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
@@ -688,16 +688,13 @@ mod tests {
         let handle = RecordingAuthLeaseHandle::default();
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
-        let connection_ref = connection_ref();
+        let auth_binding = auth_binding();
 
-        publish_token_lifecycle_acquired(&handle, &connection_ref, &tokens).unwrap();
+        publish_token_lifecycle_acquired(&handle, &auth_binding, &tokens).unwrap();
 
         assert_eq!(
             handle.acquired(),
-            vec![(
-                LeaseKey::from_connection_ref(&connection_ref),
-                1_800_000_000
-            )]
+            vec![(LeaseKey::from_auth_binding(&auth_binding), 1_800_000_000)]
         );
     }
 
@@ -706,7 +703,7 @@ mod tests {
         let handle = RecordingAuthLeaseHandle::default();
         let tokens = tokens_with_expiry(None);
 
-        publish_token_lifecycle_acquired(&handle, &connection_ref(), &tokens).unwrap();
+        publish_token_lifecycle_acquired(&handle, &auth_binding(), &tokens).unwrap();
 
         assert_eq!(handle.acquired()[0].1, u64::MAX);
     }
@@ -740,27 +737,27 @@ mod tests {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
         let store = ClearFailingTokenStore::new(tokens.clone());
-        let connection_ref = connection_ref();
+        let auth_binding = auth_binding();
 
-        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
+        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &auth_binding)
             .await
             .unwrap_err();
 
         assert!(matches!(err, TokenLifecycleClearError::TokenStoreClear(_)));
         assert_eq!(
             handle.released(),
-            vec![LeaseKey::from_connection_ref(&connection_ref)]
+            vec![LeaseKey::from_auth_binding(&auth_binding)]
         );
         assert_eq!(
             handle.acquired(),
             vec![(
-                LeaseKey::from_connection_ref(&connection_ref),
+                LeaseKey::from_auth_binding(&auth_binding),
                 persisted_token_expires_at_epoch_secs(&tokens),
             )]
         );
         assert!(
             store
-                .load(&TokenKey::from_connection_ref(&connection_ref))
+                .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
                 .unwrap()
                 .is_some()
@@ -771,15 +768,15 @@ mod tests {
     async fn clear_boundary_allows_clear_when_previous_token_load_fails() {
         let handle = RecordingAuthLeaseHandle::default();
         let store = LoadFailingTokenStore::new();
-        let connection_ref = connection_ref();
+        let auth_binding = auth_binding();
 
-        clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
+        clear_tokens_and_publish_lifecycle_released(&store, &handle, &auth_binding)
             .await
             .unwrap();
 
         assert_eq!(
             handle.released(),
-            vec![LeaseKey::from_connection_ref(&connection_ref)]
+            vec![LeaseKey::from_auth_binding(&auth_binding)]
         );
         assert!(store.cleared());
         assert!(
@@ -792,9 +789,9 @@ mod tests {
     async fn clear_boundary_does_not_release_lifecycle_when_load_and_clear_fail() {
         let handle = RecordingAuthLeaseHandle::default();
         let store = LoadFailingTokenStore::new_with_clear_error();
-        let connection_ref = connection_ref();
+        let auth_binding = auth_binding();
 
-        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
+        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &auth_binding)
             .await
             .unwrap_err();
 

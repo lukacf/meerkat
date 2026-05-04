@@ -48,7 +48,7 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
+    AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides, ModelRegistry, OutputSchema,
     Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
     SessionToolVisibilityState, SessionTooling, ToolCategoryOverride,
 };
@@ -331,14 +331,14 @@ pub struct AgentBuildConfig {
     pub backend: Option<String>,
     /// Config generation used when this session was created/resumed.
     pub config_generation: Option<u64>,
-    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
+    /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     ///
     /// When `Some`, `build_agent()` routes provider/auth resolution through
     /// `meerkat-client::runtime::ProviderRuntimeRegistry` against the
     /// realm-scoped `Config.realm[realm_id]` definitions. When `None`, the
     /// legacy flat `(provider, api_key, base_url)` path runs (removed in
     /// Phase 6). `llm_client_override` beats both paths.
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -524,7 +524,7 @@ impl AgentBuildConfig {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -616,9 +616,9 @@ impl AgentBuildConfig {
         self.instance_id = build.instance_id.clone();
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
-        // Phase 3: connection_ref flows from SessionBuildOptions into
+        // Phase 3: auth_binding flows from SessionBuildOptions into
         // AgentBuildConfig so surfaces can drive binding selection per-request.
-        self.connection_ref = build.connection_ref.clone();
+        self.auth_binding = build.auth_binding.clone();
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -665,7 +665,7 @@ impl AgentBuildConfig {
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_generation: self.config_generation,
-            connection_ref: self.connection_ref.clone(),
+            auth_binding: self.auth_binding.clone(),
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -688,10 +688,10 @@ pub enum BuildAgentError {
     #[error("Cannot infer provider from model '{model}'")]
     UnknownProvider { model: String },
 
-    /// Realm-scoped connection binding failed to resolve into a client.
+    /// Realm-scoped auth binding failed to resolve into a client.
     ///
     /// Produced by the Phase 3 `ProviderRuntimeRegistry` dispatch path
-    /// when `AgentBuildConfig.connection_ref` is set. Wraps the
+    /// when `AgentBuildConfig.auth_binding` is set. Wraps the
     /// underlying provider-runtime error as a stringified message.
     #[error("Connection resolution failed: {0}")]
     ConnectionResolution(String),
@@ -810,7 +810,7 @@ struct SelfHostedClientSpec {
 
 struct SelfHostedClientBuild {
     client: Arc<dyn LlmClient>,
-    durable_connection_ref: Option<ConnectionRef>,
+    durable_auth_binding: Option<AuthBindingRef>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1176,25 +1176,25 @@ impl AgentFactory {
     fn resolve_realm_binding_for_provider(
         config: &Config,
         provider: Provider,
-        connection_ref: Option<&ConnectionRef>,
+        auth_binding: Option<&AuthBindingRef>,
         preferred_realm: Option<&str>,
-    ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let preferred_realm = preferred_realm
             .map(RealmId::parse)
             .transpose()
             .map_err(|e| e.to_string())?;
-        let target = meerkat_core::resolve_connection_ref_or_default_for_provider(
+        let target = meerkat_core::resolve_auth_binding_or_default_for_provider(
             config,
             provider,
-            connection_ref,
+            auth_binding,
             preferred_realm.as_ref(),
             true,
         )
         .map_err(|e| e.to_string())?;
         Ok((
             target.realm,
-            target.connection_ref.binding.to_string(),
-            target.connection_ref,
+            target.auth_binding.binding.to_string(),
+            target.auth_binding,
         ))
     }
 
@@ -1296,7 +1296,7 @@ impl AgentFactory {
         config: &Config,
         provider: Provider,
         selected_realm: RealmId,
-    ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let selected_realm_id = selected_realm.as_str();
         let section = config.realm.get(selected_realm_id).ok_or_else(|| {
             format!(
@@ -1321,12 +1321,12 @@ impl AgentFactory {
                 binding_id,
             )
         })?;
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: selected_realm,
             binding,
             profile: None,
         };
-        Ok((realm, binding_id, connection_ref))
+        Ok((realm, binding_id, auth_binding))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1334,7 +1334,7 @@ impl AgentFactory {
         config: &Config,
         provider: Provider,
         selected_realm: Option<&str>,
-    ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
@@ -1354,7 +1354,7 @@ impl AgentFactory {
         &self,
         config: &Config,
     ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, BuildAgentError> {
-        let (realm, _binding_id, connection_ref) =
+        let (realm, _binding_id, auth_binding) =
             Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
                 .map_err(BuildAgentError::ConnectionResolution)?;
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
@@ -1369,7 +1369,7 @@ impl AgentFactory {
         }
         let connection = self
             .provider_registry
-            .resolve(&realm, &connection_ref, &env)
+            .resolve(&realm, &auth_binding, &env)
             .await
             .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
         let secret = connection.resolved_secret().ok_or_else(|| {
@@ -1804,14 +1804,14 @@ impl AgentFactory {
         if !mask.provider_params {
             build_config.provider_params = metadata.provider_params.clone();
         }
-        // Phase 3: propagate persisted connection_ref so resume re-resolves
+        // Phase 3: propagate persisted auth_binding so resume re-resolves
         // through the same realm binding. The caller keeps precedence —
-        // if build_config already carries a connection_ref, leave it.
-        if !mask.connection_ref && build_config.connection_ref.is_none() {
-            build_config.connection_ref = metadata
-                .connection_ref
+        // if build_config already carries an auth binding reference, leave it.
+        if !mask.auth_binding && build_config.auth_binding.is_none() {
+            build_config.auth_binding = metadata
+                .auth_binding
                 .clone()
-                .filter(|connection_ref| !connection_ref.is_env_default());
+                .filter(|auth_binding| !auth_binding.is_env_default());
         }
         if !mask.override_builtins {
             build_config.override_builtins = metadata.tooling.builtins;
@@ -1967,23 +1967,23 @@ impl AgentFactory {
             return Ok(Arc::new(meerkat_client::TestClient::default()));
         }
 
-        let (realm, _binding_id, connection_ref) = Self::resolve_realm_binding_for_provider(
+        let (realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
             config,
             identity.provider,
-            identity.connection_ref.as_ref(),
+            identity.auth_binding.as_ref(),
             None,
         )
         .map_err(FactoryError::ClientCreationFailed)?;
-        let lease_connection_ref = if connection_ref.is_env_default()
+        let lease_auth_binding = if auth_binding.is_env_default()
             && identity
-                .connection_ref
+                .auth_binding
                 .as_ref()
-                .map(ConnectionRef::is_env_default)
+                .map(AuthBindingRef::is_env_default)
                 .unwrap_or(true)
         {
             None
         } else {
-            Some(connection_ref.clone())
+            Some(auth_binding.clone())
         };
 
         #[allow(unused_mut)]
@@ -2000,20 +2000,20 @@ impl AgentFactory {
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        if lease_connection_ref.is_some()
+        if lease_auth_binding.is_some()
             && let Some(handle) = auth_lease_handle.clone()
         {
             env = env.with_auth_lease_handle(handle);
         }
         let provider_registry = Arc::clone(&self.provider_registry);
         let connection = provider_registry
-            .resolve(&realm, &connection_ref, &env)
+            .resolve(&realm, &auth_binding, &env)
             .await
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
-        if let (Some(handle), Some(lease_connection_ref)) =
-            (auth_lease_handle, lease_connection_ref.as_ref())
+        if let (Some(handle), Some(lease_auth_binding)) =
+            (auth_lease_handle, lease_auth_binding.as_ref())
         {
-            Self::publish_auth_lease(&handle, lease_connection_ref, &connection)?;
+            Self::publish_auth_lease(&handle, lease_auth_binding, &connection)?;
         }
         provider_registry
             .build_client(connection)
@@ -2202,7 +2202,7 @@ impl AgentFactory {
         #[cfg(feature = "openai")]
         {
             let spec = self.self_hosted_client_spec_for_identity(registry, identity)?;
-            let (realm, connection_ref, durable_connection_ref) =
+            let (realm, auth_binding, durable_auth_binding) =
                 self.resolve_self_hosted_connection(config, identity, &spec, preferred_realm)?;
 
             #[allow(unused_mut)]
@@ -2225,12 +2225,12 @@ impl AgentFactory {
 
             let provider_registry = Arc::clone(&self.provider_registry);
             let connection = provider_registry
-                .resolve(&realm, &connection_ref, &env)
+                .resolve(&realm, &auth_binding, &env)
                 .await
                 .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
 
             if let Some(handle) = auth_lease_handle {
-                Self::publish_auth_lease(&handle, &connection_ref, &connection)?;
+                Self::publish_auth_lease(&handle, &auth_binding, &connection)?;
             }
 
             if connection.resolved_authorizer().is_some() {
@@ -2255,7 +2255,7 @@ impl AgentFactory {
                     spec.supports_thinking,
                     spec.supports_reasoning,
                 )),
-                durable_connection_ref,
+                durable_auth_binding,
             })
         }
     }
@@ -2267,45 +2267,45 @@ impl AgentFactory {
         identity: &SessionLlmIdentity,
         spec: &SelfHostedClientSpec,
         preferred_realm: Option<&str>,
-    ) -> Result<(RealmConnectionSet, ConnectionRef, Option<ConnectionRef>), FactoryError> {
-        if let Some(connection_ref) = identity.connection_ref.as_ref() {
-            let (realm, _binding_id, resolved_connection_ref) =
+    ) -> Result<(RealmConnectionSet, AuthBindingRef, Option<AuthBindingRef>), FactoryError> {
+        if let Some(auth_binding) = identity.auth_binding.as_ref() {
+            let (realm, _binding_id, resolved_auth_binding) =
                 Self::resolve_realm_binding_for_provider(
                     config,
                     Provider::SelfHosted,
-                    Some(connection_ref),
+                    Some(auth_binding),
                     None,
                 )
                 .map_err(FactoryError::ClientCreationFailed)?;
             return Ok((
                 realm,
-                resolved_connection_ref.clone(),
-                Some(resolved_connection_ref),
+                resolved_auth_binding.clone(),
+                Some(resolved_auth_binding),
             ));
         }
 
-        if let Some((realm, resolved_connection_ref)) =
+        if let Some((realm, resolved_auth_binding)) =
             Self::configured_self_hosted_connection(config, preferred_realm)?
         {
             return Ok((
                 realm,
-                resolved_connection_ref.clone(),
-                Some(resolved_connection_ref),
+                resolved_auth_binding.clone(),
+                Some(resolved_auth_binding),
             ));
         }
 
         if Self::self_hosted_server_has_legacy_bearer_material(config, &spec.server_id) {
             return Err(FactoryError::ClientCreationFailed(format!(
-                "self-hosted server '{}' defines legacy bearer credentials but no connection/auth binding was configured; move credentials into a realm auth profile and select it with connection_ref or a realm default binding",
+                "self-hosted server '{}' defines legacy bearer credentials but no auth binding was configured; move credentials into a realm auth profile and select it with auth_binding or a realm default binding",
                 spec.server_id
             )));
         }
 
-        Self::legacy_self_hosted_connection(spec).map(|(realm, connection_ref)| {
+        Self::legacy_self_hosted_connection(spec).map(|(realm, auth_binding)| {
             // Legacy `[self_hosted]` compatibility is a transient migration
-            // binding. Do not persist it as `SessionMetadata.connection_ref`;
+            // binding. Do not persist it as `SessionMetadata.auth_binding`;
             // future resumes rebuild it from the model registry server id.
-            (realm, connection_ref, None)
+            (realm, auth_binding, None)
         })
     }
 
@@ -2313,7 +2313,7 @@ impl AgentFactory {
     fn configured_self_hosted_connection(
         config: &Config,
         preferred_realm: Option<&str>,
-    ) -> Result<Option<(RealmConnectionSet, ConnectionRef)>, FactoryError> {
+    ) -> Result<Option<(RealmConnectionSet, AuthBindingRef)>, FactoryError> {
         let preferred_realm = preferred_realm
             .map(RealmId::parse)
             .transpose()
@@ -2337,17 +2337,17 @@ impl AgentFactory {
                     realm_id.as_str()
                 ))
             })?;
-            return Ok(Some((target.realm, target.connection_ref)));
+            return Ok(Some((target.realm, target.auth_binding)));
         }
 
-        match meerkat_core::resolve_connection_ref_or_default_for_provider(
+        match meerkat_core::resolve_auth_binding_or_default_for_provider(
             config,
             Provider::SelfHosted,
             None,
             preferred_realm.as_ref(),
             false,
         ) {
-            Ok(target) => Ok(Some((target.realm, target.connection_ref))),
+            Ok(target) => Ok(Some((target.realm, target.auth_binding))),
             Err(err) => {
                 tracing::debug!(
                     error = %err,
@@ -2372,7 +2372,7 @@ impl AgentFactory {
     #[cfg(feature = "openai")]
     fn legacy_self_hosted_connection(
         spec: &SelfHostedClientSpec,
-    ) -> Result<(RealmConnectionSet, ConnectionRef), FactoryError> {
+    ) -> Result<(RealmConnectionSet, AuthBindingRef), FactoryError> {
         let realm_id = RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
             FactoryError::ClientCreationFailed(format!(
                 "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
@@ -2425,7 +2425,7 @@ impl AgentFactory {
                 bindings,
                 default_binding: Some(binding_key),
             },
-            ConnectionRef {
+            AuthBindingRef {
                 realm: realm_id,
                 binding: binding_id,
                 profile: None,
@@ -2456,7 +2456,7 @@ impl AgentFactory {
 
     fn publish_auth_lease(
         handle: &Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
-        connection_ref: &ConnectionRef,
+        auth_binding: &AuthBindingRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) -> Result<(), FactoryError> {
         if matches!(
@@ -2465,7 +2465,7 @@ impl AgentFactory {
         ) {
             return Ok(());
         }
-        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
         let expires_at = connection
             .auth_lease
             .expires_at()
@@ -2803,36 +2803,36 @@ impl AgentFactory {
                                     provider,
                                     self_hosted_server_id: self_hosted_server_id.clone(),
                                     provider_params: build_config.provider_params.clone(),
-                                    connection_ref: build_config.connection_ref.clone(),
+                                    auth_binding: build_config.auth_binding.clone(),
                                 },
                                 auth_lease_handle,
                                 build_config.realm_id.as_deref(),
                             )
                             .await
                             .map_err(BuildAgentError::LlmClient)?;
-                        build_config.connection_ref = resolved.durable_connection_ref;
+                        build_config.auth_binding = resolved.durable_auth_binding;
                         resolved.client
                     } else {
-                        let (realm, _binding_id, resolved_connection_ref) =
+                        let (realm, _binding_id, resolved_auth_binding) =
                             Self::resolve_realm_binding_for_provider(
                                 config,
                                 provider,
-                                build_config.connection_ref.as_ref(),
+                                build_config.auth_binding.as_ref(),
                                 build_config.realm_id.as_deref(),
                             )
                             .map_err(BuildAgentError::ConnectionResolution)?;
-                        let lease_connection_ref = if resolved_connection_ref.is_env_default()
+                        let lease_auth_binding = if resolved_auth_binding.is_env_default()
                             && build_config
-                                .connection_ref
+                                .auth_binding
                                 .as_ref()
-                                .map(ConnectionRef::is_env_default)
+                                .map(AuthBindingRef::is_env_default)
                                 .unwrap_or(true)
                         {
-                            build_config.connection_ref = None;
+                            build_config.auth_binding = None;
                             None
                         } else {
-                            build_config.connection_ref = Some(resolved_connection_ref.clone());
-                            Some(resolved_connection_ref.clone())
+                            build_config.auth_binding = Some(resolved_auth_binding.clone());
+                            Some(resolved_auth_binding.clone())
                         };
 
                         // Provider-runtime registry needs the OAuth-backed
@@ -2852,7 +2852,7 @@ impl AgentFactory {
                         }
                         if let RuntimeBuildMode::SessionOwned(bindings) =
                             &build_config.runtime_build_mode
-                            && lease_connection_ref.is_some()
+                            && lease_auth_binding.is_some()
                         {
                             env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                         }
@@ -2861,7 +2861,7 @@ impl AgentFactory {
                         }
                         let provider_registry = Arc::clone(&self.provider_registry);
                         let connection = provider_registry
-                            .resolve(&realm, &resolved_connection_ref, &env)
+                            .resolve(&realm, &resolved_auth_binding, &env)
                             .await
                             .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
                         provider = connection.provider;
@@ -2871,11 +2871,11 @@ impl AgentFactory {
                         // before any later build step can fail.
                         if let RuntimeBuildMode::SessionOwned(bindings) =
                             &build_config.runtime_build_mode
-                            && let Some(lease_connection_ref) = lease_connection_ref.as_ref()
+                            && let Some(lease_auth_binding) = lease_auth_binding.as_ref()
                         {
                             Self::publish_auth_lease(
                                 bindings.auth_lease(),
-                                lease_connection_ref,
+                                lease_auth_binding,
                                 &connection,
                             )
                             .map_err(BuildAgentError::LlmClient)?;
@@ -2885,7 +2885,7 @@ impl AgentFactory {
                         {
                             let selected_realm = build_config.realm_id.as_deref();
                             let connection_is_in_selected_realm = selected_realm
-                                .map(|realm| resolved_connection_ref.realm.as_str() == realm)
+                                .map(|realm| resolved_auth_binding.realm.as_str() == realm)
                                 .unwrap_or(true);
                             if connection_is_in_selected_realm {
                                 auto_image_generation_executor = provider_registry
@@ -2897,7 +2897,7 @@ impl AgentFactory {
                                 tracing::debug!(
                                     provider = provider.as_str(),
                                     ?selected_realm,
-                                    resolved_realm = resolved_connection_ref.realm.as_str(),
+                                    resolved_realm = resolved_auth_binding.realm.as_str(),
                                     "skipping image executor reuse for LLM connection outside selected realm"
                                 );
                             }
@@ -2961,7 +2961,7 @@ impl AgentFactory {
                 if executors.contains_key(&key) {
                     continue;
                 }
-                let Ok((realm, _binding_id, connection_ref)) =
+                let Ok((realm, _binding_id, auth_binding)) =
                     Self::resolve_image_binding_for_provider(
                         config,
                         image_provider,
@@ -2982,7 +2982,7 @@ impl AgentFactory {
                     }
                 }
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
-                    && !connection_ref.is_env_default()
+                    && !auth_binding.is_env_default()
                 {
                     env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
                 }
@@ -2991,15 +2991,15 @@ impl AgentFactory {
                 }
                 let Ok(connection) = self
                     .provider_registry
-                    .resolve(&realm, &connection_ref, &env)
+                    .resolve(&realm, &auth_binding, &env)
                     .await
                 else {
                     continue;
                 };
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
-                    && !connection_ref.is_env_default()
+                    && !auth_binding.is_env_default()
                 {
-                    Self::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
+                    Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
                         .map_err(BuildAgentError::LlmClient)?;
                 }
                 let Ok(Some(executor)) = self
@@ -3879,7 +3879,7 @@ impl AgentFactory {
             metadata.instance_id = build_config.instance_id.clone();
             metadata.backend = build_config.backend.clone();
             metadata.config_generation = build_config.config_generation;
-            metadata.connection_ref = build_config.connection_ref.clone();
+            metadata.auth_binding = build_config.auth_binding.clone();
             metadata
         } else {
             SessionMetadata {
@@ -3905,7 +3905,7 @@ impl AgentFactory {
                 instance_id: build_config.instance_id.clone(),
                 backend: build_config.backend.clone(),
                 config_generation: build_config.config_generation,
-                connection_ref: build_config.connection_ref.clone(),
+                auth_binding: build_config.auth_binding.clone(),
             }
         };
 
@@ -4340,7 +4340,7 @@ mod tests {
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let mismatched_identity = SessionLlmIdentity {
             provider: Provider::Anthropic,
@@ -4455,7 +4455,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         }
     }
 
@@ -4464,9 +4464,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_connection_ref_synthesizes_env_default_binding_for_resolved_provider() {
+    fn missing_auth_binding_synthesizes_env_default_binding_for_resolved_provider() {
         let config = Config::default();
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_realm_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_realm_binding_for_provider(
             &config,
             Provider::Anthropic,
             None,
@@ -4476,8 +4476,8 @@ mod tests {
 
         assert_eq!(realm.realm_id, "env_default");
         assert_eq!(binding_id, "default");
-        assert_eq!(connection_ref.realm.as_str(), "env_default");
-        assert_eq!(connection_ref.binding.as_str(), "default");
+        assert_eq!(auth_binding.realm.as_str(), "env_default");
+        assert_eq!(auth_binding.binding.as_str(), "default");
         let (_binding, backend, auth) = realm.lookup_binding("default").unwrap();
         assert_eq!(backend.provider, Provider::Anthropic);
         assert!(matches!(
@@ -4488,9 +4488,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_env_default_connection_ref_is_not_rehydrated_as_durable_identity() {
+    fn explicit_env_default_auth_binding_is_not_rehydrated_as_durable_identity() {
         let config = Config::default();
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
@@ -4498,7 +4498,7 @@ mod tests {
         let err = AgentFactory::resolve_realm_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some(&connection_ref),
+            Some(&auth_binding),
             None,
         )
         .expect_err("env_default is a synthetic fallback, not a durable identity");
@@ -4532,7 +4532,7 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
+                assert_eq!(binding.auth_binding_ref().realm.as_str(), "env_default");
                 self.auth_lease_handle_seen.fetch_or(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
@@ -4589,7 +4589,7 @@ mod tests {
                 .session()
                 .session_metadata()
                 .unwrap()
-                .connection_ref
+                .auth_binding
                 .is_none(),
             "env-default fallback must not become durable session identity"
         );
@@ -4597,13 +4597,13 @@ mod tests {
             !auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
             "env-default fallback resolution must not receive an AuthMachine lease handle"
         );
-        let env_default_connection_ref = ConnectionRef {
+        let env_default_auth_binding = AuthBindingRef {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
         };
         let lease_key =
-            meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
+            meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
         let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
@@ -4634,7 +4634,7 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
+                assert_eq!(binding.auth_binding_ref().realm.as_str(), "env_default");
                 self.auth_lease_handle_seen.fetch_or(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
@@ -4679,7 +4679,7 @@ mod tests {
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
 
         let _client = factory
@@ -4695,13 +4695,13 @@ mod tests {
             !auth_lease_handle_seen.load(std::sync::atomic::Ordering::SeqCst),
             "env-default hot-swap fallback resolution must not receive an AuthMachine lease handle"
         );
-        let env_default_connection_ref = ConnectionRef {
+        let env_default_auth_binding = AuthBindingRef {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
         };
         let lease_key =
-            meerkat_core::handles::LeaseKey::from_connection_ref(&env_default_connection_ref);
+            meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
         let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase, None,
@@ -4835,7 +4835,7 @@ mod tests {
             "session_a".to_string(),
             inline_realm_section(&[("openai", "text-openai-key")]),
         );
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
@@ -4845,7 +4845,7 @@ mod tests {
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: Some(connection_ref),
+            auth_binding: Some(auth_binding),
         };
 
         let err = match factory
@@ -4885,7 +4885,7 @@ mod tests {
             .prepare_bindings(session.id().clone())
             .await
             .expect("runtime bindings");
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("session_a").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
@@ -4911,12 +4911,12 @@ mod tests {
             )),
         };
 
-        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
             .expect("first publication");
-        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
         let first_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
-        AgentFactory::publish_auth_lease(bindings.auth_lease(), &connection_ref, &connection)
+        AgentFactory::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
             .expect("second matching publication should be idempotent");
         let second_snapshot = bindings.auth_lease().snapshot(&lease_key);
 
@@ -4966,18 +4966,17 @@ mod tests {
         );
         config.realm.insert("dev".to_string(), section);
 
-        let (_realm, binding_id, connection_ref) =
-            AgentFactory::resolve_realm_binding_for_provider(
-                &config,
-                Provider::Anthropic,
-                None,
-                Some("dev"),
-            )
-            .expect("configured default binding should resolve");
+        let (_realm, binding_id, auth_binding) = AgentFactory::resolve_realm_binding_for_provider(
+            &config,
+            Provider::Anthropic,
+            None,
+            Some("dev"),
+        )
+        .expect("configured default binding should resolve");
 
         assert_eq!(binding_id, "default_anthropic");
-        assert_eq!(connection_ref.realm.as_str(), "dev");
-        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
     }
 
     #[test]
@@ -5099,20 +5098,20 @@ mod tests {
     #[test]
     fn unscoped_image_binding_can_still_synthesize_env_default() {
         let config = Config::default();
-        let (realm, binding_id, connection_ref) =
+        let (realm, binding_id, auth_binding) =
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::Gemini, None)
                 .expect("unscoped image lookup may use env_default");
 
         assert_eq!(realm.realm_id, "env_default");
         assert_eq!(binding_id, "default");
-        assert_eq!(connection_ref.realm.as_str(), "env_default");
-        assert_eq!(connection_ref.binding.as_str(), "default");
+        assert_eq!(auth_binding.realm.as_str(), "env_default");
+        assert_eq!(auth_binding.binding.as_str(), "default");
     }
 
     #[test]
     fn selected_env_default_image_binding_can_synthesize_env_default() {
         let config = Config::default();
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::Gemini,
             Some("env_default"),
@@ -5121,8 +5120,8 @@ mod tests {
 
         assert_eq!(realm.realm_id, "env_default");
         assert_eq!(binding_id, "default");
-        assert_eq!(connection_ref.realm.as_str(), "env_default");
-        assert_eq!(connection_ref.binding.as_str(), "default");
+        assert_eq!(auth_binding.realm.as_str(), "env_default");
+        assert_eq!(auth_binding.binding.as_str(), "default");
     }
 
     #[test]
@@ -5133,14 +5132,14 @@ mod tests {
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
-        let (realm, binding_id, connection_ref) =
+        let (realm, binding_id, auth_binding) =
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::OpenAI, None)
                 .expect("unscoped image lookup may use the configured default realm");
 
         assert_eq!(realm.realm_id, "default");
         assert_eq!(binding_id, "default_openai");
-        assert_eq!(connection_ref.realm.as_str(), "default");
-        assert_eq!(connection_ref.binding.as_str(), "default_openai");
+        assert_eq!(auth_binding.realm.as_str(), "default");
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
     }
 
     #[test]
@@ -5164,7 +5163,7 @@ mod tests {
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[derive(Clone, Debug)]
     struct RecordedSelfHostedResolve {
-        connection_ref: ConnectionRef,
+        auth_binding: AuthBindingRef,
         backend_base_url: Option<String>,
         auth_source: CredentialSourceSpec,
         token_store_present: bool,
@@ -5193,7 +5192,7 @@ mod tests {
             meerkat_llm_core::provider_runtime::ProviderAuthError,
         > {
             self.calls.lock().unwrap().push(RecordedSelfHostedResolve {
-                connection_ref: binding.connection_ref().clone(),
+                auth_binding: binding.auth_binding_ref().clone(),
                 backend_base_url: binding.backend_profile().base_url.clone(),
                 auth_source: binding.auth_profile().source.clone(),
                 token_store_present: env.token_store.is_some(),
@@ -5350,7 +5349,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_with_legacy_env_fails_closed() {
+    async fn self_hosted_absent_auth_binding_with_legacy_env_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -5367,17 +5366,17 @@ mod tests {
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let err = match factory.build_agent(build, &config).await {
-            Ok(_) => panic!("legacy bearer env without a connection binding must fail closed"),
+            Ok(_) => panic!("legacy bearer env without an auth binding must fail closed"),
             Err(err) => err,
         };
 
         assert!(
             calls.lock().unwrap().is_empty(),
-            "missing connection_ref/binding must not synthesize legacy bearer env auth"
+            "missing auth_binding/binding must not synthesize legacy bearer env auth"
         );
         assert!(
             err.to_string().contains("self-hosted")
-                && err.to_string().contains("connection/auth binding")
+                && err.to_string().contains("auth binding")
                 && err.to_string().contains("legacy bearer credentials"),
             "unexpected error: {err}"
         );
@@ -5385,7 +5384,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_with_legacy_bearer_fails_closed() {
+    async fn self_hosted_absent_auth_binding_with_legacy_bearer_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -5402,25 +5401,25 @@ mod tests {
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let err = match factory.build_agent(build, &config).await {
-            Ok(_) => panic!("legacy bearer material without a connection binding must fail closed"),
+            Ok(_) => panic!("legacy bearer material without an auth binding must fail closed"),
             Err(err) => err,
         };
 
         assert!(
             calls.lock().unwrap().is_empty(),
-            "missing connection_ref/binding must not synthesize legacy bearer auth"
+            "missing auth_binding/binding must not synthesize legacy bearer auth"
         );
         assert!(
             err.to_string().contains("self-hosted")
-                && err.to_string().contains("connection")
-                && err.to_string().contains("legacy"),
+                && err.to_string().contains("auth binding")
+                && err.to_string().contains("legacy bearer credentials"),
             "unexpected error: {err}"
         );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_with_literal_and_env_fails_closed() {
+    async fn self_hosted_absent_auth_binding_with_literal_and_env_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -5437,13 +5436,13 @@ mod tests {
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let err = match factory.build_agent(build, &config).await {
-            Ok(_) => panic!("legacy bearer material without a connection binding must fail closed"),
+            Ok(_) => panic!("legacy bearer material without an auth binding must fail closed"),
             Err(err) => err,
         };
 
         assert!(
             calls.lock().unwrap().is_empty(),
-            "missing connection_ref/binding must not synthesize literal bearer auth"
+            "missing auth_binding/binding must not synthesize literal bearer auth"
         );
         assert!(
             err.to_string().contains("legacy bearer credentials"),
@@ -5476,15 +5475,15 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].connection_ref.realm.as_str(), "self_hosted_legacy");
-        assert_ne!(calls[0].connection_ref.binding.as_str(), "localhost:11434");
+        assert_eq!(calls[0].auth_binding.realm.as_str(), "self_hosted_legacy");
+        assert_ne!(calls[0].auth_binding.binding.as_str(), "localhost:11434");
         assert!(
             matches!(calls[0].auth_source, CredentialSourceSpec::PlatformDefault),
             "authless legacy compatibility must not synthesize bearer auth"
         );
         assert!(
             calls[0]
-                .connection_ref
+                .auth_binding
                 .binding
                 .as_str()
                 .starts_with("legacy-"),
@@ -5495,7 +5494,7 @@ mod tests {
                 .session()
                 .session_metadata()
                 .unwrap()
-                .connection_ref
+                .auth_binding
                 .is_none(),
             "generated legacy compatibility binding must remain transient"
         );
@@ -5539,8 +5538,7 @@ mod tests {
             calls[0].auth_lease_handle_present,
             "session-owned auth lease handle must be passed into runtime resolution"
         );
-        let lease_key =
-            meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&calls[0].auth_binding);
         let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(
             snapshot.phase,
@@ -5595,8 +5593,7 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let lease_key =
-            meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&calls[0].auth_binding);
         let snapshot = bindings.auth_lease().snapshot(&lease_key);
         assert_eq!(snapshot.phase, None);
         assert!(!snapshot.credential_present);
@@ -5871,7 +5868,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_uses_selected_realm_default_before_legacy() {
+    async fn self_hosted_absent_auth_binding_uses_selected_realm_default_before_legacy() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -5905,8 +5902,8 @@ mod tests {
             "self-hosted realm default must resolve through ProviderRuntimeRegistry"
         );
         let call = &calls[0];
-        assert_eq!(call.connection_ref.realm.as_str(), "dev");
-        assert_eq!(call.connection_ref.binding.as_str(), "dev_local");
+        assert_eq!(call.auth_binding.realm.as_str(), "dev");
+        assert_eq!(call.auth_binding.binding.as_str(), "dev_local");
         assert_eq!(
             call.backend_base_url.as_deref(),
             Some("http://realm.example/v1")
@@ -5923,11 +5920,11 @@ mod tests {
                 .session()
                 .session_metadata()
                 .unwrap()
-                .connection_ref
+                .auth_binding
                 .as_ref()
-                .map(|connection_ref| (
-                    connection_ref.realm.as_str().to_string(),
-                    connection_ref.binding.as_str().to_string()
+                .map(|auth_binding| (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string()
                 )),
             Some(("dev".to_string(), "dev_local".to_string())),
             "selected realm default binding must become durable session identity"
@@ -5936,7 +5933,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_uses_default_realm_before_legacy() {
+    async fn self_hosted_absent_auth_binding_uses_default_realm_before_legacy() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -5965,8 +5962,8 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        assert_eq!(call.connection_ref.realm.as_str(), "default");
-        assert_eq!(call.connection_ref.binding.as_str(), "default_local");
+        assert_eq!(call.auth_binding.realm.as_str(), "default");
+        assert_eq!(call.auth_binding.binding.as_str(), "default_local");
         assert_eq!(
             call.backend_base_url.as_deref(),
             Some("http://default-realm.example/v1")
@@ -5983,11 +5980,11 @@ mod tests {
                 .session()
                 .session_metadata()
                 .unwrap()
-                .connection_ref
+                .auth_binding
                 .as_ref()
-                .map(|connection_ref| (
-                    connection_ref.realm.as_str().to_string(),
-                    connection_ref.binding.as_str().to_string()
+                .map(|auth_binding| (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string()
                 )),
             Some(("default".to_string(), "default_local".to_string())),
             "default realm binding must become durable session identity"
@@ -6053,7 +6050,7 @@ mod tests {
 
         assert!(
             err.to_string().contains("self-hosted")
-                && err.to_string().contains("connection/auth binding")
+                && err.to_string().contains("auth binding")
                 && err.to_string().contains("legacy bearer credentials"),
             "unexpected error: {err}"
         );
@@ -6082,7 +6079,7 @@ mod tests {
                 .session()
                 .session_metadata()
                 .unwrap()
-                .connection_ref
+                .auth_binding
                 .is_none(),
             "authless legacy compatibility must remain transient"
         );
@@ -6090,7 +6087,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_explicit_connection_ref_uses_realm_auth_and_persists_identity() {
+    async fn self_hosted_explicit_auth_binding_uses_realm_auth_and_persists_identity() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
@@ -6135,22 +6132,22 @@ mod tests {
             },
         );
         config.realm.insert("dev".to_string(), realm);
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("local_binding").unwrap(),
             profile: None,
         };
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
-        build.connection_ref = Some(connection_ref.clone());
+        build.auth_binding = Some(auth_binding.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let agent = factory.build_agent(build, &config).await.unwrap();
 
         assert_eq!(
-            agent.session().session_metadata().unwrap().connection_ref,
-            Some(connection_ref),
-            "explicit realm connection_ref must remain the durable session identity"
+            agent.session().session_metadata().unwrap().auth_binding,
+            Some(auth_binding),
+            "explicit realm auth_binding must remain the durable session identity"
         );
     }
 
@@ -6195,7 +6192,7 @@ mod tests {
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("session_a"),
@@ -6204,9 +6201,9 @@ mod tests {
 
         assert_eq!(realm.realm_id, "session_a");
         assert_eq!(binding_id, "default_openai");
-        assert_eq!(connection_ref.realm.as_str(), "session_a");
-        assert_eq!(connection_ref.binding.as_str(), "default_openai");
-        let (binding, backend, auth) = realm.lookup_connection_ref(&connection_ref).unwrap();
+        assert_eq!(auth_binding.realm.as_str(), "session_a");
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
+        let (binding, backend, auth) = realm.lookup_auth_binding(&auth_binding).unwrap();
         assert_eq!(backend.provider, Provider::OpenAI);
         assert_eq!(auth.provider, Provider::OpenAI);
         assert!(
@@ -6236,8 +6233,11 @@ mod tests {
                 binding: &ValidatedBinding,
                 _env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref().realm.as_str(), "session_a");
-                assert_eq!(binding.connection_ref().binding.as_str(), "default_openai");
+                assert_eq!(binding.auth_binding_ref().realm.as_str(), "session_a");
+                assert_eq!(
+                    binding.auth_binding_ref().binding.as_str(),
+                    "default_openai"
+                );
                 assert_eq!(binding.provider(), Provider::OpenAI);
                 assert!(binding.policy().require_metadata_account);
                 Err(ProviderAuthError::Binding(
@@ -6266,18 +6266,17 @@ mod tests {
             .require_metadata_account = true;
         config.realm.insert("session_a".to_string(), selected);
 
-        let (realm, _binding_id, connection_ref) =
-            AgentFactory::resolve_image_binding_for_provider(
-                &config,
-                Provider::OpenAI,
-                Some("session_a"),
-            )
-            .expect("selected image lookup should resolve the selected OpenAI binding");
+        let (realm, _binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("session_a"),
+        )
+        .expect("selected image lookup should resolve the selected OpenAI binding");
         let registry =
             ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PolicyRejectingOpenAiRuntime));
 
         let err = registry
-            .resolve(&realm, &connection_ref, &ResolverEnvironment::testing())
+            .resolve(&realm, &auth_binding, &ResolverEnvironment::testing())
             .await
             .expect_err("auth-policy validation should fail in the provider-runtime domain");
 
@@ -6343,7 +6342,7 @@ mod tests {
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("session_a"),
@@ -6359,7 +6358,7 @@ mod tests {
             }));
 
         let err = registry
-            .resolve(&realm, &connection_ref, &ResolverEnvironment::testing())
+            .resolve(&realm, &auth_binding, &ResolverEnvironment::testing())
             .await
             .expect_err("catalog should reject the selected incompatible image binding");
 
@@ -6437,7 +6436,7 @@ mod tests {
                 binding: &ValidatedBinding,
                 _env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref().realm.as_str(), "env_default");
+                assert_eq!(binding.auth_binding_ref().realm.as_str(), "env_default");
                 Ok(ResolvedConnection {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
@@ -6572,8 +6571,11 @@ mod tests {
                 binding: &ValidatedBinding,
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
-                assert_eq!(binding.connection_ref().realm.as_str(), "session_a");
-                assert_eq!(binding.connection_ref().binding.as_str(), "default_openai");
+                assert_eq!(binding.auth_binding_ref().realm.as_str(), "session_a");
+                assert_eq!(
+                    binding.auth_binding_ref().binding.as_str(),
+                    "default_openai"
+                );
                 self.saw_auth_lease_handle.store(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
@@ -6654,7 +6656,7 @@ mod tests {
             1,
             "test should exercise the selected OpenAI image executor path"
         );
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
@@ -6662,8 +6664,8 @@ mod tests {
         let snapshot =
             bindings
                 .auth_lease()
-                .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
-                    &connection_ref,
+                .snapshot(&meerkat_core::handles::LeaseKey::from_auth_binding(
+                    &auth_binding,
                 ));
         assert_eq!(
             snapshot.phase,
@@ -6773,7 +6775,7 @@ mod tests {
             saw_auth_lease_handle.load(std::sync::atomic::Ordering::SeqCst),
             "session-owned LLM resolution must receive the AuthMachine authority handle"
         );
-        let connection_ref = ConnectionRef {
+        let auth_binding = AuthBindingRef {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
@@ -6781,8 +6783,8 @@ mod tests {
         let snapshot =
             bindings
                 .auth_lease()
-                .snapshot(&meerkat_core::handles::LeaseKey::from_connection_ref(
-                    &connection_ref,
+                .snapshot(&meerkat_core::handles::LeaseKey::from_auth_binding(
+                    &auth_binding,
                 ));
         assert_eq!(
             snapshot.phase,
@@ -7190,7 +7192,7 @@ mod tests {
                 instance_id: None,
                 backend: None,
                 config_generation: None,
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("resume metadata");
 

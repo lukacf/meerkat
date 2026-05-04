@@ -75,19 +75,19 @@ pub struct StartTurnParams {
     /// inherits the current value; this flag explicitly disables it.
     #[serde(default)]
     pub clear_provider_params: bool,
-    /// Override realm-scoped connection binding for this turn (deferral
+    /// Override realm-scoped auth binding for this turn (deferral
     /// §2). On materialized sessions this scopes the hot-swap credential
     /// fetch to a specific realm + binding — preventing cross-realm
     /// credential bleed in multi-tenant setups. On pending sessions it
-    /// flows into `SessionBuildOptions.connection_ref`. Dogma §10
+    /// flows into `SessionBuildOptions.auth_binding`. Dogma §10
     /// inherit/set: `None` keeps the session's current binding;
     /// `Some(...)` sets a new one explicitly.
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
-    /// Clear the durable connection binding. Omitted `connection_ref`
+    #[serde(default, alias = "connection_ref")]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    /// Clear the durable auth binding. Omitted `auth_binding`
     /// inherits the current value; this flag explicitly disables it.
-    #[serde(default)]
-    pub clear_connection_ref: bool,
+    #[serde(default, alias = "clear_connection_ref")]
+    pub clear_auth_binding: bool,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -130,8 +130,8 @@ pub struct TurnOverrides {
     pub structured_output_retries: Option<u32>,
     pub provider_params: Option<serde_json::Value>,
     pub clear_provider_params: bool,
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
-    pub clear_connection_ref: bool,
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub clear_auth_binding: bool,
 }
 
 impl TurnOverrides {
@@ -145,8 +145,8 @@ impl TurnOverrides {
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
             && !self.clear_provider_params
-            && self.connection_ref.is_none()
-            && !self.clear_connection_ref
+            && self.auth_binding.is_none()
+            && !self.clear_auth_binding
     }
 }
 
@@ -225,8 +225,8 @@ pub async fn handle_start(
         structured_output_retries: params.structured_output_retries,
         provider_params: params.provider_params,
         clear_provider_params: params.clear_provider_params,
-        connection_ref: params.connection_ref,
-        clear_connection_ref: params.clear_connection_ref,
+        auth_binding: params.auth_binding,
+        clear_auth_binding: params.clear_auth_binding,
     };
 
     let result = match runtime

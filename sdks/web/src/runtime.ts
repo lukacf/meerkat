@@ -40,7 +40,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
   // the host's registered external-auth resolver.
   return {
     model: config.model,
-    connection_ref: config.connectionRef,
+    auth_binding: config.authBinding,
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
     comms_name: config.commsName,

@@ -29,10 +29,10 @@ use std::sync::Arc;
 /// Current session format version.
 ///
 /// Version history:
-/// - v1 — pre-wave-c. `SessionMetadata.connection_ref` inner fields were
+/// - v1 — pre-wave-c. `SessionMetadata.auth_binding` inner fields were
 ///   untyped strings (`realm_id`, `binding_id`, `profile`); no per-entity
 ///   schema version byte on `SessionMetadata`.
-/// - v2 — wave-c C-3. `ConnectionRef` inner fields are typed
+/// - v2 — wave-c C-3. `AuthBindingRef` inner fields are typed
 ///   `RealmId`/`BindingId`/`ProfileId` newtypes; `SessionMetadata` carries
 ///   a `schema_version` byte. Opportunistic upgrade-on-read —
 ///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
@@ -44,7 +44,7 @@ pub const SESSION_VERSION: u32 = 2;
 ///
 /// - v1 — pre-wave-c. Default on read for rows written before the byte
 ///   was introduced.
-/// - v2 — wave-c C-3. Typed `ConnectionRef` inner fields; any future
+/// - v2 — wave-c C-3. Typed `AuthBindingRef` inner fields; any future
 ///   `SessionMetadata`-local shape change bumps this without moving
 ///   `SESSION_VERSION`.
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
@@ -1498,17 +1498,21 @@ pub struct SessionMetadata {
     /// Config generation used when this session was created/resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_generation: Option<u64>,
-    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
+    /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     ///
     /// Persisted intent for the auth/backend binding this session resolved
     /// through. On resume, `apply_resumed_session_metadata` writes this
-    /// back into `AgentBuildConfig.connection_ref` so the same realm
+    /// back into `AgentBuildConfig.auth_binding` so the same realm
     /// binding is re-resolved. Never carries secret material — leases
     /// are rebuilt from the active realm connection set at resume time.
     /// Older persisted sessions without the field deserialize as `None`
     /// (backward compatible via `#[serde(default)]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<crate::ConnectionRef>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<crate::AuthBindingRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -1539,10 +1543,14 @@ pub struct SessionLlmIdentity {
     /// this binding, not a new synthesized env-default realm.
     ///
     /// Projection (dogma §1/§13): canonical owner is
-    /// `SessionMetadata.connection_ref`; this field is the
+    /// `SessionMetadata.auth_binding`; this field is the
     /// read/write projection used by hot-swap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<crate::ConnectionRef>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<crate::AuthBindingRef>,
 }
 
 /// Live request policy paired with a session LLM identity hot-swap.
@@ -1569,7 +1577,7 @@ impl SessionMetadata {
             provider: self.provider,
             self_hosted_server_id: self.self_hosted_server_id.clone(),
             provider_params: self.provider_params.clone(),
-            connection_ref: self.connection_ref.clone(),
+            auth_binding: self.auth_binding.clone(),
         }
     }
 
@@ -1579,7 +1587,7 @@ impl SessionMetadata {
         self.provider = identity.provider;
         self.self_hosted_server_id = identity.self_hosted_server_id.clone();
         self.provider_params = identity.provider_params.clone();
-        self.connection_ref = identity.connection_ref.clone();
+        self.auth_binding = identity.auth_binding.clone();
     }
 }
 

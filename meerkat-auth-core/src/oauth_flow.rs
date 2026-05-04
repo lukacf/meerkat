@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use meerkat_core::{AuthProfile, BackendProfile, ConnectionRef, CredentialSourceSpec, Provider};
+use meerkat_core::{AuthBindingRef, AuthProfile, BackendProfile, CredentialSourceSpec, Provider};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -376,7 +376,7 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthFlowRecord {
-    pub target: ConnectionRef,
+    pub target: AuthBindingRef,
     pub provider: OAuthProviderIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
@@ -385,7 +385,7 @@ pub struct OAuthFlowRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthDeviceFlowRecord {
-    pub target: ConnectionRef,
+    pub target: AuthBindingRef,
     pub provider: OAuthProviderIdentity,
     pub device_code: String,
     pub created_at: Instant,
@@ -394,8 +394,8 @@ pub struct OAuthDeviceFlowRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OAuthPrunedFlows {
-    pub browser: Vec<(String, ConnectionRef)>,
-    pub device: Vec<(String, ConnectionRef)>,
+    pub browser: Vec<(String, AuthBindingRef)>,
+    pub device: Vec<(String, AuthBindingRef)>,
 }
 
 impl OAuthPrunedFlows {
@@ -427,7 +427,7 @@ pub struct OAuthFlowRegistrySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedOAuthBrowserFlow {
     pub state: String,
-    pub target: ConnectionRef,
+    pub target: AuthBindingRef,
     pub provider: String,
     pub redirect_uri: String,
     pub pkce_verifier: String,
@@ -437,7 +437,7 @@ pub struct PersistedOAuthBrowserFlow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedOAuthDeviceFlow {
-    pub target: ConnectionRef,
+    pub target: AuthBindingRef,
     pub provider: String,
     pub device_code: String,
     pub created_at_millis: u64,
@@ -470,8 +470,8 @@ pub enum OAuthFlowError {
     RedirectUriMismatch,
     #[error("oauth state target mismatch: expected {expected:?}, got {actual:?}")]
     TargetMismatch {
-        expected: Box<ConnectionRef>,
-        actual: Box<ConnectionRef>,
+        expected: Box<AuthBindingRef>,
+        actual: Box<AuthBindingRef>,
     },
     #[error("failed to generate oauth state token")]
     StateGenerationFailed,
@@ -502,20 +502,20 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
 
     fn finish_device_poll(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError>;
 
     fn consume_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError>;
 
     fn expire_device_flow(
         &self,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError>;
 
@@ -537,7 +537,7 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
 
 pub struct OAuthDevicePollLease {
     device_flows: Arc<Mutex<HashMap<String, OAuthDeviceFlowState>>>,
-    target: ConnectionRef,
+    target: AuthBindingRef,
     device_code: String,
     provider: OAuthProviderIdentity,
     lease_id: u64,
@@ -563,7 +563,7 @@ impl std::fmt::Debug for OAuthDevicePollLease {
 impl OAuthDevicePollLease {
     fn new(
         device_flows: Arc<Mutex<HashMap<String, OAuthDeviceFlowState>>>,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         device_code: String,
         provider: OAuthProviderIdentity,
         lease_id: u64,
@@ -798,7 +798,7 @@ pub trait OAuthFlowAuthority: Send + Sync {
 
     fn start(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -807,7 +807,7 @@ pub trait OAuthFlowAuthority: Send + Sync {
     fn verify(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
@@ -815,14 +815,14 @@ pub trait OAuthFlowAuthority: Send + Sync {
     fn consume(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError>;
 
     fn admit_device_code(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         expires_in: Duration,
@@ -831,14 +831,14 @@ pub trait OAuthFlowAuthority: Send + Sync {
     fn verify_device_code(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
 
     fn begin_device_code_poll(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDevicePollLease, OAuthFlowError>;
 }
@@ -881,7 +881,7 @@ impl OAuthFlowRegistry {
 
     pub fn start(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: impl Into<String>,
         pkce_verifier: impl Into<String>,
@@ -898,7 +898,7 @@ impl OAuthFlowRegistry {
     pub fn verify(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -908,7 +908,7 @@ impl OAuthFlowRegistry {
     pub fn consume(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -917,7 +917,7 @@ impl OAuthFlowRegistry {
 
     pub fn admit_device_code(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: impl Into<String>,
         expires_in: Duration,
@@ -934,7 +934,7 @@ impl OAuthFlowRegistry {
     pub fn verify_device_code(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::verify_device_code(self, device_code, target, provider)
@@ -943,7 +943,7 @@ impl OAuthFlowRegistry {
     pub fn begin_device_code_poll(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::begin_device_code_poll(self, device_code, target, provider)
@@ -952,7 +952,7 @@ impl OAuthFlowRegistry {
     pub fn expire_device_code(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError> {
         let mut flows = self.device_flows.lock();
@@ -965,7 +965,7 @@ impl OAuthFlowRegistry {
         Ok(())
     }
 
-    pub fn prune_expired_browser_flows(&self) -> Vec<(String, ConnectionRef)> {
+    pub fn prune_expired_browser_flows(&self) -> Vec<(String, AuthBindingRef)> {
         let mut flows = self.flows.lock();
         take_expired_locked(&mut flows, self.ttl)
             .into_iter()
@@ -973,7 +973,7 @@ impl OAuthFlowRegistry {
             .collect()
     }
 
-    pub fn prune_expired_device_flows(&self) -> Vec<(String, ConnectionRef)> {
+    pub fn prune_expired_device_flows(&self) -> Vec<(String, AuthBindingRef)> {
         let mut flows = self.device_flows.lock();
         take_expired_device_locked(&mut flows)
             .into_iter()
@@ -983,8 +983,8 @@ impl OAuthFlowRegistry {
 
     pub fn retain_flows_with_lifecycle(
         &self,
-        mut browser_active: impl FnMut(&ConnectionRef, &str) -> bool,
-        mut device_active: impl FnMut(&ConnectionRef, &str) -> bool,
+        mut browser_active: impl FnMut(&AuthBindingRef, &str) -> bool,
+        mut device_active: impl FnMut(&AuthBindingRef, &str) -> bool,
     ) -> OAuthPrunedFlows {
         let mut flows = self.flows.lock();
         let mut browser = Vec::new();
@@ -1057,7 +1057,7 @@ impl OAuthFlowRegistry {
     pub fn insert_restored_browser_flow(
         &self,
         state: String,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -1085,7 +1085,7 @@ impl OAuthFlowRegistry {
 
     pub fn insert_restored_device_flow(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         created_at: Instant,
@@ -1120,7 +1120,7 @@ impl OAuthFlowRegistry {
 
     pub fn start_with_pruned(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -1152,7 +1152,7 @@ impl OAuthFlowRegistry {
     pub fn insert_browser_flow_with_pruned(
         &self,
         state: String,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -1182,7 +1182,7 @@ impl OAuthFlowRegistry {
 
     pub fn admit_device_code_with_pruned(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         expires_in: Duration,
@@ -1225,7 +1225,7 @@ impl OAuthFlowRegistry {
 
     pub fn admit_device_code_with_pruned_without_capacity(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         expires_in: Duration,
@@ -1271,7 +1271,7 @@ impl Default for OAuthFlowRegistry {
 impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn start(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: String,
         pkce_verifier: String,
@@ -1283,7 +1283,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn verify(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -1299,7 +1299,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn consume(
         &self,
         state: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
@@ -1314,7 +1314,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
 
     fn admit_device_code(
         &self,
-        target: ConnectionRef,
+        target: AuthBindingRef,
         provider: OAuthProviderIdentity,
         device_code: String,
         expires_in: Duration,
@@ -1326,7 +1326,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn verify_device_code(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
         let mut flows = self.device_flows.lock();
@@ -1341,7 +1341,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     fn begin_device_code_poll(
         &self,
         device_code: &str,
-        target: &ConnectionRef,
+        target: &AuthBindingRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
         let mut flows = self.device_flows.lock();
@@ -1426,7 +1426,7 @@ fn release_device_poll_lease_locked(
 
 fn verify_browser_record(
     record: &OAuthFlowRecord,
-    target: &ConnectionRef,
+    target: &AuthBindingRef,
     provider: OAuthProviderIdentity,
     redirect_uri: &str,
 ) -> Result<(), OAuthFlowError> {
@@ -1450,7 +1450,7 @@ fn verify_browser_record(
 
 fn verify_device_record(
     record: &OAuthDeviceFlowRecord,
-    target: &ConnectionRef,
+    target: &AuthBindingRef,
     provider: OAuthProviderIdentity,
 ) -> Result<(), OAuthFlowError> {
     if &record.target != target {
@@ -1532,16 +1532,16 @@ fn strings(values: &[&str]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn target() -> ConnectionRef {
-        ConnectionRef {
+    fn target() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
         }
     }
 
-    fn alternate_target() -> ConnectionRef {
-        ConnectionRef {
+    fn alternate_target() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("alternate_openai").expect("valid binding"),
             profile: None,
@@ -2292,7 +2292,7 @@ mod tests {
     impl OAuthDevicePollLifecycle for RejectConsumeLifecycle {
         fn finish_device_poll(
             &self,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _device_code: &str,
         ) -> Result<(), OAuthFlowError> {
             Ok(())
@@ -2300,7 +2300,7 @@ mod tests {
 
         fn consume_device_flow(
             &self,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _device_code: &str,
             _provider: OAuthProviderIdentity,
         ) -> Result<(), OAuthFlowError> {
@@ -2312,7 +2312,7 @@ mod tests {
 
         fn expire_device_flow(
             &self,
-            _target: &ConnectionRef,
+            _target: &AuthBindingRef,
             _device_code: &str,
         ) -> Result<(), OAuthFlowError> {
             Ok(())

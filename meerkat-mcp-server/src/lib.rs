@@ -193,7 +193,7 @@ pub struct MeerkatRunInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Route this session's LLM calls through a realm-scoped provider
-    /// binding. Typed `WireConnectionRef` referencing a
+    /// binding. Typed `WireAuthBindingRef` referencing a
     /// `[realm.<realm>.binding.<binding>]` entry in the active Config.
     /// Pre-wave-c this was `Option<String>` parsed as `"realm:binding"`
     /// — the string form is now rejected at the deserialization
@@ -201,8 +201,12 @@ pub struct MeerkatRunInput {
     /// When set, the provider runtime registry resolves the binding's
     /// auth profile and backend profile through the standard
     /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -2980,10 +2984,10 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: input
-            .connection_ref
+        auth_binding: input
+            .auth_binding
             .clone()
-            .map(meerkat_core::ConnectionRef::from),
+            .map(meerkat_core::AuthBindingRef::from),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -3342,7 +3346,7 @@ async fn handle_meerkat_resume(
                 .and_then(|m| m.backend.clone())
                 .or_else(|| Some(state.backend.clone())),
             config_generation: current_generation,
-            connection_ref: None,
+            auth_binding: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -4762,7 +4766,7 @@ mod tests {
                 additional_instructions: None,
                 app_context: None,
                 shell_env: None,
-                connection_ref: None,
+                auth_binding: None,
             },
             None,
             None,
@@ -4811,7 +4815,7 @@ mod tests {
                 additional_instructions: None,
                 app_context: None,
                 shell_env: None,
-                connection_ref: None,
+                auth_binding: None,
             },
             None,
             Some(context),
@@ -5471,7 +5475,7 @@ mod tests {
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
@@ -5555,7 +5559,7 @@ mod tests {
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");

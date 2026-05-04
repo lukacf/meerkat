@@ -162,10 +162,10 @@ struct MobDefinitionHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionConfig {
     model: String,
-    /// Optional structural connection reference. When set, overrides the
+    /// Optional structural auth binding reference. When set, overrides the
     /// default provider-match from bootstrap-populated `config.realm`.
-    #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
@@ -1185,8 +1185,8 @@ fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
     handle
 }
 
-fn build_session_request_with_connection_ref(
-    connection_ref: Option<&meerkat_contracts::WireConnectionRef>,
+fn build_session_request_with_auth_binding(
+    auth_binding: Option<&meerkat_contracts::WireAuthBindingRef>,
     model: &str,
     config: &SessionConfig,
     system_prompt: Option<String>,
@@ -1203,8 +1203,8 @@ fn build_session_request_with_connection_ref(
         .map_err(|e| err_js("invalid_config", &e))?;
 
     let mut build_config = AgentBuildConfig::new(model);
-    if let Some(conn) = connection_ref {
-        build_config.connection_ref = Some(conn.clone().into());
+    if let Some(conn) = auth_binding {
+        build_config.auth_binding = Some(conn.clone().into());
     }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
@@ -1236,8 +1236,8 @@ fn create_runtime_backed_session(
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
     let model = config.model.clone();
-    let request = build_session_request_with_connection_ref(
-        config.connection_ref.as_ref(),
+    let request = build_session_request_with_auth_binding(
+        config.auth_binding.as_ref(),
         &model,
         &config,
         system_prompt,
@@ -2007,8 +2007,8 @@ struct MobSpawnHelperOptions {
     agent_identity: Option<String>,
     #[serde(default)]
     role_name: Option<String>,
-    #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -2023,8 +2023,8 @@ struct MobForkHelperOptions {
     agent_identity: Option<String>,
     #[serde(default)]
     role_name: Option<String>,
-    #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -2162,8 +2162,8 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref {
-        options.connection_ref = Some(connection_ref.into());
+    if let Some(auth_binding) = request.auth_binding {
+        options.auth_binding = Some(auth_binding.into());
     }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
@@ -2196,8 +2196,8 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref {
-        options.connection_ref = Some(connection_ref.into());
+    if let Some(auth_binding) = request.auth_binding {
+        options.auth_binding = Some(auth_binding.into());
     }
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
@@ -2568,8 +2568,8 @@ capabilities = [{capability_values}]
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn test_connection_ref() -> meerkat_core::ConnectionRef {
-        meerkat_core::ConnectionRef {
+    fn test_auth_binding() -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("default").expect("test realm id"),
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("test binding id"),
@@ -2750,7 +2750,7 @@ capabilities = [{capability_values}]
                 &mob_id,
                 vec![
                     SpawnMemberSpec::new("worker", "worker-1")
-                        .with_connection_ref(test_connection_ref())
+                        .with_auth_binding(test_auth_binding())
                         .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
                 ],
             )
@@ -2954,7 +2954,7 @@ capabilities = [{capability_values}]
             .expect("create mob");
         let mut options = meerkat_mob::HelperOptions::default();
         options.role_name = Some(meerkat_mob::ProfileName::from("worker"));
-        options.connection_ref = Some(test_connection_ref());
+        options.auth_binding = Some(test_auth_binding());
 
         let result = mob_state
             .mob_spawn_helper(

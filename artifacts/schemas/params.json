@@ -1563,8 +1563,8 @@
         "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
-      "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
             "$ref": "#/$defs/BindingId"
@@ -1603,10 +1603,10 @@
         ]
       },
       "app_context": true,
-      "connection_ref": {
+      "auth_binding": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WireConnectionRef"
+            "$ref": "#/$defs/WireAuthBindingRef"
           },
           {
             "type": "null"
@@ -7186,20 +7186,20 @@
           "agent_identity": {
             "type": "string"
           },
-          "backend": {
+          "auth_binding": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WireMobBackendKind"
+                "$ref": "#/$defs/WireAuthBindingRef"
               },
               {
                 "type": "null"
               }
             ]
           },
-          "connection_ref": {
+          "backend": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WireConnectionRef"
+                "$ref": "#/$defs/WireMobBackendKind"
               },
               {
                 "type": "null"
@@ -7254,8 +7254,8 @@
         "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
-      "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
             "$ref": "#/$defs/BindingId"
@@ -7472,6 +7472,32 @@
         "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
       "WireBudgetSplitPolicy": {
         "description": "Budget split policy for a spawned mob member.",
         "oneOf": [
@@ -7530,32 +7556,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
-        "properties": {
-          "binding": {
-            "$ref": "#/$defs/BindingId"
-          },
-          "profile": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ProfileId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "realm": {
-            "$ref": "#/$defs/RealmId"
-          }
-        },
-        "required": [
-          "realm",
-          "binding"
-        ],
-        "type": "object"
       },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
@@ -8091,6 +8091,16 @@
       "agent_identity": {
         "type": "string"
       },
+      "auth_binding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "auto_wire_parent": {
         "type": [
           "boolean",
@@ -8121,16 +8131,6 @@
         "anyOf": [
           {
             "$ref": "#/$defs/WireBudgetSplitPolicy"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "connection_ref": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WireConnectionRef"
           },
           {
             "type": "null"
@@ -8533,8 +8533,8 @@
         },
         "type": "object"
       },
-      "WireConnectionRef": {
-        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
             "$ref": "#/$defs/BindingId"
@@ -8714,23 +8714,23 @@
       "agent_identity": {
         "type": "string"
       },
-      "clear_connection_ref": {
+      "auth_binding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "clear_auth_binding": {
         "default": false,
         "type": "boolean"
       },
       "clear_provider_params": {
         "default": false,
         "type": "boolean"
-      },
-      "connection_ref": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WireConnectionRef"
-          },
-          {
-            "type": "null"
-          }
-        ]
       },
       "flow_tool_overlay": {
         "anyOf": [
@@ -9146,51 +9146,8 @@
         "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only — clients that do not carry this struct inherit the\nserver-default behavior via `#[serde(default)]` on the parent\n[`RealtimeOpenRequest`].",
         "properties": {
           "tool_timeout": {
-            "description": "Realtime-specific timeout policy for product-session tool dispatch.",
-            "oneOf": [
-              {
-                "properties": {
-                  "type": {
-                    "const": "default",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type"
-                ],
-                "type": "object"
-              },
-              {
-                "properties": {
-                  "type": {
-                    "const": "disabled",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type"
-                ],
-                "type": "object"
-              },
-              {
-                "properties": {
-                  "timeout_ms": {
-                    "format": "uint64",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": {
-                    "const": "finite",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "timeout_ms"
-                ],
-                "type": "object"
-              }
-            ]
+            "$ref": "#/$defs/RealtimeToolTimeoutPolicy",
+            "description": "Realtime-specific timeout policy for product-session tool dispatch."
           }
         },
         "type": "object"
@@ -9275,6 +9232,56 @@
           "max_total_ms"
         ],
         "type": "object"
+      },
+      "RealtimeToolTimeoutPolicy": {
+        "description": "Typed per-channel tool timeout policy.",
+        "oneOf": [
+          {
+            "description": "Use the server's default realtime tool timeout.",
+            "properties": {
+              "type": {
+                "const": "default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Do not apply a realtime-specific timeout. The runtime/tool dispatcher\nmay still enforce its own normal execution policy.",
+            "properties": {
+              "type": {
+                "const": "disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Apply this finite realtime-specific timeout.",
+            "properties": {
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "timeout_ms"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "RealtimeTurningMode": {
         "description": "Turning mode for a realtime channel.",

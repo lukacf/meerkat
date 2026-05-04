@@ -1901,12 +1901,12 @@ describe("Parity wrappers", () => {
         model: "claude-sonnet-4-6",
         tools: { shell: true },
       },
-      connectionRef: { realm: "dev", binding: "default_anthropic" },
+      authBinding: { realm: "dev", binding: "default_anthropic" },
     });
     const spawned = await client.spawnMobMembers("mob-1", [{
       profile: "worker",
       agentIdentity: "worker-1",
-      connectionRef: { realm: "dev", binding: "default_anthropic" },
+      authBinding: { realm: "dev", binding: "default_anthropic" },
     }]);
     await client.mobTurnStart(
       "mob-1",
@@ -1925,8 +1925,8 @@ describe("Parity wrappers", () => {
         structuredOutputRetries: 2,
         providerParams: { temperature: 0.2 },
         clearProviderParams: true,
-        connectionRef: { realm: "dev", binding: "default_openai" },
-        clearConnectionRef: true,
+        authBinding: { realm: "dev", binding: "default_openai" },
+        clearAuthBinding: true,
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
@@ -1987,9 +1987,9 @@ describe("Parity wrappers", () => {
         model: "claude-sonnet-4-6",
         tools: { shell: true },
       },
-      connection_ref: { realm: "dev", binding: "default_anthropic" },
+      auth_binding: { realm: "dev", binding: "default_anthropic" },
     });
-    assert.deepEqual(calls[1].params.specs[0].connection_ref, {
+    assert.deepEqual(calls[1].params.specs[0].auth_binding, {
       realm: "dev",
       binding: "default_anthropic",
     });
@@ -2015,8 +2015,8 @@ describe("Parity wrappers", () => {
       structured_output_retries: 2,
       provider_params: { temperature: 0.2 },
       clear_provider_params: true,
-      connection_ref: { realm: "dev", binding: "default_openai" },
-      clear_connection_ref: true,
+      auth_binding: { realm: "dev", binding: "default_openai" },
+      clear_auth_binding: true,
     });
     assert.equal(calls[4].params.after_cursor, 10);
     assert.equal(calls[4].params.limit, 5);

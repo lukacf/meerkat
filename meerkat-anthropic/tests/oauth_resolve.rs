@@ -27,7 +27,7 @@ use meerkat_core::handles::{
     LeaseKey,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
+    AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
@@ -83,8 +83,8 @@ fn realm_with_oauth_binding_source(
     RealmConnectionSet::from_config("dev", &section).unwrap()
 }
 
-fn default_connection_ref() -> ConnectionRef {
-    ConnectionRef {
+fn default_auth_binding() -> AuthBindingRef {
+    AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_claude").expect("valid binding"),
         profile: None,
@@ -390,7 +390,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     ));
 
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("fresh OAuth tokens should resolve");
     assert_eq!(
@@ -431,7 +431,7 @@ async fn claude_ai_oauth_rejects_token_without_auth_lifecycle() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -485,7 +485,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -529,7 +529,7 @@ async fn claude_ai_oauth_rejects_wrong_persisted_mode() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -583,7 +583,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -653,7 +653,7 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("expired Claude OAuth lease should refresh through AuthMachine gate");
 
@@ -710,7 +710,7 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -778,7 +778,7 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("forced Claude OAuth refresh should resolve through AuthMachine gate");
 
@@ -826,7 +826,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     ));
 
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("persisted api_key should resolve");
     assert_eq!(
@@ -865,7 +865,7 @@ async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -893,7 +893,7 @@ async fn missing_oauth_tokens_surface_interactive_login_required() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -918,7 +918,7 @@ async fn no_token_store_surface_interactive_login_required() {
     ));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(

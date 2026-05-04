@@ -69,24 +69,24 @@ fn every_auth_rpc_method_round_trips_through_envelope() {
     }
 }
 
-/// session.create envelope accepts a `connection_ref` field nested
+/// session.create envelope accepts a `auth_binding` field nested
 /// inside the params. Parses cleanly without flattening or discarding
 /// the field.
 #[test]
-fn session_create_envelope_preserves_connection_ref() {
+fn session_create_envelope_preserves_auth_binding() {
     let envelope = dispatch(
         "session.create",
         json!({
             "model": "claude-sonnet-4-5",
             "prompt": "hi",
-            "connection_ref": {"realm_id": "realm-x", "binding_id": "bind-y"}
+            "auth_binding": {"realm_id": "realm-x", "binding_id": "bind-y"}
         }),
     );
 
     let params = envelope.get("params").expect("params present");
     let cref = params
-        .get("connection_ref")
-        .expect("connection_ref preserved in params");
+        .get("auth_binding")
+        .expect("auth_binding preserved in params");
     assert_eq!(cref["realm_id"], "realm-x");
     assert_eq!(cref["binding_id"], "bind-y");
 }

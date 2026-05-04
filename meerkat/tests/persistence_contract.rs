@@ -14,15 +14,15 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::service::InitialTurnPolicy;
     use meerkat_core::{
-        AgentToolDispatcher, BindingId, ConnectionRef, DeferredPromptPolicy, RealmId, ToolCallView,
-        ToolCatalogCapabilities, ToolCatalogEntry, ToolDef, ToolProvenance, ToolResult,
-        ToolSourceKind, service::SessionBuildOptions,
+        AgentToolDispatcher, AuthBindingRef, BindingId, DeferredPromptPolicy, RealmId,
+        ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef, ToolProvenance,
+        ToolResult, ToolSourceKind, service::SessionBuildOptions,
     };
     use meerkat_store::MemoryBlobStore;
     use serde_json::json;
 
-    fn test_connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn test_auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: RealmId::parse("default").expect("default realm id"),
             binding: BindingId::parse("default_openai").expect("default openai binding"),
             profile: None,
@@ -41,7 +41,7 @@ mod tests {
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
-                connection_ref: Some(test_connection_ref()),
+                auth_binding: Some(test_auth_binding()),
                 ..Default::default()
             }),
             labels: None,

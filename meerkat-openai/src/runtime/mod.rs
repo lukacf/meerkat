@@ -483,8 +483,8 @@ mod tests {
         }
     }
 
-    fn connection_ref() -> meerkat_core::ConnectionRef {
-        meerkat_core::ConnectionRef {
+    fn auth_binding() -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn typed_catalog_validate_accepts_allowed_combination() {
         let vb = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend("openai_api"),
             &auth("api_key"),
             &BindingPolicy::default(),
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn typed_catalog_validate_rejects_unknown_backend_kind() {
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend("bogus_backend"),
             &auth("api_key"),
             &BindingPolicy::default(),
@@ -519,7 +519,7 @@ mod tests {
     fn typed_catalog_validate_rejects_unsupported_combo() {
         // openai_api + managed_chatgpt_oauth is not a typed catalog edge.
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend("openai_api"),
             &auth("managed_chatgpt_oauth"),
             &BindingPolicy::default(),
@@ -536,7 +536,7 @@ mod tests {
         let mut wrong = backend("openai_api");
         wrong.provider = Provider::Anthropic;
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &wrong,
             &auth("api_key"),
             &BindingPolicy::default(),
@@ -555,7 +555,7 @@ mod tests {
             require_metadata_workspace: false,
         };
         let vb = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend("openai_api"),
             &auth("api_key"),
             &policy,

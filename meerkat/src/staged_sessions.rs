@@ -580,7 +580,7 @@ mod tests {
             provider: Provider::Other,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         }
     }
 

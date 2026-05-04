@@ -40,12 +40,12 @@ pub use comms::{
 };
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
-    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams, WireAuthError,
-    WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail,
-    WireAuthProfilesList, WireAuthStatus, WireAuthStatusDetail, WireBackendProfile,
-    WireBindingIdentity, WireConnectionRef, WireDeviceCompleteResult, WireDeviceStart,
-    WireLoginReady, WireLoginStart, WireProviderBinding, WireProvisionApiKeyResult,
-    WireRealmConnectionSet, WireRealmList, WireRealmSummary,
+    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
+    WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthProfileCleared,
+    WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus,
+    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
+    WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding,
+    WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 
 pub use artifact::{

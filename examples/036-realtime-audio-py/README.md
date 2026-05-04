@@ -77,7 +77,7 @@ machines without a microphone.
 
 If startup reports that realtime audio input is unavailable, `rkat-rpc` started
 without an OpenAI realtime sideband factory. Check that `OPENAI_API_KEY` or your
-OpenAI connection binding is available to the runtime.
+OpenAI auth binding is available to the runtime.
 
 If audio devices fail to open, run `python3 -m sounddevice` to list device names
 and pass `--input-device` or `--output-device`.

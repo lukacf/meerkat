@@ -994,11 +994,11 @@ impl LeaseKey {
         }
     }
 
-    pub fn from_connection_ref(connection_ref: &crate::connection::ConnectionRef) -> Self {
+    pub fn from_auth_binding(auth_binding: &crate::connection::AuthBindingRef) -> Self {
         Self {
-            realm: connection_ref.realm.clone(),
-            binding: connection_ref.binding.clone(),
-            profile: connection_ref.profile.clone(),
+            realm: auth_binding.realm.clone(),
+            binding: auth_binding.binding.clone(),
+            profile: auth_binding.profile.clone(),
         }
     }
 }

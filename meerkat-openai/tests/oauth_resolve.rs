@@ -23,7 +23,7 @@ use meerkat_core::handles::{
     LeaseKey,
 };
 use meerkat_core::{
-    AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId, ConnectionRef,
+    AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
@@ -88,8 +88,8 @@ fn openai_realm_with_source(
     .unwrap()
 }
 
-fn default_connection_ref() -> ConnectionRef {
-    ConnectionRef {
+fn default_auth_binding() -> AuthBindingRef {
+    AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_chatgpt").expect("valid binding"),
         profile: None,
@@ -404,7 +404,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("fresh ChatGPT tokens should resolve");
     assert_eq!(
@@ -460,7 +460,7 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("forced refresh should resolve through OAuth refresh path");
 
@@ -519,7 +519,7 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     match err {
@@ -560,7 +560,7 @@ async fn openai_managed_chatgpt_oauth_rejects_marked_token_without_auth_lease() 
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -607,7 +607,7 @@ async fn openai_managed_chatgpt_oauth_rejects_marker_with_empty_auth_lifecycle()
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -619,7 +619,7 @@ async fn openai_managed_chatgpt_oauth_rejects_marker_with_empty_auth_lifecycle()
         ),
         "got {err:?}"
     );
-    let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
+    let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(snapshot.phase, None);
     assert!(!snapshot.credential_present);
 }
@@ -657,7 +657,7 @@ async fn openai_managed_chatgpt_oauth_rejects_unmarked_token_after_empty_lifecyc
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -670,7 +670,7 @@ async fn openai_managed_chatgpt_oauth_rejects_unmarked_token_after_empty_lifecyc
         ),
         "got {err:?}"
     );
-    let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
+    let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(snapshot.phase, None);
     assert!(!snapshot.credential_present);
 }
@@ -725,7 +725,7 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_marker_with_empty_auth_lif
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -737,7 +737,7 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_marker_with_empty_auth_lif
         ),
         "got {err:?}"
     );
-    let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
+    let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(snapshot.phase, None);
     assert!(!snapshot.credential_present);
     let stored = store
@@ -780,7 +780,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_persisted_mode() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -833,7 +833,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -899,7 +899,7 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
 
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -942,7 +942,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("external tokens should resolve");
     assert_eq!(
@@ -981,7 +981,7 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_requires_auth_lease() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
 
@@ -994,7 +994,7 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_requires_auth_lease() {
         ),
         "got {err:?}"
     );
-    let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
+    let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(snapshot.phase, None);
     assert!(!snapshot.credential_present);
 }
@@ -1027,7 +1027,7 @@ async fn openai_external_chatgpt_tokens_rejects_chatgpt_oauth_mode() {
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(
@@ -1051,7 +1051,7 @@ async fn openai_chatgpt_oauth_missing_tokens_surfaces_interactive_login_required
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
-        .resolve(&realm, &default_connection_ref(), &env)
+        .resolve(&realm, &default_auth_binding(), &env)
         .await
         .unwrap_err();
     assert!(

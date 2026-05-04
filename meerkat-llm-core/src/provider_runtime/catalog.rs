@@ -10,7 +10,7 @@ use meerkat_core::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
     OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
 };
-use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, Provider};
+use meerkat_core::{AuthBindingRef, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 use crate::provider_runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind};
 use crate::provider_runtime::errors::ProviderBindingError;
@@ -29,7 +29,7 @@ use crate::provider_runtime::errors::ProviderBindingError;
 /// ```
 #[derive(Clone)]
 pub struct ValidatedBinding {
-    connection_ref: ConnectionRef,
+    auth_binding: AuthBindingRef,
     provider: Provider,
     backend: NormalizedBackendKind,
     auth: NormalizedAuthMethod,
@@ -40,7 +40,7 @@ pub struct ValidatedBinding {
 
 impl ValidatedBinding {
     fn from_catalog(
-        connection_ref: ConnectionRef,
+        auth_binding: AuthBindingRef,
         provider: Provider,
         backend: NormalizedBackendKind,
         auth: NormalizedAuthMethod,
@@ -49,7 +49,7 @@ impl ValidatedBinding {
         policy: BindingPolicy,
     ) -> Self {
         Self {
-            connection_ref,
+            auth_binding,
             provider,
             backend,
             auth,
@@ -59,8 +59,8 @@ impl ValidatedBinding {
         }
     }
 
-    pub fn connection_ref(&self) -> &ConnectionRef {
-        &self.connection_ref
+    pub fn auth_binding_ref(&self) -> &AuthBindingRef {
+        &self.auth_binding
     }
 
     pub fn provider(&self) -> Provider {
@@ -91,7 +91,7 @@ impl ValidatedBinding {
 impl std::fmt::Debug for ValidatedBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ValidatedBinding")
-            .field("connection_ref", &self.connection_ref)
+            .field("auth_binding", &self.auth_binding)
             .field("provider", &self.provider)
             .field("backend", &self.backend)
             .field("auth", &self.auth)
@@ -112,7 +112,7 @@ impl ProviderRuntimeCatalog {
     }
 
     pub fn validate_binding(
-        connection_ref: &ConnectionRef,
+        auth_binding: &AuthBindingRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -120,12 +120,12 @@ impl ProviderRuntimeCatalog {
         if backend.provider != auth.provider {
             return Err(ProviderBindingError::ProviderMismatch);
         }
-        Self::validate_binding_for_provider(backend.provider, connection_ref, backend, auth, policy)
+        Self::validate_binding_for_provider(backend.provider, auth_binding, backend, auth, policy)
     }
 
     pub fn validate_binding_for_provider(
         provider: Provider,
-        connection_ref: &ConnectionRef,
+        auth_binding: &AuthBindingRef,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -144,7 +144,7 @@ impl ProviderRuntimeCatalog {
         }
 
         Ok(ValidatedBinding::from_catalog(
-            connection_ref.clone(),
+            auth_binding.clone(),
             provider,
             backend_kind,
             auth_method,
@@ -280,8 +280,8 @@ mod tests {
     use super::*;
     use meerkat_core::CredentialSourceSpec;
 
-    fn connection_ref() -> ConnectionRef {
-        ConnectionRef {
+    fn auth_binding() -> AuthBindingRef {
+        AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn validate_accepts_openai_allowed_combination() {
         let binding = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend(Provider::OpenAI, "openai_api"),
             &auth(Provider::OpenAI, "api_key"),
             &BindingPolicy::default(),
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_backend_kind() {
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend(Provider::OpenAI, "bogus_backend"),
             &auth(Provider::OpenAI, "api_key"),
             &BindingPolicy::default(),
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_auth_method() {
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend(Provider::OpenAI, "openai_api"),
             &auth(Provider::OpenAI, "bogus_auth"),
             &BindingPolicy::default(),
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn validate_rejects_incompatible_backend_auth() {
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend(Provider::OpenAI, "openai_api"),
             &auth(Provider::OpenAI, "managed_chatgpt_oauth"),
             &BindingPolicy::default(),
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn validate_rejects_profile_provider_mismatch() {
         let err = ProviderRuntimeCatalog::validate_binding(
-            &connection_ref(),
+            &auth_binding(),
             &backend(Provider::OpenAI, "openai_api"),
             &auth(Provider::Anthropic, "api_key"),
             &BindingPolicy::default(),

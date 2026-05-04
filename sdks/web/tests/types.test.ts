@@ -68,7 +68,7 @@ const fullConfig: RuntimeConfig = {
 
 const sessionConfig: SessionConfig = {
   model: 'claude-sonnet-4-5',
-  connectionRef: { realm: 'default', binding: 'anthropic' },
+  authBinding: { realm: 'default', binding: 'anthropic' },
   systemPrompt: 'You are helpful.',
   maxTokens: 1024,
   labels: { env: 'test' },
@@ -138,7 +138,7 @@ const authLogoutWithProfile: Promise<AuthCredentialsCleared> = auth.logout(
 const authBinding: AuthBindingIdentity = {
   realm_id: 'default',
   binding_id: 'openai',
-  connection_ref: { realm: 'default', binding: 'openai' },
+  auth_binding: { realm: 'default', binding: 'openai' },
   profile_id: 'openai_apikey',
 };
 const authProfile: AuthProfile = {
@@ -150,7 +150,7 @@ const authProfile: AuthProfile = {
 const authStatusBody: AuthStatus = {
   realm_id: 'default',
   binding_id: 'openai',
-  connection_ref: { realm: 'default', binding: 'openai' },
+  auth_binding: { realm: 'default', binding: 'openai' },
   profile_id: 'openai_apikey',
   provider: 'openai',
   auth_method: 'api_key',
@@ -437,12 +437,12 @@ const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-
 const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
 const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
-  { connectionRef: { realm: 'default', binding: 'openai', profile: 'work' } },
+  { authBinding: { realm: 'default', binding: 'openai', profile: 'work' } },
 );
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
-  { connectionRef: { realm: 'default', binding: 'anthropic' } },
+  { authBinding: { realm: 'default', binding: 'anthropic' } },
 );
 const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();

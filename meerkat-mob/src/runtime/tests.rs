@@ -92,7 +92,7 @@ fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) 
                 instance_id: None,
                 backend: None,
                 config_generation: None,
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("test metadata serializes");
     }
@@ -1086,7 +1086,7 @@ impl SessionService for MockSessionService {
                 instance_id: build.and_then(|b| b.instance_id.clone()),
                 backend: build.and_then(|b| b.backend.clone()),
                 config_generation: build.and_then(|b| b.config_generation),
-                connection_ref: None,
+                auth_binding: None,
             };
             session
                 .set_session_metadata(metadata)
@@ -9419,7 +9419,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             instance_id: None,
             backend: None,
             config_generation: None,
-            connection_ref: None,
+            auth_binding: None,
         })
         .expect("resume metadata");
 

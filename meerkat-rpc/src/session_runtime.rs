@@ -1809,9 +1809,9 @@ impl SessionRuntimeLlmReconfigureHost {
                 reason: "clear_provider_params cannot be combined with provider_params".to_string(),
             });
         }
-        if request.clear_connection_ref && request.connection_ref.is_some() {
+        if request.clear_auth_binding && request.auth_binding.is_some() {
             return Err(RuntimeDriverError::ValidationFailed {
-                reason: "clear_connection_ref cannot be combined with connection_ref".to_string(),
+                reason: "clear_auth_binding cannot be combined with auth_binding".to_string(),
             });
         }
 
@@ -1867,13 +1867,13 @@ impl SessionRuntimeLlmReconfigureHost {
             None
         };
 
-        let connection_ref = if request.clear_connection_ref {
+        let auth_binding = if request.clear_auth_binding {
             None
         } else {
             request
-                .connection_ref
+                .auth_binding
                 .clone()
-                .or_else(|| current.connection_ref.clone())
+                .or_else(|| current.auth_binding.clone())
         };
 
         Ok(SessionLlmIdentity {
@@ -1881,7 +1881,7 @@ impl SessionRuntimeLlmReconfigureHost {
             provider,
             self_hosted_server_id,
             provider_params,
-            connection_ref,
+            auth_binding,
         })
     }
 }
@@ -2290,11 +2290,11 @@ impl SessionRuntime {
                 })
             }
         });
-        let connection_ref = overrides.and_then(|ov| {
-            if ov.clear_connection_ref {
+        let auth_binding = overrides.and_then(|ov| {
+            if ov.clear_auth_binding {
                 Some(TurnMetadataOverride::Clear)
             } else {
-                ov.connection_ref.clone().map(TurnMetadataOverride::Set)
+                ov.auth_binding.clone().map(TurnMetadataOverride::Set)
             }
         });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -2311,7 +2311,7 @@ impl SessionRuntime {
                 .and_then(|provider| parse_provider_override(provider).ok()),
             provider_params,
             render_metadata: None,
-            connection_ref,
+            auth_binding,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
         };
@@ -2347,10 +2347,8 @@ impl SessionRuntime {
             Some(TurnMetadataOverride::Clear) => (None, true),
             None => (None, false),
         };
-        let (connection_ref, clear_connection_ref) = match &metadata.connection_ref {
-            Some(TurnMetadataOverride::Set(connection_ref)) => {
-                (Some(connection_ref.clone()), false)
-            }
+        let (auth_binding, clear_auth_binding) = match &metadata.auth_binding {
+            Some(TurnMetadataOverride::Set(auth_binding)) => (Some(auth_binding.clone()), false),
             Some(TurnMetadataOverride::Clear) => (None, true),
             None => (None, false),
         };
@@ -2362,8 +2360,8 @@ impl SessionRuntime {
                 .map(|provider| provider.as_str().to_string()),
             provider_params,
             clear_provider_params,
-            connection_ref,
-            clear_connection_ref,
+            auth_binding,
+            clear_auth_binding,
             ..Default::default()
         };
         (!overrides.is_empty()).then_some(overrides)
@@ -3753,8 +3751,8 @@ impl SessionRuntime {
                 })?,
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
             clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
-            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
-            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
+            auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
+            clear_auth_binding: overrides.is_some_and(|ov| ov.clear_auth_binding),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
             output_schema,
@@ -3941,7 +3939,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id,
             provider_params: build_config.provider_params.clone(),
-            connection_ref: build_config.connection_ref.clone(),
+            auth_binding: build_config.auth_binding.clone(),
         })
     }
 
@@ -4011,10 +4009,10 @@ impl SessionRuntime {
                 data: None,
             });
         }
-        if ov.clear_connection_ref && ov.connection_ref.is_some() {
+        if ov.clear_auth_binding && ov.auth_binding.is_some() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
-                message: "clear_connection_ref cannot be combined with connection_ref".to_string(),
+                message: "clear_auth_binding cannot be combined with auth_binding".to_string(),
                 data: None,
             });
         }
@@ -4076,12 +4074,12 @@ impl SessionRuntime {
             None
         };
 
-        let connection_ref = if ov.clear_connection_ref {
+        let auth_binding = if ov.clear_auth_binding {
             None
         } else {
-            ov.connection_ref
+            ov.auth_binding
                 .clone()
-                .or_else(|| current.connection_ref.clone())
+                .or_else(|| current.auth_binding.clone())
         };
 
         Ok(SessionLlmIdentity {
@@ -4089,7 +4087,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id,
             provider_params,
-            connection_ref,
+            auth_binding,
         })
     }
 
@@ -4101,7 +4099,7 @@ impl SessionRuntime {
         build_config.provider = Some(identity.provider);
         build_config.self_hosted_server_id = identity.self_hosted_server_id.clone();
         build_config.provider_params = identity.provider_params.clone();
-        build_config.connection_ref = identity.connection_ref.clone();
+        build_config.auth_binding = identity.auth_binding.clone();
     }
 
     async fn current_materialized_llm_identity(
@@ -4305,8 +4303,8 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             provider_params: ov.provider_params.clone(),
             clear_provider_params: ov.clear_provider_params,
-            connection_ref: ov.connection_ref.clone(),
-            clear_connection_ref: ov.clear_connection_ref,
+            auth_binding: ov.auth_binding.clone(),
+            clear_auth_binding: ov.clear_auth_binding,
         };
 
         if !self.runtime_adapter.contains_session(session_id).await
@@ -5612,8 +5610,8 @@ impl SessionRuntime {
                     || ov.provider.is_some()
                     || ov.provider_params.is_some()
                     || ov.clear_provider_params
-                    || ov.connection_ref.is_some()
-                    || ov.clear_connection_ref)
+                    || ov.auth_binding.is_some()
+                    || ov.clear_auth_binding)
             {
                 self.hot_swap_llm_client(session_id, ov).await?;
             }
@@ -6321,8 +6319,8 @@ impl SessionRuntime {
                 || ov.provider.is_some()
                 || ov.provider_params.is_some()
                 || ov.clear_provider_params
-                || ov.connection_ref.is_some()
-                || ov.clear_connection_ref)
+                || ov.auth_binding.is_some()
+                || ov.clear_auth_binding)
         {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
@@ -8284,8 +8282,8 @@ mod tests {
         }
     }
 
-    fn test_connection_ref(realm: &str, binding: &str) -> meerkat_core::ConnectionRef {
-        meerkat_core::ConnectionRef {
+    fn test_auth_binding(realm: &str, binding: &str) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse(realm).expect("valid realm fixture"),
             binding: meerkat_core::connection::BindingId::parse(binding)
                 .expect("valid binding fixture"),
@@ -10381,7 +10379,7 @@ mod tests {
             Arc::new(meerkat_store::MemoryBlobStore::new());
         let persistence = meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store);
         let adapter = persistence.runtime_adapter();
-        let target = test_connection_ref("dev", "default_openai");
+        let target = test_auth_binding("dev", "default_openai");
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";
         let state = adapter
@@ -10623,7 +10621,7 @@ mod tests {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let gemini_video_model_on_gemini = SessionLlmIdentity {
             provider: meerkat_core::Provider::Gemini,
@@ -10653,7 +10651,7 @@ mod tests {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
 
         let err = runtime
@@ -10691,15 +10689,15 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let request = SessionLlmReconfigureRequest {
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
             provider_params: None,
             clear_provider_params: false,
-            connection_ref: None,
-            clear_connection_ref: false,
+            auth_binding: None,
+            clear_auth_binding: false,
         };
 
         let err = host
@@ -10722,15 +10720,15 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let request = SessionLlmReconfigureRequest {
             model: Some("unknown-model-xyz".to_string()),
             provider: Some("provider-shaped-cache-key".to_string()),
             provider_params: None,
             clear_provider_params: false,
-            connection_ref: None,
-            clear_connection_ref: false,
+            auth_binding: None,
+            clear_auth_binding: false,
         };
 
         let err = host
@@ -10756,22 +10754,18 @@ mod tests {
             )),
             temp.path().join("config_state.json"),
         )));
-        let connection_ref = test_connection_ref("dev", "default_openai");
+        let auth_binding = test_auth_binding("dev", "default_openai");
         let tokens = meerkat_providers::auth_store::PersistedTokens::api_key("sk-hot-swap");
         token_store
             .save(
-                &meerkat_providers::auth_store::TokenKey::from_connection_ref(&connection_ref),
+                &meerkat_providers::auth_store::TokenKey::from_auth_binding(&auth_binding),
                 &tokens,
             )
             .await
             .unwrap();
         let auth_lease = runtime.auth_lease_handle();
-        meerkat_core::publish_token_lifecycle_acquired(
-            auth_lease.as_ref(),
-            &connection_ref,
-            &tokens,
-        )
-        .expect("test credential lifecycle should be acquired");
+        meerkat_core::publish_token_lifecycle_acquired(auth_lease.as_ref(), &auth_binding, &tokens)
+            .expect("test credential lifecycle should be acquired");
 
         let host = runtime.llm_reconfigure_host();
         let identity = SessionLlmIdentity {
@@ -10779,7 +10773,7 @@ mod tests {
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: Some(connection_ref),
+            auth_binding: Some(auth_binding),
         };
 
         host.build_adapter_for_llm_identity(&identity)
@@ -10819,7 +10813,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("claude-opus-4-6".to_string()),
@@ -10848,7 +10842,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
@@ -10879,7 +10873,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
@@ -11042,7 +11036,7 @@ mod tests {
             provider: meerkat_core::Provider::SelfHosted,
             self_hosted_server_id: Some("local".to_string()),
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
@@ -11062,9 +11056,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_override_connection_ref_propagates_to_resolved_identity() {
+    async fn turn_override_auth_binding_propagates_to_resolved_identity() {
         // Dogma §10 (inherit/set) + Wave 3 row 15: an explicit
-        // `connection_ref` override on a turn must flow through
+        // `auth_binding` override on a turn must flow through
         // `resolve_target_llm_identity` onto the resolved identity —
         // NOT be silently dropped to None. Guards against the earlier
         // bug where hot-swap inherited stale binding even when the
@@ -11077,7 +11071,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
@@ -11085,7 +11079,7 @@ mod tests {
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
                 profile: None,
@@ -11096,27 +11090,27 @@ mod tests {
         let resolved = runtime
             .resolve_target_llm_identity(&current, &overrides)
             .await
-            .expect("connection_ref override should resolve");
+            .expect("auth_binding override should resolve");
 
         assert_eq!(
-            resolved.connection_ref.as_ref().map(|c| c.realm.as_str()),
+            resolved.auth_binding.as_ref().map(|c| c.realm.as_str()),
             Some("tenant_b"),
-            "explicit connection_ref override must win over the session's current binding"
+            "explicit auth_binding override must win over the session's current binding"
         );
         assert_eq!(
-            resolved.connection_ref.as_ref().map(|c| c.binding.as_str()),
+            resolved.auth_binding.as_ref().map(|c| c.binding.as_str()),
             Some("anthropic_vip"),
         );
     }
 
     #[tokio::test]
-    async fn turn_without_connection_ref_override_preserves_current_binding() {
+    async fn turn_without_auth_binding_override_preserves_current_binding() {
         // Dogma §10 inherit semantics: `None` on the override does
         // NOT mean "clear the binding" — it means "keep the current
         // one". The earlier bug returned None either way, breaking
         // multi-tenant sessions whose next turn happened to set
         // another override (model/provider_params) alongside no
-        // explicit connection_ref.
+        // explicit auth_binding.
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -11125,7 +11119,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
@@ -11143,9 +11137,9 @@ mod tests {
             .expect("resolve must succeed");
 
         assert_eq!(
-            resolved.connection_ref.as_ref().map(|c| c.realm.as_str()),
+            resolved.auth_binding.as_ref().map(|c| c.realm.as_str()),
             Some("tenant_a"),
-            "absent connection_ref override must inherit the session's current binding, not drop it"
+            "absent auth_binding override must inherit the session's current binding, not drop it"
         );
     }
 
@@ -11158,7 +11152,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: Some(serde_json::json!({ "temperature": 0.7 })),
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             clear_provider_params: true,
@@ -11174,7 +11168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_clear_connection_ref_removes_current_binding() {
+    async fn turn_clear_auth_binding_removes_current_binding() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let current = SessionLlmIdentity {
@@ -11182,7 +11176,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
@@ -11190,7 +11184,7 @@ mod tests {
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            clear_connection_ref: true,
+            clear_auth_binding: true,
             ..Default::default()
         };
 
@@ -11199,11 +11193,11 @@ mod tests {
             .await
             .expect("clear override should resolve");
 
-        assert!(resolved.connection_ref.is_none());
+        assert!(resolved.auth_binding.is_none());
     }
 
     #[tokio::test]
-    async fn turn_rejects_set_and_clear_connection_ref_together() {
+    async fn turn_rejects_set_and_clear_auth_binding_together() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let current = SessionLlmIdentity {
@@ -11211,15 +11205,15 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            connection_ref: Some(meerkat_core::ConnectionRef {
+            auth_binding: Some(meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
                 profile: None,
             }),
-            clear_connection_ref: true,
+            clear_auth_binding: true,
             ..Default::default()
         };
 
@@ -11229,7 +11223,7 @@ mod tests {
             .expect_err("set+clear must be rejected");
 
         assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(err.message.contains("clear_connection_ref"));
+        assert!(err.message.contains("clear_auth_binding"));
     }
 
     #[tokio::test]
@@ -11241,7 +11235,7 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            connection_ref: None,
+            auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
@@ -15598,8 +15592,8 @@ mod tests {
             structured_output_retries: None,
             provider_params: None,
             clear_provider_params: false,
-            connection_ref: None,
-            clear_connection_ref: false,
+            auth_binding: None,
+            clear_auth_binding: false,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -16654,7 +16648,7 @@ mod tests {
                 instance_id: None,
                 backend: None,
                 config_generation: None,
-                connection_ref: None,
+                auth_binding: None,
             })
             .expect("session metadata");
         let mut deferred = meerkat_core::SessionDeferredTurnState::default();
@@ -17684,7 +17678,7 @@ mod tests {
             "structured_output_retries": 3,
             "provider_params": {"thinking": true},
             "clear_provider_params": false,
-            "clear_connection_ref": true
+            "clear_auth_binding": true
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
@@ -17698,7 +17692,7 @@ mod tests {
         assert_eq!(params.structured_output_retries, Some(3));
         assert!(params.provider_params.is_some());
         assert!(!params.clear_provider_params);
-        assert!(params.clear_connection_ref);
+        assert!(params.clear_auth_binding);
     }
 
     #[test]
@@ -17785,10 +17779,10 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let connection_ref = test_connection_ref("dev", "default");
+        let auth_binding = test_auth_binding("dev", "default");
         let overrides = TurnOverrides {
             clear_provider_params: true,
-            connection_ref: Some(connection_ref.clone()),
+            auth_binding: Some(auth_binding.clone()),
             ..Default::default()
         };
 
@@ -17798,18 +17792,18 @@ mod tests {
 
         assert!(recovered.clear_provider_params);
         assert_eq!(recovered.provider_params, None);
-        assert_eq!(recovered.connection_ref, Some(connection_ref));
-        assert!(!recovered.clear_connection_ref);
+        assert_eq!(recovered.auth_binding, Some(auth_binding));
+        assert!(!recovered.clear_auth_binding);
 
         let clear_connection = TurnOverrides {
-            clear_connection_ref: true,
+            clear_auth_binding: true,
             ..Default::default()
         };
         let recovered = runtime
             .recovery_overrides_from_turn(Some(&clear_connection), false)
             .expect("valid clear connection recovery override");
-        assert!(recovered.clear_connection_ref);
-        assert_eq!(recovered.connection_ref, None);
+        assert!(recovered.clear_auth_binding);
+        assert_eq!(recovered.auth_binding, None);
     }
 
     // -----------------------------------------------------------------------
@@ -18514,10 +18508,10 @@ mod tests {
             .unregister_session(&session_id)
             .await;
 
-        let connection_ref = test_connection_ref("dev", "default");
+        let auth_binding = test_auth_binding("dev", "default");
         let overrides = crate::handlers::turn::TurnOverrides {
             clear_provider_params: true,
-            connection_ref: Some(connection_ref.clone()),
+            auth_binding: Some(auth_binding.clone()),
             ..Default::default()
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18547,9 +18541,9 @@ mod tests {
             "clear_provider_params must survive missing-live recovery"
         );
         assert_eq!(
-            live_meta.connection_ref,
-            Some(connection_ref.clone()),
-            "connection_ref set must survive missing-live recovery"
+            live_meta.auth_binding,
+            Some(auth_binding.clone()),
+            "auth_binding set must survive missing-live recovery"
         );
 
         let stored = runtime
@@ -18561,7 +18555,7 @@ mod tests {
             .session_metadata()
             .expect("stored metadata after recovery");
         assert_eq!(stored_meta.provider_params, None);
-        assert_eq!(stored_meta.connection_ref, Some(connection_ref));
+        assert_eq!(stored_meta.auth_binding, Some(auth_binding));
     }
 
     /// Regression: start_turn_via_runtime must reject build-only overrides

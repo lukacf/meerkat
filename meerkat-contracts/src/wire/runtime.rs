@@ -1185,9 +1185,12 @@ pub struct WireRuntimeTurnMetadata {
     pub provider: Option<meerkat_core::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref:
-        Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
+    #[serde(
+        default,
+        alias = "connection_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<WireKeepAlivePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1214,8 +1217,8 @@ struct WireRuntimeTurnMetadataFields {
     provider: Option<meerkat_core::Provider>,
     #[serde(default)]
     provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
-    #[serde(default)]
-    connection_ref: Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
+    #[serde(default, alias = "connection_ref")]
+    auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default)]
     keep_alive: Option<WireKeepAlivePolicy>,
     #[serde(default)]
@@ -1232,15 +1235,15 @@ impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
         D: serde::Deserializer<'de>,
     {
         let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_connection_ref) =
-            if let Some(object) = raw.as_object_mut() {
-                (
-                    take_legacy_clear_bool(object, "clear_provider_params")?,
-                    take_legacy_clear_bool(object, "clear_connection_ref")?,
-                )
-            } else {
-                (false, false)
-            };
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &["clear_connection_ref"])?,
+            )
+        } else {
+            (false, false)
+        };
         let fields: WireRuntimeTurnMetadataFields =
             serde_json::from_value(raw).map_err(de::Error::custom)?;
         let provider_params = legacy_wire_override_from_split_fields(
@@ -1249,11 +1252,11 @@ impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
             "provider_params",
             "clear_provider_params",
         )?;
-        let connection_ref = legacy_wire_override_from_split_fields(
-            fields.connection_ref,
-            clear_connection_ref,
-            "connection_ref",
-            "clear_connection_ref",
+        let auth_binding = legacy_wire_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
         )?;
 
         Ok(Self {
@@ -1264,7 +1267,7 @@ impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
             model: fields.model,
             provider: fields.provider,
             provider_params,
-            connection_ref,
+            auth_binding,
             keep_alive: fields.keep_alive,
             render_metadata: fields.render_metadata,
             execution_kind: fields.execution_kind,
@@ -1350,7 +1353,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             model: value.model.map(|m| m.as_str().to_string()),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
-            connection_ref: value.connection_ref.map(Into::into),
+            auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
@@ -1374,7 +1377,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             model: value.model.map(ModelId::new),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
-            connection_ref: value.connection_ref.map(Into::into),
+            auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
@@ -1409,13 +1412,26 @@ where
 fn take_legacy_clear_bool<E>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     field: &'static str,
+    aliases: &[&'static str],
 ) -> Result<bool, E>
 where
     E: de::Error,
 {
-    match object.remove(field) {
-        None => Ok(false),
-        Some(serde_json::Value::Bool(value)) => Ok(value),
-        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
+    let mut seen = None;
+    for key in std::iter::once(field).chain(aliases.iter().copied()) {
+        match object.remove(key) {
+            None => {}
+            Some(serde_json::Value::Bool(value)) => match seen {
+                None => seen = Some(value),
+                Some(previous) if previous == value => {}
+                Some(_) => {
+                    return Err(E::custom(format!(
+                        "{field} and its compatibility aliases disagree"
+                    )));
+                }
+            },
+            Some(_) => return Err(E::custom(format!("{key} must be a boolean"))),
+        }
     }
+    Ok(seen.unwrap_or(false))
 }

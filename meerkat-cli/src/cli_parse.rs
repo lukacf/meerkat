@@ -1,15 +1,15 @@
 //! Wave-c C-12 — the single canonical CLI-boundary parser that lifts
 //! user-supplied `realm:binding[:profile]` input into a typed
-//! [`ConnectionRef`].
+//! [`AuthBindingRef`].
 //!
-//! `meerkat_core::connection::ConnectionRef` is purely structural — by
+//! `meerkat_core::connection::AuthBindingRef` is purely structural — by
 //! wave-b design it carries no `parse` / `Display` impl that would let
 //! an opaque string form ferry through the runtime. CLI input arrives
 //! as the flat colon-delimited form; this module owns the entire
 //! conversion from that flat form into the typed record
 //! `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`.
 //!
-//! The tripwire at `meerkat-cli/tests/connection_ref_single_parser.rs`
+//! The tripwire at `meerkat-cli/tests/auth_binding_single_parser.rs`
 //! enforces that exactly one parser function with this symbol lives
 //! under `meerkat-cli/src/`. That is the structural guard against
 //! ad-hoc colon-split parsing drifting back into handler code.
@@ -18,20 +18,20 @@
 //!
 //! * `main.rs` still parses [`meerkat_providers::auth_store::TokenKey`]
 //!   values via `split_once(':')` inside `interactive_logout`. That is
-//!   NOT a ConnectionRef parse — `TokenKey` is the on-disk token key
+//!   NOT an AuthBindingRef parse — `TokenKey` is the on-disk token key
 //!   used by OAuth storage, which happens to share the same flat
 //!   syntax but has different semantics (no profile component, no
 //!   typed newtype validation requirement at that call site).
 //! * `mcp.rs` splits HTTP header strings via `splitn(2, ':')`. That is
-//!   NOT a ConnectionRef parse either.
+//!   NOT an AuthBindingRef parse either.
 //!
 //! Both carve-outs are called out explicitly so future refactors don't
 //! mistake them for drift and collapse them into this parser.
 
-use meerkat_core::connection::{BindingId, ConnectionRef, IdentityError, ProfileId, RealmId};
+use meerkat_core::connection::{AuthBindingRef, BindingId, IdentityError, ProfileId, RealmId};
 use thiserror::Error;
 
-/// Typed error returned by [`parse_connection_ref_user_input`].
+/// Typed error returned by [`parse_auth_binding_user_input`].
 ///
 /// Every variant carries the offending input (or component) so CLI
 /// error reporting can show the user what went wrong without a
@@ -39,22 +39,20 @@ use thiserror::Error;
 /// tests and docs.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CliError {
-    /// The raw string had no colons at all. A ConnectionRef always
+    /// The raw string had no colons at all. A AuthBindingRef always
     /// needs at least `realm:binding`.
-    #[error(
-        "--connection-ref requires `realm:binding[:profile]`; got `{raw}` with no `:` separator"
-    )]
+    #[error("--auth-binding requires `realm:binding[:profile]`; got `{raw}` with no `:` separator")]
     MissingBinding { raw: String },
 
     /// More than two colons in the input: realm:binding:profile:extra
     /// is not a valid form.
     #[error(
-        "--connection-ref takes at most three components (`realm:binding[:profile]`); got `{raw}` with {extra_segments} extra segment(s)"
+        "--auth-binding takes at most three components (`realm:binding[:profile]`); got `{raw}` with {extra_segments} extra segment(s)"
     )]
     TooManySegments { raw: String, extra_segments: usize },
 
     /// The realm component failed slug validation.
-    #[error("--connection-ref realm component `{component}` is not a valid slug: {source}")]
+    #[error("--auth-binding realm component `{component}` is not a valid slug: {source}")]
     InvalidRealm {
         component: String,
         #[source]
@@ -62,7 +60,7 @@ pub enum CliError {
     },
 
     /// The binding component failed slug validation.
-    #[error("--connection-ref binding component `{component}` is not a valid slug: {source}")]
+    #[error("--auth-binding binding component `{component}` is not a valid slug: {source}")]
     InvalidBinding {
         component: String,
         #[source]
@@ -70,7 +68,7 @@ pub enum CliError {
     },
 
     /// The profile component failed slug validation.
-    #[error("--connection-ref profile component `{component}` is not a valid slug: {source}")]
+    #[error("--auth-binding profile component `{component}` is not a valid slug: {source}")]
     InvalidProfile {
         component: String,
         #[source]
@@ -79,17 +77,17 @@ pub enum CliError {
 }
 
 /// Parse a user-supplied `realm:binding[:profile]` string into a typed
-/// [`ConnectionRef`].
+/// [`AuthBindingRef`].
 ///
-/// This is the **sole** ConnectionRef parser in `meerkat-cli`. Every
-/// CLI surface that accepts a `--connection-ref` flag must funnel the
+/// This is the **sole** AuthBindingRef parser in `meerkat-cli`. Every
+/// CLI surface that accepts a `--auth-binding` flag must funnel the
 /// raw string through this function at the argument-decoding boundary;
-/// downstream code paths accept only the typed `ConnectionRef`.
+/// downstream code paths accept only the typed `AuthBindingRef`.
 ///
 /// ### Grammar
 ///
 /// ```text
-/// connection_ref := realm ":" binding [ ":" profile ]
+/// auth_binding := realm ":" binding [ ":" profile ]
 /// realm          := slug
 /// binding        := slug
 /// profile        := slug
@@ -106,7 +104,7 @@ pub enum CliError {
 /// failed. Parse errors never panic — the CLI frontend formats them
 /// and exits with a non-zero status via `anyhow::bail!` at the
 /// clap-boundary call site.
-pub fn parse_connection_ref_user_input(raw: &str) -> Result<ConnectionRef, CliError> {
+pub fn parse_auth_binding_user_input(raw: &str) -> Result<AuthBindingRef, CliError> {
     let trimmed = raw.trim();
     // Split on ':' — we allow up to 3 segments (realm, binding, profile).
     // Using splitn(4, …) gives us "at most 3 segments + one leftover"
@@ -151,7 +149,7 @@ pub fn parse_connection_ref_user_input(raw: &str) -> Result<ConnectionRef, CliEr
         ),
     };
 
-    Ok(ConnectionRef {
+    Ok(AuthBindingRef {
         realm,
         binding,
         profile,
@@ -164,7 +162,7 @@ mod tests {
 
     #[test]
     fn parses_realm_and_binding() {
-        let cref = parse_connection_ref_user_input("dev:openai").expect("valid realm:binding");
+        let cref = parse_auth_binding_user_input("dev:openai").expect("valid realm:binding");
         assert_eq!(cref.realm.as_str(), "dev");
         assert_eq!(cref.binding.as_str(), "openai");
         assert!(cref.profile.is_none());
@@ -172,7 +170,7 @@ mod tests {
 
     #[test]
     fn parses_realm_binding_profile() {
-        let cref = parse_connection_ref_user_input("prod:anthropic:paid")
+        let cref = parse_auth_binding_user_input("prod:anthropic:paid")
             .expect("valid three-component form");
         assert_eq!(cref.realm.as_str(), "prod");
         assert_eq!(cref.binding.as_str(), "anthropic");
@@ -181,55 +179,53 @@ mod tests {
 
     #[test]
     fn trims_surrounding_whitespace() {
-        let cref =
-            parse_connection_ref_user_input("  dev:openai  ").expect("whitespace is trimmed");
+        let cref = parse_auth_binding_user_input("  dev:openai  ").expect("whitespace is trimmed");
         assert_eq!(cref.realm.as_str(), "dev");
         assert_eq!(cref.binding.as_str(), "openai");
     }
 
     #[test]
     fn rejects_missing_binding() {
-        let err = parse_connection_ref_user_input("onlyrealm").expect_err("no colon");
+        let err = parse_auth_binding_user_input("onlyrealm").expect_err("no colon");
         assert!(matches!(err, CliError::MissingBinding { .. }));
     }
 
     #[test]
     fn rejects_four_segments() {
-        let err =
-            parse_connection_ref_user_input("a:b:c:d").expect_err("fourth segment is rejected");
+        let err = parse_auth_binding_user_input("a:b:c:d").expect_err("fourth segment is rejected");
         assert!(matches!(err, CliError::TooManySegments { .. }));
     }
 
     #[test]
     fn rejects_invalid_realm_character() {
-        let err = parse_connection_ref_user_input("dev$:openai")
-            .expect_err("`$` is not a valid slug char");
+        let err =
+            parse_auth_binding_user_input("dev$:openai").expect_err("`$` is not a valid slug char");
         assert!(matches!(err, CliError::InvalidRealm { .. }));
     }
 
     #[test]
     fn rejects_invalid_binding_character() {
-        let err = parse_connection_ref_user_input("dev:open ai")
+        let err = parse_auth_binding_user_input("dev:open ai")
             .expect_err("space is not a valid slug char");
         assert!(matches!(err, CliError::InvalidBinding { .. }));
     }
 
     #[test]
     fn rejects_invalid_profile_character() {
-        let err = parse_connection_ref_user_input("dev:openai:pa!d")
+        let err = parse_auth_binding_user_input("dev:openai:pa!d")
             .expect_err("`!` is not a valid slug char");
         assert!(matches!(err, CliError::InvalidProfile { .. }));
     }
 
     #[test]
     fn rejects_empty_realm() {
-        let err = parse_connection_ref_user_input(":openai").expect_err("empty realm");
+        let err = parse_auth_binding_user_input(":openai").expect_err("empty realm");
         assert!(matches!(err, CliError::InvalidRealm { .. }));
     }
 
     #[test]
     fn rejects_empty_binding() {
-        let err = parse_connection_ref_user_input("dev:").expect_err("empty binding");
+        let err = parse_auth_binding_user_input("dev:").expect_err("empty binding");
         assert!(matches!(err, CliError::InvalidBinding { .. }));
     }
 }

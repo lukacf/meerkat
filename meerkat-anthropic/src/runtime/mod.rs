@@ -192,8 +192,8 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     if let Some(handle) = env.auth_lease_handle.clone() {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                binding.connection_ref(),
+                            meerkat_core::handles::LeaseKey::from_auth_binding(
+                                binding.auth_binding_ref(),
                             ),
                         );
                     }
@@ -246,8 +246,8 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     if let Some(handle) = env.auth_lease_handle.clone() {
                         authorizer = authorizer.with_auth_lease_observer(
                             handle,
-                            meerkat_core::handles::LeaseKey::from_connection_ref(
-                                binding.connection_ref(),
+                            meerkat_core::handles::LeaseKey::from_auth_binding(
+                                binding.auth_binding_ref(),
                             ),
                         );
                     }
@@ -606,8 +606,8 @@ fn bedrock_region(binding: &ValidatedBinding) -> Result<String, ProviderAuthErro
                  set auth_profile.metadata_defaults.provider_metadata.aws_region or \
                  backend_profile.options.aws_region/region. Region is not inferred from \
                  BackendProfile.base_url.",
-                binding.connection_ref().realm.as_str(),
-                binding.connection_ref().binding.as_str()
+                binding.auth_binding_ref().realm.as_str(),
+                binding.auth_binding_ref().binding.as_str()
             ))
         })
 }
@@ -688,7 +688,7 @@ mod tests {
             },
         };
         ProviderRuntimeCatalog::validate_binding(
-            &meerkat_core::ConnectionRef {
+            &meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::BindingId::parse("bedrock").unwrap(),
                 profile: None,

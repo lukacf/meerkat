@@ -640,7 +640,7 @@ def require_audio_capabilities(open_info: Any) -> tuple[AudioFormat, AudioFormat
     if input_format is None:
         raise RuntimeError(
             "Realtime audio input is unavailable. Check OPENAI_API_KEY or your OpenAI "
-            "connection binding; without OpenAI realtime credentials rkat-rpc exposes a "
+            "auth binding; without OpenAI realtime credentials rkat-rpc exposes a "
             "text-only fallback channel."
         )
     input_audio = AudioFormat.from_wire(input_format)

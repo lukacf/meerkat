@@ -1,7 +1,7 @@
 //! Phase 4c T12 contract proof — wire-type round-trips.
 //!
 //! Plan §Top-down integration tests T12 (meerkat-contracts/tests/
-//! connection_ref_wire.rs) asserts that every wire projection the SDK
+//! auth_binding_wire.rs) asserts that every wire projection the SDK
 //! codegen consumes round-trips through `serde_json`, and — under the
 //! `schema` feature — emits a non-trivial JsonSchema. Unit tests in
 //! `src/wire/connection.rs` already exercise the Rust↔wire From/Into
@@ -14,12 +14,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_contracts::wire::{
-    WireAuthError, WireAuthProfile, WireAuthStatus, WireAuthStatusDetail, WireBackendProfile,
-    WireBindingIdentity, WireConnectionRef, WireProviderBinding, WireRealmConnectionSet,
+    WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthStatus, WireAuthStatusDetail,
+    WireBackendProfile, WireBindingIdentity, WireProviderBinding, WireRealmConnectionSet,
 };
 
-fn sample_connection_ref() -> meerkat_core::ConnectionRef {
-    meerkat_core::ConnectionRef {
+fn sample_auth_binding() -> meerkat_core::AuthBindingRef {
+    meerkat_core::AuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default_openai")
             .expect("valid binding"),
@@ -62,14 +62,14 @@ fn sample_provider_binding() -> meerkat_core::ProviderBinding {
 }
 
 #[test]
-fn connection_ref_serde_roundtrip() {
-    let domain = sample_connection_ref();
-    let wire: WireConnectionRef = domain.clone().into();
+fn auth_binding_serde_roundtrip() {
+    let domain = sample_auth_binding();
+    let wire: WireAuthBindingRef = domain.clone().into();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"realm\":\"dev\""));
     assert!(s.contains("\"binding\":\"default_openai\""));
-    let back: WireConnectionRef = serde_json::from_str(&s).unwrap();
-    let redomain: meerkat_core::ConnectionRef = back.into();
+    let back: WireAuthBindingRef = serde_json::from_str(&s).unwrap();
+    let redomain: meerkat_core::AuthBindingRef = back.into();
     assert_eq!(redomain, domain);
 }
 
@@ -181,9 +181,9 @@ fn auth_status_wire_with_error_roundtrips() {
 
 #[test]
 fn auth_status_detail_wire_flattens_binding_identity() {
-    let connection_ref = sample_connection_ref();
+    let auth_binding = sample_auth_binding();
     let status = WireAuthStatusDetail {
-        identity: WireBindingIdentity::from(&connection_ref),
+        identity: WireBindingIdentity::from(&auth_binding),
         profile_id: "prod_env_key".to_string(),
         provider: "openai".to_string(),
         auth_method: "api_key".to_string(),
@@ -196,15 +196,35 @@ fn auth_status_detail_wire_flattens_binding_identity() {
     let value = serde_json::to_value(&status).unwrap();
     assert_eq!(value["realm_id"], "dev");
     assert_eq!(value["binding_id"], "default_openai");
-    assert_eq!(value["connection_ref"]["realm"], "dev");
+    assert_eq!(value["auth_binding"]["realm"], "dev");
     assert_eq!(value["profile_id"], "prod_env_key");
     assert_eq!(value["has_refresh_token"], true);
     let back: WireAuthStatusDetail = serde_json::from_value(value).unwrap();
     assert_eq!(back.identity.realm_id, status.identity.realm_id);
     assert_eq!(back.identity.binding_id, status.identity.binding_id);
-    assert_eq!(back.identity.connection_ref, status.identity.connection_ref);
+    assert_eq!(back.identity.auth_binding, status.identity.auth_binding);
     assert_eq!(back.profile_id, status.profile_id);
     assert_eq!(back.has_refresh_token, status.has_refresh_token);
+}
+
+#[test]
+fn binding_identity_accepts_legacy_connection_ref_alias() {
+    let identity: WireBindingIdentity = serde_json::from_value(serde_json::json!({
+        "realm_id": "dev",
+        "binding_id": "default_openai",
+        "connection_ref": {
+            "realm": "dev",
+            "binding": "default_openai",
+        },
+    }))
+    .expect("legacy connection_ref alias should deserialize during transition");
+
+    assert_eq!(identity.auth_binding.realm.as_str(), "dev");
+    assert_eq!(identity.auth_binding.binding.as_str(), "default_openai");
+
+    let serialized = serde_json::to_value(identity).expect("serialize identity");
+    assert!(serialized.get("connection_ref").is_none());
+    assert_eq!(serialized["auth_binding"]["realm"], "dev");
 }
 
 #[test]
@@ -223,7 +243,7 @@ fn auth_status_wire_rejects_unknown_lifecycle_state() {
     let detail = serde_json::json!({
         "realm_id": "dev",
         "binding_id": "default_openai",
-        "connection_ref": {
+        "auth_binding": {
             "realm": "dev",
             "binding": "default_openai"
         },
@@ -248,8 +268,8 @@ mod schema_emission {
     }
 
     #[test]
-    fn connection_ref_schema_has_realm_and_binding() {
-        let s = schema_json::<WireConnectionRef>();
+    fn auth_binding_schema_has_realm_and_binding() {
+        let s = schema_json::<WireAuthBindingRef>();
         let props = s.pointer("/properties").expect("schema has properties");
         assert!(props.get("realm").is_some());
         assert!(props.get("binding").is_some());
@@ -286,7 +306,7 @@ mod schema_emission {
         let props = s.pointer("/properties").expect("schema has properties");
         assert!(props.get("realm_id").is_some());
         assert!(props.get("binding_id").is_some());
-        assert!(props.get("connection_ref").is_some());
+        assert!(props.get("auth_binding").is_some());
         assert!(props.get("profile_id").is_some());
         assert!(props.get("has_refresh_token").is_some());
     }

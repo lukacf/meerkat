@@ -271,11 +271,11 @@ class MobSpawnParams:
     mob_id: str
     profile: str
     additional_instructions: Optional[list[str]] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
     auto_wire_parent: Optional[bool] = None
     backend: Optional[WireMobBackendKind] = None
     binding: Optional[WireRuntimeBinding] = None
     budget_split_policy: Optional[WireBudgetSplitPolicy] = None
-    connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
     inherited_tool_filter: Optional[WireToolFilter] = None
     initial_message: Optional[WireContentInput] = None
@@ -301,8 +301,8 @@ class MobSpawnSpecParams:
     agent_identity: str
     profile: str
     additional_instructions: Optional[list[str]] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
     backend: Optional[WireMobBackendKind] = None
-    connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
@@ -649,9 +649,9 @@ class MobTurnStartParams:
     mob_id: str
     prompt: WireContentInput
     additional_instructions: Optional[list[str]] = None
-    clear_connection_ref: Optional[bool] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
+    clear_auth_binding: Optional[bool] = None
     clear_provider_params: Optional[bool] = None
-    connection_ref: Optional[WireConnectionRef] = None
     flow_tool_overlay: Optional[dict[str, Any]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
@@ -1399,24 +1399,18 @@ class RealtimeReconnectPolicy:
     max_total_ms: int
 
 
+# Typed per-channel tool timeout policy.
 class RealtimeToolTimeoutPolicyDefault(TypedDict, total=False):
-    """Use the server's default realtime tool timeout."""
     type: Required[Literal['default']]
 
-
 class RealtimeToolTimeoutPolicyDisabled(TypedDict, total=False):
-    """Do not apply a realtime-specific timeout."""
     type: Required[Literal['disabled']]
 
-
 class RealtimeToolTimeoutPolicyFinite(TypedDict, total=False):
-    """Apply this finite realtime-specific timeout."""
     timeout_ms: Required[int]
     type: Required[Literal['finite']]
 
-
 RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite
-
 
 @dataclass
 class RealtimeChannelConfig:
@@ -1769,8 +1763,8 @@ class WireImageGenerationToolResult:
 
 
 @dataclass
-class WireConnectionRef:
-    """Wire projection of [`meerkat_core::ConnectionRef`].
+class WireAuthBindingRef:
+    """Wire projection of [`meerkat_core::AuthBindingRef`].
 
 Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
 `parse` and `Display` on both the core type and the wire projection so
@@ -1830,21 +1824,21 @@ from the `realm/get` / `GET /realm/:id` endpoints."""
 @dataclass
 class WireBindingIdentity:
     """Identifies a binding inside a realm on the wire. Shared by every
-auth REST response that returns a `{realm_id, binding_id, connection_ref}`
-trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
+auth REST response that returns a `{realm_id, binding_id, auth_binding}`
+trio. Built from a typed [`meerkat_core::AuthBindingRef`] so the three
 fields always agree; the `realm_id`/`binding_id` strings carry the
 slug form for wire consumers that key by string."""
+    auth_binding: WireAuthBindingRef
     binding_id: str
-    connection_ref: WireConnectionRef
     realm_id: str
 
 
 @dataclass
 class WireAuthProfileCreated:
     """`POST /auth/profiles` (create) success body."""
+    auth_binding: WireAuthBindingRef
     auth_method: str
     binding_id: str
-    connection_ref: WireConnectionRef
     profile_id: str
     provider: str
     realm_id: str
@@ -1854,9 +1848,9 @@ class WireAuthProfileCreated:
 @dataclass
 class WireAuthProfileDetail:
     """`GET /auth/bindings/{binding_id}` success body."""
+    auth_binding: WireAuthBindingRef
     auth_profile: dict[str, Any]
     binding_id: str
-    connection_ref: WireConnectionRef
     profile_id: str
 
 
@@ -1864,9 +1858,9 @@ class WireAuthProfileDetail:
 class WireAuthProfileCleared:
     """`DELETE /auth/bindings/{binding_id}` /
 `POST /auth/bindings/{binding_id}/logout` success body."""
+    auth_binding: WireAuthBindingRef
     binding_id: str
     cleared: bool
-    connection_ref: WireConnectionRef
     profile_id: str
     realm_id: str
 
@@ -1888,8 +1882,8 @@ The optional `state` field distinguishes the flat `POST
 /auth/login/complete` response (no `state` set) from the device-code
 ready leg (`state = "ready"`) which is part of the pending/slow_down/
 access_denied/expired/ready tagged protocol."""
+    auth_binding: WireAuthBindingRef
     binding_id: str
-    connection_ref: WireConnectionRef
     has_refresh_token: bool
     profile_id: str
     provider: str
@@ -1955,11 +1949,11 @@ class WireAuthStatus:
 class WireAuthStatusDetail:
     """`GET /auth/bindings/{binding_id}/status` success body. Richer than
 [`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
-`connection_ref` / `has_refresh_token` so the caller can key by
+`auth_binding` / `has_refresh_token` so the caller can key by
 binding directly."""
+    auth_binding: WireAuthBindingRef
     auth_method: str
     binding_id: str
-    connection_ref: WireConnectionRef
     has_refresh_token: bool
     profile_id: str
     provider: str

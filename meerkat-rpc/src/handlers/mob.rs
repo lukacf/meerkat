@@ -350,8 +350,8 @@ pub struct MobSpawnParams {
     /// The mob runtime refuses ambient credential selection; callers
     /// that spawn live model-backed members must name the realm binding
     /// that owns auth resolution.
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
 pub async fn handle_spawn(
@@ -410,8 +410,8 @@ pub async fn handle_spawn(
     if let Some(override_profile) = params.override_profile {
         spec.override_profile = Some(profile_from_wire(override_profile));
     }
-    if let Some(connection_ref) = params.connection_ref {
-        spec.connection_ref = Some(connection_ref);
+    if let Some(auth_binding) = params.auth_binding {
+        spec.auth_binding = Some(auth_binding);
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
@@ -448,8 +448,8 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    #[serde(default, alias = "connection_ref")]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
 }
 
 /// Handle `mob/spawn_many` — batch spawn multiple members.
@@ -482,7 +482,7 @@ pub async fn handle_spawn_many(
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
         spec.additional_instructions = s.additional_instructions.clone();
-        spec.connection_ref = s.connection_ref.clone();
+        spec.auth_binding = s.auth_binding.clone();
         specs.push(spec);
     }
 
@@ -1786,10 +1786,10 @@ pub struct MobTurnStartParams {
     pub provider_params: Option<serde_json::Value>,
     #[serde(default)]
     pub clear_provider_params: bool,
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
-    #[serde(default)]
-    pub clear_connection_ref: bool,
+    #[serde(default, alias = "connection_ref")]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    #[serde(default, alias = "clear_connection_ref")]
+    pub clear_auth_binding: bool,
 }
 
 /// Handle `mob/turn_start` — resolve identity to session and delegate to turn/start.
@@ -1885,14 +1885,10 @@ pub async fn handle_mob_turn_start(
             serde_json::Value::Bool(true),
         );
     }
-    insert_optional(
-        &mut turn_params,
-        "connection_ref",
-        mob_params.connection_ref,
-    );
-    if mob_params.clear_connection_ref {
+    insert_optional(&mut turn_params, "auth_binding", mob_params.auth_binding);
+    if mob_params.clear_auth_binding {
         turn_params.insert(
-            "clear_connection_ref".to_string(),
+            "clear_auth_binding".to_string(),
             serde_json::Value::Bool(true),
         );
     }
@@ -2236,7 +2232,7 @@ mod tests {
                 "peer_description": "",
                 "external_addressable": false
             },
-            "connection_ref": {
+            "auth_binding": {
                 "realm": "dev",
                 "binding": "default_anthropic"
             },
@@ -2282,12 +2278,12 @@ mod tests {
             .as_ref()
             .expect("override_profile round-trips through serde");
         assert_eq!(override_profile.model, "claude-sonnet-4-6");
-        let connection_ref = params
-            .connection_ref
+        let auth_binding = params
+            .auth_binding
             .as_ref()
-            .expect("connection_ref round-trips through serde");
-        assert_eq!(connection_ref.realm.as_str(), "dev");
-        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
+            .expect("auth_binding round-trips through serde");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
 
         // And all older fields that aren't set stay None so the additive
         // wire extension doesn't break prior callers.
@@ -2303,7 +2299,7 @@ mod tests {
         assert!(minimal_params.budget_split_policy.is_none());
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
-        assert!(minimal_params.connection_ref.is_none());
+        assert!(minimal_params.auth_binding.is_none());
     }
 
     #[test]
@@ -2377,11 +2373,11 @@ mod tests {
             "structured_output_retries": 2,
             "provider_params": { "temperature": 0.2 },
             "clear_provider_params": true,
-            "connection_ref": {
+            "auth_binding": {
                 "realm": "dev",
                 "binding": "default_openai"
             },
-            "clear_connection_ref": true
+            "clear_auth_binding": true
         });
         let params: MobTurnStartParams =
             serde_json::from_value(value).expect("known turn overrides deserialize");
@@ -2399,12 +2395,12 @@ mod tests {
         assert_eq!(params.max_tokens, Some(128));
         assert_eq!(params.structured_output_retries, Some(2));
         assert!(params.clear_provider_params);
-        assert!(params.clear_connection_ref);
+        assert!(params.clear_auth_binding);
         assert_eq!(
             params
-                .connection_ref
+                .auth_binding
                 .as_ref()
-                .expect("connection_ref")
+                .expect("auth_binding")
                 .binding
                 .as_str(),
             "default_openai"

@@ -1,23 +1,23 @@
 #![allow(clippy::manual_assert, clippy::panic)]
 
 //! Tripwire for wave-c (Section 1.5 #4). Flipped green by **C-12**
-//! (CLI consolidation to a single `ConnectionRef`-parsing call site).
+//! (CLI consolidation to a single `AuthBindingRef`-parsing call site).
 //!
 //! Invariant: exactly one function in `meerkat-cli/src/**/*.rs` is
 //! responsible for parsing user-supplied freeform text into a
-//! `ConnectionRef` (realm / binding / profile triple). The canonical
-//! name is `parse_connection_ref_user_input`. Multiple ad-hoc parsers
+//! `AuthBindingRef` (realm / binding / profile triple). The canonical
+//! name is `parse_auth_binding_user_input`. Multiple ad-hoc parsers
 //! are the very regression C-12 exists to prevent.
 //!
 //! Scope: we scan only `meerkat-cli/src/**/*.rs` for functions whose
 //! name matches the canonical parser. `split_once(':')` elsewhere in
 //! the CLI is not a violation — `main.rs:3798` parses a `TokenKey`
 //! and `mcp.rs:~193` splits an HTTP header; neither is a
-//! `ConnectionRef` parse. The scope restriction is the whole point of
+//! `AuthBindingRef` parse. The scope restriction is the whole point of
 //! this tripwire (adversarial review flaw 7).
 //!
 //! Predicted failure today: no function named
-//! `parse_connection_ref_user_input` exists; ad-hoc parsing lives
+//! `parse_auth_binding_user_input` exists; ad-hoc parsing lives
 //! inline across CLI handlers. The test asserts exactly one such
 //! function exists, so it fails today with `found 0`.
 
@@ -57,7 +57,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn exactly_one_parse_connection_ref_user_input_in_cli_src() {
+fn exactly_one_parse_auth_binding_user_input_in_cli_src() {
     let root = workspace_root();
     let cli_src = root.join("meerkat-cli/src");
     assert!(
@@ -69,10 +69,10 @@ fn exactly_one_parse_connection_ref_user_input_in_cli_src() {
     let mut files = Vec::new();
     collect_rs_files(&cli_src, &mut files);
 
-    // Count lines declaring a function named `parse_connection_ref_user_input`.
-    // Match both `fn parse_connection_ref_user_input` and
-    // `pub(...) fn parse_connection_ref_user_input`.
-    let needle = "fn parse_connection_ref_user_input";
+    // Count lines declaring a function named `parse_auth_binding_user_input`.
+    // Match both `fn parse_auth_binding_user_input` and
+    // `pub(...) fn parse_auth_binding_user_input`.
+    let needle = "fn parse_auth_binding_user_input";
     let mut hits: Vec<(PathBuf, usize)> = Vec::new();
     for path in &files {
         let Ok(body) = fs::read_to_string(path) else {
@@ -88,9 +88,9 @@ fn exactly_one_parse_connection_ref_user_input_in_cli_src() {
     assert_eq!(
         hits.len(),
         1,
-        "expected exactly one `fn parse_connection_ref_user_input` in \
+        "expected exactly one `fn parse_auth_binding_user_input` in \
          meerkat-cli/src, found {}. The CLI must have a single \
-         ConnectionRef parser at the input boundary (C-12). Hits:\n{}",
+         AuthBindingRef parser at the input boundary (C-12). Hits:\n{}",
         hits.len(),
         hits.iter()
             .map(|(p, ln)| format!("  {}:{}", p.display(), ln))

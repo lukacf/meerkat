@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::core_executor::{
 };
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunId};
 use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
@@ -13906,6 +13906,250 @@ fn batch_receipt(run_id: RunId, contributing_input_ids: Vec<InputId>) -> RunBoun
     }
 }
 
+struct RuntimeCommitAtomicityStore {
+    inner: Arc<crate::store::InMemoryRuntimeStore>,
+    fail_atomic_apply: AtomicBool,
+    fail_atomic_lifecycle_commit: AtomicBool,
+}
+
+impl RuntimeCommitAtomicityStore {
+    fn fail_atomic_apply_once(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_atomic_apply: AtomicBool::new(true),
+            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_atomic_lifecycle_commit_once(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_atomic_lifecycle_commit: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeStore for RuntimeCommitAtomicityStore {
+    async fn commit_session_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: crate::store::SessionDelta,
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        input_updates: Vec<crate::input_state::StoredInputState>,
+    ) -> Result<RunBoundaryReceipt, crate::store::RuntimeStoreError> {
+        self.inner
+            .commit_session_boundary(
+                runtime_id,
+                session_delta,
+                run_id,
+                boundary,
+                contributing_input_ids,
+                input_updates,
+            )
+            .await
+    }
+
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: crate::store::SessionDelta,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
+    async fn atomic_apply(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: Option<crate::store::SessionDelta>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<crate::input_state::StoredInputState>,
+        session_store_key: Option<SessionId>,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic atomic_apply failure".into(),
+            ));
+        }
+        self.inner
+            .atomic_apply(
+                runtime_id,
+                session_delta,
+                receipt,
+                input_updates,
+                session_store_key,
+            )
+            .await
+    }
+
+    async fn load_input_states(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError> {
+        self.inner.load_input_states(runtime_id).await
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
+        self.inner
+            .load_boundary_receipt(runtime_id, run_id, sequence)
+            .await
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+        self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn persist_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: &crate::input_state::StoredInputState,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn load_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_id: &InputId,
+    ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError> {
+        self.inner.load_input_state(runtime_id, input_id).await
+    }
+
+    async fn persist_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: RuntimeState,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner.persist_runtime_state(runtime_id, state).await
+    }
+
+    async fn load_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
+        self.inner.load_runtime_state(runtime_id).await
+    }
+
+    async fn atomic_lifecycle_commit(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        runtime_state: RuntimeState,
+        input_states: &[crate::input_state::StoredInputState],
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        if self
+            .fail_atomic_lifecycle_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic atomic_lifecycle_commit failure".into(),
+            ));
+        }
+        self.inner
+            .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+            .await
+    }
+}
+
+async fn persistent_staged_run_driver(
+    store: Arc<dyn RuntimeStore>,
+) -> (SharedDriver, LogicalRuntimeId, RunId, InputId) {
+    let runtime_id = LogicalRuntimeId::new("persistent-commit-atomicity");
+    let mut driver = PersistentRuntimeDriver::new(runtime_id.clone(), store, memory_blob_store());
+    let input = make_prompt("persistent terminalization");
+    let input_id = input.id().clone();
+    driver
+        .accept_input(input)
+        .await
+        .expect("persistent input should be accepted");
+
+    let run_id = RunId::new();
+    driver.contract_force_runtime_authority(
+        RuntimeState::Running,
+        Some(run_id.clone()),
+        Some(RuntimeState::Idle),
+    );
+    driver
+        .stage_input(&input_id, &run_id)
+        .expect("input should stage for the run");
+
+    (
+        Arc::new(Mutex::new(DriverEntry::Persistent(driver))),
+        runtime_id,
+        run_id,
+        input_id,
+    )
+}
+
+fn assert_live_run_remains_staged(
+    entry: &DriverEntry,
+    run_id: &RunId,
+    input_id: &InputId,
+    context: &str,
+) {
+    assert_eq!(
+        entry.runtime_state(),
+        RuntimeState::Running,
+        "{context}: runtime must remain running"
+    );
+    assert_eq!(
+        entry.current_run_id(),
+        Some(run_id.clone()),
+        "{context}: active run id must remain bound"
+    );
+    assert_eq!(
+        entry.input_phase(input_id),
+        Some(crate::input_state::InputLifecycleState::Staged),
+        "{context}: contributor must remain staged"
+    );
+    assert_eq!(
+        entry.input_terminal_outcome(input_id),
+        None,
+        "{context}: contributor must not be consumed or otherwise terminal"
+    );
+
+    let authority = entry.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        auth.state.lifecycle_phase,
+        mm_dsl::MeerkatPhase::Running,
+        "{context}: DSL lifecycle must remain Running"
+    );
+    assert_eq!(
+        auth.state.current_run_id.as_ref().map(|id| id.0.as_str()),
+        Some(run_id.to_string().as_str()),
+        "{context}: DSL current_run_id must remain bound"
+    );
+    assert_eq!(
+        auth.state.turn_phase,
+        mm_dsl::TurnPhase::Ready,
+        "{context}: DSL turn_phase must not become terminal"
+    );
+    assert_eq!(
+        auth.state.terminal_outcome, None,
+        "{context}: DSL terminal_outcome must not be set"
+    );
+    assert_eq!(
+        auth.state.input_phases.get(&input_id.to_string()),
+        Some(&mm_dsl::InputPhase::Staged),
+        "{context}: DSL input phase must remain staged"
+    );
+}
+
 async fn assert_commit_rejection_preserved_staged_batch(
     driver: &SharedDriver,
     run_id: &RunId,
@@ -13973,6 +14217,152 @@ async fn legacy_run_commit_rejects_reordered_receipt_contributors_before_mutatio
         "receipt contributors must exactly match consumed input ids"
     );
     assert_commit_rejection_preserved_staged_batch(&driver, &run_id, &staged_ids).await;
+}
+
+#[tokio::test]
+async fn persistent_commit_atomic_apply_failure_preserves_pre_terminal_state() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
+    );
+    let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
+
+    let err = commit_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        vec![input_id.clone()],
+        batch_receipt(run_id.clone(), vec![input_id.clone()]),
+        Some(b"session-data".to_vec()),
+    )
+    .await
+    .expect_err("synthetic atomic_apply failure should reject the commit");
+    assert!(
+        err.to_string().contains("synthetic atomic_apply failure"),
+        "unexpected commit error: {err}"
+    );
+
+    let entry = driver.lock().await;
+    assert_live_run_remains_staged(&entry, &run_id, &input_id, "failed boundary commit");
+    drop(entry);
+
+    assert!(
+        inner
+            .load_boundary_receipt(&runtime_id, &run_id, 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "failed boundary commit must not persist a receipt"
+    );
+    assert_eq!(
+        inner.load_session_snapshot(&runtime_id).await.unwrap(),
+        None,
+        "failed boundary commit must not persist a session snapshot"
+    );
+}
+
+#[tokio::test]
+async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = inner.clone();
+    let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
+    let session_snapshot = b"session-data".to_vec();
+
+    commit_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        vec![input_id.clone()],
+        batch_receipt(run_id.clone(), vec![input_id.clone()]),
+        Some(session_snapshot.clone()),
+    )
+    .await
+    .expect("persistent commit should succeed");
+
+    assert!(
+        inner
+            .load_boundary_receipt(&runtime_id, &run_id, 0)
+            .await
+            .unwrap()
+            .is_some(),
+        "successful commit must persist the boundary receipt"
+    );
+    assert_eq!(
+        inner.load_session_snapshot(&runtime_id).await.unwrap(),
+        Some(session_snapshot),
+        "successful commit must persist the session snapshot"
+    );
+
+    let entry = driver.lock().await;
+    assert_eq!(entry.runtime_state(), RuntimeState::Idle);
+    assert_eq!(entry.current_run_id(), None);
+    assert_eq!(
+        entry.input_phase(&input_id),
+        Some(crate::input_state::InputLifecycleState::Consumed)
+    );
+    assert_eq!(
+        entry.input_terminal_outcome(&input_id),
+        Some(crate::input_state::InputTerminalOutcome::Consumed)
+    );
+    let input_state = entry
+        .as_driver()
+        .input_state(&input_id)
+        .expect("committed input state should remain available");
+    assert_eq!(
+        input_state
+            .history
+            .iter()
+            .filter(|event| event.to == crate::input_state::InputLifecycleState::Consumed)
+            .count(),
+        1,
+        "successful commit must consume the contributor exactly once"
+    );
+
+    let authority = entry.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(auth.state.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(auth.state.current_run_id, None);
+    assert_eq!(auth.state.turn_phase, mm_dsl::TurnPhase::Completed);
+    assert_eq!(
+        auth.state.terminal_outcome,
+        Some(mm_dsl::TurnTerminalOutcome::Completed)
+    );
+    assert_eq!(
+        auth.state.input_phases.get(&input_id.to_string()),
+        Some(&mm_dsl::InputPhase::Consumed)
+    );
+}
+
+#[tokio::test]
+async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_state() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        RuntimeCommitAtomicityStore::fail_atomic_lifecycle_commit_once(Arc::clone(&inner)),
+    );
+    let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
+
+    let err = fail_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        CoreApplyFailureCause::executor_internal("synthetic run failure"),
+    )
+    .await
+    .expect_err("synthetic lifecycle commit failure should reject the failed-run persist");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected failed-run error: {err}"
+    );
+
+    let entry = driver.lock().await;
+    assert_live_run_remains_staged(&entry, &run_id, &input_id, "failed run persist");
+    drop(entry);
+
+    assert_ne!(
+        inner.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Idle),
+        "failed run persist must not durably commit the returned runtime state"
+    );
 }
 
 // ---------------------------------------------------------------

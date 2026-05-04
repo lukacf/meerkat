@@ -77,6 +77,14 @@ impl PersistentRuntimeDriver {
         &self.inner
     }
 
+    pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
+        self.inner.rollback_snapshot()
+    }
+
+    pub(crate) fn restore_rollback_snapshot(&mut self, snapshot: EphemeralDriverRollbackSnapshot) {
+        self.inner.restore_rollback_snapshot(snapshot);
+    }
+
     /// Get the logical runtime ID for this driver.
     pub fn runtime_id(&self) -> &LogicalRuntimeId {
         &self.runtime_id

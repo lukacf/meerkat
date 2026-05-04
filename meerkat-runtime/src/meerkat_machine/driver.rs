@@ -105,6 +105,11 @@ pub(crate) enum PreparedDestroyLifecycle {
     Persistent(EphemeralDriverRollbackSnapshot),
 }
 
+enum DriverRollbackSnapshot {
+    Ephemeral(EphemeralDriverRollbackSnapshot),
+    Persistent(EphemeralDriverRollbackSnapshot),
+}
+
 pub(crate) struct PreparedDestroy {
     pub(crate) report: DestroyReport,
     pub(crate) lifecycle: PreparedDestroyLifecycle,
@@ -344,6 +349,25 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.ledger(),
             DriverEntry::Persistent(d) => d.inner_ref().ledger(),
+        }
+    }
+
+    fn rollback_snapshot(&self) -> DriverRollbackSnapshot {
+        match self {
+            DriverEntry::Ephemeral(d) => DriverRollbackSnapshot::Ephemeral(d.rollback_snapshot()),
+            DriverEntry::Persistent(d) => DriverRollbackSnapshot::Persistent(d.rollback_snapshot()),
+        }
+    }
+
+    fn restore_rollback_snapshot(&mut self, checkpoint: DriverRollbackSnapshot) {
+        match (self, checkpoint) {
+            (DriverEntry::Ephemeral(d), DriverRollbackSnapshot::Ephemeral(checkpoint)) => {
+                d.restore_rollback_snapshot(checkpoint);
+            }
+            (DriverEntry::Persistent(d), DriverRollbackSnapshot::Persistent(checkpoint)) => {
+                d.restore_rollback_snapshot(checkpoint);
+            }
+            _ => {}
         }
     }
 
@@ -2455,42 +2479,60 @@ pub(crate) async fn commit_runtime_loop_run(
     let commit_input_id = consumed_input_ids.first().cloned();
     machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
+    machine_validate_active_run(&driver, &run_id, next_phase).map_err(|err| {
+        RuntimeLoopRunCommitError::Rejected(RuntimeDriverError::Internal(err.to_string()))
+    })?;
     let completed_run_id = run_id.clone();
-    machine_apply_turn_run_completed(&mut driver, &completed_run_id)
-        .map_err(RuntimeLoopRunCommitError::Rejected)?;
-    let disposition = match commit_input_id.as_ref() {
-        Some(input_id) => RunReturnDisposition::Commit { input_id },
-        None => RunReturnDisposition::Rollback,
-    };
-    machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition, next_phase)
-        .map_err(|err| {
-            RuntimeLoopRunCommitError::Rejected(RuntimeDriverError::Internal(format!(
-                "failed to apply runtime return projection after completion: {err}"
-            )))
-        })?;
+
+    let boundary_checkpoint = driver.rollback_snapshot();
     if let Err(err) = driver
         .machine_realize_boundary_applied(run_id.clone(), receipt, session_snapshot)
         .await
     {
-        let _ = driver.rollback_staged(&consumed_input_ids);
+        driver.restore_rollback_snapshot(boundary_checkpoint);
         return Err(RuntimeLoopRunCommitError::BoundaryCommit(
             RuntimeDriverError::Internal(format!("runtime boundary commit failed: {err}")),
         ));
     }
 
-    machine_validate_run_completed(&driver, &consumed_input_ids).map_err(|err| {
-        RuntimeLoopRunCommitError::PostBoundaryValidation(RuntimeDriverError::Internal(format!(
-            "runtime completion validation failed after boundary commit: {err}"
-        )))
-    })?;
-    driver
+    let terminal_checkpoint = driver.rollback_snapshot();
+    if let Err(err) = machine_validate_run_completed(&driver, &consumed_input_ids) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::PostBoundaryValidation(
+            RuntimeDriverError::Internal(format!(
+                "runtime completion validation failed after boundary commit: {err}"
+            )),
+        ));
+    }
+    if let Err(err) = machine_apply_turn_run_completed(&mut driver, &completed_run_id) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(err));
+    }
+    let disposition = match commit_input_id.as_ref() {
+        Some(input_id) => RunReturnDisposition::Commit { input_id },
+        None => RunReturnDisposition::Rollback,
+    };
+    if let Err(err) =
+        machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition, next_phase)
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(format!(
+                "failed to apply runtime return projection after completion: {err}"
+            )),
+        ));
+    }
+    if let Err(err) = driver
         .machine_realize_run_completed(completed_run_id.clone(), consumed_input_ids)
         .await
-        .map_err(|err| {
-            RuntimeLoopRunCommitError::TerminalSnapshot(RuntimeDriverError::Internal(format!(
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::TerminalSnapshot(
+            RuntimeDriverError::Internal(format!(
                 "failed to persist runtime completion snapshot: {err}"
-            )))
-        })?;
+            )),
+        ));
+    }
 
     Ok(())
 }
@@ -2547,27 +2589,32 @@ async fn fail_runtime_loop_run_inner(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    machine_apply_turn_run_failed(
+    let terminal_checkpoint = driver.rollback_snapshot();
+    if let Err(err) = machine_apply_turn_run_failed(
         &mut driver,
         &failed_run_id,
         &terminal_error,
         terminal_cause_kind,
         runtime_apply_failure.as_ref(),
-    )
-    .map_err(RuntimeLoopRunFailError::Rejected)?;
+    ) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::Rejected(err));
+    }
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
-    machine_apply_run_return_projection(
+    if let Err(err) = machine_apply_run_return_projection(
         &mut driver,
         &failed_run_id,
         RunReturnDisposition::Failed,
         next_phase,
-    )
-    .map_err(|err| {
-        RuntimeLoopRunFailError::Rejected(RuntimeDriverError::Internal(format!(
-            "failed to apply runtime return projection after failure: {err}"
-        )))
-    })?;
-    driver
+    ) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::Rejected(
+            RuntimeDriverError::Internal(format!(
+                "failed to apply runtime return projection after failure: {err}"
+            )),
+        ));
+    }
+    if let Err(run_err) = driver
         .machine_realize_run_failed(
             failed_run_id.clone(),
             staged_input_ids,
@@ -2577,11 +2624,13 @@ async fn fail_runtime_loop_run_inner(
             true,
         )
         .await
-        .map_err(|run_err| {
-            RuntimeLoopRunFailError::TerminalSnapshot(RuntimeDriverError::Internal(format!(
-                "failed to record run-failed event: {run_err}"
-            )))
-        })
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::TerminalSnapshot(
+            RuntimeDriverError::Internal(format!("failed to record run-failed event: {run_err}")),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

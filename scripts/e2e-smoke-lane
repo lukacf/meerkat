@@ -75,11 +75,45 @@ buildbuddy_e2e_artifacts_bin() {
   return 1
 }
 
+buildbuddy_wasm_pack_bin() {
+  local output_base candidate
+  output_base="$(buildbuddy_output_base)"
+  for candidate in \
+    "${output_base}/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/external/wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/execroot/_main/external/wasm_pack_darwin_arm64/wasm-pack"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  candidate="$(
+    find -L "${output_base}" \
+      -type f \
+      -name wasm-pack \
+      -path '*/wasm_pack_darwin_arm64/*' \
+      -perm -111 \
+      2>/dev/null |
+      head -n 1
+  )"
+  if [[ -n "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  return 1
+}
+
 e2e_artifacts_cmd=("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts --)
 if buildbuddy_enabled; then
   if artifact_bin="$(buildbuddy_e2e_artifacts_bin)"; then
     e2e_artifacts_cmd=("${artifact_bin}")
     export MEERKAT_E2E_BAZEL_BIN_DIR="$(cd "$(dirname "${artifact_bin}")/../.." && pwd)"
+    if [[ -z "${RKAT_WASM_PACK_BIN:-}" && -z "${WASM_PACK:-}" ]] &&
+      wasm_pack_bin="$(buildbuddy_wasm_pack_bin)"; then
+      export RKAT_WASM_PACK_BIN="${wasm_pack_bin}"
+      export WASM_PACK="${wasm_pack_bin}"
+    fi
   else
     echo "error: BuildBuddy e2e-smoke foundation did not produce e2e_artifacts_bin" >&2
     echo "Run MEERKAT_BUILDBUDDY=1 make e2e-smoke so scripts/buildbuddy-dev builds //tests/integration:e2e_artifacts_bin first." >&2

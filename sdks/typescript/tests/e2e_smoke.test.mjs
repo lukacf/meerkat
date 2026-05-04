@@ -598,13 +598,13 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
   if (includeScenario(59)) {
     it(
       "Scenario 59: realtime channel session exchange through the packaged SDK",
-      { skip: !hasAnthropicKey() },
+      { skip: !hasOpenAIKey() },
       async () => {
       const scenario = "Scenario 59";
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient({ realmId: "env_default" }),
+        connectClient({ realmId: `ts-realtime-59-${Date.now()}-${process.pid}` }),
       );
 
       const session = await withStepTimeout(

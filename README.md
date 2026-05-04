@@ -27,40 +27,75 @@
 
 Meerkat is a **library-first, modular agent harness** -- composable Rust crates that handle the hard parts of building agentic systems: state machines, retries, budgets, streaming, tool execution, MCP integration, and multi-agent coordination.
 
-It is designed to be **stable** (deterministic state machine, typed errors, compile-time guarantees) and **fast** (<10ms cold start, ~20MB memory, single 5MB binary).
+That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
-The library comes first; surfaces come second. The CLI, REST API, JSON-RPC server, MCP server, Python SDK, and TypeScript SDK are all thin layers over the same engine. Pick the entry point that fits your architecture.
+It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Critical lifecycle flows are specified as typed machines and checked with TLA+ where it matters, which keeps cancellation, auth freshness, schedules, and realtime attachment predictable across surfaces.
+
+The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
 ### How it compares
 
 | | Meerkat | Claude Code / Codex CLI / Gemini CLI |
 |---|---|---|
-| **Design** | Library-first -- embed in your service | CLI-first -- interactive terminal tool |
-| **Providers** | Anthropic, OpenAI, Gemini + self-hosted (Ollama, vLLM, LM Studio) | Single provider |
-| **Modularity** | Opt-in subsystems, from bare agent loop to full harness | All-or-nothing |
-| **Surfaces** | CLI, REST, JSON-RPC, MCP server, Rust/Python/TS SDKs | CLI + SDK |
-| **Agent infra** | Hooks, skills, semantic memory across sessions | File-based context |
-| **Multi-agent** | Mob members, peer-to-peer comms, mob orchestration | Single agent |
-| **Portable deployment** | Signed `.mobpack` artifacts (`pack/deploy/embed/compile`) + WASM web bundles (`mob web build`) | No equivalent portable team artifact flow |
-| **Deployment** | Single 5MB binary, <10ms startup, ~20MB RAM | Runtime + dependencies |
+| **Design** | Library-first runtime you can embed, script, host, or ship in the browser | CLI-first interactive terminal tool |
+| **State model** | Realm-scoped sessions, config, credentials, blobs, schedules, and mobs | Tool-local or app-local state |
+| **Providers** | Anthropic, OpenAI, Gemini, and self-hosted OpenAI-compatible models | Usually one provider family |
+| **Auth** | Env fast path, realm bindings, OAuth/device flows, TokenStore, cloud IAM, and per-session/member overrides | Usually provider key per process |
+| **Surfaces** | CLI, mini CLI, REST, JSON-RPC, mini RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
+| **Agent infra** | Hooks, skills, memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
+| **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
+| **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
+| **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |
+| **Distribution** | Release binaries, Homebrew tap, SDK auto-runtime, mini binaries, crates, PyPI, npm | Runtime plus dependencies |
 
-Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, and anywhere you need programmatic control over the agent lifecycle.
+Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, browser-delivered agents, and applications that need programmatic control over lifecycle, credentials, tools, and runtime events.
 
 ## Quick Start
 
 ```bash
 cargo install rkat
-export ANTHROPIC_API_KEY=sk-...
+export RKAT_ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+`RKAT_ANTHROPIC_API_KEY`, `RKAT_OPENAI_API_KEY`, and `RKAT_GEMINI_API_KEY` take precedence over the provider-native names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`). You can also install from the Homebrew tap, use release binaries, or let the Python and TypeScript SDKs auto-resolve `rkat-rpc`:
+
+```bash
+brew install lukacf/meerkat/rkat
+pip install meerkat-sdk
+npm install @rkat/sdk
+npm install @rkat/web
+```
+
+Release artifacts include `rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
 
 **Run a one-off prompt** with any provider:
 
 ```bash
 rkat run "What is the capital of France?"
-rkat run --model gpt-5.4 "Explain async/await"
+rkat run --model gpt-5.5 "Explain async/await"
+rkat-mini "Summarize this repository"
 ```
 
-**Give it tools and let it work.** Enable shell access and mob orchestration with the `full` tool preset, then let the agent coordinate delegated work through mob members and flows:
+**Share state across processes** with an explicit realm:
+
+```bash
+rkat --realm team-alpha run "Draft a release note"
+rkat-rpc --realm team-alpha
+```
+
+Same realm means shared sessions, config, backend, credentials, schedules, blobs, and mobs. Different realms stay isolated.
+
+**Use persisted credentials** when env vars are not enough:
+
+```bash
+rkat auth login openai
+rkat auth profiles --realm dev
+rkat run --model gpt-5.5 --connection-ref dev:openai_oauth "Summarize this pull request"
+```
+
+Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys. Bindings are provider-checked against the selected model, so an OpenAI binding should be paired with an OpenAI model, an Anthropic binding with an Anthropic model, and so on.
+
+**Give it tools and let it work.** Enable shell access, MCP tools, schedules, comms, and mob orchestration with the `full` tool preset:
 
 ```bash
 rkat run --tools full \
@@ -71,104 +106,94 @@ rkat run --tools full \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-sonnet-4-6 --tools workspace \
+rkat run --model claude-opus-4-7 --tools workspace \
   --schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
 ```
 
-The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. All three examples use the same binary; provider is resolved from the model registry.
+The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. Provider selection comes from the model catalog, so switching models does not require a code change.
 
-Image-capable sessions can also generate assistant-owned images through the built-in `generate_image` tool. OpenAI and Gemini image targets are provider-profile driven; generated bytes are stored as blobs and surfaced in history as typed assistant image blocks across CLI, RPC, REST, MCP, and the Python/TypeScript SDKs.
+**Generate images** from a runtime-backed session:
+
+```bash
+rkat run --allow-tool generate_image \
+  "Use generate_image to create a square PNG icon for a release dashboard. Return the blob id."
+rkat blob get <blob_id> --output release-dashboard.png
+```
+
+The active chat model does not need to be an image model. Image requests route through configured image provider profiles, and generated bytes are stored as blobs that CLI, REST, RPC, MCP, and SDK clients can fetch.
 
 ### Self-hosted models
 
-Run local models through any OpenAI-compatible server (Ollama, vLLM, LM Studio). Add to `.rkat/config.toml`:
+Run local models through any OpenAI-compatible server (Ollama, vLLM, LM Studio). Add model aliases to your active realm config:
 
 ```toml
 [self_hosted.servers.local]
 transport = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
 api_style = "chat_completions"
-# Optional: bearer_token_env = "OLLAMA_TOKEN"
+# Optional: bearer_token_env = "LOCAL_LLM_TOKEN"
 
 [self_hosted.models.gemma-4-31b]
 server = "local"
 remote_model = "gemma4:31b"
 display_name = "Gemma 4 31B"
 family = "gemma-4"
+tier = "supported"
 context_window = 256000
+max_output_tokens = 8192
 vision = true
+image_tool_results = true
+inline_video = false
+supports_temperature = true
+supports_thinking = true
+supports_reasoning = true
+call_timeout_secs = 600
 ```
 
 Then use it like any other model:
 
 ```bash
 rkat run -m gemma-4-31b "Explain the code in main.rs"
-rkat doctor  # validate server connectivity
+rkat doctor
 ```
 
-Credential resolution for self-hosted LLM calls and `rkat doctor` probes uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. A configured selected realm without a usable self-hosted binding fails closed instead of falling back to legacy credentials. In the legacy compatibility path, `bearer_token` wins over `bearer_token_env`, a configured but missing env var fails closed, and a server with neither remains authless for local deployments.
-
-Self-hosted models work across all surfaces -- CLI, REST, RPC, MCP, and SDKs. See the [self-hosted Gemma 4 guide](https://docs.rkat.ai/guides/self-hosted-gemma4) for Ollama, vLLM, and LM Studio recipes.
+Self-hosted credential resolution uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. Legacy compatibility is intentionally fail-closed for credentials: if a legacy server defines bearer material but no usable connection/auth binding is configured, Meerkat refuses to synthesize bearer auth; a selected realm without a self-hosted binding also fails instead of falling back to legacy config.
 
 ## Testing
 
-Meerkat’s repo-wide test lanes are intentionally named by execution model:
-
-- `cargo unit` for unit tests
-- `cargo int` for integration-fast tests
-- `cargo e2e-fast` for deterministic end-to-end coverage
-- `cargo e2e-build` for build-composition end-to-end coverage
-- `cargo e2e-system` for real binaries / real local resources, but no live providers
-- `cargo e2e-live` for targeted live-provider integration checks
-- `cargo e2e-smoke` for compound live-provider smoke scenarios
-
-The authoritative end-to-end harness lives in `tests/integration/src/e2e_lanes.rs`.
-Even when a scenario internally shells out to Python, Node, or browser tooling,
-the supported top-level entrypoint is still one of the Cargo lane commands
-above, or a filtered `cargo nextest run -p meerkat-integration-tests --test ...`
-invocation.
-
-Inside the repo, prefer the wrapped form:
-
-```bash
-./scripts/repo-cargo unit
-./scripts/repo-cargo int
-./scripts/repo-cargo e2e-fast
-./scripts/repo-cargo e2e-build
-./scripts/repo-cargo e2e-system
-./scripts/repo-cargo e2e-live
-./scripts/repo-cargo e2e-smoke
-```
-
-Use `make rust-lane-doctor` when changing build/test entrypoints. It verifies
-that wrapped Cargo caches stay outside the repository, same-checkout agents can
-select distinct target dirs, and the fast test profile still excludes dedicated
-e2e wrappers. `scripts/repo-cargo` uses `RUST_LANE_ID` first, then
-`MEERKAT_AGENT_LANE`, then `CODEX_AGENT_ID`; without any of those it derives a
-lane from the current worktree path.
-
-For local multi-agent edits, use `make agent-gate` or `scripts/agent-gate`.
-It derives build-relevant changed files and runs a package-scoped Cargo clippy
-+ nextest gate, escalating only global Rust lane changes to a workspace Cargo
-gate.
-
-For normal local development, keep using the Make targets:
+Meerkat's repo-wide lanes are exposed through Make:
 
 ```bash
 make build
 make check
 make lint
 make test
+make agent-gate
 ```
 
-Use `--dry-run` to inspect the selected packages or paths before paying the
-build cost. The Cargo gates accept `--staged`, `--committed`, and
-`--working-tree` for hook and CI routing. When using Make, pass gate flags with
-`AGENT_GATE_ARGS='--dry-run --working-tree'`.
+Use `make agent-gate` for local multi-agent edits. It derives build-relevant changed files and runs the scoped clippy + nextest gate, escalating only when a change affects global Rust lanes.
 
-Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider lanes stay opt-in.
+Deterministic end-to-end lanes are also available through Make:
+
+```bash
+make e2e-fast
+make e2e-system
+```
+
+Live-provider lanes stay opt-in:
+
+```bash
+make e2e-live
+make e2e-smoke
+```
+
+When you need targeted Cargo work inside the repo, use the wrapper:
+
+```bash
+./scripts/repo-cargo test -p meerkat-tools --test schema_snapshot
+```
 
 ## Development Setup
 
@@ -178,73 +203,107 @@ Install the Rust toolchain required by the default local build lanes:
 make install-build-deps
 ```
 
-The installer reads `rust-toolchain.toml`, installs the pinned Rust toolchain
-with `rustfmt` and `clippy` through `rustup`. If your shell does not already
-include Cargo's bin directory, run:
+Release discipline includes generated contract freshness and package-version checks:
 
 ```bash
-source "$HOME/.cargo/env"
+make verify-version-parity
+make verify-schema-freshness
+make release-preflight
 ```
+
+BuildBuddy is opt-in for local development:
+
+```bash
+MEERKAT_BUILDBUDDY=1 make test
+MEERKAT_BUILDBUDDY=1 make agent-gate
+```
+
+Run `make buildbuddy-doctor` if remote build setup looks suspicious.
 
 ## Capabilities
 
-**Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is resolved from the built-in model catalog or configured self-hosted aliases -- switch models with a flag, not a code change.
+**Providers and streaming.** Anthropic, OpenAI, Gemini, and self-hosted models share one streaming interface. The model catalog carries defaults, capability gates, parameter schemas, provider-native web-search behavior, image defaults, and provider/model mismatch checks.
 
-**Self-hosted models.** Run local models through Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Self-hosted models are first-class -- once configured, they work identically to cloud models across all surfaces (CLI, REST, RPC, MCP, SDKs). `rkat doctor` validates server connectivity and model availability.
+**Sessions, realms, and auth.** Sessions are realm-scoped and resumable across surfaces. Env vars are the fast path; realm bindings add backend profiles, auth profiles, `connection_ref`, OAuth/device flows, TokenStore persistence, cloud IAM, external resolvers, auth freshness, and per-member overrides.
 
-**Sessions and memory.** Persistent sessions (SQLite or JSONL), automatic context compaction for long conversations, and semantic memory with HNSW indexing for recall across sessions.
+**Tools and integration.** Custom dispatchers, builtins, shell, scheduler tools, comms, skills, memory, MCP servers, and structured output compose into one tool surface. Applications can discover deferred tools with `tool_catalog_search` and `tool_catalog_load`, live-add or reload MCP servers, and scope tool visibility by profile, session, or turn.
 
-**Tools and integration.** Custom tool dispatchers, native MCP client for connecting external tool servers, JSON-schema-validated structured output, and built-in tools for task management, utility edits like `apply_patch`, shell access, and more. Live tool scoping lets you add, remove, or filter tools mid-session without restarting the agent.
+**Scheduling.** Durable schedules run sessions or mobs from once, interval, or calendar triggers. Occurrences survive process restarts and carry overlap, misfire, and missing-target policy. Host apps use REST/RPC schedule APIs; agents use the `meerkat_schedule_*` tools.
 
-**Hooks and skills.** Eight hook points (pre/post LLM, pre/post tool, turn boundary, run lifecycle) with observe, rewrite, and guardrail semantics. Skills are composable knowledge packs that inject context and capabilities.
+**Multi-agent mobs.** Mobs are reusable teams built from definitions, profiles, profile stores, budgets, scoped tools, credentials, task boards, flows, and signed peer-to-peer wiring. Prefabs are no longer the model; define the team you need and launch members through the current `mob_*` tools and host APIs.
 
-**Multi-agent.** Mob members run as session-backed workers with budget and tool isolation. Peer-to-peer inter-agent messaging uses cryptographic identity, while mobs provide team orchestration, shared task boards, and DAG-based flows. Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
+**Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime` and the runtime brings the OpenAI Realtime transport up automatically for that session or mob member. The session remains the canonical source of truth, provider callbacks are fenced by authority-epoch tokens, and model swaps flow through the guarded live-topology reconfigure path. See the [realtime guide](https://docs.rkat.ai/guides/realtime).
+**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime-1.5` and the runtime attaches the OpenAI Realtime transport automatically. Surfaces expose attachment status, `realtime/open_info`, and SDK helpers; JSON-RPC hosts need the realtime WebSocket listener enabled for audio bootstrap. `gpt-realtime` remains a compatibility alias.
 
-**Packaging and targets.** Build once as a signed `.mobpack`, then choose runtime target: direct deploy, embedded native binary, optimized compile, or browser WASM bundle.
+**Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 
-**Modularity.** Every subsystem is opt-in via Cargo features. Default: three providers and nothing else. Add `session-store`, `mcp`, `comms`, or `skills` as needed. Disabled features return typed errors, not panics. See the [capability matrix](https://docs.rkat.ai/reference/capability-matrix) for the full feature map.
+**Web/WASM.** `@rkat/web` wraps `MeerkatRuntime`, browser sessions and mobs, typed event subscriptions, JS tools, structural `connectionRef`, provider proxy support, and host-page auth resolvers. Mobpacks can also be built into browser bundles with `rkat mob web build`.
+
+**Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`.
+
+**Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-mini` and `rkat-rpc-mini` are separate slim release surfaces.
 
 ## Surfaces
 
-All surfaces share the same `SessionService` lifecycle and `AgentFactory` construction pipeline.
+All surfaces share the same session lifecycle and runtime-backed contracts.
 
 | Surface | Use Case | Docs |
 |---------|----------|------|
 | **Rust crate** | Embed agents in your Rust application | [SDK guide](https://docs.rkat.ai/rust/overview) |
-| **Python SDK** | Script agents from Python | [Python SDK](https://docs.rkat.ai/sdks/python/overview) |
-| **TypeScript SDK** | Script agents from Node.js | [TypeScript SDK](https://docs.rkat.ai/sdks/typescript/overview) |
+| **Python SDK** | Script agents from Python; auto-resolves `rkat-rpc` | [Python SDK](https://docs.rkat.ai/sdks/python/overview) |
+| **TypeScript SDK** | Script agents from Node.js; auto-resolves `rkat-rpc` | [TypeScript SDK](https://docs.rkat.ai/sdks/typescript/overview) |
+| **Web SDK (`@rkat/web`)** | Browser/WASM sessions, mobs, subscriptions, JS tools, provider proxy/auth resolver | [Web/WASM](https://docs.rkat.ai/examples/wasm) |
 | **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
+| **Mini CLI (`rkat-mini`)** | Small task-first binary for run/session/config/blob/skill/models/capabilities/doctor | [Mini surfaces](https://docs.rkat.ai/guides/mini-surfaces) |
 | **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
-| **JSON-RPC** | Stateful IDE/desktop integration over stdio | [RPC guide](https://docs.rkat.ai/api/rpc) |
-| **MCP Server** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
+| **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional realtime WebSocket bootstrap | [RPC guide](https://docs.rkat.ai/api/rpc) |
+| **Mini RPC (`rkat-rpc-mini`)** | Small JSON-RPC runtime for core session/config/catalog/capabilities methods | [Mini surfaces](https://docs.rkat.ai/guides/mini-surfaces) |
+| **MCP Server (`rkat-mcp`)** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
 
 ## Architecture
 
 ```mermaid
 graph TD
     subgraph surfaces["Surfaces"]
-        CLI["rkat CLI"]
+        CLI["rkat / rkat-mini"]
         REST["REST API"]
-        RPC["JSON-RPC"]
+        RPC["rkat-rpc / rkat-rpc-mini"]
         MCPS["MCP Server"]
-        RUST["Rust SDK"]
+        RUST["Rust crate"]
         PY["Python SDK"]
         TS["TypeScript SDK"]
+        WEB["@rkat/web + WASM"]
     end
+
+    RUNTIME["Shared Meerkat runtime"]
+
+    CLI --> RUNTIME
+    REST --> RUNTIME
+    RPC --> RUNTIME
+    MCPS --> RUNTIME
+    RUST --> RUNTIME
+    PY -->|via rkat-rpc| RUNTIME
+    TS -->|via rkat-rpc| RUNTIME
+    WEB -->|WASM runtime| RUNTIME
+
+    subgraph services["Runtime services"]
+        AUTH["Auth & bindings"]
+        SCHEDULE["Schedules & occurrences"]
+        MOB["Mobs & comms"]
+        REALTIME["Realtime attachment"]
+        TOOLING["Tool visibility"]
+    end
+
+    RUNTIME --> AUTH
+    RUNTIME --> SCHEDULE
+    RUNTIME --> MOB
+    RUNTIME --> REALTIME
+    RUNTIME --> TOOLING
 
     SS["SessionService"]
     AF["AgentFactory"]
-
-    CLI --> SS
-    REST --> SS
-    RPC --> SS
-    MCPS --> SS
-    RUST --> SS
-    PY -->|via rkat-rpc| SS
-    TS -->|via rkat-rpc| SS
-
+    RUNTIME --> SS
     SS --> AF
 
     subgraph core["meerkat-core  (no I/O deps)"]
@@ -253,33 +312,32 @@ graph TD
     end
 
     AF --> AGENT
+    AF --> TRAITS
 
-    CLIENT["Providers\nAnthropic / OpenAI / Gemini"]
-    TOOLS["Tools\nRegistry / MCP / Built-ins"]
-    SESSION["Sessions\nPersistence / Compaction"]
-    MEMORY["Memory\nHNSW semantic index"]
-    COMMS["Comms\nP2P messaging"]
-    HOOKS["Hooks\nObserve / Rewrite / Guard"]
+    CLIENT["Providers<br/>Anthropic / OpenAI / Gemini / self-hosted"]
+    TOOLS["Tools<br/>Builtins / MCP / custom"]
+    SESSION["Persistence<br/>Sessions / blobs / artifacts"]
+    MEMORY["Memory<br/>HNSW semantic index"]
+    HOOKS["Hooks + skills<br/>Observe / rewrite / guard"]
 
     AGENT --> CLIENT
     AGENT --> TOOLS
     AGENT --> SESSION
     AGENT --> MEMORY
-    AGENT --> COMMS
     AGENT --> HOOKS
 ```
 
-See the [architecture reference](https://docs.rkat.ai/reference/architecture) for the full crate structure, state machine diagram, and extension points.
+See the [architecture reference](https://docs.rkat.ai/reference/architecture) for crate structure, state machine details, and extension points.
 
 ## Examples
 
 ### Embedded structured extraction (Rust)
 
-Use an agent as a processing component in your service -- typed output, budget-limited, no subprocess.
+Use an agent as a processing component in your service -- typed output, budget-limited, no subprocess. For long-lived realm-backed applications, use the runtime-backed `SessionService` setup in the Rust SDK guide; direct `AgentBuilder` remains useful for standalone embedded components and tests.
 
 ```rust
 let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4-6")
+    .model("claude-opus-4-7")
     .system_prompt("You are an incident triage system.")
     .output_schema(OutputSchema::new(triage_schema)?)
     .budget(BudgetLimits::default().with_max_tokens(2000))
@@ -294,24 +352,47 @@ route_to_oncall(triage).await;
 
 The agent returns validated JSON matching your schema, enforced by budget limits. This runs in-process in your Rust binary -- no HTTP roundtrip, no subprocess management.
 
+### Realm binding (CLI)
+
+After defining a realm binding and storing its credentials, pass the binding explicitly:
+
+```bash
+rkat run --realm prod --model gpt-5.5 --connection-ref prod:openai \
+  "Summarize the incident queue with the production OpenAI binding."
+```
+
+The same structural `connection_ref` shape is accepted by RPC, REST, SDKs, and mob member launch requests.
+
+### Durable scheduled work (CLI)
+
+Schedulers can target either a session or a mob and apply overlap, misfire, and missing-target policy:
+
+```bash
+rkat run --tools full --realm ops \
+  "Create an hourly health-check schedule for the payments service. \
+   Skip overlapping runs, skip stale occurrences, and report the next planned fires."
+```
+
+Applications that manage schedules directly can use `schedule/create` over JSON-RPC or `/schedules` over REST. Agents manage the same model through `meerkat_schedule_create`, `meerkat_schedule_list`, `meerkat_schedule_occurrences`, and the related update/pause/resume/delete tools.
+
 ### CI failure analysis with mobs (Python)
 
-Drive an agent from your Python backend. The agent coordinates mob members to parallelize work across providers.
+Drive an agent from your Python backend. The SDK starts or connects to `rkat-rpc`, then the agent coordinates mob members to parallelize work across providers.
 
 ```python
 from meerkat import MeerkatClient
 
 client = MeerkatClient()
-await client.connect()
+await client.connect(realm_id="ci")
 
 result = await client.create_session(
-    f"Analyze these CI failures. For each failing test, create a small mob "
-    f"member task (use gemini-3-flash-preview for speed) to investigate the root cause by "
-    f"reading the relevant source files. Collect results and return structured JSON.\n\n"
-    f"{ci_log}",
-    model="claude-sonnet-4-6",
+    f"Analyze these CI failures. Create a small mob for investigation, "
+    f"scope shell access to the worker members, collect the findings, "
+    f"and return structured JSON.\n\n{ci_log}",
+    model="claude-opus-4-7",
     enable_shell=True,
     enable_mob=True,
+    connection_ref={"realm": "ci", "binding": "default_anthropic"},
     output_schema={
         "type": "object",
         "properties": {
@@ -324,48 +405,83 @@ result = await client.create_session(
     },
 )
 
-# Structured output -- parse directly, feed into your pipeline
-return json.loads(result.structured_output)["failures"]
+return result.structured_output["failures"]
 ```
 
-The orchestrator agent delegates investigation to fast mob members, collects their findings, and synthesizes a structured report. Budget controls prevent runaway cost.
+The orchestrator agent delegates investigation, collects findings, and synthesizes a structured report. Budget and tool scopes keep the work bounded.
 
 ### Multi-agent mob for code audit (CLI)
 
-Mobs are tool-driven -- the agent uses `mob_*` tools to create a team, spawn members, and coordinate work. Define the team structure in TOML and let the agent orchestrate:
+Mobs are definition/profile driven. Define the team structure and let the agent orchestrate current mob runtime surfaces:
 
-```toml
-# audit-team.toml
-[profiles.analyst]
-model = "claude-sonnet-4-6"
-system_prompt = "You analyze code for error handling gaps, security issues, and test coverage."
-tools = { shell = true, builtins = true }
-
-[profiles.writer]
-model = "gpt-5.4"
-system_prompt = "You produce clear, actionable remediation plans from analysis findings."
-
-[wiring]
-mesh = [{ a = "analyst", b = "writer" }]
+```json
+{
+  "id": "audit-team",
+  "profiles": {
+    "analyst": {
+      "model": "claude-opus-4-7",
+      "peer_description": "Analyzes code for error handling gaps, security issues, and test coverage.",
+      "tools": { "shell": true, "builtins": true, "comms": true }
+    },
+    "writer": {
+      "model": "gpt-5.5",
+      "peer_description": "Turns analysis findings into clear remediation plans.",
+      "tools": { "builtins": true, "comms": true }
+    }
+  },
+  "wiring": {
+    "role_wiring": [{ "a": "analyst", "b": "writer" }]
+  }
+}
 ```
 
 ```bash
-rkat run --tools workspace \
-  "Use a mob with the definition in audit-team.toml to audit the payments module. \
-   The analyst should examine error handling and edge cases. The writer should \
-   produce a prioritized remediation plan. Use the mob_* tools to coordinate."
+rkat run --tools full --realm prod \
+  "Use audit-team.json to audit the payments module. \
+   Keep shell access scoped to the analyst and return a prioritized remediation plan."
 ```
 
-The orchestrating agent reads the definition, creates the mob via `mob_create`, spawns members via `mob_spawn`, and the team communicates via signed peer-to-peer messages with a shared task board. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for DAG-based flows and built-in prefabs (`coding_swarm`, `code_review`, `research_team`, `pipeline`).
+The orchestrating agent creates the mob from the definition, launches profile-backed members, wires communication, and collects the final report. Use realm profile references or per-member `connection_ref` values when different roles need different credentials. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for flows, task boards, `mob_spawn_member`, and direct host APIs.
+
+### Browser runtime (Web/WASM)
+
+```typescript
+import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
+import { MeerkatRuntime } from "@rkat/web";
+
+const runtime = await MeerkatRuntime.init(wasm, {
+  model: "claude-opus-4-7",
+  anthropicBaseUrl: "https://proxy.example.com/anthropic",
+  anthropicApiKey: "proxy"
+});
+
+const session = runtime.createSession({
+  model: "claude-opus-4-7",
+  connectionRef: { realm: "dev", binding: "default_anthropic" }
+});
+
+const sub = session.subscribe();
+const result = await session.turn("Draft a browser-only release note.");
+console.log(result.text);
+console.log(sub.poll());
+sub.close();
+```
+
+Browser auth can be supplied at runtime bootstrap, through the `@rkat/web` provider proxy, or through a host-page external auth resolver for structural `connectionRef` values. The same package supports browser mobs, JS tools, typed subscriptions, and mobpack deployment.
 
 ### Portable Mob Deployment (CLI + Web)
 
 Build once, run in multiple environments with a portable `.mobpack`:
 
 ```bash
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key --signer-id release-team
+rkat mob inspect ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack
 rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
 ```
+
+Strict trust requires the signer ID and public key to be present in the user or project trusted-signers store before deploy.
 
 Browser target from the same artifact:
 
@@ -380,19 +496,25 @@ See full guide: [Mobpack and Web Deployment](https://docs.rkat.ai/guides/mobpack
 ## Configuration
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...
-export OPENAI_API_KEY=sk-...
-export GOOGLE_API_KEY=...
+export RKAT_ANTHROPIC_API_KEY=sk-ant-...
+export RKAT_OPENAI_API_KEY=sk-...
+export RKAT_GEMINI_API_KEY=...
 ```
 
 ```toml
 # .rkat/config.toml (project) or ~/.rkat/config.toml (user)
 [agent]
-model = "claude-sonnet-4-6"
+model = "claude-opus-4-7"
 max_tokens = 4096
+
+[provider_tools.anthropic]
+web_search = true
+
+[provider_tools.openai]
+web_search = true
 ```
 
-See the [configuration guide](https://docs.rkat.ai/concepts/configuration) for the full reference.
+See the [configuration guide](https://docs.rkat.ai/concepts/configuration), [realms](https://docs.rkat.ai/concepts/realms), [providers](https://docs.rkat.ai/concepts/providers), and [auth guide](https://docs.rkat.ai/guides/auth) for the full reference.
 
 ## Documentation
 
@@ -401,26 +523,32 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 | Section | Topics |
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
-| [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration, realms |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, realtime audio, structured output |
-| [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
-| [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
-| [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, session contracts |
+| [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, realms, auth and bindings, tools, providers, scheduling, mobs, comms, realtime |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, realtime, image generation, mini surfaces, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
+| [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI, REST, JSON-RPC, MCP |
+| [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript, Web |
+| [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, builtin tools, session contracts |
 
 ## Development
 
 ```bash
 make build                          # Cargo build by default
+make check                          # Compilation check lane
+make lint                           # Clippy and static checks
 make test                           # Fast tests (unit + integration-fast)
-make lint                           # Clippy
-make ci                             # Full Cargo CI pipeline
+make agent-gate                     # Scoped local gate for changed files
 ```
+
+Use `MEERKAT_BUILDBUDDY=1` with broad Make lanes when you have BuildBuddy access. Use `make buildbuddy-doctor` to verify API key, generated Bazel files, selector behavior, and lane isolation.
+
+Run `make verify-version-parity` and `make verify-schema-freshness` when touching generated contracts, SDK wrappers, package metadata, or release-facing schemas.
 
 ## Contributing
 
-1. Run `make test` or `make agent-gate` for the relevant local gate
-2. Add tests for new functionality
-3. Submit PRs to `main`
+1. Run `make agent-gate` or the relevant Make lane for your change.
+2. Add or update tests for behavior changes.
+3. Run version/schema freshness checks when touching generated contracts or release metadata.
+4. Submit PRs to `main`.
 
 ## License
 

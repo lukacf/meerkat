@@ -33,10 +33,6 @@ It is designed to be **stable** (typed session events, explicit terminal results
 
 The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
-<p align="center">
-  <img src=".github/meerkat-architecture.png" alt="Meerkat architecture" width="100%">
-</p>
-
 ### How it compares
 
 | | Meerkat | Claude Code / Codex CLI / Gemini CLI |
@@ -258,69 +254,9 @@ All surfaces share the same session lifecycle and runtime-backed contracts.
 
 ## Architecture
 
-```mermaid
-graph TD
-    subgraph surfaces["Surfaces"]
-        CLI["rkat / rkat-mini"]
-        REST["REST API"]
-        RPC["rkat-rpc / rkat-rpc-mini"]
-        MCPS["MCP Server"]
-        RUST["Rust crate"]
-        PY["Python SDK"]
-        TS["TypeScript SDK"]
-        WEB["@rkat/web + WASM"]
-    end
-
-    RUNTIME["Shared Meerkat runtime"]
-
-    CLI --> RUNTIME
-    REST --> RUNTIME
-    RPC --> RUNTIME
-    MCPS --> RUNTIME
-    RUST --> RUNTIME
-    PY -->|via rkat-rpc| RUNTIME
-    TS -->|via rkat-rpc| RUNTIME
-    WEB -->|WASM runtime| RUNTIME
-
-    subgraph services["Runtime services"]
-        AUTH["Auth & bindings"]
-        SCHEDULE["Schedules & occurrences"]
-        MOB["Mobs & comms"]
-        REALTIME["Realtime attachment"]
-        TOOLING["Tool visibility"]
-    end
-
-    RUNTIME --> AUTH
-    RUNTIME --> SCHEDULE
-    RUNTIME --> MOB
-    RUNTIME --> REALTIME
-    RUNTIME --> TOOLING
-
-    SS["SessionService"]
-    AF["AgentFactory"]
-    RUNTIME --> SS
-    SS --> AF
-
-    subgraph core["meerkat-core  (no I/O deps)"]
-        AGENT["Agent loop + state machine"]
-        TRAITS["Trait contracts"]
-    end
-
-    AF --> AGENT
-    AF --> TRAITS
-
-    CLIENT["Providers<br/>Anthropic / OpenAI / Gemini / self-hosted"]
-    TOOLS["Tools<br/>Builtins / MCP / custom"]
-    SESSION["Persistence<br/>Sessions / blobs / artifacts"]
-    MEMORY["Memory<br/>HNSW semantic index"]
-    HOOKS["Hooks + skills<br/>Observe / rewrite / guard"]
-
-    AGENT --> CLIENT
-    AGENT --> TOOLS
-    AGENT --> SESSION
-    AGENT --> MEMORY
-    AGENT --> HOOKS
-```
+<p align="center">
+  <img src=".github/meerkat-architecture.png" alt="Meerkat architecture" width="100%">
+</p>
 
 See the [architecture reference](https://docs.rkat.ai/reference/architecture) for crate structure, state machine details, and extension points.
 

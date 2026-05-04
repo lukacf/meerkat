@@ -1798,7 +1798,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::LeaseAbsent)
         ));
     }
 

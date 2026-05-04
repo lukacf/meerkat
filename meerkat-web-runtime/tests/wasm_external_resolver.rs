@@ -216,6 +216,54 @@ async fn resolver_preserves_structured_refresh_and_denial_failures() {
     register_eval_callback(
         r#"
             (function (_) {
+                return Promise.reject({ kind: "stale_credential" });
+            })
+        "#,
+    );
+    let err = resolve_with_registered_callback()
+        .await
+        .expect_err("stale credential should remain typed");
+    assert!(matches!(err, AuthError::StaleCredential));
+
+    register_eval_callback(
+        r#"
+            (function (_) {
+                return Promise.reject({ kind: "refresh_required" });
+            })
+        "#,
+    );
+    let err = resolve_with_registered_callback()
+        .await
+        .expect_err("refresh-required admission should remain typed");
+    assert!(matches!(err, AuthError::RefreshRequired));
+
+    register_eval_callback(
+        r#"
+            (function (_) {
+                return Promise.reject({ kind: "lease_absent" });
+            })
+        "#,
+    );
+    let err = resolve_with_registered_callback()
+        .await
+        .expect_err("missing lease should remain typed");
+    assert!(matches!(err, AuthError::LeaseAbsent));
+
+    register_eval_callback(
+        r#"
+            (function (_) {
+                return Promise.reject({ kind: "user_reauth_required" });
+            })
+        "#,
+    );
+    let err = resolve_with_registered_callback()
+        .await
+        .expect_err("user reauth requirement should remain typed");
+    assert!(matches!(err, AuthError::UserReauthRequired));
+
+    register_eval_callback(
+        r#"
+            (function (_) {
                 return Promise.reject({
                     kind: "refresh_failed",
                     detail: "browser refresh token revoked"

@@ -320,6 +320,16 @@ fn auth_error_from_wire(error: meerkat_contracts::WireAuthError) -> meerkat_core
             meerkat_core::AuthError::WorkspaceMismatch
         }
         meerkat_contracts::WireAuthError::Expired => meerkat_core::AuthError::Expired,
+        meerkat_contracts::WireAuthError::StaleCredential => {
+            meerkat_core::AuthError::StaleCredential
+        }
+        meerkat_contracts::WireAuthError::RefreshRequired => {
+            meerkat_core::AuthError::RefreshRequired
+        }
+        meerkat_contracts::WireAuthError::LeaseAbsent => meerkat_core::AuthError::LeaseAbsent,
+        meerkat_contracts::WireAuthError::UserReauthRequired => {
+            meerkat_core::AuthError::UserReauthRequired
+        }
         meerkat_contracts::WireAuthError::RefreshFailed { detail } => {
             meerkat_core::AuthError::RefreshFailed(detail)
         }

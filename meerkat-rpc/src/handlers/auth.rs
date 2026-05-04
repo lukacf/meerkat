@@ -3208,7 +3208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_status_rehydrates_marked_oauth_token_after_restart() {
+    async fn auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ManagedStore,
         ));
@@ -3232,13 +3232,13 @@ mod tests {
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         let status = auth_status_value(resp);
-        assert_eq!(status["state"], "valid");
-        assert!(status.get("expires_at").is_some());
-        assert_eq!(status["account_id"], "acct-1");
-        assert_eq!(status["has_refresh_token"], true);
+        assert_eq!(status["state"], "unknown");
+        assert!(status.get("expires_at").is_none());
+        assert!(status.get("account_id").is_none());
+        assert_eq!(status["has_refresh_token"], false);
         let snapshot = runtime.auth_lease_handle().snapshot(&lease_key);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert!(snapshot.credential_present);
+        assert_eq!(snapshot.phase, None);
+        assert!(!snapshot.credential_present);
     }
 
     #[tokio::test]

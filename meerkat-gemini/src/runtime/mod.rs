@@ -219,7 +219,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         persisted
                     } else {
                         if !refresh_allowed(binding) {
-                            return Err(ProviderAuthError::Auth(AuthError::Expired));
+                            return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
                         }
                         let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
                             env,
@@ -258,11 +258,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                 })
                             })
                         });
-                        let refreshed = if env.force_refresh {
-                            runtime.force_refresh_tokens_with_commit(commit).await
-                        } else {
-                            runtime.get_or_refresh_tokens_with_commit(commit).await
-                        };
+                        let refreshed = runtime
+                            .refresh_tokens_with_commit(commit, env.force_refresh)
+                            .await;
                         refreshed.map_err(|e| {
                             let permanent =
                                 google_code_assist_oauth_refresh_failure_is_permanent(&e);

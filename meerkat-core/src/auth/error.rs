@@ -25,6 +25,18 @@ pub enum AuthError {
     /// Workspace/account identity did not match the binding constraints.
     #[error("workspace mismatch")]
     WorkspaceMismatch,
+    /// Persisted credential material is stale relative to AuthMachine lease truth.
+    #[error("stale credential material")]
+    StaleCredential,
+    /// AuthMachine has admitted the credential only for refresh, not provider use.
+    #[error("credential refresh required")]
+    RefreshRequired,
+    /// Credential material exists, but no AuthMachine lease currently owns it.
+    #[error("auth lease absent")]
+    LeaseAbsent,
+    /// AuthMachine requires an explicit user reauthorization flow.
+    #[error("user reauth required")]
+    UserReauthRequired,
     /// Credential lease has expired.
     #[error("credential expired")]
     Expired,
@@ -55,6 +67,10 @@ impl AuthError {
             Self::UnsupportedCombination { .. } => AuthErrorKind::UnsupportedCombination,
             Self::MissingRequiredMetadata(_) => AuthErrorKind::MissingRequiredMetadata,
             Self::WorkspaceMismatch => AuthErrorKind::WorkspaceMismatch,
+            Self::StaleCredential => AuthErrorKind::StaleCredential,
+            Self::RefreshRequired => AuthErrorKind::RefreshRequired,
+            Self::LeaseAbsent => AuthErrorKind::LeaseAbsent,
+            Self::UserReauthRequired => AuthErrorKind::UserReauthRequired,
             Self::Expired => AuthErrorKind::Expired,
             Self::RefreshFailed(_) => AuthErrorKind::RefreshFailed,
             Self::InteractiveLoginRequired => AuthErrorKind::InteractiveLoginRequired,
@@ -75,6 +91,10 @@ pub enum AuthErrorKind {
     UnsupportedCombination,
     MissingRequiredMetadata,
     WorkspaceMismatch,
+    StaleCredential,
+    RefreshRequired,
+    LeaseAbsent,
+    UserReauthRequired,
     Expired,
     RefreshFailed,
     InteractiveLoginRequired,
@@ -98,6 +118,19 @@ mod tests {
             AuthError::WorkspaceMismatch.kind(),
             AuthErrorKind::WorkspaceMismatch
         );
+        assert_eq!(
+            AuthError::StaleCredential.kind(),
+            AuthErrorKind::StaleCredential
+        );
+        assert_eq!(
+            AuthError::RefreshRequired.kind(),
+            AuthErrorKind::RefreshRequired
+        );
+        assert_eq!(AuthError::LeaseAbsent.kind(), AuthErrorKind::LeaseAbsent);
+        assert_eq!(
+            AuthError::UserReauthRequired.kind(),
+            AuthErrorKind::UserReauthRequired
+        );
         assert_eq!(AuthError::Expired.kind(), AuthErrorKind::Expired);
         assert_eq!(
             AuthError::RefreshFailed("x".into()).kind(),
@@ -119,6 +152,10 @@ mod tests {
             },
             AuthError::MissingRequiredMetadata("workspace_id".into()),
             AuthError::WorkspaceMismatch,
+            AuthError::StaleCredential,
+            AuthError::RefreshRequired,
+            AuthError::LeaseAbsent,
+            AuthError::UserReauthRequired,
             AuthError::Expired,
             AuthError::RefreshFailed("timeout".into()),
             AuthError::InteractiveLoginRequired,

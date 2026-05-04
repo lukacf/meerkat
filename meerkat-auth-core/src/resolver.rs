@@ -127,7 +127,7 @@ async fn resolve_managed_store_secret(
     {
         let managed = load_managed_store_tokens_with_lifecycle(env, binding).await?;
         if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
-            return Err(ProviderAuthError::Auth(AuthError::Expired));
+            return Err(refresh_required_error());
         }
         managed.tokens.primary_secret.ok_or_else(|| {
             ProviderAuthError::SourceResolutionFailed(
@@ -268,41 +268,6 @@ fn oauth_lifecycle_marker_payload_valid_for_tokens(tokens: &PersistedTokens) -> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn oauth_lifecycle_snapshot_allows_marker_rehydrate(
-    phase: AuthStatusPhase,
-    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
-    tokens: &PersistedTokens,
-) -> bool {
-    if phase != AuthStatusPhase::Unknown
-        || snapshot.credential_present
-        || !meerkat_core::tokens_lifecycle_published(tokens)
-    {
-        return false;
-    }
-    if snapshot.generation == 0 && snapshot.phase.is_none() {
-        return true;
-    }
-    snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn restore_oauth_lifecycle_after_marker_save_failure(
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    lease_key: &meerkat_core::handles::LeaseKey,
-    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
-    tokens: &PersistedTokens,
-) -> String {
-    let expires_at = snapshot
-        .expires_at
-        .or_else(|| Some(meerkat_core::persisted_token_expires_at_epoch_secs(tokens)));
-    auth_lease
-        .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
-        .err()
-        .map(|e| format!("; AuthMachine lifecycle rollback failed: {e}"))
-        .unwrap_or_default()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn persisted_token_material_matches(left: &PersistedTokens, right: &PersistedTokens) -> bool {
     left.auth_mode == right.auth_mode
         && left.primary_secret == right.primary_secret
@@ -312,6 +277,46 @@ fn persisted_token_material_matches(left: &PersistedTokens, right: &PersistedTok
         && left.last_refresh == right.last_refresh
         && left.scopes == right.scopes
         && left.account_id == right.account_id
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stale_credential_error() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::StaleCredential)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lease_absent_error() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::LeaseAbsent)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn user_reauth_required_error() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::UserReauthRequired)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_failed_error() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::RefreshFailed(
+        "AuthMachine credential refresh failed".into(),
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_required_error() -> ProviderAuthError {
+    ProviderAuthError::Auth(AuthError::RefreshRequired)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn auth_lease_phase_error(phase: AuthStatusPhase) -> ProviderAuthError {
+    match phase {
+        AuthStatusPhase::Valid => ProviderAuthError::Auth(AuthError::Other(
+            "internal auth gate error: valid lease rejected".into(),
+        )),
+        AuthStatusPhase::Expiring | AuthStatusPhase::Expired => refresh_required_error(),
+        AuthStatusPhase::ReauthRequired => user_reauth_required_error(),
+        AuthStatusPhase::RefreshFailed => refresh_failed_error(),
+        AuthStatusPhase::Unknown => lease_absent_error(),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -335,7 +340,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     } else {
         None
     };
-    let mut tokens = store
+    let tokens = store
         .load(&key)
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
@@ -343,7 +348,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile().auth_method)?;
     let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
     if is_oauth_login && !oauth_lifecycle_marker_payload_valid_for_tokens(&tokens) {
-        return Err(interactive_login_error(binding));
+        return Err(stale_credential_error());
     }
 
     let now = (env.now)();
@@ -354,41 +359,11 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     let lifecycle = managed_store_lifecycle_from_phase(token_phase);
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        let mut snapshot = auth_lease.snapshot(&lease_key);
-        let mut phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-        if is_oauth_login
-            && oauth_lifecycle_snapshot_allows_marker_rehydrate(phase, &snapshot, &tokens)
-        {
-            let previous_snapshot = snapshot.clone();
-            let transition = meerkat_core::publish_token_lifecycle_acquired(
-                auth_lease.as_ref(),
-                binding.connection_ref(),
-                &tokens,
-            )
-            .map_err(|e| {
-                ProviderAuthError::SourceResolutionFailed(format!(
-                    "AuthMachine lifecycle acquire failed: {e}"
-                ))
-            })?;
-            let marked =
-                meerkat_core::mark_tokens_lifecycle_published_for_transition(&tokens, transition);
-            if marked != tokens {
-                if let Err(save_error) = store.save(&key, &marked).await {
-                    let rollback = restore_oauth_lifecycle_after_marker_save_failure(
-                        auth_lease.as_ref(),
-                        &lease_key,
-                        &previous_snapshot,
-                        &tokens,
-                    );
-                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                        "TokenStore lifecycle marker generation save failed after AuthMachine lifecycle acquire: {save_error}{rollback}"
-                    )));
-                }
-                tokens = marked;
-            }
-            snapshot = auth_lease.snapshot(&lease_key);
-            phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        let snapshot = auth_lease.snapshot(&lease_key);
+        if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
+            return Err(user_reauth_required_error());
         }
+        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         if is_oauth_login
             && matches!(
                 phase,
@@ -400,7 +375,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 OAuthLifecycleMarkerRelation::TokenNewer
                 | OAuthLifecycleMarkerRelation::TokenStale
                 | OAuthLifecycleMarkerRelation::Invalid => {
-                    return Err(interactive_login_error(binding));
+                    return Err(stale_credential_error());
                 }
             }
         }
@@ -439,12 +414,12 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             )),
             AuthStatusPhase::ReauthRequired
             | AuthStatusPhase::RefreshFailed
-            | AuthStatusPhase::Unknown => Err(interactive_login_error(binding)),
+            | AuthStatusPhase::Unknown => Err(auth_lease_phase_error(phase)),
         };
     }
 
     if is_oauth_login {
-        Err(interactive_login_error(binding))
+        Err(lease_absent_error())
     } else {
         Ok(managed_store_tokens(
             store,
@@ -513,7 +488,7 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
-        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+        .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let current_snapshot = auth_lease.snapshot(&lease_key);
     if current_snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
@@ -541,7 +516,18 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
             previous.lifecycle_snapshot = Some(auth_lease.snapshot(&lease_key));
             Ok(true)
         }
-        _ => Err(ProviderAuthError::Auth(AuthError::Expired)),
+        Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) => {
+            Err(user_reauth_required_error())
+        }
+        Some(meerkat_core::handles::AuthLeasePhase::Refreshing) => {
+            previous.lifecycle_snapshot = Some(current_snapshot);
+            Ok(false)
+        }
+        Some(meerkat_core::handles::AuthLeasePhase::Released) | None => Err(lease_absent_error()),
+        Some(
+            meerkat_core::handles::AuthLeasePhase::Valid
+            | meerkat_core::handles::AuthLeasePhase::Expiring,
+        ) => Err(lease_absent_error()),
     }
 }
 
@@ -558,7 +544,7 @@ pub fn mark_managed_store_oauth_refresh_failed(
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
-        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+        .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     if auth_lease.snapshot(&lease_key).phase
         != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
@@ -818,12 +804,12 @@ fn publish_managed_store_tokens_refresh_lifecycle(
         Some(meerkat_core::persisted_token_expires_at_epoch_secs(tokens)),
     ) == AuthStatusPhase::Expired
     {
-        return Err(ProviderAuthError::Auth(AuthError::Expired));
+        return Err(refresh_required_error());
     }
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
-        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+        .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let snapshot = auth_lease.snapshot(&lease_key);
     let began_here = if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
@@ -861,7 +847,7 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
-        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+        .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let _guard = if previous.lifecycle_guard.is_none() {
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
@@ -961,15 +947,19 @@ pub fn require_credential_lifecycle_authority(
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
-        .ok_or_else(|| interactive_login_error(binding))?;
+        .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(binding.connection_ref());
     let snapshot = auth_lease.snapshot(&lease_key);
-    match AuthStatusPhase::from_lease_snapshot((env.now)(), &snapshot) {
+    if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
+        return Err(user_reauth_required_error());
+    }
+    let phase = AuthStatusPhase::from_lease_snapshot((env.now)(), &snapshot);
+    match phase {
         AuthStatusPhase::Valid | AuthStatusPhase::Expiring => Ok(()),
-        AuthStatusPhase::Expired => Err(ProviderAuthError::Auth(AuthError::Expired)),
+        AuthStatusPhase::Expired => Err(refresh_required_error()),
         AuthStatusPhase::ReauthRequired
         | AuthStatusPhase::RefreshFailed
-        | AuthStatusPhase::Unknown => Err(interactive_login_error(binding)),
+        | AuthStatusPhase::Unknown => Err(auth_lease_phase_error(phase)),
     }
 }
 
@@ -1844,7 +1834,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
     }
 
@@ -1869,7 +1859,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
     }
 
@@ -1899,7 +1889,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
     }
 
@@ -1935,7 +1925,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, ProviderAuthError::Auth(AuthError::Expired)),
+            matches!(err, ProviderAuthError::Auth(AuthError::RefreshRequired)),
             "expiring OAuth token must be rejected at the AuthMachine/token-store boundary, got {err}"
         );
     }
@@ -1970,7 +1960,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
         assert_eq!(
             auth_lease.acquire_count(),
@@ -2004,7 +1994,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
         assert_eq!(
             auth_lease.acquire_count(),
@@ -2015,7 +2005,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn managed_store_oauth_only_lifecycle_adopts_valid_marked_token() {
+    async fn managed_store_oauth_only_lifecycle_rejects_valid_marked_token() {
         let store = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
@@ -2025,7 +2015,13 @@ mod tests {
         store
             .save(
                 &key,
-                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+                &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &tokens,
+                    AuthLeaseTransition {
+                        generation: 1,
+                        credential_published_at_millis: None,
+                    },
+                ),
             )
             .await
             .unwrap();
@@ -2040,14 +2036,22 @@ mod tests {
             .with_token_store(store)
             .with_auth_lease_handle(auth_lease.clone());
 
-        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+        let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
-            .expect("OAuth-only flow membership must not block marked token adoption");
+            .unwrap_err();
 
-        assert_eq!(secret, "oauth-only-access");
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::UserReauthRequired)
+        ));
         let snapshot = auth_lease.snapshot(&lease_key);
-        assert!(snapshot.credential_present);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(!snapshot.credential_present);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
+        assert_eq!(
+            auth_lease.acquire_count(),
+            0,
+            "OAuth token material must not acquire AuthMachine lease truth"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2082,7 +2086,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::LeaseAbsent)
         ));
         assert_eq!(
             auth_lease.acquire_count(),
@@ -2173,7 +2177,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+            ProviderAuthError::Auth(AuthError::StaleCredential)
         ));
         assert_eq!(
             auth_lease.acquire_count(),

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
@@ -210,40 +210,12 @@ impl AnthropicOAuthRuntime {
         &self.key
     }
 
-    /// Load the persisted bundle, or `None` if not yet saved.
-    async fn load_persisted(&self) -> Result<Option<PersistedTokens>, AnthropicOAuthError> {
-        self.token_store
-            .load(&self.key)
-            .await
-            .map_err(|e| AnthropicOAuthError::Store(e.to_string()))
-    }
-
-    fn token_is_fresh(tokens: &PersistedTokens) -> bool {
-        tokens
-            .expires_at
-            .is_some_and(|expiry| expiry - Utc::now() > Duration::seconds(60))
-            && tokens.primary_secret.is_some()
-    }
-
-    /// Return a valid token bundle, refreshing if the persisted token is
-    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
-    /// tokens are persisted yet.
-    async fn get_or_refresh_tokens_with_commit_slot(
+    async fn refresh_tokens_with_commit_slot(
         &self,
-        commit_fn: Option<TokenCommitFn>,
-        force_refresh: bool,
+        commit_fn: TokenCommitFn,
+        force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        let persisted = self
-            .load_persisted()
-            .await?
-            .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
-
-        // Fresh enough? Use cached.
-        if Self::token_is_fresh(&persisted) && commit_fn.is_none() && !force_refresh {
-            return Ok(persisted);
-        }
-
-        let commit_slot = Arc::new(Mutex::new(commit_fn));
+        let commit_slot = Arc::new(Mutex::new(Some(commit_fn)));
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
         let token_store = Arc::clone(&self.token_store);
@@ -265,17 +237,6 @@ impl AnthropicOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                if AnthropicOAuthRuntime::token_is_fresh(&current) && !force_refresh {
-                    let commit = commit_slot
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    return match commit {
-                        Some(commit) => commit(current).await,
-                        None => Ok(current),
-                    };
-                }
-                // Need to refresh. Must have a refresh_token.
                 let refresh_token = current
                     .refresh_token
                     .clone()
@@ -299,7 +260,7 @@ impl AnthropicOAuthRuntime {
                 }
             })
         });
-        let refreshed = if force_refresh {
+        let refreshed = if force_refresh_coordination {
             self.refresh_coord
                 .with_forced_refresh(self.key.clone(), refresh_fn)
                 .await?
@@ -319,42 +280,13 @@ impl AnthropicOAuthRuntime {
         }
     }
 
-    pub async fn get_or_refresh_tokens_uncommitted(
-        &self,
-    ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(None, false)
-            .await
-    }
-
-    pub async fn get_or_refresh_tokens_with_commit(
+    pub(crate) async fn refresh_tokens_with_commit(
         &self,
         commit_fn: TokenCommitFn,
+        force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), false)
+        self.refresh_tokens_with_commit_slot(commit_fn, force_refresh_coordination)
             .await
-    }
-
-    pub async fn force_refresh_tokens_with_commit(
-        &self,
-        commit_fn: TokenCommitFn,
-    ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), true)
-            .await
-    }
-
-    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_uncommitted().await
-    }
-
-    /// Return a valid access token, refreshing if the persisted token is
-    /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
-    /// tokens are persisted yet. Refresh persistence belongs to the
-    /// AuthMachine-managed resolver boundary.
-    pub async fn get_or_refresh_access_token(&self) -> Result<String, AnthropicOAuthError> {
-        let refreshed = self.get_or_refresh_tokens().await?;
-        refreshed
-            .primary_secret
-            .ok_or(AnthropicOAuthError::InteractiveLoginRequired)
     }
 
     /// Complete an interactive login: exchange the authorization code for

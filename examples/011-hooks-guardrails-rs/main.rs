@@ -12,7 +12,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 011-hooks-guardrails --features jsonl-store
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 011-hooks-guardrails --features jsonl-store
 //! ```
 
 use std::sync::Arc;

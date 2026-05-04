@@ -47,11 +47,11 @@ Available models: \
 claude-opus-4-7 (Anthropic, strongest reasoning), \
 claude-sonnet-4-6 (Anthropic, fast + capable), \
 gpt-5.5 (OpenAI, strongest general + code), \
-gpt-5.2-pro (OpenAI, deep reasoning — slow, use sparingly), \
+gpt-5.5-pro (OpenAI, deep reasoning — slow, use sparingly), \
 gemini-3.1-pro-preview (Google, strong general), \
 gemini-3.1-flash-lite-preview (Google, fastest). \
 Default: gpt-5.5. \
-Guidance: use opus/gpt-5.2-pro for complex reasoning (architecture, judging). \
+Guidance: use opus/gpt-5.5-pro for complex reasoning (architecture, judging). \
 Use sonnet/gpt-5.5 for code tasks. \
 Use gemini-3.1-flash-lite-preview for speed-sensitive roles. \
 Mix providers in multi-agent packs for perspective diversity";
@@ -404,6 +404,7 @@ mod tests {
 
         assert!(schema.contains("gpt-5.5"));
         assert!(schema.contains("claude-opus-4-7"));
+        assert!(!schema.contains("gpt-5.2"));
         assert!(!schema.contains("gpt-5.4"));
         assert!(!schema.contains("claude-opus-4-6"));
     }

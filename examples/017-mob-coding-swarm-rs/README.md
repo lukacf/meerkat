@@ -14,7 +14,7 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 ## Mob Architecture
 ```
                     ┌──────────────┐
-    User prompt ──→ │     Lead     │ (claude-opus-4-6)
+    User prompt ──→ │     Lead     │ (claude-opus-4-7)
                     │ Orchestrator │
                     │              │
                     │ mob.spawn()  │
@@ -32,5 +32,7 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat-mob \
+  --example 017-mob-coding-swarm
 ```

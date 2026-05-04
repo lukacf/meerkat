@@ -5,7 +5,13 @@ communicates via JSON-RPC — zero HTTP servers, zero configuration.
 
 ## Prerequisites
 ```bash
-pip install meerkat-sdk   # or: pip install -e sdks/python
+# From the repository root when running from a checkout
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e sdks/python
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
 ```
 
 ## Concepts
@@ -16,5 +22,5 @@ pip install meerkat-sdk   # or: pip install -e sdks/python
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... python main.py
+ANTHROPIC_API_KEY=sk-... python3 main.py
 ```

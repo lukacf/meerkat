@@ -16,7 +16,7 @@ Run:
     ANTHROPIC_API_KEY=sk-... rkat-rest
 
     # Terminal 2: Run this script
-    python main.py
+    python3 main.py
 """
 
 import json

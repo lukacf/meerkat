@@ -45,7 +45,7 @@ export interface MobRuntime {
 
 /**
  * Resolve model assignments based on available API keys.
- * Preferred: main=opus, planner=gpt-5.2, coder=gpt-5.3-codex, reviewer=gemini-3.1-pro-preview.
+ * Preferred: main=opus, planner=gpt-5.5, coder=gpt-5.3-codex, reviewer=gemini-3.1-pro-preview.
  * Falls back to available providers when keys are missing.
  */
 export function resolveModels(keys: ApiKeys): ModelAssignments {
@@ -56,12 +56,12 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   // Main agent: prefer Anthropic Opus
   let main: string;
   let mainKey: string;
-  if (hasAnthropic) { main = "claude-opus-4-6"; mainKey = keys.anthropic!; }
-  else if (hasOpenAI) { main = "gpt-5.2"; mainKey = keys.openai!; }
+  if (hasAnthropic) { main = "claude-opus-4-7"; mainKey = keys.anthropic!; }
+  else if (hasOpenAI) { main = "gpt-5.5"; mainKey = keys.openai!; }
   else { main = "gemini-3.1-pro-preview"; mainKey = keys.gemini!; }
 
-  // Planner: prefer OpenAI gpt-5.2
-  const planner = hasOpenAI ? "gpt-5.2"
+  // Planner: prefer OpenAI GPT-5.5
+  const planner = hasOpenAI ? "gpt-5.5"
     : hasAnthropic ? "claude-sonnet-4-6"
     : "gemini-3.1-pro-preview";
 
@@ -73,7 +73,7 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   // Reviewer: prefer Gemini (schema issues fixed in PR #93)
   const reviewer = hasGemini ? "gemini-3-flash-preview"
     : hasAnthropic ? "claude-sonnet-4-6"
-    : "gpt-5.2";
+    : "gpt-5.5";
 
   return { main, mainKey, planner, coder, reviewer };
 }

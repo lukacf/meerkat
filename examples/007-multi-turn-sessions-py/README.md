@@ -23,5 +23,11 @@ session.archive()  → clean up
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=sk-... python main.py
+# From the repository root, first build/install the local Python SDK runtime:
+# python3 -m venv .venv && . .venv/bin/activate
+# python -m pip install --upgrade pip
+# python -m pip install -e sdks/python
+# ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+# export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+ANTHROPIC_API_KEY=sk-... python3 main.py
 ```

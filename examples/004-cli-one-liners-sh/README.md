@@ -4,8 +4,8 @@ Everything you can do with `rkat` from the command line — no code required.
 
 ## Concepts
 - `rkat run` — single-turn agent execution
-- `rkat resume` — multi-turn session resumption
-- `rkat sessions list/read/archive` — session management
+- `rkat run --resume last` — multi-turn session resumption
+- `rkat session list/show/delete` — session management
 - `--isolated` / `--realm` — workspace isolation
 - `--verbose` / `--stream` — output modes
 - `rkat config` — runtime configuration
@@ -13,7 +13,7 @@ Everything you can do with `rkat` from the command line — no code required.
 ## Prerequisites
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo build -p meerkat-cli
+./scripts/repo-cargo build -p rkat --bin rkat
 ```
 
 ## Run

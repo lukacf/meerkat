@@ -36,5 +36,7 @@ that long-lived sessions enable.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=... cargo run -p meerkat --example 024-host-mode-event-mesh
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 024-host-mode-event-mesh --features jsonl-store
 ```

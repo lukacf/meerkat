@@ -11,6 +11,7 @@ fn agent_factory_policy_bridge_symbol_suffix() -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "meerkat-agent-factory-policy-bridge-v3".hash(&mut hasher);
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .ok()
@@ -18,9 +19,6 @@ fn agent_factory_policy_bridge_symbol_suffix() -> String {
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
     manifest_dir.hash(&mut hasher);
-    std::env::var("OUT_DIR")
-        .unwrap_or_default()
-        .hash(&mut hasher);
     std::env::var("TARGET")
         .unwrap_or_default()
         .hash(&mut hasher);

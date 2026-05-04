@@ -21,5 +21,7 @@ Agent A signs message with private key A
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 020-comms-peer-messaging --features jsonl-store,comms
 ```

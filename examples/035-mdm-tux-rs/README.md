@@ -61,30 +61,33 @@ the fleet.
 ### Direct mode (no kennel)
 
 ```bash
-cd examples/035-mdm-tux-rs
-
 # Terminal 1 — target agent
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- \
+ANTHROPIC_API_KEY=sk-ant-... ./scripts/repo-cargo run \
+    --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
+    --bin mdm-target -- \
     --rpc-port 4800 --name my-mac
 
 # Terminal 2 — TUX controller (direct connection)
-cargo run --bin mdm-tux -- --target 127.0.0.1:4800
+./scripts/repo-cargo run --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
+    --bin mdm-tux -- --target 127.0.0.1:4800
 ```
 
 ### Kennel mode (brokered discovery)
 
 ```bash
-cd examples/035-mdm-tux-rs
-
 # Terminal 1 — kennel broker
-cargo run --bin mdm-kennel -- --listen 127.0.0.1:5000
+./scripts/repo-cargo run --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
+    --bin mdm-kennel -- --listen 127.0.0.1:5000
 
 # Terminal 2 — target agent (registers with kennel)
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- \
+ANTHROPIC_API_KEY=sk-ant-... ./scripts/repo-cargo run \
+    --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
+    --bin mdm-target -- \
     --kennel 127.0.0.1:5000 --rpc-port 4800 --name my-mac
 
 # Terminal 3 — TUX controller (discovers targets via kennel)
-cargo run --bin mdm-tux -- --kennel 127.0.0.1:5000
+./scripts/repo-cargo run --manifest-path examples/035-mdm-tux-rs/Cargo.toml \
+    --bin mdm-tux -- --kennel 127.0.0.1:5000
 ```
 
 In TUX, use `/claim` to claim a target, then type a command and press Enter.
@@ -313,14 +316,13 @@ schedule tools:
 ### Install the binaries
 
 ```bash
-cd examples/035-mdm-tux-rs
-cargo build --release
-# Produces: target/release/mdm-target, target/release/mdm-tux, target/release/mdm-kennel
+./scripts/repo-cargo build --manifest-path examples/035-mdm-tux-rs/Cargo.toml --release
+export MDM_TARGET_DIR="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/release"
 ```
 
-Copy `target/release/mdm-target` to each managed machine.
-Run `target/release/mdm-tux` on the controller.
-Run `target/release/mdm-kennel` on the rendezvous host.
+Copy `$MDM_TARGET_DIR/mdm-target` to each managed machine.
+Run `$MDM_TARGET_DIR/mdm-tux` on the controller.
+Run `$MDM_TARGET_DIR/mdm-kennel` on the rendezvous host.
 
 ### macOS launchd (target as a persistent service)
 
@@ -360,7 +362,7 @@ Run `target/release/mdm-kennel` on the rendezvous host.
 ```
 
 ```bash
-sudo cp target/release/mdm-target /usr/local/bin/mdm-target
+sudo cp "$MDM_TARGET_DIR/mdm-target" /usr/local/bin/mdm-target
 sudo launchctl load /Library/LaunchDaemons/com.example.mdm-target.plist
 ```
 
@@ -386,7 +388,7 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo cp target/release/mdm-target /usr/local/bin/mdm-target
+sudo cp "$MDM_TARGET_DIR/mdm-target" /usr/local/bin/mdm-target
 sudo systemctl daemon-reload
 sudo systemctl enable --now mdm-target
 ```

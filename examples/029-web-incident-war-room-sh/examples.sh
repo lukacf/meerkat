@@ -8,14 +8,40 @@ PROMPTS="$ROOT/prompts"
 MOB_DIR="$WORK/incident-war-room"
 PACK="$WORK/incident-war-room.mobpack"
 WEB_OUT="$WORK/incident-war-room-web"
+WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
 
-if [[ -x "$ROOT/../../target/debug/rkat" ]]; then
-  RKAT="$ROOT/../../target/debug/rkat"
-elif [[ -x "$ROOT/../../target/release/rkat" ]]; then
-  RKAT="$ROOT/../../target/release/rkat"
-else
-  RKAT="${RKAT:-rkat}"
-fi
+resolve_rkat() {
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT="$(resolve_rkat)"
 
 if [[ "${1:-}" == "--clean" ]]; then
   rm -rf "$WORK"

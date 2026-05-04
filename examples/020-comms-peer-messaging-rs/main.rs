@@ -13,7 +13,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 020-comms-peer-messaging --features "jsonl-store,comms"
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 020-comms-peer-messaging --features jsonl-store,comms
 //! ```
 
 use std::sync::Arc;

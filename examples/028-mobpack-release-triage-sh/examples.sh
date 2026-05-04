@@ -6,7 +6,41 @@ WORK="$ROOT/.work"
 MOB_DIR="$WORK/release-triage"
 PACK="$WORK/release-triage.mobpack"
 KEY="$WORK/release.key"
-RKAT="${RKAT:-rkat}"
+SIGNER_ID="release-triage-demo"
+WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
+
+resolve_rkat() {
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT="$(resolve_rkat)"
 
 rm -rf "$MOB_DIR"
 mkdir -p "$MOB_DIR/skills" "$MOB_DIR/config" "$WORK"
@@ -22,7 +56,7 @@ capabilities = ["comms"]
 
 [models]
 default = "claude-sonnet-4-6"
-lead = "claude-opus-4-6"
+lead = "claude-opus-4-7"
 TOML
 
 cat > "$MOB_DIR/config/defaults.toml" <<'TOML'
@@ -41,7 +75,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
   "orchestrator": { "profile": "lead" },
   "profiles": {
     "lead": {
-      "model": "claude-opus-4-6",
+      "model": "claude-opus-4-7",
       "skills": ["lead-playbook"],
       "peer_description": "Release lead who owns severity, decisions, and executive updates",
       "external_addressable": true,
@@ -205,7 +239,7 @@ printf '0707070707070707070707070707070707070707070707070707070707070707' > "$KE
 
 echo ""
 echo "==> Packing and signing portable artifact"
-"$RKAT" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY"
+"$RKAT" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY" --signer-id "$SIGNER_ID"
 
 echo ""
 echo "==> Inspecting artifact contents"

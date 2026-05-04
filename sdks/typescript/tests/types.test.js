@@ -1999,6 +1999,7 @@ describe("Parity wrappers", () => {
       prompt: [{ type: "text", text: "continue" }],
       skill_refs: [
         {
+          kind: "structured",
           source_uuid: "00000000-0000-4000-8000-000000000001",
           skill_name: "read",
         },

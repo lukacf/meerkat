@@ -16,55 +16,13 @@ fn agent_factory_policy_bridge_symbol_suffix() -> Option<String> {
     let manifest_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
     let core_manifest_dirs = core_manifest_dir_candidates(&manifest_dir, &build_dir);
 
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(build_dir).ok()? {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let package_dir = entry.path();
-        let package_name = package_dir.file_name()?.to_string_lossy();
-        if !package_name.starts_with("meerkat-core-") {
-            continue;
-        }
-        let core_out_dir = package_dir.join("out");
-        if !core_out_dir.is_dir() {
-            continue;
-        }
-        let emitted_suffix = std::fs::read_to_string(package_dir.join("output"))
-            .ok()
-            .and_then(|output| {
-                output.lines().find_map(|line| {
-                    line.strip_prefix(
-                        "cargo:rustc-env=MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX=",
-                    )
-                    .map(str::to_owned)
-                })
-            });
-        if emitted_suffix.is_none() {
-            continue;
-        }
-        let suffix = core_manifest_dirs.iter().find_map(|core_manifest_dir| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            core_manifest_dir.to_string_lossy().hash(&mut hasher);
-            core_out_dir.to_string_lossy().hash(&mut hasher);
-            target.hash(&mut hasher);
-            let suffix = format!("{:016x}", hasher.finish());
-            (emitted_suffix.as_deref() == Some(suffix.as_str())).then_some(suffix)
-        });
-        let Some(suffix) = suffix else {
-            continue;
-        };
-        let modified = std::fs::metadata(&core_out_dir)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if best
-            .as_ref()
-            .is_none_or(|(best_modified, _)| modified > *best_modified)
-        {
-            best = Some((modified, suffix));
-        }
-    }
-    best.map(|(_, suffix)| suffix)
+    core_manifest_dirs.first().map(|core_manifest_dir| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "meerkat-agent-factory-policy-bridge-v3".hash(&mut hasher);
+        core_manifest_dir.to_string_lossy().hash(&mut hasher);
+        target.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    })
 }
 
 fn core_manifest_dir_candidates(

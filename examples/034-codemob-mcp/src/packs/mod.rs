@@ -224,6 +224,10 @@ mod tests {
             "Anthropic default should include claude-opus-4-7: {models:?}"
         );
         assert!(
+            !models.iter().any(|model| model == "gpt-5.2"),
+            "advanced packs should not regress to gpt-5.2: {models:?}"
+        );
+        assert!(
             !models.iter().any(|model| model == "gpt-5.4"),
             "advanced packs should not regress to gpt-5.4: {models:?}"
         );

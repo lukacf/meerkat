@@ -20,5 +20,7 @@ Lint → Test → Security → Deploy
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat-mob \
+  --example 019-mob-pipeline
 ```

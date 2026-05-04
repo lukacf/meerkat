@@ -24,5 +24,7 @@ Messages accumulate → token_threshold exceeded →
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 013-context-compaction --features jsonl-store,session-compaction
 ```

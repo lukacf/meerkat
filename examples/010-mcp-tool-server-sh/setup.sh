@@ -10,11 +10,12 @@
 #
 # Prerequisites:
 #   export ANTHROPIC_API_KEY=sk-...
-#   cargo build -p meerkat-cli   # or install rkat globally
+#   ./scripts/repo-cargo build -p rkat --bin rkat
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
 WORK="$ROOT/.work"
 STATE_ROOT="$WORK/state"
 CONTEXT_ROOT="$WORK/project"
@@ -22,13 +23,38 @@ USER_CONFIG_ROOT="$WORK/user"
 SERVER_NAME="incident-kit"
 SERVER_SCRIPT="$ROOT/demo_mcp_server.py"
 
-if [[ -x "$ROOT/../../target/debug/rkat" ]]; then
-  RKAT="${RKAT:-$ROOT/../../target/debug/rkat}"
-elif [[ -x "$ROOT/../../target/release/rkat" ]]; then
-  RKAT="${RKAT:-$ROOT/../../target/release/rkat}"
-else
-  RKAT="${RKAT:-rkat}"
-fi
+resolve_rkat() {
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT="$(resolve_rkat)"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "Set ANTHROPIC_API_KEY to run the live agent step."

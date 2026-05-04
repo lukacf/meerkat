@@ -30,11 +30,11 @@ an on-call coordination prompt that must quote fields returned by those tools.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo build -p meerkat-cli
+./scripts/repo-cargo build -p rkat --bin rkat
 ```
 
 If `rkat` is not on your `PATH`, the script automatically falls back to
-`../../target/debug/rkat` or `../../target/release/rkat`.
+repo-local binaries built by `./scripts/repo-cargo`.
 
 ## Run
 

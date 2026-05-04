@@ -11,15 +11,14 @@ standalone runtime mode explicitly.
 ## Quick Start
 
 ```bash
-# Build
-cd examples/034-codemob-mcp
-cargo build --release
+# Build from the repository root
+./scripts/repo-cargo build --manifest-path examples/034-codemob-mcp/Cargo.toml --release
 
 # Register in Claude Code (.mcp.json in your project root)
 {
   "mcpServers": {
     "codemob": {
-      "command": "/path/to/target/release/codemob-mcp",
+      "command": "/path/to/codemob-mcp",
       "env": {
         "ANTHROPIC_API_KEY": "sk-ant-...",
         "OPENAI_API_KEY": "sk-...",
@@ -109,13 +108,13 @@ CRUD for user-created mob definitions. Saved to `.codemob-mcp/mobs/` and immedia
 
 | Pack | Agents | Pattern | Default Models |
 |------|--------|---------|---------------|
-| **advisor** | 1 | Single opinion | GPT-5.4 |
-| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, Opus |
-| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-5.4, Gemini 3.1 Pro |
-| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, Opus |
-| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.1 Flash Lite, GPT-5.4, Opus |
-| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.4, Gemini 3.1 Pro, GPT-5.2, Gemini 3.1 Flash Lite, Sonnet |
-| **implement** | 2 | Implementer ↔ reviewer loop (max 3 rounds) | Sonnet, GPT-5.4 |
+| **advisor** | 1 | Single opinion | GPT-5.5 |
+| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
+| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-5.5, Gemini 3.1 Pro |
+| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
+| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.1 Flash Lite, GPT-5.5, Opus |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.5, Gemini 3.1 Pro, GPT-5.5 Pro, Gemini 3.1 Flash Lite, Sonnet |
+| **implement** | 2 | Implementer ↔ reviewer loop (max 3 rounds) | Sonnet, GPT-5.5 |
 
 ### Comms-based (autonomous debate)
 
@@ -134,7 +133,7 @@ Every agent in every pack uses a distinct model by default — different trainin
 | `gemini-3.1-pro-preview` | Google | Strong general | General reviewer, purist, guardian |
 | `gemini-3.1-flash-lite-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
 | `claude-sonnet-4-6` | Anthropic | Fast + capable | RCT aggregator, implementer |
-| `gpt-5.2-pro` | OpenAI | Deepest reasoning | Available for override (slow — use sparingly) |
+| `gpt-5.5-pro` | OpenAI | Deepest reasoning | Available for override (slow — use sparingly) |
 
 ## Skills
 
@@ -169,7 +168,7 @@ Override the default model for any role in a pack:
 deliberate(
   pack: "review",
   task: "...",
-  model_overrides: {"security": "claude-opus-4-7", "perf": "gpt-5.2-pro"}
+  model_overrides: {"security": "claude-opus-4-7", "perf": "gpt-5.5-pro"}
 )
 ```
 
@@ -188,7 +187,7 @@ deliberate(
 
 consult(
   question: "...",
-  model: "gpt-5.2-pro",
+  model: "gpt-5.5-pro",
   provider_params: {"reasoning_effort": "high"}
 )
 ```

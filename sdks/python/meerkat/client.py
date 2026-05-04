@@ -202,8 +202,8 @@ def _wire_params(value: Any) -> dict[str, Any]:
     return converted if isinstance(converted, dict) else dict(converted)
 
 
-def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
-    """Convert a list of SkillRef to the wire format for JSON-RPC."""
+def _skill_keys_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
+    """Convert SkillKey-like refs to the bare SkillKey wire format."""
     if refs is None:
         return None
     return [
@@ -212,6 +212,20 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
             "skill_name": _normalize_skill_ref(r).skill_name,
         }
         for r in refs
+    ]
+
+
+def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
+    """Convert SkillRef values to the tagged wire format for skill_refs."""
+    keys = _skill_keys_to_wire(refs)
+    if keys is None:
+        return None
+    return [
+        {
+            "kind": "structured",
+            **key,
+        }
+        for key in keys
     ]
 
 
@@ -2646,7 +2660,7 @@ class MeerkatClient:
         if provider_params is not None:
             params["provider_params"] = provider_params
         if preload_skills is not None:
-            params["preload_skills"] = _skill_refs_to_wire(preload_skills)
+            params["preload_skills"] = _skill_keys_to_wire(preload_skills)
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs

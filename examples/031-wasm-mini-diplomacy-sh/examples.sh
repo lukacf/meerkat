@@ -10,13 +10,42 @@ WEB_DIR="$ROOT/web"
 WEB_DIST="$WEB_DIR/dist"
 WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
 
-if [[ -x "$WORKSPACE_ROOT/target/debug/rkat" ]]; then
-  RKAT_BIN="$WORKSPACE_ROOT/target/debug/rkat"
-elif [[ -x "$WORKSPACE_ROOT/target/release/rkat" ]]; then
-  RKAT_BIN="$WORKSPACE_ROOT/target/release/rkat"
-else
-  RKAT_BIN="${RKAT_BIN:-rkat}"
-fi
+resolve_rkat() {
+  if [[ -n "${RKAT_BIN:-}" ]]; then
+    printf '%s\n' "$RKAT_BIN"
+    return
+  fi
+  if [[ -n "${RKAT:-}" ]]; then
+    printf '%s\n' "$RKAT"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$WORKSPACE_ROOT/target/debug/rkat" \
+    "$WORKSPACE_ROOT/target/release/rkat"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  if [[ -x "$WORKSPACE_ROOT/scripts/repo-cargo" ]]; then
+    local target_dir
+    target_dir="$("$WORKSPACE_ROOT/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+    for candidate in "$target_dir/debug/rkat" "$target_dir/release/rkat"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  printf '%s\n' "rkat"
+}
+
+RKAT_BIN="$(resolve_rkat)"
 
 mkdir -p "$WORK" "$MOB_RUNTIME"
 

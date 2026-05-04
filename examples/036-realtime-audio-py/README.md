@@ -22,6 +22,14 @@ python3 -m pip install -e ../../sdks/python
 python3 -m pip install -r requirements.txt
 ```
 
+When running from a source checkout, build the local RPC binary from the
+repository root and pass it with `--rkat-path` or `MEERKAT_BIN_PATH`:
+
+```bash
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc
+export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/debug/rkat-rpc"
+```
+
 Linux hosts may also need PortAudio:
 
 ```bash
@@ -56,7 +64,7 @@ same mob and prints the helper's final output when it is available.
 python3 main.py --help
 python3 main.py --text-probe
 python3 main.py --input-device 1 --output-device 2
-python3 main.py --helper-model gpt-5.2
+python3 main.py --helper-model gpt-5.5
 python3 main.py --realm realtime-demo
 ```
 

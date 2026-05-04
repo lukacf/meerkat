@@ -22,5 +22,7 @@ pre_llm_call → LLM → post_llm_response → pre_tool_dispatch → Tool
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+  --example 011-hooks-guardrails --features jsonl-store
 ```

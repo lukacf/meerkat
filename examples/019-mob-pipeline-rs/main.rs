@@ -15,7 +15,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 019-mob-pipeline --features comms
+//! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat-mob --example 019-mob-pipeline
 //! ```
 
 use std::sync::Arc;
@@ -32,7 +32,7 @@ id = "pipeline"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -150,7 +150,7 @@ id = "cicd-pipeline"
 orchestrator = "coordinator"
 
 [profiles.coordinator]
-model = "claude-opus-4-6"
+model = "claude-opus-4-7"
 skills = ["pipeline-coordinator"]
 peer_description = "Pipeline coordinator -- drives sequential stage execution"
 external_addressable = true

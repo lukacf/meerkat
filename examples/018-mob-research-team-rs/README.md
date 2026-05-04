@@ -13,12 +13,14 @@ and a lead analyst synthesizes findings into a cohesive report.
 ## Profiles
 | Profile | Model | Role |
 |---------|-------|------|
-| lead-analyst | claude-opus-4-6 | Coordinates research, synthesizes findings |
+| lead-analyst | claude-opus-4-7 | Coordinates research, synthesizes findings |
 | market-researcher | claude-sonnet-4-6 | Competitive analysis, market sizing |
 | tech-researcher | claude-sonnet-4-6 | Technical feasibility |
 | user-researcher | claude-sonnet-4-6 | Personas, pain points |
 
 ## Run
 ```bash
-# This is a reference implementation. For runnable examples, see meerkat/examples/.
+# From the repository root
+ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat-mob \
+  --example 018-mob-research-team
 ```

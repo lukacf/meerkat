@@ -40,7 +40,7 @@ with:
 ## Concepts
 
 - `rkat mob pack` for artifact creation from generated mob source
-- `--sign` to attach provenance to the packed artifact
+- `--sign` / `--signer-id` to attach provenance to the packed artifact
 - `rkat mob inspect` to see what was embedded
 - `rkat mob validate` to check the artifact contract before use
 - `rkat mob deploy` to run the same signed artifact with a real prompt
@@ -50,10 +50,10 @@ with:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo install rkat
+./scripts/repo-cargo build -p rkat --bin rkat
 
-# Optional when working from this repo instead of a global install:
-export RKAT=../../target/debug/rkat
+# Optional override if you want to use a specific binary:
+export RKAT=/path/to/rkat
 ```
 
 ## Run

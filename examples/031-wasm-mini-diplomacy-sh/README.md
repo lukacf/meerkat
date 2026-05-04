@@ -62,14 +62,14 @@ JS detects quiescence → extracts orders → resolves combat → narrator flow
 ## Prerequisites
 
 ```bash
-cargo build -p meerkat-cli       # builds rkat for repo-local runs
-cargo install wasm-pack          # if not already installed
-node --version                   # 20+
+./scripts/repo-cargo build -p rkat --bin rkat  # builds rkat for repo-local runs
+wasm-pack --version                            # install if not already available
+node --version                                 # 20+
 npm --version
 ```
 
-`./examples.sh` will automatically prefer the repo-local `../../target/debug/rkat`
-or `../../target/release/rkat` when present.
+`./examples.sh` will automatically prefer repo-local binaries built by
+`./scripts/repo-cargo` when present.
 
 ## Build & Run
 
@@ -93,12 +93,12 @@ open http://127.0.0.1:4173
 ### Rebuild after Rust changes
 
 ```bash
-cargo build -p meerkat-cli
+./scripts/repo-cargo build -p rkat --bin rkat
 cd examples/031-wasm-mini-diplomacy-sh
 ./examples.sh
 ```
 
-That path stays aligned with the current 0.5 browser packaging flow because it
+That path stays aligned with the current browser packaging flow because it
 rebuilds the runtime through `rkat mob web build` instead of teaching a separate
 direct `wasm-pack` recipe.
 

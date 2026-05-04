@@ -46,6 +46,11 @@ echo "Building and syncing current meerkat-web-runtime for wasm32..."
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SDK_WASM_DIR="${REPO_ROOT}/sdks/web/wasm"
 
+if [[ -x "${REPO_ROOT}/scripts/repo-cargo" ]]; then
+  REPO_CARGO_HOME="$("${REPO_ROOT}/scripts/repo-cargo" --print-env | sed -n 's/^CARGO_HOME=//p')"
+  export PATH="${REPO_CARGO_HOME}/bin:${PATH}"
+fi
+
 # Build via sdks/web's build:wasm script (handles --out-dir and .gitignore cleanup)
 if [[ -f "${REPO_ROOT}/sdks/web/package.json" ]]; then
   (cd "${REPO_ROOT}/sdks/web" && npm run build:wasm)

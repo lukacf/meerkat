@@ -38,11 +38,13 @@ clear operator recommendation.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo install rkat wasm-pack
+./scripts/repo-cargo build -p rkat --bin rkat
+wasm-pack --version
 ```
 
 If you are working from this repo checkout instead of a global install, the
-script will prefer `../../target/debug/rkat` automatically when it exists.
+script will prefer repo-local binaries built by `./scripts/repo-cargo` when
+present.
 
 ## Run
 

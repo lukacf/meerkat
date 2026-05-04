@@ -27,7 +27,7 @@ from meerkat import MeerkatClient, RealtimeChannel
 
 
 DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
-DEFAULT_HELPER_MODEL = "gpt-5.2"
+DEFAULT_HELPER_MODEL = "gpt-5.5"
 HOST_IDENTITY = "voice-host"
 
 

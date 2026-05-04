@@ -11,7 +11,7 @@ What you'll learn:
 - Streaming events in real-time
 
 Run:
-    ANTHROPIC_API_KEY=sk-... python main.py
+    ANTHROPIC_API_KEY=sk-... python3 main.py
 """
 
 import asyncio
@@ -64,10 +64,11 @@ async def main():
         # ── Session management ──
         print("\n=== Session info ===")
         info = await client.read_session(session.id)
-        print(f"Messages: {info.get('message_count', 'N/A')}")
-        print(f"Tokens:   {info.get('total_tokens', 'N/A')}")
+        print(f"Messages: {info.message_count}")
 
         sessions = await client.list_sessions()
+        summary = next((item for item in sessions if item.session_id == session.id), None)
+        print(f"Tokens:   {summary.total_tokens if summary else 'N/A'}")
         print(f"Active sessions: {len(sessions)}")
 
         # Clean up

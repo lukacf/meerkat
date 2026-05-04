@@ -79,7 +79,7 @@ impl Pack for RctPack {
                 "integration_sheriff",
                 "rct-sheriff-skill",
                 "Integration Sheriff reviewer",
-                "gpt-5.2",
+                "gpt-5.5-pro",
                 tools_with_shell.clone(),
             ),
             (

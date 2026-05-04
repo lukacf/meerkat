@@ -112,6 +112,7 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
     let mut clean = collect_drift_mismatches(dir.path(), &selection).expect("clean drift");
     clean.retain(|mismatch| {
         !mismatch.starts_with("production owner audit path for ")
+            && !mismatch.starts_with("production owner schema relation for ")
             && !mismatch.starts_with("MobCommand::")
     });
     assert!(

@@ -22,6 +22,12 @@ use tokio::sync::{Mutex, mpsc};
 type DynAgent =
     meerkat_core::Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
 
+fn empty_test_tool_schema() -> Value {
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    Value::Object(schema)
+}
+
 #[derive(Clone, Copy)]
 enum ClientMode {
     TextOnly,
@@ -130,7 +136,7 @@ impl AgentToolDispatcher for RecordingToolDispatcher {
         Arc::new([Arc::new(ToolDef {
             name: "echo".into(),
             description: "echo".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: empty_test_tool_schema(),
             provenance: None,
         })])
     }

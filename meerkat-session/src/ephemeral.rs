@@ -150,6 +150,7 @@ enum SessionCommand {
     },
     DispatchExternalToolCall {
         call: meerkat_core::ToolCall,
+        timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
         reply_tx: oneshot::Sender<
             Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError>,
         >,
@@ -492,6 +493,15 @@ pub trait SessionAgent: Send {
         Err(meerkat_core::error::AgentError::ConfigError(
             "external live tool dispatch is not supported by this session agent".to_string(),
         ))
+    }
+
+    /// Dispatch an external tool call with a caller-specific timeout policy.
+    async fn dispatch_external_tool_call_with_timeout_policy(
+        &mut self,
+        call: meerkat_core::ToolCall,
+        _timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError> {
+        self.dispatch_external_tool_call(call).await
     }
 
     /// Cancel the currently running turn.
@@ -1187,6 +1197,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         call: meerkat_core::ToolCall,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        self.dispatch_external_tool_call_with_timeout_policy(
+            id,
+            call,
+            meerkat_core::ToolDispatchTimeoutPolicy::Disabled,
+        )
+        .await
+    }
+
+    /// Dispatch an external tool call through the live session task with a
+    /// caller-specific timeout policy.
+    pub async fn dispatch_external_tool_call_with_timeout_policy(
+        &self,
+        id: &SessionId,
+        call: meerkat_core::ToolCall,
+        timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
         let command_tx = {
             let sessions = self.sessions.read().await;
             let handle = sessions
@@ -1197,7 +1223,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
-            .send(SessionCommand::DispatchExternalToolCall { call, reply_tx })
+            .send(SessionCommand::DispatchExternalToolCall {
+                call,
+                timeout_policy,
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -3563,8 +3593,14 @@ async fn session_task<A: SessionAgent>(
                 }
                 let _ = reply_tx.send(result);
             }
-            SessionCommand::DispatchExternalToolCall { call, reply_tx } => {
-                let result = agent.dispatch_external_tool_call(call).await;
+            SessionCommand::DispatchExternalToolCall {
+                call,
+                timeout_policy,
+                reply_tx,
+            } => {
+                let result = agent
+                    .dispatch_external_tool_call_with_timeout_policy(call, timeout_policy)
+                    .await;
                 if result.is_ok() {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {

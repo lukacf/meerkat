@@ -24,13 +24,14 @@ use meerkat_client::{
 };
 use meerkat_contracts::{
     AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioFormat, RealtimeCapabilities,
-    RealtimeChannelClosedFrame, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
-    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelState,
-    RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeClientFrame, RealtimeErrorCode,
-    RealtimeErrorDetails, RealtimeEvent, RealtimeInputChunk, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeProtocolVersion, RealtimeReconnectPolicy, RealtimeServerFrame,
+    RealtimeChannelClosedFrame, RealtimeChannelConfig, RealtimeChannelErrorFrame,
+    RealtimeChannelEventFrame, RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame,
+    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeClientFrame,
+    RealtimeErrorCode, RealtimeErrorDetails, RealtimeEvent, RealtimeInputChunk, RealtimeOpenInfo,
+    RealtimeOpenRequest, RealtimeProtocolVersion, RealtimeReconnectPolicy, RealtimeServerFrame,
+    RealtimeToolTimeoutPolicy,
 };
-use meerkat_core::{ConfigStore, SessionId};
+use meerkat_core::{ConfigStore, SessionId, ToolDispatchTimeoutPolicy};
 use meerkat_runtime::{
     Input, PromptInput, RuntimeDriverError, RuntimeState, service_ext::SessionServiceRuntimeExt,
 };
@@ -965,12 +966,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let _ = send_server_frame(&mut socket, &opened).await;
                     let role = registered.role;
                     let turning_mode = accepted.request.turning_mode;
-                    let tool_timeout_ms = accepted
+                    let tool_timeout_policy = accepted
                         .request
                         .channel_config
                         .clone()
                         .unwrap_or_default()
-                        .tool_timeout_ms_or_default();
+                        .tool_timeout;
                     let mut observer_fanout_rx = registered.observer_fanout_rx.take();
                     let mut reconnect_retry = RealtimeReconnectRetryPlanner::new(
                         accepted
@@ -1776,7 +1777,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     call_id,
                                                     tool_name,
                                                     arguments,
-                                                    tool_timeout_ms,
+                                                    tool_timeout_policy.clone(),
                                                 )
                                                 .await
                                             }
@@ -3417,6 +3418,26 @@ async fn run_product_session_actor(
     }
 }
 
+fn tool_dispatch_timeout_policy(policy: RealtimeToolTimeoutPolicy) -> ToolDispatchTimeoutPolicy {
+    match policy {
+        RealtimeToolTimeoutPolicy::Default => ToolDispatchTimeoutPolicy::Default {
+            timeout: Duration::from_millis(RealtimeChannelConfig::DEFAULT_TOOL_TIMEOUT_MS),
+        },
+        RealtimeToolTimeoutPolicy::Disabled => ToolDispatchTimeoutPolicy::Disabled,
+        RealtimeToolTimeoutPolicy::Finite { timeout_ms } => ToolDispatchTimeoutPolicy::Finite {
+            timeout: Duration::from_millis(timeout_ms),
+        },
+    }
+}
+
+fn canonical_tool_result_error_code(result: &meerkat_core::ToolResult) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&result.text_content())
+        .ok()?
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 async fn handle_product_session_tool_call(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
@@ -3424,7 +3445,7 @@ async fn handle_product_session_tool_call(
     call_id: String,
     tool_name: String,
     arguments: serde_json::Value,
-    tool_timeout_ms: Option<u64>,
+    tool_timeout_policy: RealtimeToolTimeoutPolicy,
 ) -> Result<Vec<RealtimeServerFrame>, RealtimeChannelErrorFrame> {
     let mut frames = vec![channel_event(RealtimeEvent::ToolCallRequested {
         call_id: call_id.clone(),
@@ -3446,44 +3467,19 @@ async fn handle_product_session_tool_call(
     };
 
     let call = meerkat_core::ToolCall::new(call_id.clone(), tool_name, arguments);
-    let dispatch = runtime.dispatch_external_tool_call(&session_id, call);
     let started_at = meerkat_core::time_compat::Instant::now();
-    let outcome_result = match tool_timeout_ms {
-        Some(limit_ms) => {
-            match tokio::time::timeout(std::time::Duration::from_millis(limit_ms), dispatch).await {
-                Ok(inner) => inner,
-                Err(_elapsed) => {
-                    // Budget exceeded: inject a synthetic tool-error result so
-                    // the model observes a concrete failure, then emit the
-                    // typed timeout event. Dropping the `dispatch` future
-                    // cancels the underlying task so a late-finishing tool
-                    // does not leak its result onto a cancelled channel.
-                    let actual_elapsed_ms =
-                        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let timeout_message = format!(
-                        "tool exceeded budget after {actual_elapsed_ms}ms, continuing without result",
-                    );
-                    let _ = submit_product_session_tool_error(
-                        runtime,
-                        binding,
-                        product_session,
-                        call_id.clone(),
-                        timeout_message.clone(),
-                    )
-                    .await;
-                    frames.push(channel_event(RealtimeEvent::ToolCallTimedOut {
-                        call_id,
-                        elapsed_ms: actual_elapsed_ms,
-                    }));
-                    return Ok(frames);
-                }
-            }
-        }
-        None => dispatch.await,
-    };
+    let outcome_result = runtime
+        .dispatch_external_tool_call_with_timeout_policy(
+            &session_id,
+            call,
+            tool_dispatch_timeout_policy(tool_timeout_policy),
+        )
+        .await;
 
     match outcome_result {
         Ok(outcome) if outcome.result.is_error => {
+            let is_timeout = canonical_tool_result_error_code(&outcome.result)
+                .is_some_and(|code| code == "timeout");
             let error_message = outcome.result.text_content();
             let _ = submit_product_session_tool_error(
                 runtime,
@@ -3493,10 +3489,17 @@ async fn handle_product_session_tool_call(
                 error_message.clone(),
             )
             .await;
-            frames.push(channel_event(RealtimeEvent::ToolCallFailed {
-                call_id,
-                error: error_message,
-            }));
+            if is_timeout {
+                frames.push(channel_event(RealtimeEvent::ToolCallTimedOut {
+                    call_id,
+                    elapsed_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                }));
+            } else {
+                frames.push(channel_event(RealtimeEvent::ToolCallFailed {
+                    call_id,
+                    error: error_message,
+                }));
+            }
             Ok(frames)
         }
         Ok(outcome) => {
@@ -5160,6 +5163,36 @@ mod tests {
         assert!(
             bind_source.contains("realtime_bootstrap_eligibility"),
             "channel.open must re-check machine-owned realtime bootstrap eligibility before binding"
+        );
+    }
+
+    #[test]
+    fn product_session_tool_timeout_terminalization_is_not_websocket_local() {
+        let source = include_str!("realtime_ws.rs");
+        let start = source
+            .find("async fn handle_product_session_tool_call")
+            .expect("handle_product_session_tool_call should exist");
+        let end = source[start..]
+            .find("async fn submit_product_session_tool_result")
+            .map(|offset| start + offset)
+            .expect("submit_product_session_tool_result should follow tool-call handler");
+        let handler_source = &source[start..end];
+        assert!(
+            handler_source.contains("dispatch_external_tool_call_with_timeout_policy"),
+            "realtime product-session tool calls must delegate timeout policy to runtime dispatch"
+        );
+        assert!(
+            !handler_source.contains("tokio::time::timeout"),
+            "websocket handler must not own the timeout await branch"
+        );
+        assert!(
+            !handler_source.contains("ToolError::timeout")
+                && !handler_source.contains("terminal_tool_outcome_for_error"),
+            "websocket handler must not synthesize canonical timeout tool errors"
+        );
+        assert!(
+            !handler_source.contains("tool exceeded budget"),
+            "old websocket-local synthetic timeout message must stay amputated"
         );
     }
 

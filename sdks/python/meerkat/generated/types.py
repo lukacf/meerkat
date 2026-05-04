@@ -1399,6 +1399,25 @@ class RealtimeReconnectPolicy:
     max_total_ms: int
 
 
+class RealtimeToolTimeoutPolicyDefault(TypedDict, total=False):
+    """Use the server's default realtime tool timeout."""
+    type: Required[Literal['default']]
+
+
+class RealtimeToolTimeoutPolicyDisabled(TypedDict, total=False):
+    """Do not apply a realtime-specific timeout."""
+    type: Required[Literal['disabled']]
+
+
+class RealtimeToolTimeoutPolicyFinite(TypedDict, total=False):
+    """Apply this finite realtime-specific timeout."""
+    timeout_ms: Required[int]
+    type: Required[Literal['finite']]
+
+
+RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite
+
+
 @dataclass
 class RealtimeChannelConfig:
     """Per-channel runtime knobs negotiated at open time.
@@ -1406,7 +1425,7 @@ class RealtimeChannelConfig:
 Additive fields only — clients that do not carry this struct inherit the
 server-default behavior via `#[serde(default)]` on the parent
 [`RealtimeOpenRequest`]."""
-    tool_timeout_ms: Optional[int] = None
+    tool_timeout: Optional[RealtimeToolTimeoutPolicy] = None
 
 
 @dataclass

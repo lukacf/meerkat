@@ -9145,13 +9145,51 @@
       "RealtimeChannelConfig": {
         "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only — clients that do not carry this struct inherit the\nserver-default behavior via `#[serde(default)]` on the parent\n[`RealtimeOpenRequest`].",
         "properties": {
-          "tool_timeout_ms": {
-            "description": "Maximum wall-clock time a tool dispatch may take before the channel\ngives up and injects a synthetic tool-error result. `None` disables the\ndeadline (product explicitly opted into unlimited tools); omitting the\nfield leaves the server default in place.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
+          "tool_timeout": {
+            "description": "Realtime-specific timeout policy for product-session tool dispatch.",
+            "oneOf": [
+              {
+                "properties": {
+                  "type": {
+                    "const": "default",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "disabled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "timeout_ms": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "finite",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "timeout_ms"
+                ],
+                "type": "object"
+              }
             ]
           }
         },

@@ -27,21 +27,23 @@ use meerkat_client::{
     RealtimeSessionEvent, RealtimeSessionFactory, realtime_session::RealtimeSessionOpenConfig,
 };
 use meerkat_contracts::{
-    RealtimeAudioChunk, RealtimeCapabilities, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
-    RealtimeChannelInputFrame, RealtimeChannelOpenFrame, RealtimeChannelRole, RealtimeChannelState,
-    RealtimeChannelStatus, RealtimeChannelTarget, RealtimeClientFrame, RealtimeErrorCode,
-    RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTextChunk,
-    RealtimeTurningMode, WireContentInput, WireSessionMessage,
+    RealtimeAudioChunk, RealtimeCapabilities, RealtimeChannelConfig, RealtimeChannelErrorFrame,
+    RealtimeChannelEventFrame, RealtimeChannelInputFrame, RealtimeChannelOpenFrame,
+    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
+    RealtimeClientFrame, RealtimeErrorCode, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind,
+    RealtimeOpenInfo, RealtimeOpenRequest, RealtimeOutputKind, RealtimeReconnectPolicy,
+    RealtimeServerFrame, RealtimeTextChunk, RealtimeToolTimeoutPolicy, RealtimeTurningMode,
+    WireContentInput, WireSessionMessage,
 };
-use meerkat_core::ToolResult;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::session::ToolCategoryOverride;
+use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDef, ToolError, ToolResult};
 use meerkat_core::{Config, MemoryConfigStore, SessionHistoryQuery, StopReason};
 use meerkat_rpc::session_executor::SessionRuntimeExecutor;
 use meerkat_rpc::session_runtime::SessionRuntime;
@@ -120,6 +122,24 @@ impl LlmClient for MockLlmClient {
 
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
+    }
+}
+
+struct HangingToolDispatcher;
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for HangingToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([Arc::new(ToolDef {
+            name: "slow".into(),
+            description: "hangs until the dispatch timeout fires".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            provenance: None,
+        })])
+    }
+
+    async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        std::future::pending().await
     }
 }
 
@@ -273,10 +293,18 @@ impl CoreExecutor for NeverAppliedExecutor {
 }
 
 async fn create_realtime_session(runtime: &Arc<SessionRuntime>) -> meerkat_core::SessionId {
+    create_realtime_session_with_external_tools(runtime, None).await
+}
+
+async fn create_realtime_session_with_external_tools(
+    runtime: &Arc<SessionRuntime>,
+    external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> meerkat_core::SessionId {
     runtime
         .create_session(
             AgentBuildConfig {
                 override_builtins: ToolCategoryOverride::Enable,
+                external_tools,
                 ..AgentBuildConfig::new("gpt-realtime")
             },
             None,
@@ -319,7 +347,16 @@ async fn issue_open_info(
     role: RealtimeChannelRole,
     turning_mode: RealtimeTurningMode,
 ) -> RealtimeOpenInfo {
-    issue_open_info_with_policy(host, runtime, session_id, role, turning_mode, None).await
+    issue_open_info_with_policy_and_config(
+        host,
+        runtime,
+        session_id,
+        role,
+        turning_mode,
+        None,
+        None,
+    )
+    .await
 }
 
 async fn issue_open_info_with_policy(
@@ -329,6 +366,47 @@ async fn issue_open_info_with_policy(
     role: RealtimeChannelRole,
     turning_mode: RealtimeTurningMode,
     reconnect_policy: Option<RealtimeReconnectPolicy>,
+) -> RealtimeOpenInfo {
+    issue_open_info_with_policy_and_config(
+        host,
+        runtime,
+        session_id,
+        role,
+        turning_mode,
+        reconnect_policy,
+        None,
+    )
+    .await
+}
+
+async fn issue_open_info_with_channel_config(
+    host: &RealtimeWsHost,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &str,
+    role: RealtimeChannelRole,
+    turning_mode: RealtimeTurningMode,
+    channel_config: RealtimeChannelConfig,
+) -> RealtimeOpenInfo {
+    issue_open_info_with_policy_and_config(
+        host,
+        runtime,
+        session_id,
+        role,
+        turning_mode,
+        None,
+        Some(channel_config),
+    )
+    .await
+}
+
+async fn issue_open_info_with_policy_and_config(
+    host: &RealtimeWsHost,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &str,
+    role: RealtimeChannelRole,
+    turning_mode: RealtimeTurningMode,
+    reconnect_policy: Option<RealtimeReconnectPolicy>,
+    channel_config: Option<RealtimeChannelConfig>,
 ) -> RealtimeOpenInfo {
     let parsed_session_id =
         meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
@@ -345,7 +423,7 @@ async fn issue_open_info_with_policy(
             role,
             turning_mode,
             reconnect_policy,
-            channel_config: None,
+            channel_config,
         },
         RealtimeOpenGrant::from_machine_eligibility(
             eligibility,
@@ -458,7 +536,14 @@ async fn read_history(
 }
 
 async fn create_materialized_session(runtime: &Arc<SessionRuntime>) -> meerkat_core::SessionId {
-    let session_id = create_realtime_session(runtime).await;
+    create_materialized_session_with_external_tools(runtime, None).await
+}
+
+async fn create_materialized_session_with_external_tools(
+    runtime: &Arc<SessionRuntime>,
+    external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> meerkat_core::SessionId {
+    let session_id = create_realtime_session_with_external_tools(runtime, external_tools).await;
     runtime
         .runtime_adapter()
         .register_session_with_executor(
@@ -2469,6 +2554,135 @@ async fn product_session_tool_call_failures_emit_failed_event_and_submit_provide
         seen_tool_errors[0].1.contains("missing_tool"),
         "provider error payload should include the dispatch failure"
     );
+
+    let _ = ws_stream.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn product_session_tool_timeout_projects_runtime_terminalization() {
+    let (_temp, runtime, config_store) = build_test_runtime();
+    let session_id = create_materialized_session_with_external_tools(
+        &runtime,
+        Some(Arc::new(HangingToolDispatcher) as Arc<dyn AgentToolDispatcher>),
+    )
+    .await;
+    let session_id_text = session_id.to_string();
+    let open_calls = Arc::new(tokio::sync::Mutex::new(0usize));
+    let attach_calls = Arc::new(tokio::sync::Mutex::new(0usize));
+    let seen_tool_results = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let seen_tool_errors = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let session_factory = Arc::new(FakeRealtimeSessionFactory {
+        capabilities: conservative_capabilities(vec![
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ]),
+        opened_sessions: tokio::sync::Mutex::new(std::collections::VecDeque::from(vec![Ok(
+            Box::new(FakeRealtimeSession {
+                capabilities: conservative_capabilities(vec![
+                    RealtimeTurningMode::ProviderManaged,
+                    RealtimeTurningMode::ExplicitCommit,
+                ]),
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+                scripted_events: std::collections::VecDeque::from(vec![
+                    Ok(Some(RealtimeSessionEvent::ToolCallRequested {
+                        call_id: "call_tool_timeout".to_string(),
+                        tool_name: "slow".to_string(),
+                        arguments: serde_json::json!({}),
+                    })),
+                    Ok(None),
+                ]),
+                seen_inputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                seen_tool_results: Arc::clone(&seen_tool_results),
+                seen_tool_errors: Arc::clone(&seen_tool_errors),
+                release_events_after_input: false,
+                release_events_after_tool_submission: true,
+                input_seen: Arc::new(AtomicBool::new(false)),
+                input_gate: Arc::new(Notify::new()),
+                tool_submission_seen: Arc::new(AtomicBool::new(false)),
+                tool_submission_gate: Arc::new(Notify::new()),
+            }) as Box<dyn RealtimeSession>,
+        )])),
+        open_calls: Arc::clone(&open_calls),
+        open_configs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        attach_calls: Arc::clone(&attach_calls),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
+    let host =
+        Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory.clone()));
+    let open_info = issue_open_info_with_channel_config(
+        host.as_ref(),
+        &runtime,
+        &session_id_text,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+        RealtimeChannelConfig {
+            tool_timeout: RealtimeToolTimeoutPolicy::Finite { timeout_ms: 10 },
+        },
+    )
+    .await;
+    let server_host = Arc::clone(&host);
+    let server_runtime = Arc::clone(&runtime);
+    let server = tokio::spawn(async move {
+        serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
+    });
+
+    let mut ws_stream = connect_and_open(
+        &ws_url,
+        &open_info,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelOpened(opened) => {
+            assert_eq!(opened.status.state, RealtimeChannelState::Ready);
+        }
+        other => panic!("expected channel.opened, got {other:?}"),
+    }
+    assert_channel_event(
+        read_server_frame(&mut ws_stream).await,
+        RealtimeEvent::ToolCallRequested {
+            call_id: "call_tool_timeout".to_string(),
+            tool_name: "slow".to_string(),
+        },
+    );
+    match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelEvent(RealtimeChannelEventFrame {
+            event:
+                RealtimeEvent::ToolCallTimedOut {
+                    call_id,
+                    elapsed_ms,
+                },
+        }) => {
+            assert_eq!(call_id, "call_tool_timeout");
+            assert!(
+                elapsed_ms >= 10,
+                "timeout projection should carry elapsed runtime, got {elapsed_ms}ms",
+            );
+        }
+        other => panic!("expected ToolCallTimedOut event, got {other:?}"),
+    }
+
+    assert!(seen_tool_results.lock().await.is_empty());
+    let seen_tool_errors = seen_tool_errors.lock().await;
+    assert_eq!(seen_tool_errors.len(), 1);
+    assert_eq!(seen_tool_errors[0].0, "call_tool_timeout");
+    let expected = meerkat_core::ops::terminal_tool_outcome_for_error(
+        "call_tool_timeout",
+        ToolError::timeout("slow", 10),
+    )
+    .result
+    .text_content();
+    assert_eq!(
+        seen_tool_errors[0].1, expected,
+        "provider continuation must receive the runtime-authored canonical timeout payload",
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&seen_tool_errors[0].1).expect("timeout payload should be JSON");
+    assert_eq!(payload["error"], "timeout");
 
     let _ = ws_stream.close(None).await;
     server.abort();

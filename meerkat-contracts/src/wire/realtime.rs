@@ -311,6 +311,48 @@ pub struct RealtimeReconnectPolicy {
     pub max_total_ms: u64,
 }
 
+/// Typed per-channel tool timeout policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RealtimeToolTimeoutPolicy {
+    /// Use the server's default realtime tool timeout.
+    Default,
+    /// Do not apply a realtime-specific timeout. The runtime/tool dispatcher
+    /// may still enforce its own normal execution policy.
+    Disabled,
+    /// Apply this finite realtime-specific timeout.
+    Finite { timeout_ms: u64 },
+}
+
+impl Default for RealtimeToolTimeoutPolicy {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl RealtimeToolTimeoutPolicy {
+    /// Default tool budget when neither the caller nor the server provides
+    /// an override. Keeps the "runtime safe by default" dogma.
+    pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+
+    /// Resolve to the effective realtime-specific timeout. `None` means the
+    /// caller explicitly disabled the realtime-specific deadline.
+    #[must_use]
+    pub fn timeout_ms(&self) -> Option<u64> {
+        match self {
+            Self::Default => Some(Self::DEFAULT_TIMEOUT_MS),
+            Self::Disabled => None,
+            Self::Finite { timeout_ms } => Some(*timeout_ms),
+        }
+    }
+}
+
 /// Per-channel runtime knobs negotiated at open time.
 ///
 /// Additive fields only — clients that do not carry this struct inherit the
@@ -319,30 +361,15 @@ pub struct RealtimeReconnectPolicy {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeChannelConfig {
-    /// Maximum wall-clock time a tool dispatch may take before the channel
-    /// gives up and injects a synthetic tool-error result. `None` disables the
-    /// deadline (product explicitly opted into unlimited tools); omitting the
-    /// field leaves the server default in place.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_timeout_ms: Option<u64>,
+    /// Realtime-specific timeout policy for product-session tool dispatch.
+    #[serde(default, skip_serializing_if = "RealtimeToolTimeoutPolicy::is_default")]
+    pub tool_timeout: RealtimeToolTimeoutPolicy,
 }
 
 impl RealtimeChannelConfig {
     /// Default tool budget when neither the caller nor the server provides
     /// an override. Keeps the "runtime safe by default" dogma.
-    pub const DEFAULT_TOOL_TIMEOUT_MS: u64 = 15_000;
-
-    /// Resolve the effective tool timeout, substituting the global default
-    /// when the caller did not specify one. `None` means "no deadline" and is
-    /// honored exactly.
-    #[must_use]
-    pub fn tool_timeout_ms_or_default(&self) -> Option<u64> {
-        match self.tool_timeout_ms {
-            Some(0) => None,
-            Some(ms) => Some(ms),
-            None => Some(Self::DEFAULT_TOOL_TIMEOUT_MS),
-        }
-    }
+    pub const DEFAULT_TOOL_TIMEOUT_MS: u64 = RealtimeToolTimeoutPolicy::DEFAULT_TIMEOUT_MS;
 }
 
 /// Product-facing realtime capability set for one target/provider combination.
@@ -570,9 +597,8 @@ pub enum RealtimeEvent {
         call_id: String,
         error: String,
     },
-    /// The tool dispatch exceeded its configured budget and was aborted;
-    /// a synthetic `ToolResult::Error` was injected back into the provider
-    /// session so the model sees a concrete failure instead of silence.
+    /// The tool dispatch exceeded its configured budget and was terminalized
+    /// by the runtime/tool-dispatch path.
     ToolCallTimedOut {
         call_id: String,
         elapsed_ms: u64,

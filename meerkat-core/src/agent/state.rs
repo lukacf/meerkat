@@ -4695,6 +4695,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_tool_dispatch_timeout_uses_canonical_terminal_outcome() {
+        struct HangingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for HangingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                std::future::pending().await
+            }
+        }
+
+        let client = Arc::new(StaticLlmClient);
+        let tools = Arc::new(HangingDispatcher {
+            tools: Arc::from([Arc::new(ToolDef {
+                name: "slow".into(),
+                description: "hangs until timeout".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            })]),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            agent.dispatch_external_tool_call_with_timeout_policy(
+                ToolCall::new(
+                    "tool-call-timeout".to_string(),
+                    "slow".to_string(),
+                    serde_json::json!({}),
+                ),
+                crate::ops::ToolDispatchTimeoutPolicy::Finite {
+                    timeout: std::time::Duration::from_millis(5),
+                },
+            ),
+        )
+        .await
+        .expect("external dispatch should terminalize promptly")
+        .expect("timeout terminalization should be a tool outcome");
+
+        let expected = crate::ops::terminal_tool_outcome_for_error(
+            "tool-call-timeout",
+            ToolError::timeout("slow", 5),
+        );
+        assert_eq!(outcome.result.tool_use_id, expected.result.tool_use_id);
+        assert!(outcome.result.is_error);
+        assert_eq!(
+            outcome.result.text_content(),
+            expected.result.text_content()
+        );
+    }
+
+    #[tokio::test]
     async fn external_tool_dispatch_terminalizes_hidden_tools() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));

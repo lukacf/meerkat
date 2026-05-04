@@ -4,7 +4,7 @@ use crate::budget::Budget;
 use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
 use crate::hooks::{HookInvocation, HookPatch, HookPoint};
-use crate::ops::ToolDispatchOutcome;
+use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
@@ -433,6 +433,22 @@ where
         &mut self,
         call: crate::types::ToolCall,
     ) -> Result<ToolDispatchOutcome, AgentError> {
+        self.dispatch_external_tool_call_with_timeout_policy(
+            call,
+            ToolDispatchTimeoutPolicy::Disabled,
+        )
+        .await
+    }
+
+    /// Dispatch an external product/runtime tool call with an optional
+    /// caller-owned timeout. Timeout terminalization is still canonical:
+    /// timeout expiry becomes `ToolError::Timeout`, then flows through
+    /// `terminal_tool_outcome_for_error` like normal tool execution failures.
+    pub async fn dispatch_external_tool_call_with_timeout_policy(
+        &mut self,
+        call: crate::types::ToolCall,
+        timeout_policy: ToolDispatchTimeoutPolicy,
+    ) -> Result<ToolDispatchOutcome, AgentError> {
         let visible_tool_names = self
             .tool_scope
             .visible_tool_names()
@@ -454,7 +470,16 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
-        let dispatch_result = self.tools.dispatch(view).await;
+        let dispatch_result = match timeout_policy.timeout() {
+            Some(timeout) => match tokio::time::timeout(timeout, self.tools.dispatch(view)).await {
+                Ok(result) => result,
+                Err(_) => Err(crate::error::ToolError::timeout(
+                    call.name.clone(),
+                    timeout_policy.timeout_ms().unwrap_or(u64::MAX),
+                )),
+            },
+            None => self.tools.dispatch(view).await,
+        };
 
         match dispatch_result {
             Ok(mut outcome) => {

@@ -4358,8 +4358,22 @@ impl SessionRuntime {
         session_id: &SessionId,
         call: meerkat_core::ToolCall,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        self.dispatch_external_tool_call_with_timeout_policy(
+            session_id,
+            call,
+            meerkat_core::ToolDispatchTimeoutPolicy::Disabled,
+        )
+        .await
+    }
+
+    pub async fn dispatch_external_tool_call_with_timeout_policy(
+        &self,
+        session_id: &SessionId,
+        call: meerkat_core::ToolCall,
+        timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
         self.service
-            .dispatch_external_tool_call(session_id, call)
+            .dispatch_external_tool_call_with_timeout_policy(session_id, call, timeout_policy)
             .await
     }
 

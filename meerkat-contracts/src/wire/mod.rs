@@ -129,7 +129,8 @@ pub use realtime::{
     RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
     RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion, RealtimeReconnectPolicy,
     RealtimeServerFrame, RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk,
-    RealtimeTextDelta, RealtimeTurningMode, RealtimeVideoChunk, ToolCallTimeoutContext,
+    RealtimeTextDelta, RealtimeToolTimeoutPolicy, RealtimeTurningMode, RealtimeVideoChunk,
+    ToolCallTimeoutContext,
 };
 pub use result::WireRunResult;
 pub use runtime::{

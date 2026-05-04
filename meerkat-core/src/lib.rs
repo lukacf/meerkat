@@ -212,7 +212,8 @@ pub use model_defaults::ModelOperationalDefaultsResolver;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SessionEffect,
-    SpawnSpec, ToolAccessPolicy, ToolDispatchOutcome, WaitPolicy, WorkKind,
+    SpawnSpec, ToolAccessPolicy, ToolDispatchOutcome, ToolDispatchTimeoutPolicy, WaitPolicy,
+    WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,

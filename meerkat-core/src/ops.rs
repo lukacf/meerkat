@@ -112,6 +112,34 @@ pub struct ToolDispatchOutcome {
     pub session_effects: Vec<SessionEffect>,
 }
 
+/// Optional timeout policy supplied by an external tool-dispatch caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDispatchTimeoutPolicy {
+    /// Use the caller's default timeout value.
+    Default { timeout: std::time::Duration },
+    /// Do not apply a caller-specific timeout. The dispatcher may still apply
+    /// its own normal execution policy.
+    Disabled,
+    /// Apply this finite caller-specific timeout.
+    Finite { timeout: std::time::Duration },
+}
+
+impl ToolDispatchTimeoutPolicy {
+    #[must_use]
+    pub fn timeout(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Default { timeout } | Self::Finite { timeout } => Some(timeout),
+            Self::Disabled => None,
+        }
+    }
+
+    #[must_use]
+    pub fn timeout_ms(self) -> Option<u64> {
+        self.timeout()
+            .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
 impl ToolDispatchOutcome {
     /// Create an outcome with no async operations or session effects (synchronous tool).
     pub fn sync_result(result: crate::types::ToolResult) -> Self {

@@ -4,48 +4,79 @@
 
 use meerkat_contracts::{
     RealtimeChannelConfig, RealtimeChannelEventFrame, RealtimeEvent, RealtimeOpenRequest,
-    RealtimeServerFrame,
+    RealtimeServerFrame, RealtimeToolTimeoutPolicy,
 };
 
 #[test]
-fn channel_config_default_tool_timeout_resolves_to_15s() {
+fn channel_config_default_tool_timeout_is_typed_policy() {
     let config = RealtimeChannelConfig::default();
     assert_eq!(
-        config.tool_timeout_ms_or_default(),
-        Some(RealtimeChannelConfig::DEFAULT_TOOL_TIMEOUT_MS),
-        "default must be the 15 000 ms runtime-safe budget",
+        config.tool_timeout,
+        RealtimeToolTimeoutPolicy::Default,
+        "default must be an explicit typed policy, not an absent Option value",
+    );
+    assert_eq!(
+        config.tool_timeout.timeout_ms(),
+        Some(RealtimeToolTimeoutPolicy::DEFAULT_TIMEOUT_MS),
+        "default policy resolves to the 15 000 ms runtime-safe budget",
     );
 }
 
 #[test]
-fn channel_config_zero_ms_disables_the_deadline() {
-    // Operators that explicitly want unlimited tools can pass 0; product
-    // code treats that as "no deadline" (distinguishable from "not set").
+fn channel_config_disabled_tool_timeout_is_typed_policy() {
     let config = RealtimeChannelConfig {
-        tool_timeout_ms: Some(0),
+        tool_timeout: RealtimeToolTimeoutPolicy::Disabled,
     };
-    assert_eq!(config.tool_timeout_ms_or_default(), None);
+    assert_eq!(config.tool_timeout.timeout_ms(), None);
 }
 
 #[test]
-fn channel_config_explicit_value_is_honored() {
+fn channel_config_finite_tool_timeout_is_typed_policy() {
     let config = RealtimeChannelConfig {
-        tool_timeout_ms: Some(7_500),
+        tool_timeout: RealtimeToolTimeoutPolicy::Finite { timeout_ms: 7_500 },
     };
-    assert_eq!(config.tool_timeout_ms_or_default(), Some(7_500));
+    assert_eq!(config.tool_timeout.timeout_ms(), Some(7_500));
+}
+
+#[test]
+fn channel_config_timeout_policy_cases_remain_distinct() {
+    assert_ne!(
+        RealtimeToolTimeoutPolicy::Default,
+        RealtimeToolTimeoutPolicy::Disabled,
+    );
+    assert_ne!(
+        RealtimeToolTimeoutPolicy::Default,
+        RealtimeToolTimeoutPolicy::Finite {
+            timeout_ms: RealtimeToolTimeoutPolicy::DEFAULT_TIMEOUT_MS
+        },
+        "default and explicit finite default value must remain distinguishable",
+    );
 }
 
 #[test]
 fn channel_config_roundtrips_over_the_wire() {
     let config = RealtimeChannelConfig {
-        tool_timeout_ms: Some(5_000),
+        tool_timeout: RealtimeToolTimeoutPolicy::Finite { timeout_ms: 5_000 },
     };
     let value = serde_json::to_value(&config).expect("channel config serializes");
-    assert_eq!(value["tool_timeout_ms"], 5_000);
+    assert_eq!(value["tool_timeout"]["type"], "finite");
+    assert_eq!(value["tool_timeout"]["timeout_ms"], 5_000);
 
     let roundtrip: RealtimeChannelConfig =
         serde_json::from_value(value).expect("channel config deserializes");
     assert_eq!(roundtrip, config);
+}
+
+#[test]
+fn channel_config_legacy_zero_ms_field_is_not_a_disable_sentinel() {
+    let value = serde_json::json!({ "tool_timeout_ms": 0 });
+    let config: RealtimeChannelConfig =
+        serde_json::from_value(value).expect("legacy field should not poison config parsing");
+    assert_eq!(
+        config.tool_timeout,
+        RealtimeToolTimeoutPolicy::Default,
+        "legacy tool_timeout_ms=0 must not map to disabled semantics",
+    );
 }
 
 #[test]

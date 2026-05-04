@@ -993,8 +993,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         call: meerkat_core::ToolCall,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        self.dispatch_external_tool_call_with_timeout_policy(
+            id,
+            call,
+            meerkat_core::ToolDispatchTimeoutPolicy::Disabled,
+        )
+        .await
+    }
+
+    pub async fn dispatch_external_tool_call_with_timeout_policy(
+        &self,
+        id: &SessionId,
+        call: meerkat_core::ToolCall,
+        timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
         let _mutation_guard = self.live_persist_mutation_guard(id).await?;
-        let outcome = self.inner.dispatch_external_tool_call(id, call).await?;
+        let outcome = self
+            .inner
+            .dispatch_external_tool_call_with_timeout_policy(id, call, timeout_policy)
+            .await?;
         if let Err(error) = self.persist_full_session(id).await {
             let _ = self.discard_live_session(id).await;
             return Err(error);

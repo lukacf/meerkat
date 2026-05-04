@@ -268,6 +268,16 @@ impl SessionAgent for FactoryAgent {
         self.agent.dispatch_external_tool_call(call).await
     }
 
+    async fn dispatch_external_tool_call_with_timeout_policy(
+        &mut self,
+        call: meerkat_core::ToolCall,
+        timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError> {
+        self.agent
+            .dispatch_external_tool_call_with_timeout_policy(call, timeout_policy)
+            .await
+    }
+
     fn sync_system_context_state(&mut self) {
         self.agent.sync_system_context_state_to_session();
     }

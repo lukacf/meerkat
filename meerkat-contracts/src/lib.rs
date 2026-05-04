@@ -270,6 +270,7 @@ pub use wire::{
     RealtimeStatusResult,
     RealtimeTextChunk,
     RealtimeTextDelta,
+    RealtimeToolTimeoutPolicy,
     RealtimeTurningMode,
     RealtimeVideoChunk,
     RuntimeAcceptOutcomeType,

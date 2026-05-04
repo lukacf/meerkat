@@ -1865,8 +1865,23 @@ export interface RealtimeReconnectPolicy {
   max_total_ms: number;
 }
 
+export interface RealtimeToolTimeoutPolicyDefault {
+  type: "default";
+}
+
+export interface RealtimeToolTimeoutPolicyDisabled {
+  type: "disabled";
+}
+
+export interface RealtimeToolTimeoutPolicyFinite {
+  type: "finite";
+  timeout_ms: number;
+}
+
+export type RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite;
+
 export interface RealtimeChannelConfig {
-  tool_timeout_ms?: number;
+  tool_timeout?: RealtimeToolTimeoutPolicy;
 }
 
 export interface RealtimeAudioFormat {

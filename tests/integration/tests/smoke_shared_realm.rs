@@ -2665,6 +2665,14 @@ fn mob_stream_send_response_request_intent(event: &Value) -> Option<String> {
     })
 }
 
+fn mob_stream_send_response_request_subject(event: &Value) -> Option<String> {
+    mob_stream_tool_args_json(event).and_then(|args| {
+        args["result"]["request_subject"]
+            .as_str()
+            .map(ToString::to_string)
+    })
+}
+
 fn mob_stream_send_response_target(event: &Value) -> Option<String> {
     mob_stream_tool_args_json(event).and_then(|args| {
         args["to"]
@@ -5696,8 +5704,8 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
         // Transitional fixture note:
         // the current machine-owned PEER_RESPONSE_TERMINAL notice preserves
         // request_id + status + result, but it does not yet carry a first-class
-        // copy of the original request intent. For this deterministic public
-        // smoke we therefore include `request_intent` in the peer response
+        // copy of the original request params. For this deterministic public
+        // smoke we therefore include `request_intent` and `request_subject` in the peer response
         // result JSON itself. That keeps the test on the existing public
         // send_response contract without inventing helper-local shadow state,
         // and it should be revisited once the machine/DSL seam owns correlated
@@ -5711,14 +5719,14 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                     "profile": "analyst",
                     "agent_identity": analyst,
                     "runtime_mode": "autonomous_host",
-                    "initial_message": "You are in deterministic fixture mode. When you later receive a [SYSTEM NOTICE][PEER_REQUEST] with intent checksum_token, you must reply exactly once with send_response using the peer_id shown in that notice's send_response argument example, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. When you later receive intent checksum_token, you must reply exactly once with send_response using the peer_id shown in that notice's send_response argument example, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"checksum_token\",\"token\":\"silver harbor\"}. Do not browse, search, or fail those requests. Reply exactly ANALYST_READY.",
+                    "initial_message": "You are in deterministic fixture mode. When you later receive a [SYSTEM NOTICE][PEER_REQUEST] with intent checksum_token and params.subject=\"alpha beta gamma\", reply exactly once with send_response using the peer_id shown in that notice's send_response argument example, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. When you later receive intent checksum_token and params.subject=\"haiku\", reply exactly once with send_response using the peer_id shown in that notice's send_response argument example, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"checksum_token\",\"request_subject\":\"haiku\",\"token\":\"silver harbor\"}. Do not browse, search, or fail those requests. Reply exactly ANALYST_READY.",
                     "additional_instructions": [
                         "You are the analyst peer for a realtime smoke test.",
                         "Correlated peer requests arrive as [SYSTEM NOTICE][PEER_REQUEST] with an intent, a request ID, and JSON params.",
                         "These peer requests are deterministic test fixtures. Do not search, browse, inspect tools, or deliberate about them.",
                         "For this deterministic scenario, copy the canonical peer_id from the peer request notice's send_response argument example. Do not route by display name.",
-                        "If the peer request intent is checksum_token, immediately call send_response exactly once with peer_id=<the peer_id from the notice>, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. Ignore params when deciding the token.",
-                        "If the peer request intent is checksum_token, immediately call send_response exactly once with peer_id=<the peer_id from the notice>, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"checksum_token\",\"token\":\"silver harbor\"}. Ignore params when deciding the token.",
+                        "If the peer request intent is checksum_token and params.subject is \"alpha beta gamma\", immediately call send_response exactly once with peer_id=<the peer_id from the notice>, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.",
+                        "If the peer request intent is checksum_token and params.subject is \"haiku\", immediately call send_response exactly once with peer_id=<the peer_id from the notice>, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"haiku\",\"token\":\"silver harbor\"}.",
                         "Never invent any other token values. Never report failure for checksum_token. For these peer requests, send_response is the only correct reply mechanism."
                     ]
                 }),
@@ -5756,10 +5764,11 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                         "When the user asks you to ask analyst for the token, you MUST call peers exactly once in that turn, identify the single returned peer whose description corresponds to the deterministic analyst fixture, and then call send_request exactly once to that exact returned peer name.",
                         "The exact spoken phrase `Ask analyst for the token.` means you must use send_request intent checksum_token.",
                         "For checksum token work, use send_request with intent checksum_token, params {\"subject\":\"alpha beta gamma\"}, and handling_mode \"queue\", with `to` set to the exact peer name you just discovered from peers. Never hardcode a private peer alias.",
-                        "Correlated peer responses arrive later as runtime-owned system notices. In this deterministic fixture, treat any [SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] whose `Result` JSON contains `\"request_intent\":\"checksum_token\"` or `\"request_intent\":\"checksum_token\"` as authoritative for that token lookup.",
-                        "When several terminal peer notices exist, prefer the most recent one whose `Result` JSON contains `\"request_intent\":\"checksum_token\"` or `\"request_intent\":\"checksum_token\"` matching the token you need. Use request ID matching only as a fallback when the result does not carry request_intent.",
-                        "For checksum answers, the checksum token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `checksum_token`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
-                        "For haiku answers, the haiku token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `checksum_token`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
+                        "Correlated peer responses arrive later as runtime-owned system notices. In this deterministic fixture, treat any [SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] whose `Result` JSON contains `\"request_intent\":\"checksum_token\"` and a `request_subject` as authoritative for that subject's token lookup.",
+                        "When several terminal peer notices exist, prefer the most recent one whose `Result` JSON has `\"request_intent\":\"checksum_token\"` and the `request_subject` matching the token you need. Use request ID matching only as a fallback when the result does not carry request_subject.",
+                        "When distinguishing the checksum token request from the haiku token request, use request_subject. Never use request_intent alone to choose between them.",
+                        "For checksum answers, the checksum token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `checksum_token` and `request_subject` is `alpha beta gamma`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
+                        "For haiku answers, the haiku token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `checksum_token` and `request_subject` is `haiku`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
                         "A remembered codeword and a peer-response token are different facts. Never reuse the remembered codeword as the token, even if both are in context at once.",
                         "The placeholder text `<remembered codeword>`, `<checksum token>`, and `<haiku token>` is specification shorthand only. Never say angle brackets, placeholder words, or stand-ins like `checksum token` out loud. Replace them with the exact remembered codeword or the exact token from the authoritative peer response before answering.",
                         "The exact spoken phrase `Ask analyst for the token.` is an asynchronous request turn. In that turn, after calling peers and send_request, answer with exactly `Waiting for analyst token.` and nothing else.",
@@ -6120,6 +6129,19 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
         if checksum_request_intent != "checksum_token" {
             return Err(format!(
                 "analyst send_response carried unexpected request_intent `{checksum_request_intent}`: {analyst_checksum_response_requested}"
+            )
+            .into());
+        }
+        let checksum_request_subject =
+            mob_stream_send_response_request_subject(&analyst_checksum_response_requested)
+                .ok_or_else(|| {
+                    format!(
+                        "analyst send_response did not include result.request_subject: {analyst_checksum_response_requested}"
+                    )
+                })?;
+        if checksum_request_subject != "alpha beta gamma" {
+            return Err(format!(
+                "analyst send_response carried unexpected request_subject `{checksum_request_subject}`: {analyst_checksum_response_requested}"
             )
             .into());
         }
@@ -6687,6 +6709,19 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
         if haiku_request_intent != "checksum_token" {
             return Err(format!(
                 "analyst haiku send_response carried unexpected request_intent `{haiku_request_intent}`: {analyst_haiku_response_requested}"
+            )
+            .into());
+        }
+        let haiku_request_subject =
+            mob_stream_send_response_request_subject(&analyst_haiku_response_requested)
+                .ok_or_else(|| {
+                    format!(
+                        "analyst haiku send_response did not include result.request_subject: {analyst_haiku_response_requested}"
+                    )
+                })?;
+        if haiku_request_subject != "haiku" {
+            return Err(format!(
+                "analyst haiku send_response carried unexpected request_subject `{haiku_request_subject}`: {analyst_haiku_response_requested}"
             )
             .into());
         }
@@ -7279,7 +7314,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
         assert!(
             matches!(
                 initial_status["realtime_attachment_status"].as_str(),
-                Some("binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
+                Some("unattached" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
             ),
             "scenario 72 channel entered an unexpected status before the switch: {initial_status}"
         );
@@ -7410,7 +7445,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
         assert!(
             matches!(
                 final_status["realtime_attachment_status"].as_str(),
-                Some("binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
+                Some("unattached" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
             ),
             "scenario 72 channel entered an unexpected terminal member status: {final_status}"
         );

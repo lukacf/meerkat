@@ -15,6 +15,8 @@ const OUT_DIR = path.join(SDK_DIR, "wasm");
 const CRATE_DIR = path.resolve(SDK_DIR, "../../meerkat-web-runtime");
 const WORKSPACE_DIR = path.resolve(SDK_DIR, "../..");
 const CACHE_MANIFEST = path.join(OUT_DIR, ".meerkat-wasm-build.json");
+const WASM_PACK_BIN =
+  process.env.RKAT_WASM_PACK_BIN || process.env.WASM_PACK || "wasm-pack";
 const REQUIRED_OUTPUTS = [
   "meerkat_web_runtime.js",
   "meerkat_web_runtime_bg.wasm",
@@ -174,7 +176,13 @@ async function runCapture(command, args, options = {}) {
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      reject(
+        new Error(
+          `failed to run ${command}: ${error.message}. Install wasm-pack or set RKAT_WASM_PACK_BIN/WASM_PACK to a wasm-pack binary.`,
+        ),
+      );
+    });
     child.on("exit", (code, signal) => {
       if (code === 0) {
         resolve(stdout);
@@ -264,7 +272,7 @@ async function computeSourceHash() {
   hash.update("meerkat-web-runtime-wasm-v1\n");
   hash.update(`rustflags=--cfg getrandom_backend="wasm_js"\n`);
   hash.update(`profile=${BUILD_PROFILE}\n`);
-  hash.update(`wasm-pack=${(await runCapture("wasm-pack", ["--version"])).trim()}\n`);
+  hash.update(`wasm-pack=${(await runCapture(WASM_PACK_BIN, ["--version"])).trim()}\n`);
   const inputs = await localCargoGraphInputs();
   for (const filePath of inputs) {
     const relativePath = path.relative(WORKSPACE_DIR, filePath);
@@ -309,7 +317,7 @@ async function run() {
       const profileArgs =
         BUILD_PROFILE === "release" ? [] : [`--${BUILD_PROFILE}`];
       const child = spawn(
-        "wasm-pack",
+        WASM_PACK_BIN,
         [
           "build",
           CRATE_DIR,
@@ -328,7 +336,13 @@ async function run() {
           },
         },
       );
-      child.on("error", reject);
+      child.on("error", (error) => {
+        reject(
+          new Error(
+            `failed to run ${WASM_PACK_BIN}: ${error.message}. Install wasm-pack or set RKAT_WASM_PACK_BIN/WASM_PACK to a wasm-pack binary.`,
+          ),
+        );
+      });
       child.on("exit", (code, signal) => {
         if (code === 0) {
           resolve();

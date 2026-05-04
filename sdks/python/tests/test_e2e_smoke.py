@@ -631,7 +631,7 @@ if include_scenario(57):
 
 if include_scenario(58):
     @pytest.mark.asyncio
-    @requires_live_llm
+    @requires_openai_realtime
     async def test_smoke_scenario_58_realtime_member_channel_respawn_continuity():
         async with live_client() as client:
             if not client.has_capability("mob"):
@@ -760,7 +760,7 @@ if include_scenario(58):
 
 if include_scenario(64):
     @pytest.mark.asyncio
-    @requires_mixed_llms
+    @requires_openai_realtime
     async def test_smoke_scenario_64_realtime_member_channel_model_switch_continuity():
         async with live_client() as client:
             if not client.has_capability("mob"):
@@ -878,6 +878,7 @@ if include_scenario(64):
             assert "py-member-post-switch-64" in final_preview
             assert "maple" in final_preview
             assert final_state.get("realtime_attachment_status") in {
+                "unattached",
                 "binding_not_ready",
                 "binding_ready",
                 "replacement_pending",

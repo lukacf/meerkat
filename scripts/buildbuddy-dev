@@ -41,6 +41,7 @@ EOF
 
 workspace_root="$(git rev-parse --show-toplevel)"
 cd "${workspace_root}"
+source "${workspace_root}/scripts/build-backend-env"
 
 jobs="${BUILDBUDDY_JOBS:-64}"
 dry_run=0
@@ -95,6 +96,12 @@ fi
 lane="$1"
 shift
 extra_args=("$@")
+
+case "${lane}" in
+  e2e-live|e2e-smoke)
+    meerkat_load_local_secrets_env "${workspace_root}"
+    ;;
+esac
 
 bb_config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
 

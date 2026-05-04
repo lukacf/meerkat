@@ -1,11 +1,11 @@
 use crate::digest::{MobpackDigest, canonical_digest_from_map};
 use crate::manifest::MobpackManifest;
 use crate::signing::{PackSignature, sign_digest};
-use crate::targz::{create_targz, extract_targz_safe};
+use crate::targz::{create_targz, extract_targz_safe, normalize_for_archive};
 use crate::validate::PackValidationError;
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
-use meerkat_mob::MobDefinition;
+use meerkat_mob::{MobDefinition, definition::SkillSource};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -36,6 +36,11 @@ pub struct SigningRequest<'a> {
     pub key_path: &'a Path,
 }
 
+pub(crate) struct ValidatedPackFiles {
+    pub manifest: MobpackManifest,
+    pub definition: MobDefinition,
+}
+
 pub fn pack_directory(
     directory: &Path,
     signing: Option<SigningRequest<'_>>,
@@ -53,7 +58,7 @@ pub fn pack_directory_with_excludes(
     if let Some(request) = signing {
         exclude_paths_from_pack(directory, &[request.key_path], &mut files);
     }
-    validate_required_files(&files)?;
+    validate_extracted_pack_files(&files)?;
 
     if let Some(request) = signing {
         let unsigned_archive = create_targz(&files)?;
@@ -81,9 +86,7 @@ pub fn pack_directory_with_excludes(
 
 pub fn inspect_archive_bytes(bytes: &[u8]) -> Result<InspectResult, PackValidationError> {
     let files = extract_targz_safe(bytes)?;
-    validate_required_files(&files)?;
-    let manifest = parse_manifest(&files)?;
-    parse_definition(&files)?;
+    let ValidatedPackFiles { manifest, .. } = validate_extracted_pack_files(&files)?;
     let mut file_list: Vec<String> = files.keys().cloned().collect();
     file_list.sort();
     Ok(InspectResult {
@@ -98,6 +101,22 @@ pub fn inspect_archive_bytes(bytes: &[u8]) -> Result<InspectResult, PackValidati
 pub fn compute_archive_digest(bytes: &[u8]) -> Result<MobpackDigest, PackValidationError> {
     let files = extract_targz_safe(bytes)?;
     Ok(canonical_digest_from_map(&files))
+}
+
+pub(crate) fn validate_extracted_pack_files(
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<ValidatedPackFiles, PackValidationError> {
+    validate_required_files(files)?;
+    ensure_no_trust_section(files)?;
+    let manifest = parse_manifest(files)?;
+    validate_manifest_identity(&manifest)?;
+    let definition = parse_definition(files)?;
+    reject_realm_refs(&definition)?;
+    validate_skill_paths(&definition, files)?;
+    Ok(ValidatedPackFiles {
+        manifest,
+        definition,
+    })
 }
 
 fn parse_manifest(
@@ -121,6 +140,22 @@ fn parse_definition(
     serde_json::from_slice(bytes).map_err(|err| PackValidationError::BadDefinition(err.to_string()))
 }
 
+fn validate_manifest_identity(manifest: &MobpackManifest) -> Result<(), PackValidationError> {
+    if manifest.mobpack.name.trim().is_empty() {
+        return Err(PackValidationError::InvalidManifestField {
+            field: "mobpack.name".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if manifest.mobpack.version.trim().is_empty() {
+        return Err(PackValidationError::InvalidManifestField {
+            field: "mobpack.version".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn reject_realm_refs(definition: &MobDefinition) -> Result<(), PackValidationError> {
     for (name, binding) in &definition.profiles {
         if binding.realm_ref_name().is_some() {
@@ -128,6 +163,49 @@ fn reject_realm_refs(definition: &MobDefinition) -> Result<(), PackValidationErr
                 profile_name: name.to_string(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_skill_paths(
+    definition: &MobDefinition,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), PackValidationError> {
+    for (skill_name, source) in &definition.skills {
+        let SkillSource::Path { path } = source else {
+            continue;
+        };
+        let normalized_path =
+            normalize_for_archive(path).map_err(|err| PackValidationError::InvalidSkillPath {
+                skill_name: skill_name.clone(),
+                path: path.clone(),
+                reason: err.to_string(),
+            })?;
+        if normalized_path != *path {
+            return Err(PackValidationError::InvalidSkillPath {
+                skill_name: skill_name.clone(),
+                path: path.clone(),
+                reason: format!("must use canonical archive path `{normalized_path}`"),
+            });
+        }
+        if !normalized_path.starts_with("skills/") {
+            return Err(PackValidationError::InvalidSkillPath {
+                skill_name: skill_name.clone(),
+                path: path.clone(),
+                reason: "must be under skills/".to_string(),
+            });
+        }
+        let Some(bytes) = files.get(&normalized_path) else {
+            return Err(PackValidationError::MissingSkillFile {
+                skill_name: skill_name.clone(),
+                path: normalized_path,
+            });
+        };
+        std::str::from_utf8(bytes).map_err(|err| PackValidationError::InvalidSkillUtf8 {
+            skill_name: skill_name.clone(),
+            path: normalized_path,
+            reason: err.to_string(),
+        })?;
     }
     Ok(())
 }
@@ -333,6 +411,127 @@ mod tests {
     }
 
     #[test]
+    fn test_pack_rejects_manifest_trust_section() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[trust]\npolicy = \"strict\"\n",
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(err, PackValidationError::TrustSectionForbidden));
+    }
+
+    #[test]
+    fn test_pack_rejects_blank_manifest_name() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            "[mobpack]\nname = \"   \"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidManifestField { field, .. } if field == "mobpack.name"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_blank_manifest_version() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"\"\n",
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidManifestField { field, .. } if field == "mobpack.version"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_realm_profile_refs() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            br#"{"id":"mob","profiles":{"worker":{"realm_profile":"prod-worker"}}}"#,
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::RealmRefForbidden { profile_name } if profile_name == "worker"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_missing_packed_skill_path() {
+        let temp = fixture_mob_dir_with_skill_path("skills/missing.md");
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::MissingSkillFile { skill_name, path }
+                if skill_name == "review" && path == "skills/missing.md"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_non_skills_skill_path() {
+        let temp = fixture_mob_dir_with_skill_path("config/review.md");
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::write(temp.path().join("config").join("review.md"), "# Review\n").unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidSkillPath { skill_name, path, .. }
+                if skill_name == "review" && path == "config/review.md"
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_noncanonical_skill_path() {
+        let temp = fixture_mob_dir_with_skill_path("./skills/review.md");
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidSkillPath { skill_name, path, reason }
+                if skill_name == "review"
+                    && path == "./skills/review.md"
+                    && reason.contains("canonical archive path")
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_invalid_utf8_skill_path_content() {
+        let temp = fixture_mob_dir_with_skill_path("skills/review.md");
+        std::fs::write(temp.path().join("skills").join("review.md"), [0xff, 0xfe]).unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidSkillUtf8 { skill_name, path, .. }
+                if skill_name == "review" && path == "skills/review.md"
+        ));
+    }
+
+    #[test]
+    fn test_inspect_rejects_semantically_invalid_archive() {
+        let files = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n\n[trust]\npolicy = \"strict\"\n"
+                    .to_vec(),
+            ),
+            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+        ]);
+        let archive = create_targz(&files).unwrap();
+        let err = inspect_archive_bytes(&archive).unwrap_err();
+        assert!(matches!(err, PackValidationError::TrustSectionForbidden));
+    }
+
+    #[test]
     fn test_inspect_shows_manifest_and_digest() {
         let temp = fixture_mob_dir();
         let packed = pack_directory(temp.path(), None).unwrap();
@@ -361,6 +560,21 @@ mod tests {
         std::fs::write(
             temp.path().join("hooks").join("run.sh"),
             "#!/bin/sh\necho run\n",
+        )
+        .unwrap();
+        temp
+    }
+
+    fn fixture_mob_dir_with_skill_path(path: &str) -> TempDir {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            format!(
+                r#"{{
+  "id":"mob",
+  "skills":{{"review":{{"source":"path","path":"{path}"}}}}
+}}"#
+            ),
         )
         .unwrap();
         temp

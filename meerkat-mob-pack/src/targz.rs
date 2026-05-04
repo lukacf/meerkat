@@ -3,7 +3,7 @@ use crate::validate::PackValidationError;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 use tar::{Archive, Builder, EntryType, Header};
 
@@ -11,8 +11,14 @@ pub fn create_targz(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, PackVa
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     {
         let mut builder = Builder::new(&mut encoder);
+        let mut normalized_paths = BTreeSet::new();
         for (path, bytes) in files {
             let normalized_path = normalize_for_archive(path)?;
+            if !normalized_paths.insert(normalized_path.clone()) {
+                return Err(PackValidationError::DuplicateArchiveEntry {
+                    path: normalized_path,
+                });
+            }
             let exec = normalize_executable_bit(&normalized_path, bytes);
             let mut header = Header::new_gnu();
             header.set_size(bytes.len() as u64);
@@ -70,6 +76,11 @@ pub fn extract_targz_safe(input: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Pac
         }
 
         let normalized_path = normalize_for_archive(&raw_path_string)?;
+        if out.contains_key(&normalized_path) {
+            return Err(PackValidationError::DuplicateArchiveEntry {
+                path: normalized_path,
+            });
+        }
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes)?;
         out.insert(normalized_path, bytes);
@@ -78,7 +89,7 @@ pub fn extract_targz_safe(input: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Pac
     Ok(out)
 }
 
-fn normalize_for_archive(path: &str) -> Result<String, PackValidationError> {
+pub(crate) fn normalize_for_archive(path: &str) -> Result<String, PackValidationError> {
     let replaced = path.replace('\\', "/");
     if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
         return Err(PackValidationError::UnsafeEntry {
@@ -174,11 +185,56 @@ mod tests {
     }
 
     #[test]
+    fn test_targz_rejects_duplicate_normalized_entries_on_extract() {
+        let bytes = create_duplicate_archive("./skills/review.md", "skills/review.md");
+        let err = extract_targz_safe(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::DuplicateArchiveEntry { path } if path == "skills/review.md"
+        ));
+    }
+
+    #[test]
+    fn test_targz_rejects_duplicate_normalized_entries_on_create() {
+        let files = BTreeMap::from([
+            ("./skills/review.md".to_string(), b"one".to_vec()),
+            ("skills/review.md".to_string(), b"two".to_vec()),
+        ]);
+        let err = create_targz(&files).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::DuplicateArchiveEntry { path } if path == "skills/review.md"
+        ));
+    }
+
+    #[test]
     fn test_mob_definition_json_roundtrip() {
         let definition: meerkat_mob::MobDefinition =
             serde_json::from_str(r#"{"id":"mobpack-test"}"#).unwrap();
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: meerkat_mob::MobDefinition = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, definition);
+    }
+
+    fn create_duplicate_archive(first_path: &str, second_path: &str) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = Builder::new(&mut encoder);
+            for (path, bytes) in [
+                (first_path, b"one".as_slice()),
+                (second_path, b"two".as_slice()),
+            ] {
+                let mut header = Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_entry_type(EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, Cursor::new(bytes))
+                    .expect("append duplicate entry");
+            }
+            builder.finish().expect("finish archive");
+        }
+        encoder.finish().expect("finish gzip")
     }
 }

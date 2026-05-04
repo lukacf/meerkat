@@ -1,4 +1,5 @@
 use crate::manifest::MobpackManifest;
+use crate::pack::{ValidatedPackFiles, validate_extracted_pack_files};
 use crate::targz::extract_targz_safe;
 use crate::validate::PackValidationError;
 use meerkat_mob::MobDefinition;
@@ -42,18 +43,10 @@ impl MobpackArchive {
     pub fn from_extracted_files(
         files: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, PackValidationError> {
-        let manifest_bytes = files
-            .get("manifest.toml")
-            .ok_or(PackValidationError::MissingManifest)?;
-        let definition_bytes = files
-            .get("definition.json")
-            .ok_or(PackValidationError::MissingDefinition)?;
-        let manifest_text = String::from_utf8(manifest_bytes.clone())
-            .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
-        let manifest: MobpackManifest = toml::from_str(&manifest_text)
-            .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
-        let definition: MobDefinition = serde_json::from_slice(definition_bytes)
-            .map_err(|err| PackValidationError::BadDefinition(err.to_string()))?;
+        let ValidatedPackFiles {
+            manifest,
+            definition,
+        } = validate_extracted_pack_files(files)?;
 
         let mut skills = BTreeMap::new();
         let mut hooks = BTreeMap::new();
@@ -153,5 +146,25 @@ mod tests {
             let err = MobpackArchive::from_archive_bytes(&bytes).unwrap_err();
             assert!(matches!(err, PackValidationError::UnsafeEntry { .. }));
         }
+    }
+
+    #[test]
+    fn test_archive_reader_rejects_semantic_pack_errors() {
+        let files = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"mob","profiles":{"worker":{"realm_profile":"prod-worker"}}}"#.to_vec(),
+            ),
+        ]);
+        let archive_bytes = create_targz(&files).unwrap();
+        let err = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::RealmRefForbidden { profile_name } if profile_name == "worker"
+        ));
     }
 }

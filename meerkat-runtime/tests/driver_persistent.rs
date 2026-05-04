@@ -15,7 +15,7 @@ use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
     InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput, RuntimeDriver,
-    RuntimeState, RuntimeStore, SessionDelta,
+    RuntimeDriverError, RuntimeState, RuntimeStore, SessionDelta,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -357,24 +357,23 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
 }
 
 fn bind_running(driver: &mut PersistentRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(run_id),
-        Some(pre_run_phase),
-    );
+    assert_eq!(driver.runtime_state(), pre_run_phase);
+    driver.contract_begin_run_authority(run_id).unwrap();
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
+    assert_eq!(driver.inner_ref().pre_run_phase(), Some(pre_run_phase));
 }
 
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
+    driver.contract_retire_runtime_authority()?;
     driver.contract_finalize_retire().await
 }
 
 async fn reset_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::ResetReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
+    driver.contract_reset_runtime_authority()?;
     driver.contract_finalize_reset().await
 }
 
@@ -1004,7 +1003,7 @@ async fn direct_destroy_persists_destroyed_runtime_state() {
 }
 
 #[tokio::test]
-async fn direct_destroy_rejects_before_persisting_when_dsl_guard_rejects() {
+async fn direct_destroy_rejects_when_dsl_guard_rejects_destroyed_state() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
     let mut driver = PersistentRuntimeDriver::new(
@@ -1012,25 +1011,29 @@ async fn direct_destroy_rejects_before_persisting_when_dsl_guard_rejects() {
         store.clone() as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     );
-    driver.contract_force_runtime_authority(RuntimeState::Initializing, None, None);
+
+    driver
+        .destroy()
+        .await
+        .expect("first destroy should reach destroyed");
 
     let error = driver
         .destroy()
         .await
-        .expect_err("destroy without bound runtime identity must surface the DSL rejection");
+        .expect_err("destroy from destroyed must surface the DSL rejection");
     assert!(
         error.to_string().contains("DSL authority (Destroy)"),
         "unexpected error: {error}",
     );
     assert_eq!(
         driver.runtime_state(),
-        RuntimeState::Initializing,
-        "failed destroy must not override DSL lifecycle authority",
+        RuntimeState::Destroyed,
+        "failed destroy must preserve existing destroyed authority",
     );
-    assert_ne!(
+    assert_eq!(
         store.load_runtime_state(&rid).await.unwrap(),
         Some(RuntimeState::Destroyed),
-        "failed destroy must not persist shell-projected destroyed state",
+        "failed destroy must not rewrite durable state away from destroyed",
     );
 }
 
@@ -1672,5 +1675,47 @@ async fn recover_ignores_legacy_runtime_state_load_error_after_canonical_miss() 
         driver.runtime_state(),
         RuntimeState::Idle,
         "canonical runtime-state miss should retain the fresh idle runtime state"
+    );
+}
+
+#[tokio::test]
+async fn driver_persistent_recovery_without_session_authority_fails_closed_for_recovered_retire() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+    store
+        .atomic_lifecycle_commit(&rid, RuntimeState::Retired, &[])
+        .await
+        .unwrap();
+
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
+    let error = driver
+        .recover()
+        .await
+        .expect_err("recovered Retired without DSL session authority must fail closed");
+
+    let RuntimeDriverError::RecoveryCorruption { reason } = error else {
+        panic!("expected recovery corruption error, got {error}");
+    };
+    assert!(
+        reason.contains("recovered 'retired' runtime state"),
+        "unexpected error: {reason}",
+    );
+    assert!(
+        reason.contains("missing DSL session authority"),
+        "unexpected error: {reason}",
+    );
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Idle,
+        "failed recovery must roll back the live runtime projection",
+    );
+    assert!(
+        driver.active_input_ids().is_empty(),
+        "failed recovery must not leave recovered driver rows live",
+    );
+    assert_eq!(
+        store.load_runtime_state(&rid).await.unwrap(),
+        Some(RuntimeState::Retired),
+        "failed recovery must not repair or overwrite durable lifecycle truth from the shell",
     );
 }

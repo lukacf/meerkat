@@ -1105,6 +1105,176 @@ impl EphemeralRuntimeDriver {
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }
 
+    fn contract_session_authority_id(&self) -> mm_dsl::SessionId {
+        mm_dsl::SessionId::from(self.runtime_id.to_string())
+    }
+
+    fn ensure_contract_session_authority(
+        &mut self,
+    ) -> Result<mm_dsl::SessionId, RuntimeDriverError> {
+        let existing = {
+            let authority = self.shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.state.session_id.clone()
+        };
+        if let Some(session_id) = existing {
+            return Ok(session_id);
+        }
+
+        let session_id = self.contract_session_authority_id();
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RegisterSession {
+                session_id: session_id.clone(),
+            },
+            "ContractRegisterSession",
+        )?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(session_id)
+    }
+
+    /// Contract helper for external tests that need a registered DSL session
+    /// before replaying lifecycle inputs through canonical authority.
+    #[doc(hidden)]
+    pub fn contract_register_session_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.ensure_contract_session_authority().map(|_| ())
+    }
+
+    /// Contract helper for external tests that need to start a run through the
+    /// same DSL authority used by the runtime loop.
+    #[doc(hidden)]
+    pub fn contract_begin_run_authority(
+        &mut self,
+        run_id: RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        let from = self.runtime_phase_snapshot();
+        if from == RuntimeState::Running && self.current_run_id().as_ref() == Some(&run_id) {
+            return Ok(());
+        }
+        if self.current_run_id().is_some() {
+            return Err(RuntimeDriverError::Internal(
+                crate::runtime_state::RuntimeStateTransitionError {
+                    from,
+                    to: RuntimeState::Running,
+                }
+                .to_string(),
+            ));
+        }
+        crate::runtime_state::run_start_pre_phase_from_phase(from)
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+
+        let session_id = self.ensure_contract_session_authority()?;
+        if from == RuntimeState::Retired {
+            let authority = self.shared_dsl_authority();
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority
+                .apply_signal(mm_dsl::MeerkatMachineSignal::DrainQueuedRun {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                })
+                .map(|_| ())
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        err,
+                        "ContractDrainQueuedRun",
+                    ))
+                })?;
+        } else {
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::Prepare {
+                    session_id,
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                },
+                "ContractPrepareRun",
+            )?;
+        }
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that complete a run through DSL
+    /// authority after shell-side input consumption has been realized.
+    #[doc(hidden)]
+    pub fn contract_commit_run_authority(
+        &mut self,
+        input_id: &InputId,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::Commit {
+                input_id: mm_dsl::InputId::from_domain(input_id),
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "ContractCommitRun",
+        )?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that roll back a run through DSL
+    /// authority after shell-side contributor replay has been realized.
+    #[doc(hidden)]
+    pub fn contract_rollback_run_authority(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RollbackRun {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "ContractRollbackRun",
+        )?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that need the runtime retired via
+    /// canonical DSL authority before invoking shell cleanup assertions.
+    #[doc(hidden)]
+    pub fn contract_retire_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        let session_id = self.ensure_contract_session_authority()?;
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::Retire { session_id },
+            "ContractRetire",
+        )?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that need reset lifecycle authority
+    /// replayed through the DSL before invoking shell cleanup assertions.
+    #[doc(hidden)]
+    pub fn contract_reset_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(mm_dsl::MeerkatMachineInput::Reset, "ContractReset")?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that need destroyed lifecycle
+    /// authority replayed through the DSL after shell cleanup assertions.
+    #[doc(hidden)]
+    pub fn contract_destroy_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        let session_id = self.ensure_contract_session_authority()?;
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::Destroy { session_id },
+            "ContractDestroy",
+        )?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
+    /// Contract helper for external tests that need stopped lifecycle authority
+    /// replayed through the DSL before invoking shell cleanup assertions.
+    #[doc(hidden)]
+    pub fn contract_stop_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.apply_stop_runtime_executor_authority()?;
+        self.apply_runtime_executor_exited_authority()?;
+        self.sync_control_projection_from_dsl_authority();
+        Ok(())
+    }
+
     fn set_phase(&mut self, next_phase: RuntimeState) -> RuntimeState {
         let mut control = self.write_control_projection();
         let from_phase = control.phase;
@@ -1151,7 +1321,12 @@ impl EphemeralRuntimeDriver {
         self.set_control_projection(phase, current_run_id, pre_run_phase);
     }
 
-    pub(crate) fn force_runtime_authority(
+    /// Contract-only authority override for tests that need to seed impossible
+    /// or already-realized runtime phases. Production recovery must replay
+    /// durable lifecycle facts through DSL inputs instead of calling this.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn contract_force_runtime_authority(
         &mut self,
         next_phase: RuntimeState,
         current_run_id: Option<RunId>,
@@ -1171,16 +1346,6 @@ impl EphemeralRuntimeDriver {
                 .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state);
         }
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
-    }
-
-    #[doc(hidden)]
-    pub fn contract_force_runtime_authority(
-        &mut self,
-        next_phase: RuntimeState,
-        current_run_id: Option<RunId>,
-        pre_run_phase: Option<RuntimeState>,
-    ) {
-        self.force_runtime_authority(next_phase, current_run_id, pre_run_phase);
     }
 
     pub(crate) fn apply_runtime_executor_exited_authority(

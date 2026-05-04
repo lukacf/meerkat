@@ -164,6 +164,44 @@ impl PersistentRuntimeDriver {
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }
 
+    pub(crate) fn sync_control_projection_from_dsl_authority(&mut self) {
+        self.inner.sync_control_projection_from_dsl_authority();
+    }
+
+    /// Contract helper for external tests that need a registered DSL session
+    /// before replaying lifecycle inputs through canonical authority.
+    #[doc(hidden)]
+    pub fn contract_register_session_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.inner.contract_register_session_authority()
+    }
+
+    /// Contract helper for external tests that need to start a run through the
+    /// same DSL authority used by the runtime loop.
+    #[doc(hidden)]
+    pub fn contract_begin_run_authority(
+        &mut self,
+        run_id: RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner.contract_begin_run_authority(run_id)
+    }
+
+    /// Contract helper for external tests that need retired lifecycle
+    /// authority replayed through the DSL before invoking shell assertions.
+    #[doc(hidden)]
+    pub fn contract_retire_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.inner.contract_retire_runtime_authority()
+    }
+
+    /// Contract helper for external tests that need reset lifecycle authority
+    /// replayed through the DSL before invoking shell assertions.
+    #[doc(hidden)]
+    pub fn contract_reset_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
+        self.inner.contract_reset_runtime_authority()
+    }
+
+    /// Test-only authority override for crate-unit tests that need to seed
+    /// impossible or already-realized runtime phases.
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn contract_force_runtime_authority(
         &mut self,
@@ -173,10 +211,6 @@ impl PersistentRuntimeDriver {
     ) {
         self.inner
             .contract_force_runtime_authority(next_phase, current_run_id, pre_run_phase);
-    }
-
-    pub(crate) fn sync_control_projection_from_dsl_authority(&mut self) {
-        self.inner.sync_control_projection_from_dsl_authority();
     }
 
     fn apply_destroy_dsl_authority(&mut self) -> Result<(), RuntimeDriverError> {

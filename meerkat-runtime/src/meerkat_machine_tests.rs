@@ -19928,6 +19928,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
             format!("validation_failed:{reason}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::RecoveryCorruption { reason } => {
+            format!("recovery_corruption:{reason}")
+        }
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }
 }
@@ -20758,7 +20761,7 @@ async fn destroy_from_bound_initializing_is_backed_by_dsl_guard() {
         let DriverEntry::Ephemeral(driver) = &mut *entry else {
             panic!("test uses ephemeral driver");
         };
-        driver.force_runtime_authority(RuntimeState::Initializing, None, None);
+        driver.contract_force_runtime_authority(RuntimeState::Initializing, None, None);
         driver.sync_control_projection_from_dsl_authority();
     }
 

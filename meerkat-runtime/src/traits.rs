@@ -28,6 +28,10 @@ pub enum RuntimeDriverError {
     #[error("Runtime destroyed")]
     Destroyed,
 
+    /// Durable recovery state could not be replayed through canonical runtime authority.
+    #[error("Recovery corruption: {reason}")]
+    RecoveryCorruption { reason: String },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

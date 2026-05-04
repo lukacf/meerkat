@@ -108,35 +108,30 @@ fn assert_machine_owned_admission_signal(
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(run_id),
-        Some(pre_run_phase),
-    );
-}
-
-fn complete_run_projection(driver: &mut EphemeralRuntimeDriver, next_phase: RuntimeState) {
-    driver.contract_force_runtime_authority(next_phase, None, None);
+    assert_eq!(driver.runtime_state(), pre_run_phase);
+    driver.contract_begin_run_authority(run_id).unwrap();
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
+    assert_eq!(driver.pre_run_phase(), Some(pre_run_phase));
 }
 
 fn retire_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::RetireReport {
-    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
+    driver.contract_retire_runtime_authority().unwrap();
     driver.contract_finalize_retire()
 }
 
 fn reset_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::ResetReport {
-    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
+    driver.contract_reset_runtime_authority().unwrap();
     driver.contract_reset_cleanup()
 }
 
 fn destroy_runtime(driver: &mut EphemeralRuntimeDriver) -> usize {
     let abandoned = driver.contract_destroy_cleanup();
-    driver.contract_force_runtime_authority(RuntimeState::Destroyed, None, None);
+    driver.contract_destroy_runtime_authority().unwrap();
     abandoned
 }
 
 fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_force_runtime_authority(RuntimeState::Stopped, None, None);
+    driver.contract_stop_runtime_authority().unwrap();
     driver.contract_finalize_stop_runtime();
 }
 
@@ -377,7 +372,9 @@ async fn on_run_completed_consumes() {
         .run_completed(run_id.clone(), vec![input_id.clone()])
         .await
         .unwrap();
-    complete_run_projection(&mut driver, RuntimeState::Idle);
+    driver
+        .contract_commit_run_authority(&input_id, &run_id)
+        .unwrap();
 
     // Input should be consumed
     assert!(driver.input_state(&input_id).is_some());
@@ -403,7 +400,7 @@ async fn on_run_failed_rollbacks() {
     // Run failed
     driver
         .run_failed(
-            run_id,
+            run_id.clone(),
             vec![input_id.clone()],
             ReplayQueuedContributorsPlan {
                 queue_work_ids: vec![input_id.clone()],
@@ -416,7 +413,7 @@ async fn on_run_failed_rollbacks() {
         )
         .await
         .unwrap();
-    complete_run_projection(&mut driver, RuntimeState::Idle);
+    driver.contract_rollback_run_authority(&run_id).unwrap();
 
     // Input should be rolled back to Queued
     assert!(driver.input_state(&input_id).is_some());
@@ -708,8 +705,13 @@ async fn retired_can_drain_queue_via_run_cycle() {
         .unwrap();
 
     // Complete run → returns to Retired (not Idle)
-    driver.run_completed(run_id, vec![input_id]).await.unwrap();
-    complete_run_projection(&mut driver, RuntimeState::Retired);
+    driver
+        .run_completed(run_id.clone(), vec![input_id.clone()])
+        .await
+        .unwrap();
+    driver
+        .contract_commit_run_authority(&input_id, &run_id)
+        .unwrap();
 
     assert_eq!(driver.runtime_state(), RuntimeState::Retired);
     assert!(driver.queue().is_empty());

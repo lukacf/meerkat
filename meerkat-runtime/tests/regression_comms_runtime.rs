@@ -16,6 +16,7 @@ use meerkat_core::interaction::{
     InboxInteraction, InteractionContent, InteractionId, PeerIngressConvention, PeerIngressFact,
     PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus,
 };
+use meerkat_core::lifecycle::RunId;
 use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
 use meerkat_runtime::driver::ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
@@ -38,12 +39,12 @@ fn assert_machine_owned_admission_signal(
     );
 }
 
-fn bind_running(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(meerkat_core::lifecycle::RunId::new()),
-        Some(RuntimeState::Idle),
-    );
+fn bind_running(driver: &mut EphemeralRuntimeDriver) -> RunId {
+    let run_id = RunId::new();
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+    driver.contract_begin_run_authority(run_id.clone()).unwrap();
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
+    run_id
 }
 
 fn iid() -> InteractionId {
@@ -387,8 +388,8 @@ async fn response_after_completed_turn_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Simulate a completed run by starting and completing
-    bind_running(&mut driver);
-    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
+    let run_id = bind_running(&mut driver);
+    driver.contract_rollback_run_authority(&run_id).unwrap();
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);

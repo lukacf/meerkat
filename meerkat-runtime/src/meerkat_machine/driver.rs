@@ -1469,79 +1469,98 @@ fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
     )
 }
 
+fn recovered_runtime_state_corruption(
+    runtime_state: RuntimeState,
+    reason: impl Into<String>,
+) -> RuntimeDriverError {
+    RuntimeDriverError::RecoveryCorruption {
+        reason: format!(
+            "store corruption: recovered '{runtime_state}' runtime state cannot be replayed through DSL authority: {}",
+            reason.into()
+        ),
+    }
+}
+
+fn recovered_session_id(
+    driver: &crate::driver::ephemeral::EphemeralRuntimeDriver,
+    runtime_state: RuntimeState,
+) -> Result<crate::meerkat_machine::dsl::SessionId, RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    auth.state.session_id.clone().ok_or_else(|| {
+        recovered_runtime_state_corruption(
+            runtime_state,
+            "missing DSL session authority for session-scoped lifecycle input",
+        )
+    })
+}
+
+fn replay_recovered_runtime_input(
+    driver: &crate::driver::ephemeral::EphemeralRuntimeDriver,
+    runtime_state: RuntimeState,
+    input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+    context: &'static str,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input)
+        .map(|_| ())
+        .map_err(|err| {
+            recovered_runtime_state_corruption(
+                runtime_state,
+                crate::meerkat_machine::dsl_authority::map_error(err, context),
+            )
+        })
+}
+
 pub(crate) fn machine_realize_recovered_runtime_state(
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
     runtime_state: RuntimeState,
-) {
+) -> Result<(), RuntimeDriverError> {
     match runtime_state {
         RuntimeState::Retired if driver.runtime_state() != RuntimeState::Retired => {
-            let authority = driver.shared_dsl_authority();
-            let mut auth = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let applied = if let Some(session_id) = auth.state.session_id.clone() {
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *auth,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
-                )
-                .is_ok()
-            } else {
-                false
-            };
-            drop(auth);
-            if applied {
-                driver.sync_control_projection_from_dsl_authority();
-            } else {
-                driver.force_runtime_authority(RuntimeState::Retired, None, None);
-            }
+            let session_id = recovered_session_id(driver, runtime_state)?;
+            replay_recovered_runtime_input(
+                driver,
+                runtime_state,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
+                "RecoverRuntimeState(Retired)",
+            )?;
+            driver.sync_control_projection_from_dsl_authority();
         }
         RuntimeState::Stopped
             if driver.runtime_state() != RuntimeState::Stopped
                 && driver.runtime_state() != RuntimeState::Destroyed =>
         {
-            let authority = driver.shared_dsl_authority();
-            let mut auth = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let applied = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                &mut *auth,
+            replay_recovered_runtime_input(
+                driver,
+                runtime_state,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
-                    reason: "runtime state sync stopped executor".to_string(),
+                    reason: "recovered stopped runtime".to_string(),
                 },
-            )
-            .is_ok();
-            drop(auth);
-            if applied {
-                driver.sync_control_projection_from_dsl_authority();
-            } else {
-                driver.force_runtime_authority(RuntimeState::Stopped, None, None);
-            }
+                "RecoverRuntimeState(Stopped)",
+            )?;
+            driver.sync_control_projection_from_dsl_authority();
             driver.stop_runtime_cleanup();
         }
         RuntimeState::Destroyed if driver.runtime_state() != RuntimeState::Destroyed => {
-            let authority = driver.shared_dsl_authority();
-            let mut auth = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let applied = if let Some(session_id) = auth.state.session_id.clone() {
-                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *auth,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
-                )
-                .is_ok()
-            } else {
-                false
-            };
-            drop(auth);
-            if applied {
-                driver.sync_control_projection_from_dsl_authority();
-            } else {
-                driver.force_runtime_authority(RuntimeState::Destroyed, None, None);
-            }
+            let session_id = recovered_session_id(driver, runtime_state)?;
+            replay_recovered_runtime_input(
+                driver,
+                runtime_state,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
+                "RecoverRuntimeState(Destroyed)",
+            )?;
+            driver.sync_control_projection_from_dsl_authority();
             driver.destroy_cleanup();
         }
         _ => {}
     }
+    Ok(())
 }
 
 pub(crate) fn machine_recover_ephemeral_driver(
@@ -1709,7 +1728,7 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
     }
     if let Some(runtime_state) = recovered_runtime_state {
-        machine_realize_recovered_runtime_state(driver, runtime_state);
+        machine_realize_recovered_runtime_state(driver, runtime_state)?;
 
         if runtime_state.is_terminal() {
             let active = driver.active_input_ids();

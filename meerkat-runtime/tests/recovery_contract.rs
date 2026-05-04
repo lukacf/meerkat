@@ -10,6 +10,8 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+use meerkat_core::types::SessionId;
+use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
@@ -20,7 +22,7 @@ use meerkat_runtime::input_state::{
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SessionDelta};
 use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
+use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine, PersistentRuntimeDriver};
 use meerkat_store::MemoryBlobStore;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -154,17 +156,16 @@ fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(run_id),
-        Some(pre_run_phase),
-    );
+    assert_eq!(driver.runtime_state(), pre_run_phase);
+    driver.contract_begin_run_authority(run_id).unwrap();
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
+    assert_eq!(driver.pre_run_phase(), Some(pre_run_phase));
 }
 
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
+    driver.contract_retire_runtime_authority()?;
     driver.contract_finalize_retire().await
 }
 
@@ -386,41 +387,35 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
         );
 
         drop(driver);
+    }
+}
 
-        let mut retired_driver = PersistentRuntimeDriver::new(
-            runtime_id.clone(),
-            harness.store.clone(),
-            memory_blob_store(),
-        );
-        retired_driver.recover().await.unwrap();
-        assert_eq!(
-            retired_driver.runtime_state(),
+#[tokio::test]
+async fn recovery_contract_replays_recovered_runtime_lifecycle_facts_through_machine_dsl_authority()
+{
+    for harness in supported_store_harnesses() {
+        for recovered_state in [
             RuntimeState::Retired,
-            "{}: persisted retire state should round-trip through recovery",
-            harness.name
-        );
-        assert_eq!(
-            sorted_id_strings(retired_driver.active_input_ids()),
-            expected_ids,
-            "{}: retire recovery should keep the replayable contributors active",
-            harness.name
-        );
+            RuntimeState::Stopped,
+            RuntimeState::Destroyed,
+        ] {
+            let session_id = SessionId::new();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            harness
+                .store
+                .atomic_lifecycle_commit(&runtime_id, recovered_state, &[])
+                .await
+                .unwrap();
 
-        let retired_replayed_ids = vec![
-            retired_driver.dequeue_next().unwrap().0,
-            retired_driver.dequeue_next().unwrap().0,
-        ];
-        assert!(
-            retired_driver.dequeue_next().is_none(),
-            "{}: retire recovery should requeue the preserved contributors exactly once",
-            harness.name
-        );
-        assert_eq!(
-            sorted_id_strings(retired_replayed_ids),
-            expected_ids,
-            "{}: retire recovery should surface the same replay contributors",
-            harness.name
-        );
+            let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+            machine.register_session(session_id.clone()).await;
+            assert_eq!(
+                machine.runtime_state(&session_id).await.unwrap(),
+                recovered_state,
+                "{}: recovered {recovered_state} fact should replay through DSL authority",
+                harness.name
+            );
+        }
     }
 }
 

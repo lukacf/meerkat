@@ -312,23 +312,18 @@ pub struct RealtimeReconnectPolicy {
 }
 
 /// Typed per-channel tool timeout policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeToolTimeoutPolicy {
     /// Use the server's default realtime tool timeout.
+    #[default]
     Default,
     /// Do not apply a realtime-specific timeout. The runtime/tool dispatcher
     /// may still enforce its own normal execution policy.
     Disabled,
     /// Apply this finite realtime-specific timeout.
     Finite { timeout_ms: u64 },
-}
-
-impl Default for RealtimeToolTimeoutPolicy {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl RealtimeToolTimeoutPolicy {

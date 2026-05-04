@@ -101,7 +101,7 @@ Practical caveats:
 
 - Single realtime binding per session. For per-member realtime in mobs, spawn members on realtime-capable profiles.
 - Idle sessions can't host a binding — start a turn or spawn via a mob.
-- Provider-native web search and tool-calling capability gating is per-model; check `ModelProfile.tools.*` if a tool unexpectedly disappears under a realtime model.
+- Provider-native web search and tool-calling capability is per-model; check `ModelProfile` flat fields like `supports_web_search` if a tool unexpectedly disappears under a realtime model.
 
 User-facing guide: `docs/guides/realtime.mdx`. Internal authority/reconfigure flow: load the architecture skill's `references/realtime-attachment.md`.
 
@@ -130,7 +130,8 @@ rkat mob wait-kickoff <mob_id> [--member <agent_identity>...]
 
 ```bash
 # Build portable artifact
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
 
@@ -172,12 +173,13 @@ ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
 For OAuth, cloud IAM, or any "auth handled by the host page" flow, register an external resolver instead of shipping bare API keys to the browser:
 
 ```typescript
-import { registerExternalAuthResolver, attachConnectionRef } from '@rkat/web';
+import { registerExternalAuthResolver, withConnectionRef } from '@rkat/web';
 registerExternalAuthResolver(wasm, async (connectionRef) => {
   const token = await myHostFetchToken(connectionRef);
   return { kind: 'bearer_token', token };
 });
-const session = runtime.createSession(attachConnectionRef({ model: 'claude-sonnet-4-6' }, connectionRef));
+// withConnectionRef takes (connectionRef, config) and returns a config with `connectionRef` set.
+const session = runtime.createSession(withConnectionRef(connectionRef, { model: 'claude-sonnet-4-6' }));
 ```
 
 `connectionRef` is the structural way to scope a session/mob member to a specific realm + binding — set it on `runtime.createSession({...})`, `mob.spawn(...)`, etc. Per-session `apiKey` fields were removed; use `anthropicApiKey`/`openaiApiKey`/`geminiApiKey` at runtime init or rely on the resolver.

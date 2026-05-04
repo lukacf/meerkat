@@ -275,7 +275,8 @@ rkat mob run-flow team-mob --flow triage
 ### CLI artifact + web deployment
 
 ```bash
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
 rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict

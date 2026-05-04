@@ -64,7 +64,9 @@ rkat skill list [--json]
 rkat skill inspect <skill-name> --source-uuid <uuid> [--json]
 rkat models [--json]
 rkat auth login|logout|status|profile ...
-rkat schedule create|list|show|update|pause|resume|delete ...
+# (Scheduling has no top-level CLI subcommand. Schedules are managed
+# through the agent tools `meerkat_schedule_*` from `rkat run`,
+# the RPC `schedule/*` methods, REST schedule endpoints, or SDK helpers.)
 rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run-flow|flow-status|pack|inspect|validate|deploy|web ...
 rkat config get|set|patch ...
 rkat capabilities
@@ -305,10 +307,25 @@ Core tools:
 - `meerkat_mcp_reload` — stage live MCP server reload
 - `meerkat_event_stream_open` / `meerkat_event_stream_read` / `meerkat_event_stream_close` — session event streaming
 
-Mob tools (feature-gated):
+Mob tools (feature-gated, public MCP names — distinct from the agent-internal `mob_*` tool surface):
 
-- `mob_create`, `mob_list`, `mob_lifecycle`, etc. — mob lifecycle tools (via `meerkat-mob-mcp`)
-- `meerkat_mob_event_stream_open` / `meerkat_mob_event_stream_read` / `meerkat_mob_event_stream_close`
+- Lifecycle: `meerkat_mob_create`, `meerkat_mob_list`, `meerkat_mob_status`, `meerkat_mob_lifecycle`
+- Membership: `meerkat_mob_spawn`, `meerkat_mob_spawn_many`, `meerkat_mob_retire`, `meerkat_mob_respawn`, `meerkat_mob_force_cancel`, `meerkat_mob_wait_kickoff`
+- Wiring: `meerkat_mob_wire`, `meerkat_mob_unwire`
+- Member interaction: `meerkat_mob_member_send`, `meerkat_mob_append_system_context`
+- Flows: `meerkat_mob_events`, `meerkat_mob_flows`, `meerkat_mob_flow_run`, `meerkat_mob_flow_status`, `meerkat_mob_flow_cancel`
+- Profiles: `meerkat_mob_profile_create`, `meerkat_mob_profile_get`, `meerkat_mob_profile_list`, `meerkat_mob_profile_update`, `meerkat_mob_profile_delete`
+- Event streams: `meerkat_mob_event_stream_open` / `meerkat_mob_event_stream_read` / `meerkat_mob_event_stream_close`
+
+Schedule tools:
+
+- `meerkat_schedule_create`, `meerkat_schedule_get`, `meerkat_schedule_list`, `meerkat_schedule_update`
+- `meerkat_schedule_pause`, `meerkat_schedule_resume`, `meerkat_schedule_delete`
+- `meerkat_schedule_occurrences`
+
+Realtime tools:
+
+- `meerkat_realtime_status`
 
 Comms tools (feature-gated):
 
@@ -356,28 +373,27 @@ Client methods:
 - `mcp_add(params)` / `mcp_remove(params)` / `mcp_reload(params)`
 - `list_skills()`
 - `capabilities` (property, populated during `connect()`)
-- `runtime_host_info()` / `runtime_capabilities()` / `runtime_health()`
+- `get_runtime_host_info()` / `get_runtime_host_capabilities()` / `get_runtime_host_health()`
 
 Realtime helpers:
 
 - `runtime_realtime_attachment_status(session_id)` → status projection
 - `realtime_open_info(session_id)` → audio channel info
-- `realtime_capabilities()` / `realtime_status(session_id)`
+- `realtime_capabilities()` / `realtime_status(params)`
 
 Auth helpers:
 
 - `auth_login_start(...)` / `auth_login_complete(...)`
 - `auth_login_device_start(...)` / `auth_login_device_complete(...)`
-- `auth_login_provision_api_key(...)`
-- `auth_status_get(...)` / `auth_logout(...)`
-- `auth_profile_create/get/list/delete`
-- `realm_list()` / `realm_get(realm_id)`
+- `auth_provision_api_key(...)`
+- `auth_status(...)` / `auth_logout(...)`
+- `list_auth_profiles(realm_id)` / `get_auth_profile(...)` / `create_auth_profile(...)` / `delete_auth_profile(...)`
 
 Schedule helpers:
 
-- `schedule_create(...)` / `schedule_get(id)` / `schedule_list()` / `schedule_update(...)`
-- `schedule_pause(id)` / `schedule_resume(id)` / `schedule_delete(id)`
-- `schedule_occurrences(id)`
+- `create_schedule(request)` / `get_schedule(id)` / `list_schedules(...)` / `update_schedule(request)`
+- `pause_schedule(id)` / `resume_schedule(id)` / `delete_schedule(id)`
+- `list_schedule_occurrences(id)`
 
 Session methods:
 
@@ -444,13 +460,13 @@ Client methods:
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()`
 - `capabilities` (property, populated during `connect()`)
-- `runtimeHostInfo()` / `runtimeCapabilities()` / `runtimeHealth()`
+- `getRuntimeHostInfo()` / `getRuntimeHostCapabilities()` / `getRuntimeHostHealth()`
 
 Realtime helpers:
 
-- `runtimeRealtimeAttachmentStatus(sessionId)`
-- `realtimeOpenInfo(sessionId)`
-- `realtimeCapabilities()` / `realtimeStatus(sessionId)`
+- `runtimeRealtimeAttachmentStatus(params)`
+- `realtimeOpenInfo(params)`
+- `realtimeCapabilities(params)` / `realtimeStatus(params)`
 
 Auth helpers:
 
@@ -458,14 +474,14 @@ Auth helpers:
 - `authLoginDeviceStart(...)` / `authLoginDeviceComplete(...)`
 - `authLoginProvisionApiKey(...)`
 - `authStatusGet(...)` / `authLogout(...)`
-- `authProfileCreate/Get/List/Delete`
-- `realmList()` / `realmGet(realmId)`
+- `authProfileList(realmId)` / `authProfileGet(...)` / `authProfileCreate(...)` / `authProfileDelete(...)`
 
 Schedule helpers:
 
-- `scheduleCreate(...)` / `scheduleGet(id)` / `scheduleList()` / `scheduleUpdate(...)`
-- `schedulePause(id)` / `scheduleResume(id)` / `scheduleDelete(id)`
-- `scheduleOccurrences(id)`
+- `createSchedule(request)` / `getSchedule(id)` / `listSchedules(options?)` / `updateSchedule(request)`
+- `pauseSchedule(id)` / `resumeSchedule(id)` / `deleteSchedule(id)`
+- `listScheduleOccurrences(id, ...)`
+- `listScheduleTools()` / `callScheduleTool(request)`
 
 Session methods:
 

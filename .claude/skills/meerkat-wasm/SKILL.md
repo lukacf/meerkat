@@ -70,7 +70,7 @@ binding.
 
 The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around the wasm_bindgen exports with an idiomatic camelCase API. Ships with the pre-built WASM binary and a Node.js provider proxy.
 
-**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `attachConnectionRef`, `Auth` types).
+**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `withConnectionRef`, `Auth` types).
 
 **Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests.
 
@@ -99,7 +99,7 @@ For OAuth, cloud IAM, or any flow more dynamic than a static global key, use the
 import {
   MeerkatRuntime,
   registerExternalAuthResolver,
-  attachConnectionRef,
+  withConnectionRef,
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
@@ -109,9 +109,11 @@ registerExternalAuthResolver(wasm, async (connectionRef) => {
 });
 
 const runtime = await MeerkatRuntime.init(wasm, { anthropicBaseUrl: '/proxy/anthropic' });
-const session = runtime.createSession(attachConnectionRef(
-  { model: 'claude-sonnet-4-6' },
+// withConnectionRef takes (connectionRef, config) and returns config with `connectionRef` set;
+// you can also set `connectionRef` directly on the config object.
+const session = runtime.createSession(withConnectionRef(
   connectionRef,
+  { model: 'claude-sonnet-4-6' },
 ));
 ```
 

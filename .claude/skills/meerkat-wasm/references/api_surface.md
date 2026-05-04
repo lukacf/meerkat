@@ -92,7 +92,7 @@ Browser-hosted authentication is done through three concepts:
 import {
   MeerkatRuntime,
   registerExternalAuthResolver,
-  attachConnectionRef,
+  withConnectionRef,
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
@@ -106,9 +106,11 @@ const runtime = await MeerkatRuntime.init(wasm, {
   anthropicBaseUrl: 'https://my-proxy.example/anthropic',
 });
 
-const session = runtime.createSession(attachConnectionRef(
-  { model: 'claude-sonnet-4-6' },
+// withConnectionRef(connectionRef, config) returns a config with `connectionRef` set;
+// alternatively just set the field directly on the config object.
+const session = runtime.createSession(withConnectionRef(
   connectionRef,
+  { model: 'claude-sonnet-4-6' },
 ));
 ```
 
@@ -223,7 +225,7 @@ The `@rkat/web` npm package provides a camelCase TypeScript wrapper:
 import {
   MeerkatRuntime,
   registerExternalAuthResolver,
-  attachConnectionRef,
+  withConnectionRef,
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
@@ -241,10 +243,13 @@ const runtime = await MeerkatRuntime.init(wasm, {
 // Mob lifecycle
 const mob = await runtime.createMob(definition);
 await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
-const sub = await mob.subscribe('w1');       // async, returns EventSubscription<EventEnvelope>
+// Per-member subscription (async, EventSubscription<MemberEventItem>)
+const sub = await mob.subscribeMemberEvents('w1');
 const events = sub.poll();
 sub.close();
-const mobWide = await mob.subscribeAll();    // async, returns EventSubscription<AttributedEvent>
+// Or via the member object: const memberSub = await mob.member('w1').subscribe();
+// Mob-wide attributed event stream (async, EventSubscription<AttributedEventItem>)
+const mobWide = await mob.subscribeEvents();
 
 // Direct sessions
 const session = runtime.createSession({ model: 'claude-sonnet-4-6' });
@@ -256,8 +261,8 @@ session.destroy();
 
 ### Key type changes (0.6)
 
-- `Mob.subscribe()` and `Mob.subscribeAll()` are **async** (return `Promise<EventSubscription<T>>`)
-- `EventSubscription<T>` is generic — `subscribe()` yields `EventEnvelope`, `subscribeAll()` yields `AttributedEvent`
+- `Mob.subscribeMemberEvents(agentIdentity)` and `Mob.subscribeEvents()` are **async** (return `Promise<EventSubscription<T>>`); `mob.member(id).subscribe()` is the per-member shorthand
+- `EventSubscription<T>` is generic — `subscribeMemberEvents()` yields `MemberEventItem`, `subscribeEvents()` yields `AttributedEventItem`
 - `Mob.events()` returns `MobEvent[]` (structural mob events, not agent events)
 - `mob_create` and `mob_run_flow` return plain strings (not JSON-wrapped)
 - `SpawnResult` is identity-native: `agent_identity`, `agent_runtime_id`, `fence_token`, optional `generation`

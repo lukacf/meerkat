@@ -332,6 +332,21 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
     }
 }
 
+struct FailingRefreshCoordinator {
+    error: RefreshError,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for FailingRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        _key: TokenKey,
+        _refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        Err(self.error.clone())
+    }
+}
+
 // --- Fresh OAuth bundle → inline secret ---------------------
 
 #[tokio::test]
@@ -653,6 +668,61 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
     );
     assert_eq!(stored.refresh_token.as_deref(), Some("rotated-refresh"));
     assert!(meerkat_core::tokens_lifecycle_published(&stored));
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_refresh_failure_is_typed() {
+    let key = TokenKey::parse("dev", "default_claude").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let expired = PersistedTokens {
+        auth_mode: PersistedAuthMode::ClaudeAiOauth,
+        primary_secret: Some("stale-access".into()),
+        refresh_token: Some("valid-refresh".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() - ChronoDuration::minutes(1)),
+        last_refresh: Some(Utc::now() - ChronoDuration::hours(2)),
+        scopes: vec![],
+        account_id: None,
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &expired,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let realm = realm_with_oauth_binding("claude_ai_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
+            error: RefreshError::Refresh("claude refresh transport failed".into()),
+        }))
+        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshFailed(detail),
+        ) => assert!(
+            detail.contains("claude refresh transport failed"),
+            "got {detail}"
+        ),
+        other => panic!("got {other:?}"),
+    }
 }
 
 #[tokio::test]

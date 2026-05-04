@@ -321,6 +321,21 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
     }
 }
 
+struct FailingRefreshCoordinator {
+    error: RefreshError,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for FailingRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        _key: TokenKey,
+        _refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        Err(self.error.clone())
+    }
+}
+
 fn persisted_google_oauth(secret: &str) -> PersistedTokens {
     PersistedTokens {
         auth_mode: PersistedAuthMode::GoogleOauth,
@@ -574,6 +589,52 @@ async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runti
         Some("rotated-google-refresh")
     );
     assert!(meerkat_core::tokens_lifecycle_published(&stored));
+}
+
+#[tokio::test]
+async fn google_oauth_refresh_failure_is_typed() {
+    let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let old_expiry = Utc::now() - ChronoDuration::minutes(5);
+    let mut expired = persisted_google_oauth("expired-google-access");
+    expired.expires_at = Some(old_expiry);
+    expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &expired,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
+            error: RefreshError::Refresh("google refresh transport failed".into()),
+        }))
+        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshFailed(detail),
+        ) => assert!(
+            detail.contains("google refresh transport failed"),
+            "got {detail}"
+        ),
+        other => panic!("got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -17,6 +17,8 @@ use meerkat_core::AuthError;
 use meerkat_core::HttpAuthorizer;
 use meerkat_core::{AuthLease, AuthMetadata, Provider};
 
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
+use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
@@ -25,8 +27,7 @@ use meerkat_auth_core::resolver::{
     publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
-    resolve_simple_secret,
+    finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -63,6 +64,28 @@ fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthErr
         }
         _ => false,
     }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn anthropic_oauth_refresh_error(
+    error: oauth::AnthropicOAuthError,
+    authmachine_failure: String,
+) -> ProviderAuthError {
+    let detail = if authmachine_failure.is_empty() {
+        error.to_string()
+    } else {
+        format!("{error}{authmachine_failure}")
+    };
+    if authmachine_failure.is_empty() {
+        match error {
+            oauth::AnthropicOAuthError::InteractiveLoginRequired
+            | oauth::AnthropicOAuthError::MissingRefreshToken => {
+                return ProviderAuthError::Auth(AuthError::UserReauthRequired);
+            }
+            _ => {}
+        }
+    }
+    ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
 pub struct AnthropicProviderRuntime;
@@ -345,20 +368,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                     .err()
                                     .map(|err| format!("; {err}"))
                                     .unwrap_or_default();
-                                    match e {
-                                        oauth::AnthropicOAuthError::InteractiveLoginRequired => {
-                                            let mut err = interactive_login_error(binding);
-                                            if !failure.is_empty() {
-                                                err = ProviderAuthError::SourceResolutionFailed(
-                                                    format!("{err}{failure}"),
-                                                );
-                                            }
-                                            err
-                                        }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            format!("{other}{failure}"),
-                                        ),
-                                    }
+                                    anthropic_oauth_refresh_error(e, failure)
                                 })?
                             }
                         }

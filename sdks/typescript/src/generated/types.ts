@@ -2290,6 +2290,22 @@ export interface WireAuthErrorExpired {
   kind: "expired";
 }
 
+export interface WireAuthErrorStaleCredential {
+  kind: "stale_credential";
+}
+
+export interface WireAuthErrorRefreshRequired {
+  kind: "refresh_required";
+}
+
+export interface WireAuthErrorLeaseAbsent {
+  kind: "lease_absent";
+}
+
+export interface WireAuthErrorUserReauthRequired {
+  kind: "user_reauth_required";
+}
+
 export interface WireAuthErrorRefreshFailed {
   detail: string;
   kind: "refresh_failed";
@@ -2313,7 +2329,7 @@ export interface WireAuthErrorOther {
   kind: "other";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
 
 export interface WireAssistantBlockText {
   block_type: "text";

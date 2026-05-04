@@ -851,7 +851,7 @@ impl Session {
                     item_id,
                     previous_item_id,
                     RealtimeTranscriptRole::Assistant,
-                    Some(response_id.clone()),
+                    Some(response_id),
                 ) {
                     item.content_segments
                         .entry(content_index)
@@ -877,7 +877,7 @@ impl Session {
                     item_id,
                     None,
                     RealtimeTranscriptRole::Assistant,
-                    Some(response_id.clone()),
+                    Some(response_id),
                 ) {
                     item.content_segments.insert(content_index, text);
                     if response_completed && !item.text().is_empty() {

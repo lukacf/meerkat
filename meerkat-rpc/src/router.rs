@@ -66,6 +66,20 @@ fn compose_rpc_mob_external_tools(
     }
 }
 
+#[cfg(feature = "mob")]
+fn rpc_mob_external_tools_provider_from_parts(
+    callback_tools_provider: Arc<dyn Fn() -> Option<Arc<dyn AgentToolDispatcher>> + Send + Sync>,
+    configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    #[cfg(feature = "mcp")] configured_mcp_keepalive: Option<Arc<ConfiguredRpcMobMcpKeepalive>>,
+) -> meerkat_mob::ExternalToolsProvider {
+    Arc::new(move || {
+        #[cfg(feature = "mcp")]
+        let _configured_mcp_keepalive = configured_mcp_keepalive.as_ref();
+        let callback_tools = callback_tools_provider();
+        compose_rpc_mob_external_tools(callback_tools, configured_mcp_tools.clone())
+    })
+}
+
 /// Bundle returned by [`load_configured_mcp_tools_for_rpc_mob`]: the dispatcher
 /// callers wire into mob members, plus a keepalive guard that owns the loader
 /// runtime thread's lifetime.
@@ -603,29 +617,27 @@ impl MethodRouter {
                     let runtime = runtime.clone();
                     move || runtime.default_llm_client()
                 });
-                let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
+                let callback_tools_provider: Arc<
+                    dyn Fn() -> Option<Arc<dyn AgentToolDispatcher>> + Send + Sync,
+                > = Arc::new({
                     let runtime = runtime.clone();
-                    let configured_mcp_tools = configured_mcp_tools.clone();
-                    // Captured for its `Drop` side effect — keeps the loader
-                    // thread + MCP transports alive while the closure (and
-                    // therefore the dispatcher Arc) is reachable. Removing
-                    // this capture leaks the thread; see
-                    // `ConfiguredRpcMobMcpKeepalive`.
-                    #[cfg(feature = "mcp")]
-                    let _configured_mcp_keepalive = configured_mcp_keepalive;
                     move || {
-                        let callback_tools: Option<Arc<dyn AgentToolDispatcher>> =
-                            runtime.callback_request_tx().map(|tx| {
-                                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                                    runtime.registered_tools(),
-                                    tx,
-                                    runtime.callback_id_counter(),
-                                    vec![],
-                                )) as Arc<dyn AgentToolDispatcher>
-                            });
-                        compose_rpc_mob_external_tools(callback_tools, configured_mcp_tools.clone())
+                        runtime.callback_request_tx().map(|tx| {
+                            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                                runtime.registered_tools(),
+                                tx,
+                                runtime.callback_id_counter(),
+                                vec![],
+                            )) as Arc<dyn AgentToolDispatcher>
+                        })
                     }
                 });
+                let tools_provider = rpc_mob_external_tools_provider_from_parts(
+                    callback_tools_provider,
+                    configured_mcp_tools.clone(),
+                    #[cfg(feature = "mcp")]
+                    configured_mcp_keepalive,
+                );
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                     runtime.session_service(),
                     Some(runtime_adapter.clone()),
@@ -2744,6 +2756,37 @@ mod tests {
             names.contains("linear_upsert_workpad"),
             "RPC mob members launched over TCP may not have a callback transport, \
              but configured MCP tools from .rkat/mcp.toml must still be exposed"
+        );
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[test]
+    fn rpc_mob_external_tools_provider_holds_configured_mcp_keepalive_until_provider_drop() {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let keepalive = Arc::new(ConfiguredRpcMobMcpKeepalive {
+            shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+            join: None,
+        });
+
+        let provider = rpc_mob_external_tools_provider_from_parts(
+            Arc::new(|| None),
+            None,
+            Some(keepalive.clone()),
+        );
+
+        drop(keepalive);
+        assert!(
+            matches!(
+                shutdown_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "dropping the caller's keepalive Arc must not shut down configured MCP transports while the provider is alive"
+        );
+
+        drop(provider);
+        assert!(
+            shutdown_rx.try_recv().is_ok(),
+            "dropping the provider should release the captured MCP keepalive guard"
         );
     }
 

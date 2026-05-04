@@ -1051,6 +1051,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    pub async fn append_realtime_transcript_event(
+        &self,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        let _mutation_guard = self.live_persist_mutation_guard(id).await?;
+        let outcome = self
+            .inner
+            .append_realtime_transcript_event(id, event)
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session(id).await;
+            return Err(error);
+        }
+        Ok(outcome)
+    }
+
     /// Create a new persistent session service.
     pub fn new(
         builder: B,

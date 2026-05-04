@@ -8,7 +8,10 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
-use meerkat_core::{Message, PendingSystemContextAppend, ToolDef, ToolResult};
+use meerkat_core::{
+    Message, PendingSystemContextAppend, RealtimeTranscriptEvent, RealtimeTranscriptRole, ToolDef,
+    ToolResult,
+};
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::realtime_session::{
@@ -742,6 +745,21 @@ fn openai_output_audio_transcript_key(item_id: &str, content_index: u32) -> Stri
     format!("{item_id}:{content_index}")
 }
 
+fn openai_realtime_item_transcript_identity(
+    item: &Item,
+) -> Option<(String, RealtimeTranscriptRole)> {
+    match item {
+        Item::Message {
+            id: Some(id), role, ..
+        } => match role {
+            Role::User => Some((id.clone(), RealtimeTranscriptRole::User)),
+            Role::Assistant => Some((id.clone(), RealtimeTranscriptRole::Assistant)),
+            Role::System => None,
+        },
+        _ => None,
+    }
+}
+
 const OPENAI_REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
 /// Sample rate OpenAI Realtime negotiates for PCM audio on both input and output.
 pub(crate) const OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
@@ -826,6 +844,7 @@ pub struct OpenAiRealtimeSession {
     has_staged_audio: bool,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
+    item_previous: BTreeMap<String, Option<String>>,
     pending_output_audio_transcripts: BTreeMap<String, String>,
     pending_text_suppressions: VecDeque<String>,
     response_output_active: bool,
@@ -866,6 +885,7 @@ impl OpenAiRealtimeSession {
             has_staged_audio: false,
             pending_events: VecDeque::new(),
             pending_mcp_calls: BTreeMap::new(),
+            item_previous: BTreeMap::new(),
             pending_output_audio_transcripts: BTreeMap::new(),
             pending_text_suppressions: VecDeque::new(),
             response_output_active: false,
@@ -959,6 +979,28 @@ impl OpenAiRealtimeSession {
         self.response_output_active = true;
     }
 
+    fn previous_item_id_for(&self, item_id: &str) -> Option<String> {
+        self.item_previous.get(item_id).cloned().flatten()
+    }
+
+    fn observe_transcript_item(
+        &mut self,
+        item_id: String,
+        previous_item_id: Option<String>,
+        role: RealtimeTranscriptRole,
+    ) -> RealtimeSessionEvent {
+        self.item_previous
+            .entry(item_id.clone())
+            .or_insert_with(|| previous_item_id.clone());
+        RealtimeSessionEvent::RealtimeTranscript {
+            event: RealtimeTranscriptEvent::ItemObserved {
+                item_id,
+                previous_item_id,
+                role,
+            },
+        }
+    }
+
     fn pending_mcp_call_mut(&mut self, item_id: &str) -> &mut PendingMcpCall {
         self.pending_mcp_calls
             .entry(item_id.to_string())
@@ -1042,6 +1084,7 @@ impl OpenAiRealtimeSession {
 
     fn note_output_audio_transcript_delta(
         &mut self,
+        event_id: String,
         item_id: &str,
         content_index: u32,
         delta: String,
@@ -1052,7 +1095,13 @@ impl OpenAiRealtimeSession {
             .entry(key)
             .or_default()
             .push_str(&delta);
-        RealtimeSessionEvent::OutputTextDelta { delta }
+        RealtimeSessionEvent::OutputTextDeltaForItem {
+            delta_id: event_id,
+            item_id: item_id.to_string(),
+            previous_item_id: self.previous_item_id_for(item_id),
+            content_index,
+            delta,
+        }
     }
 
     fn waiting_for_provider_progress(&self) -> bool {
@@ -1075,6 +1124,7 @@ impl OpenAiRealtimeSession {
 
     fn note_output_audio_transcript_done(
         &mut self,
+        event_id: String,
         item_id: &str,
         content_index: u32,
         transcript: String,
@@ -1089,10 +1139,20 @@ impl OpenAiRealtimeSession {
             return None;
         }
         if seen.is_empty() {
-            return Some(RealtimeSessionEvent::OutputTextDelta { delta: transcript });
+            return Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                delta_id: event_id,
+                item_id: item_id.to_string(),
+                previous_item_id: self.previous_item_id_for(item_id),
+                content_index,
+                delta: transcript,
+            });
         }
         transcript.strip_prefix(&seen).and_then(|suffix| {
-            (!suffix.is_empty()).then(|| RealtimeSessionEvent::OutputTextDelta {
+            (!suffix.is_empty()).then(|| RealtimeSessionEvent::OutputTextDeltaForItem {
+                delta_id: event_id,
+                item_id: item_id.to_string(),
+                previous_item_id: self.previous_item_id_for(item_id),
+                content_index,
                 delta: suffix.to_string(),
             })
         })
@@ -1103,12 +1163,37 @@ impl OpenAiRealtimeSession {
         event: ServerEvent,
     ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let mapped = match event {
+            ServerEvent::ConversationItemCreated {
+                previous_item_id,
+                item,
+                ..
+            }
+            | ServerEvent::ConversationItemAdded {
+                previous_item_id,
+                item,
+                ..
+            }
+            | ServerEvent::ConversationItemDone {
+                previous_item_id,
+                item,
+                ..
+            } => openai_realtime_item_transcript_identity(&item).map(|(item_id, role)| {
+                self.observe_transcript_item(item_id, previous_item_id, role)
+            }),
             ServerEvent::InputAudioTranscriptionDelta { delta, .. } => {
                 Some(RealtimeSessionEvent::InputTranscriptPartial { text: delta })
             }
-            ServerEvent::InputAudioTranscriptionCompleted { transcript, .. } => {
-                Some(RealtimeSessionEvent::InputTranscriptFinal { text: transcript })
-            }
+            ServerEvent::InputAudioTranscriptionCompleted {
+                item_id,
+                content_index,
+                transcript,
+                ..
+            } => Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                previous_item_id: self.previous_item_id_for(&item_id),
+                item_id,
+                content_index,
+                text: transcript,
+            }),
             ServerEvent::InputAudioBufferSpeechStarted { .. } => {
                 if self.response_output_active && !self.response_interrupt_emitted {
                     self.response_output_active = false;
@@ -1120,7 +1205,14 @@ impl OpenAiRealtimeSession {
                     Some(RealtimeSessionEvent::TurnStarted)
                 }
             }
-            ServerEvent::InputAudioBufferCommitted { .. } => {
+            ServerEvent::InputAudioBufferCommitted {
+                previous_item_id,
+                item_id,
+                ..
+            } => {
+                self.item_previous
+                    .entry(item_id)
+                    .or_insert(previous_item_id);
                 self.awaiting_provider_response_after_commit =
                     self.turning_mode == RealtimeTurningMode::ProviderManaged;
                 self.provider_response_acknowledged_without_progress = false;
@@ -1247,32 +1339,56 @@ impl OpenAiRealtimeSession {
                 self.note_provider_response_progressed();
                 self.note_mcp_argument_done(&item_id, arguments)
             }
-            ServerEvent::ResponseOutputTextDelta { delta, .. } => {
-                self.note_provider_response_progressed();
-                if self.should_suppress_mcp_echoed_text(&delta) {
-                    None
-                } else {
-                    self.mark_response_output_active();
-                    Some(RealtimeSessionEvent::OutputTextDelta { delta })
-                }
-            }
-            ServerEvent::ResponseOutputAudioTranscriptDelta {
+            ServerEvent::ResponseOutputTextDelta {
+                event_id,
                 item_id,
                 content_index,
                 delta,
                 ..
             } => {
                 self.note_provider_response_progressed();
-                Some(self.note_output_audio_transcript_delta(&item_id, content_index, delta))
+                if self.should_suppress_mcp_echoed_text(&delta) {
+                    None
+                } else {
+                    self.mark_response_output_active();
+                    Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: event_id,
+                        previous_item_id: self.previous_item_id_for(&item_id),
+                        item_id,
+                        content_index,
+                        delta,
+                    })
+                }
+            }
+            ServerEvent::ResponseOutputAudioTranscriptDelta {
+                event_id,
+                item_id,
+                content_index,
+                delta,
+                ..
+            } => {
+                self.note_provider_response_progressed();
+                Some(self.note_output_audio_transcript_delta(
+                    event_id,
+                    &item_id,
+                    content_index,
+                    delta,
+                ))
             }
             ServerEvent::ResponseOutputAudioTranscriptDone {
+                event_id,
                 item_id,
                 content_index,
                 transcript,
                 ..
             } => {
                 self.note_provider_response_progressed();
-                self.note_output_audio_transcript_done(&item_id, content_index, transcript)
+                self.note_output_audio_transcript_done(
+                    event_id,
+                    &item_id,
+                    content_index,
+                    transcript,
+                )
             }
             ServerEvent::ResponseOutputAudioDelta { delta, .. } => {
                 self.note_provider_response_progressed();
@@ -1435,12 +1551,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
             }
             RealtimeInputChunk::TextChunk(chunk) => {
                 let text = chunk.text;
+                let synthetic_item_id =
+                    format!("meerkat_text_{}", meerkat_core::time_compat::new_uuid_v7());
                 self.raw_mut()?
                     .send_raw(ClientEvent::ConversationItemCreate {
                         event_id: None,
                         previous_item_id: None,
                         item: Box::new(Item::Message {
-                            id: None,
+                            id: Some(synthetic_item_id.clone()),
                             status: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText { text: text.clone() }],
@@ -1455,10 +1573,9 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // stays consistent — callers waiting for the canonical
                 // TurnStarted / InputTranscriptPartial / InputTranscriptFinal /
                 // TurnCommitted sequence get the same events for text as for
-                // audio. InputTranscriptFinal is also the canonical-history
-                // append seam on the consumer side (handle_product_session_event
-                // in meerkat-rpc), so text chunks must emit it or the user's
-                // turn never lands in the session history.
+                // audio. The synthetic item id is sent to OpenAI as the item id
+                // and then reused on the typed transcript seam so canonical
+                // session append remains keyed and idempotent.
                 if matches!(self.turning_mode, RealtimeTurningMode::ProviderManaged) {
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnStarted);
@@ -1466,8 +1583,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         .push_back(RealtimeSessionEvent::InputTranscriptPartial {
                             text: text.clone(),
                         });
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::InputTranscriptFinal { text });
+                    self.pending_events.push_back(
+                        RealtimeSessionEvent::InputTranscriptFinalForItem {
+                            item_id: synthetic_item_id,
+                            previous_item_id: None,
+                            content_index: 0,
+                            text,
+                        },
+                    );
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnCommitted);
                     self.raw_mut()?
@@ -2934,7 +3057,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("final"),
-            Some(RealtimeSessionEvent::InputTranscriptFinal { text }) if text == "hello"
+            Some(RealtimeSessionEvent::InputTranscriptFinalForItem { text, .. }) if text == "hello"
         ));
         assert!(matches!(
             session.next_event().await.expect("turn started"),
@@ -2946,7 +3069,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("text delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "hi"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "hi"
         ));
         assert!(matches!(
             session.next_event().await.expect("audio delta"),
@@ -3340,7 +3463,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("new response delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "birch seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch seventeen"
         ));
         assert!(matches!(
             session.next_event().await.expect("new response completed"),
@@ -3387,7 +3510,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("response output"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "amber lantern"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "amber lantern"
         ));
         assert!(matches!(
             session.next_event().await.expect("response completed"),
@@ -3442,11 +3565,11 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("first delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "Amber Lantern. "
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "Amber Lantern. "
         ));
         assert!(matches!(
             session.next_event().await.expect("second delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "birch seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch seventeen"
         ));
         assert!(matches!(
             session.next_event().await.expect("turn completed"),
@@ -3524,7 +3647,7 @@ mod tests {
 
         assert!(matches!(
             session.next_event().await.expect("queued event after refresh"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "birch seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch seventeen"
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }
@@ -3567,15 +3690,15 @@ mod tests {
 
         assert!(matches!(
             session.next_event().await.expect("first delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "birch "
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch "
         ));
         assert!(matches!(
             session.next_event().await.expect("suffix delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "seventeen"
         ));
         assert!(matches!(
             session.next_event().await.expect("done without delta still projects text"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "silver harbor"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "silver harbor"
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }
@@ -3701,7 +3824,7 @@ mod tests {
 
         assert!(matches!(
             session.next_event().await.expect("text delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "Looping now"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "Looping now"
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
@@ -3752,7 +3875,7 @@ mod tests {
 
         assert!(matches!(
             session.next_event().await.expect("text delta"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "Looping now"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "Looping now"
         ));
         assert!(matches!(
             session
@@ -3885,7 +4008,7 @@ mod tests {
         ));
         assert!(matches!(
             session.next_event().await.expect("assistant text"),
-            Some(RealtimeSessionEvent::OutputTextDelta { delta }) if delta == "birch seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch seventeen"
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }
@@ -4134,7 +4257,11 @@ mod tests {
 
         assert_eq!(
             opened.next_event().await.expect("buffered event"),
-            Some(RealtimeSessionEvent::OutputTextDelta {
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                delta_id: "evt_seed_buffered_delta".to_string(),
+                item_id: "item_seed".to_string(),
+                previous_item_id: None,
+                content_index: 0,
                 delta: "projection buffered text".to_string(),
             })
         );

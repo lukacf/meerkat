@@ -56,6 +56,7 @@ pub mod placement;
 pub mod prompt;
 pub mod provider;
 pub mod provider_matrix;
+pub mod realtime_transcript;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;
@@ -223,6 +224,10 @@ pub use ops_lifecycle::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
+pub use realtime_transcript::{
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
+    RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+};
 pub use retry::{
     LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
     select_retry_delay,

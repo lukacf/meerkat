@@ -4399,6 +4399,16 @@ impl SessionRuntime {
             .await
     }
 
+    pub async fn append_realtime_transcript_event(
+        &self,
+        session_id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.service
+            .append_realtime_transcript_event(session_id, event)
+            .await
+    }
+
     #[cfg(feature = "mob")]
     pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
         Arc::new(RpcMobSessionService::new(

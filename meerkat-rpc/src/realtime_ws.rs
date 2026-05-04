@@ -142,7 +142,6 @@ struct ActiveTargetEntry {
 #[derive(Debug, Default)]
 struct RealtimePendingTurn {
     staged_user_text: String,
-    staged_assistant_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1754,7 +1753,8 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     );
                                                     None
                                                 }
-                                                RealtimeSessionEvent::InputTranscriptFinal { .. } => Some("input_transcript_final"),
+                                                RealtimeSessionEvent::InputTranscriptFinal { .. }
+                                                | RealtimeSessionEvent::InputTranscriptFinalForItem { .. } => Some("input_transcript_final"),
                                                 RealtimeSessionEvent::Interrupted => Some("interrupted"),
                                                 RealtimeSessionEvent::ToolCallRequested { .. } => Some("tool_call_requested"),
                                                 _ => None,
@@ -1785,7 +1785,6 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 handle_product_session_event(
                                                     &state.runtime,
                                                     binding.as_ref(),
-                                                    &mut pending_turn,
                                                     other,
                                                 )
                                                 .await
@@ -3216,13 +3215,15 @@ fn classify_product_session_event(event: &RealtimeSessionEvent) -> ProductSessio
             // async mutation signal would set `StaleDeferred` for an own-
             // turn mutation and cause a spurious provider-session reopen at
             // turn end.
-            | RealtimeSessionEvent::InputTranscriptFinal { .. }
+            | RealtimeSessionEvent::InputTranscriptFinalForItem { .. }
+            | RealtimeSessionEvent::RealtimeTranscript { .. }
     ) || logical_turn_completed;
     let tool_call_requested = matches!(event, RealtimeSessionEvent::ToolCallRequested { .. });
     let turn_committed = matches!(event, RealtimeSessionEvent::TurnCommitted);
     let output_started = matches!(
         event,
         RealtimeSessionEvent::OutputTextDelta { .. }
+            | RealtimeSessionEvent::OutputTextDeltaForItem { .. }
             | RealtimeSessionEvent::OutputAudioChunk { .. }
             | RealtimeSessionEvent::OutputVideoChunk { .. }
             | RealtimeSessionEvent::ToolCallRequested { .. }
@@ -3616,40 +3617,37 @@ async fn submit_product_session_tool_error(
 async fn handle_product_session_event(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
-    pending_turn: &mut RealtimePendingTurn,
     event: RealtimeSessionEvent,
 ) -> Result<Vec<RealtimeServerFrame>, RealtimeChannelErrorFrame> {
     match event {
         RealtimeSessionEvent::InputTranscriptPartial { text } => {
-            pending_turn.staged_user_text = text.clone();
             Ok(vec![channel_event(RealtimeEvent::InputTranscriptPartial {
                 text,
             })])
         }
         RealtimeSessionEvent::InputTranscriptFinal { text } => {
-            // Canonical-history append on transcript finalization, not on
-            // TurnCommitted. For OpenAI audio the provider emits
-            // `input_audio_buffer.committed` *before* transcription
-            // completes, so relying on TurnCommitted's staged text would
-            // either leak the prior turn's transcript or drop this turn's
-            // transcript entirely. The transcript-final event is the earliest
-            // point where the full user utterance is known; use it as the
-            // append trigger and clear the staging slot so the subsequent
-            // TurnCommitted handler does not re-append.
-            let session_id = resolve_primary_session_id(
+            Ok(vec![channel_event(RealtimeEvent::InputTranscriptFinal {
+                text,
+                prosody_hint: None,
+            })])
+        }
+        RealtimeSessionEvent::InputTranscriptFinalForItem {
+            item_id,
+            previous_item_id,
+            content_index,
+            text,
+        } => {
+            append_realtime_transcript_event(
                 runtime,
                 binding,
-                "realtime product session is not wired to a session target",
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id,
+                    previous_item_id,
+                    content_index,
+                    text: text.clone(),
+                },
             )
             .await?;
-            runtime
-                .append_external_user_content(
-                    &session_id,
-                    meerkat_core::types::ContentInput::Text(text.clone()),
-                )
-                .await
-                .map_err(session_error_frame)?;
-            pending_turn.staged_user_text.clear();
             Ok(vec![channel_event(RealtimeEvent::InputTranscriptFinal {
                 text,
                 prosody_hint: None,
@@ -3657,52 +3655,72 @@ async fn handle_product_session_event(
         }
         RealtimeSessionEvent::TurnStarted => Ok(vec![channel_event(RealtimeEvent::TurnStarted)]),
         RealtimeSessionEvent::TurnCommitted => {
-            let session_id = resolve_primary_session_id(
-                runtime,
-                binding,
-                "realtime product session is not wired to a session target",
-            )
-            .await?;
-            if pending_turn.staged_user_text.is_empty() {
-                // Either the transcript-final handler already appended the
-                // canonical user turn and cleared staging, or the provider
-                // committed with no transcript at all.
-                return Ok(vec![channel_event(RealtimeEvent::TurnCommitted)]);
-            }
-            // Fallback: transcript partials accumulated but no final event
-            // arrived before the commit. Append the best-known staged text so
-            // the canonical history still records *something* for this turn.
-            let text = std::mem::take(&mut pending_turn.staged_user_text);
-            append_external_user_transcript(runtime, &session_id, text, false).await
+            Ok(vec![channel_event(RealtimeEvent::TurnCommitted)])
         }
         RealtimeSessionEvent::TurnCompleted { stop_reason, usage } => {
             match product_turn_completion_disposition(stop_reason) {
                 RealtimeTurnCompletionDisposition::Finalize => {
-                    let session_id = resolve_primary_session_id(
+                    append_realtime_transcript_event(
                         runtime,
                         binding,
-                        "realtime product session is not wired to a session target",
+                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                            stop_reason,
+                            usage,
+                        },
                     )
                     .await?;
-                    let assistant_text = std::mem::take(&mut pending_turn.staged_assistant_text);
-                    append_external_assistant_output(
-                        runtime,
-                        &session_id,
-                        assistant_text,
-                        stop_reason,
-                        usage,
-                    )
-                    .await
+                    Ok(vec![channel_event(RealtimeEvent::TurnCompleted)])
                 }
-                RealtimeTurnCompletionDisposition::SuppressKeepStaged => Ok(Vec::new()),
+                RealtimeTurnCompletionDisposition::SuppressKeepStaged => {
+                    append_realtime_transcript_event(
+                        runtime,
+                        binding,
+                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                            stop_reason,
+                            usage,
+                        },
+                    )
+                    .await?;
+                    Ok(Vec::new())
+                }
                 RealtimeTurnCompletionDisposition::SuppressDiscardStaged => {
-                    pending_turn.staged_assistant_text.clear();
+                    append_realtime_transcript_event(
+                        runtime,
+                        binding,
+                        meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                            stop_reason,
+                            usage,
+                        },
+                    )
+                    .await?;
                     Ok(Vec::new())
                 }
             }
         }
         RealtimeSessionEvent::OutputTextDelta { delta } => {
-            pending_turn.staged_assistant_text.push_str(&delta);
+            Ok(vec![channel_event(RealtimeEvent::OutputTextDelta {
+                delta,
+            })])
+        }
+        RealtimeSessionEvent::OutputTextDeltaForItem {
+            delta_id,
+            item_id,
+            previous_item_id,
+            content_index,
+            delta,
+        } => {
+            append_realtime_transcript_event(
+                runtime,
+                binding,
+                meerkat_core::RealtimeTranscriptEvent::AssistantTextDelta {
+                    delta_id,
+                    item_id,
+                    previous_item_id,
+                    content_index,
+                    delta: delta.clone(),
+                },
+            )
+            .await?;
             Ok(vec![channel_event(RealtimeEvent::OutputTextDelta {
                 delta,
             })])
@@ -3718,7 +3736,12 @@ async fn handle_product_session_event(
             })])
         }
         RealtimeSessionEvent::Interrupted => {
-            pending_turn.staged_assistant_text.clear();
+            append_realtime_transcript_event(
+                runtime,
+                binding,
+                meerkat_core::RealtimeTranscriptEvent::AssistantTurnInterrupted,
+            )
+            .await?;
             Ok(vec![channel_event(RealtimeEvent::Interrupted)])
         }
         RealtimeSessionEvent::ToolCallRequested {
@@ -3732,14 +3755,17 @@ async fn handle_product_session_event(
             audio_played_ms,
             truncated_text,
         } => {
-            // Canonical-history projection: replace the staged assistant text
-            // with the heard prefix so the next turn's projection seeds from
-            // what the user actually heard. If the provider did not supply a
-            // re-projected text, leave existing staging and let the next
-            // TurnCompleted event finalize from whatever the provider
-            // eventually surfaces.
             if let Some(text) = truncated_text.clone() {
-                pending_turn.staged_assistant_text = text;
+                append_realtime_transcript_event(
+                    runtime,
+                    binding,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTranscriptTruncated {
+                        item_id: item_id.clone(),
+                        content_index: 0,
+                        text,
+                    },
+                )
+                .await?;
             }
             Ok(vec![channel_event(
                 RealtimeEvent::AssistantTranscriptTruncated {
@@ -3749,7 +3775,28 @@ async fn handle_product_session_event(
                 },
             )])
         }
+        RealtimeSessionEvent::RealtimeTranscript { event } => {
+            append_realtime_transcript_event(runtime, binding, event).await?;
+            Ok(Vec::new())
+        }
     }
+}
+
+async fn append_realtime_transcript_event(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+    event: meerkat_core::RealtimeTranscriptEvent,
+) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, RealtimeChannelErrorFrame> {
+    let session_id = resolve_primary_session_id(
+        runtime,
+        binding,
+        "realtime product session is not wired to a session target",
+    )
+    .await?;
+    runtime
+        .append_realtime_transcript_event(&session_id, event)
+        .await
+        .map_err(session_error_frame)
 }
 
 async fn resolve_primary_session_id(
@@ -4144,51 +4191,6 @@ async fn commit_runtime_turn_text(
     }
 
     Ok(frames)
-}
-
-async fn append_external_user_transcript(
-    runtime: &SessionRuntime,
-    session_id: &SessionId,
-    text: String,
-    emit_transcript_final: bool,
-) -> Result<Vec<RealtimeServerFrame>, RealtimeChannelErrorFrame> {
-    runtime
-        .append_external_user_content(
-            session_id,
-            meerkat_core::types::ContentInput::Text(text.clone()),
-        )
-        .await
-        .map_err(session_error_frame)?;
-
-    let mut frames = Vec::new();
-    if emit_transcript_final {
-        frames.push(channel_event(RealtimeEvent::InputTranscriptFinal {
-            text,
-            prosody_hint: None,
-        }));
-    }
-    frames.push(channel_event(RealtimeEvent::TurnCommitted));
-    Ok(frames)
-}
-
-async fn append_external_assistant_output(
-    runtime: &SessionRuntime,
-    session_id: &SessionId,
-    text: String,
-    stop_reason: meerkat_core::types::StopReason,
-    usage: meerkat_core::types::Usage,
-) -> Result<Vec<RealtimeServerFrame>, RealtimeChannelErrorFrame> {
-    let blocks = if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![meerkat_core::types::AssistantBlock::Text { text, meta: None }]
-    };
-    runtime
-        .append_external_assistant_output(session_id, blocks, stop_reason, usage)
-        .await
-        .map_err(session_error_frame)?;
-
-    Ok(vec![channel_event(RealtimeEvent::TurnCompleted)])
 }
 
 fn runtime_error_frame(err: RuntimeDriverError, action: &str) -> RealtimeChannelErrorFrame {

@@ -24,7 +24,8 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
     DeferredFirstTurnPhase, InputId, PendingDeferredPrompt, PendingSystemContextAppend,
-    PendingToolResultsMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
+    PendingToolResultsMessage, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
+    RealtimeTranscriptMaterializedMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
     SessionSystemContextState,
 };
 use sha2::{Digest, Sha256};
@@ -147,6 +148,12 @@ enum SessionCommand {
         stop_reason: meerkat_core::types::StopReason,
         usage: Usage,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    AppendRealtimeTranscriptEvent {
+        event: RealtimeTranscriptEvent,
+        reply_tx: oneshot::Sender<
+            Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>,
+        >,
     },
     DispatchExternalToolCall {
         call: meerkat_core::ToolCall,
@@ -628,6 +635,16 @@ pub trait SessionAgent: Send {
     ) -> Result<(), meerkat_core::error::AgentError> {
         Err(meerkat_core::error::AgentError::ConfigError(
             "external assistant output append is not supported by this session agent".to_string(),
+        ))
+    }
+
+    /// Apply an identity-bearing provider realtime transcript event.
+    fn append_realtime_transcript_event(
+        &mut self,
+        _event: RealtimeTranscriptEvent,
+    ) -> Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "realtime transcript append is not supported by this session agent".to_string(),
         ))
     }
 
@@ -1384,6 +1401,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 usage,
                 reply_tx,
             })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Apply an identity-bearing provider realtime transcript event.
+    pub async fn append_realtime_transcript_event(
+        &self,
+        id: &SessionId,
+        event: RealtimeTranscriptEvent,
+    ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -3590,6 +3637,49 @@ async fn session_task<A: SessionAgent>(
                         },
                     );
                     let _ = control.session_event_tx.send(envelope);
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx } => {
+                let result = agent.append_realtime_transcript_event(event);
+                if let Ok(outcome) = &result {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                    for materialized in &outcome.materialized_messages {
+                        if let RealtimeTranscriptMaterializedMessage::Assistant {
+                            text,
+                            stop_reason,
+                            usage,
+                            ..
+                        } = materialized
+                        {
+                            if !text.is_empty() {
+                                let envelope = stamp_event_envelope(
+                                    &mut next_seq,
+                                    &source,
+                                    AgentEvent::TextComplete {
+                                        content: text.clone(),
+                                    },
+                                );
+                                let _ = control.session_event_tx.send(envelope);
+                            }
+                            let envelope = stamp_event_envelope(
+                                &mut next_seq,
+                                &source,
+                                AgentEvent::TurnCompleted {
+                                    stop_reason: *stop_reason,
+                                    usage: usage.clone(),
+                                },
+                            );
+                            let _ = control.session_event_tx.send(envelope);
+                        }
+                    }
                 }
                 let _ = reply_tx.send(result);
             }

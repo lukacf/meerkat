@@ -1318,11 +1318,25 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                     Ok(Some(RealtimeSessionEvent::InputTranscriptPartial {
                         text: "cedar".to_string(),
                     })),
-                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinal {
+                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                        item_id: "item_user".to_string(),
+                        previous_item_id: None,
+                        content_index: 0,
                         text: "cedar seven".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_ready".to_string(),
+                        item_id: "item_assistant".to_string(),
+                        previous_item_id: Some("item_user".to_string()),
+                        content_index: 0,
+                        delta: "ready".to_string(),
+                    })),
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_ready".to_string(),
+                        item_id: "item_assistant".to_string(),
+                        previous_item_id: Some("item_user".to_string()),
+                        content_index: 0,
                         delta: "ready".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::OutputAudioChunk {
@@ -1433,6 +1447,12 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
     );
     assert_channel_event(
         read_server_frame(&mut ws_stream).await,
+        RealtimeEvent::OutputTextDelta {
+            delta: "ready".to_string(),
+        },
+    );
+    assert_channel_event(
+        read_server_frame(&mut ws_stream).await,
         RealtimeEvent::OutputAudioChunk {
             chunk: RealtimeAudioChunk {
                 mime_type: "audio/pcm".to_string(),
@@ -1486,6 +1506,137 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
 }
 
 #[tokio::test]
+async fn unkeyed_provider_transcript_events_are_projection_only_for_websocket() {
+    let (_temp, runtime, config_store) = build_test_runtime();
+    let session_id = create_materialized_session(&runtime).await;
+    let session_id_text = session_id.to_string();
+    let baseline_history = read_history(&runtime, &session_id_text).await;
+    let session_factory = Arc::new(FakeRealtimeSessionFactory {
+        capabilities: conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+        opened_sessions: tokio::sync::Mutex::new(std::collections::VecDeque::from(vec![Ok(
+            Box::new(FakeRealtimeSession {
+                capabilities: conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+                scripted_events: std::collections::VecDeque::from(vec![
+                    Ok(Some(RealtimeSessionEvent::TurnStarted)),
+                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinal {
+                        text: "unkeyed user".to_string(),
+                    })),
+                    Ok(Some(RealtimeSessionEvent::TurnCommitted)),
+                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                        delta: "unkeyed assistant".to_string(),
+                    })),
+                    Ok(Some(RealtimeSessionEvent::TurnCompleted {
+                        stop_reason: StopReason::EndTurn,
+                        usage: meerkat_core::types::Usage::default(),
+                    })),
+                    Ok(None),
+                ]),
+                seen_inputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                seen_tool_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                seen_tool_errors: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                release_events_after_input: true,
+                release_events_after_tool_submission: false,
+                input_seen: Arc::new(AtomicBool::new(false)),
+                input_gate: Arc::new(Notify::new()),
+                tool_submission_seen: Arc::new(AtomicBool::new(false)),
+                tool_submission_gate: Arc::new(Notify::new()),
+            }) as Box<dyn RealtimeSession>,
+        )])),
+        open_calls: Arc::new(tokio::sync::Mutex::new(0usize)),
+        open_configs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        attach_calls: Arc::new(tokio::sync::Mutex::new(0usize)),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
+    let host = Arc::new(RealtimeWsHost::new(ws_url.clone()).with_session_factory(session_factory));
+    let open_info = issue_open_info(
+        host.as_ref(),
+        &runtime,
+        &session_id_text,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    let server_host = Arc::clone(&host);
+    let server_runtime = Arc::clone(&runtime);
+    let server = tokio::spawn(async move {
+        serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
+    });
+
+    let mut ws_stream = connect_and_open(
+        &ws_url,
+        &open_info,
+        RealtimeChannelRole::Primary,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelOpened(opened) => {
+            assert_eq!(opened.status.state, RealtimeChannelState::Ready);
+        }
+        other => panic!("expected channel.opened, got {other:?}"),
+    }
+    ws_stream
+        .send(WsMessage::Text(
+            serde_json::to_string(&RealtimeClientFrame::ChannelInput(
+                RealtimeChannelInputFrame {
+                    chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
+                        mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
+                        data: "AQID".to_string(),
+                    }),
+                },
+            ))
+            .expect("channel.input should serialize")
+            .into(),
+        ))
+        .await
+        .expect("channel.input should send");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_completed = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let frame = tokio::time::timeout(remaining, read_server_frame(&mut ws_stream))
+            .await
+            .expect("expected provider frames before timeout");
+        match frame {
+            RealtimeServerFrame::ChannelEvent(event_frame) => {
+                if matches!(event_frame.event, RealtimeEvent::TurnCompleted) {
+                    saw_completed = true;
+                    break;
+                }
+            }
+            RealtimeServerFrame::ChannelStatus(_) | RealtimeServerFrame::ChannelOpened(_) => {}
+            RealtimeServerFrame::ChannelClosed(frame) => {
+                panic!("unexpected channel close {frame:?}")
+            }
+            RealtimeServerFrame::ChannelError(error) => {
+                panic!("unexpected channel error {error:?}")
+            }
+        }
+    }
+    assert!(
+        saw_completed,
+        "provider public turn completion should surface"
+    );
+
+    let history = read_history(&runtime, &session_id_text).await;
+    assert_eq!(history.message_count, baseline_history.message_count);
+    assert_eq!(
+        serde_json::to_value(&history.messages).unwrap(),
+        serde_json::to_value(&baseline_history.messages).unwrap(),
+        "unkeyed websocket translation must not append canonical transcript content"
+    );
+
+    let _ = ws_stream.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
 // Re-enabled 2026-04-19: the underlying race (tool-use subresponse
 // boundary sometimes reconstructs the provider session mid-turn under
 // CI load) is kept in check by `.config/nextest.toml`'s retries=2
@@ -1508,18 +1659,29 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
                 turning_mode: RealtimeTurningMode::ProviderManaged,
                 scripted_events: std::collections::VecDeque::from(vec![
                     Ok(Some(RealtimeSessionEvent::TurnStarted)),
-                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinal {
+                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                        item_id: "item_user".to_string(),
+                        previous_item_id: None,
+                        content_index: 0,
                         text: "cedar seven".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_asking".to_string(),
+                        item_id: "item_assistant".to_string(),
+                        previous_item_id: Some("item_user".to_string()),
+                        content_index: 0,
                         delta: "asking ".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
                         stop_reason: StopReason::ToolUse,
                         usage: meerkat_core::types::Usage::default(),
                     })),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_done".to_string(),
+                        item_id: "item_assistant".to_string(),
+                        previous_item_id: Some("item_user".to_string()),
+                        content_index: 0,
                         delta: "done".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {
@@ -1964,23 +2126,41 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                 turning_mode: RealtimeTurningMode::ProviderManaged,
                 scripted_events: std::collections::VecDeque::from(vec![
                     Ok(Some(RealtimeSessionEvent::TurnStarted)),
-                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinal {
+                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                        item_id: "item_user_1".to_string(),
+                        previous_item_id: None,
+                        content_index: 0,
                         text: "ask analyst for the token".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_interrupted".to_string(),
+                        item_id: "item_assistant_1".to_string(),
+                        previous_item_id: Some("item_user_1".to_string()),
+                        content_index: 0,
                         delta: "the token is ".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::Interrupted)),
                     Ok(Some(RealtimeSessionEvent::TurnStarted)),
-                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinal {
+                    Ok(Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                        item_id: "item_user_2".to_string(),
+                        previous_item_id: Some("item_user_1".to_string()),
+                        content_index: 0,
                         text: "stop and tell me the codeword and the token".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCommitted)),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_final_1".to_string(),
+                        item_id: "item_assistant_2".to_string(),
+                        previous_item_id: Some("item_user_2".to_string()),
+                        content_index: 0,
                         delta: "amber lantern. ".to_string(),
                     })),
-                    Ok(Some(RealtimeSessionEvent::OutputTextDelta {
+                    Ok(Some(RealtimeSessionEvent::OutputTextDeltaForItem {
+                        delta_id: "evt_assistant_final_2".to_string(),
+                        item_id: "item_assistant_2".to_string(),
+                        previous_item_id: Some("item_user_2".to_string()),
+                        content_index: 0,
                         delta: "birch seventeen.".to_string(),
                     })),
                     Ok(Some(RealtimeSessionEvent::TurnCompleted {

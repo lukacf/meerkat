@@ -382,6 +382,25 @@ impl SessionAgent for FactoryAgent {
         Ok(())
     }
 
+    fn append_realtime_transcript_event(
+        &mut self,
+        event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        let outcome = self
+            .agent
+            .session_mut()
+            .append_realtime_transcript_event(event);
+        for materialized in &outcome.materialized_messages {
+            if let meerkat_core::RealtimeTranscriptMaterializedMessage::Assistant {
+                usage, ..
+            } = materialized
+            {
+                self.agent.budget().record_usage(usage);
+            }
+        }
+        Ok(outcome)
+    }
+
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {

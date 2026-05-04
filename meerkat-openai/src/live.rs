@@ -25,7 +25,7 @@ use oai_rt_rs::protocol::models::{
     Role, SessionUpdate, SessionUpdateConfig, Tool, TurnDetection, Voice,
 };
 use oai_rt_rs::{ClientEvent, Error as OpenAiLiveError, RealtimeClient, ServerEvent};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -762,7 +762,30 @@ fn openai_realtime_item_transcript_identity(
 
 fn openai_realtime_item_id(item: &Item) -> Option<&str> {
     match item {
-        Item::Message { id: Some(id), .. } | Item::McpCall { id: Some(id), .. } => Some(id),
+        Item::Message { id: Some(id), .. }
+        | Item::FunctionCall { id: Some(id), .. }
+        | Item::FunctionCallOutput { id: Some(id), .. }
+        | Item::McpCall { id: Some(id), .. }
+        | Item::McpListTools { id: Some(id), .. }
+        | Item::McpApprovalRequest { id: Some(id), .. }
+        | Item::McpApprovalResponse { id: Some(id), .. } => Some(id),
+        _ => None,
+    }
+}
+
+fn openai_realtime_skipped_item_id(item: &Item) -> Option<String> {
+    match item {
+        Item::Message {
+            id: Some(id),
+            role: Role::System,
+            ..
+        }
+        | Item::FunctionCall { id: Some(id), .. }
+        | Item::FunctionCallOutput { id: Some(id), .. }
+        | Item::McpCall { id: Some(id), .. }
+        | Item::McpListTools { id: Some(id), .. }
+        | Item::McpApprovalRequest { id: Some(id), .. }
+        | Item::McpApprovalResponse { id: Some(id), .. } => Some(id.clone()),
         _ => None,
     }
 }
@@ -853,6 +876,7 @@ pub struct OpenAiRealtimeSession {
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
     item_response: BTreeMap<String, String>,
+    projected_seed_item_ids: BTreeSet<String>,
     pending_output_audio_transcripts: BTreeMap<String, String>,
     pending_text_suppressions: VecDeque<String>,
     active_response_id: Option<String>,
@@ -896,6 +920,7 @@ impl OpenAiRealtimeSession {
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
             item_response: BTreeMap::new(),
+            projected_seed_item_ids: BTreeSet::new(),
             pending_output_audio_transcripts: BTreeMap::new(),
             pending_text_suppressions: VecDeque::new(),
             active_response_id: None,
@@ -964,8 +989,11 @@ impl OpenAiRealtimeSession {
                     return Err(LlmError::ConnectionReset);
                 };
                 match event {
-                    ServerEvent::ConversationItemCreated { .. }
-                    | ServerEvent::ConversationItemAdded { .. } => {
+                    ServerEvent::ConversationItemCreated { item, .. }
+                    | ServerEvent::ConversationItemAdded { item, .. } => {
+                        if let Some(item_id) = openai_realtime_item_id(&item) {
+                            self.projected_seed_item_ids.insert(item_id.to_string());
+                        }
                         acknowledged += 1;
                     }
                     other => {
@@ -991,7 +1019,21 @@ impl OpenAiRealtimeSession {
     }
 
     fn previous_item_id_for(&self, item_id: &str) -> Option<String> {
-        self.item_previous.get(item_id).cloned().flatten()
+        self.canonical_previous_item_id(self.item_previous.get(item_id).cloned().flatten())
+    }
+
+    fn canonical_previous_item_id(&self, previous_item_id: Option<String>) -> Option<String> {
+        previous_item_id.filter(|item_id| !self.projected_seed_item_ids.contains(item_id))
+    }
+
+    fn note_previous_for_item(&mut self, item_id: &str, previous_item_id: Option<String>) {
+        let entry = self
+            .item_previous
+            .entry(item_id.to_string())
+            .or_insert(None);
+        if entry.is_none() && previous_item_id.is_some() {
+            *entry = previous_item_id;
+        }
     }
 
     fn note_response_for_item(&mut self, response_id: &str, item_id: &str) {
@@ -1012,9 +1054,8 @@ impl OpenAiRealtimeSession {
         role: RealtimeTranscriptRole,
         response_id: Option<String>,
     ) -> RealtimeSessionEvent {
-        self.item_previous
-            .entry(item_id.clone())
-            .or_insert_with(|| previous_item_id.clone());
+        self.note_previous_for_item(&item_id, previous_item_id.clone());
+        let previous_item_id = self.canonical_previous_item_id(previous_item_id);
         if let Some(response_id) = response_id.as_deref() {
             self.note_response_for_item(response_id, &item_id);
         }
@@ -1024,6 +1065,21 @@ impl OpenAiRealtimeSession {
                 previous_item_id,
                 role,
                 response_id,
+            },
+        }
+    }
+
+    fn observe_skipped_item(
+        &mut self,
+        item_id: String,
+        previous_item_id: Option<String>,
+    ) -> RealtimeSessionEvent {
+        self.note_previous_for_item(&item_id, previous_item_id.clone());
+        let previous_item_id = self.canonical_previous_item_id(previous_item_id);
+        RealtimeSessionEvent::RealtimeTranscript {
+            event: RealtimeTranscriptEvent::ItemSkipped {
+                item_id,
+                previous_item_id,
             },
         }
     }
@@ -1211,9 +1267,14 @@ impl OpenAiRealtimeSession {
                 previous_item_id,
                 item,
                 ..
-            } => openai_realtime_item_transcript_identity(&item).map(|(item_id, role)| {
-                self.observe_transcript_item(item_id, previous_item_id, role, None)
-            }),
+            } => {
+                if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item) {
+                    Some(self.observe_transcript_item(item_id, previous_item_id, role, None))
+                } else {
+                    openai_realtime_skipped_item_id(&item)
+                        .map(|item_id| self.observe_skipped_item(item_id, previous_item_id))
+                }
+            }
             ServerEvent::InputAudioTranscriptionDelta { delta, .. } => {
                 Some(RealtimeSessionEvent::InputTranscriptPartial { text: delta })
             }
@@ -1246,9 +1307,7 @@ impl OpenAiRealtimeSession {
                 item_id,
                 ..
             } => {
-                self.item_previous
-                    .entry(item_id)
-                    .or_insert(previous_item_id);
+                self.note_previous_for_item(&item_id, previous_item_id);
                 self.awaiting_provider_response_after_commit =
                     self.turning_mode == RealtimeTurningMode::ProviderManaged;
                 self.provider_response_acknowledged_without_progress = false;
@@ -3222,6 +3281,117 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 ..
             })
+        ));
+        assert_eq!(session.next_event().await.expect("eof"), None);
+    }
+
+    #[tokio::test]
+    async fn provider_neutral_session_emits_non_dialogue_items_as_transcript_anchors() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::from(vec![
+                    Ok(Some(ServerEvent::ConversationItemAdded {
+                        event_id: "evt_tool_item".to_string(),
+                        previous_item_id: Some("item_user".to_string()),
+                        item: Item::FunctionCall {
+                            id: Some("item_tool".to_string()),
+                            status: None,
+                            name: "lookup".to_string(),
+                            call_id: "call_tool".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    })),
+                    Ok(Some(ServerEvent::InputAudioBufferCommitted {
+                        event_id: "evt_commit".to_string(),
+                        previous_item_id: Some("item_tool".to_string()),
+                        item_id: "item_next_user".to_string(),
+                    })),
+                    Ok(None),
+                ]))),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        assert!(matches!(
+            session.next_event().await.expect("tool anchor"),
+            Some(RealtimeSessionEvent::RealtimeTranscript {
+                event: RealtimeTranscriptEvent::ItemSkipped {
+                    item_id,
+                    previous_item_id: Some(previous),
+                },
+            }) if item_id == "item_tool" && previous == "item_user"
+        ));
+        assert!(matches!(
+            session.next_event().await.expect("commit"),
+            Some(RealtimeSessionEvent::TurnCommitted)
+        ));
+        assert_eq!(
+            session.previous_item_id_for("item_next_user").as_deref(),
+            Some("item_tool")
+        );
+        assert_eq!(session.next_event().await.expect("eof"), None);
+    }
+
+    #[tokio::test]
+    async fn provider_neutral_session_treats_projected_seed_items_as_transcript_boundaries() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::from(vec![
+                    Ok(Some(ServerEvent::ConversationItemCreated {
+                        event_id: "evt_seed_user".to_string(),
+                        previous_item_id: None,
+                        item: Item::Message {
+                            id: Some("item_seed_user".to_string()),
+                            status: None,
+                            role: Role::User,
+                            content: vec![ContentPart::InputText {
+                                text: "remember amber lantern".to_string(),
+                            }],
+                        },
+                    })),
+                    Ok(Some(ServerEvent::InputAudioBufferCommitted {
+                        event_id: "evt_commit".to_string(),
+                        previous_item_id: Some("item_seed_user".to_string()),
+                        item_id: "item_live_user".to_string(),
+                    })),
+                    Ok(Some(ServerEvent::InputAudioTranscriptionCompleted {
+                        event_id: "evt_final".to_string(),
+                        item_id: "item_live_user".to_string(),
+                        content_index: 0,
+                        transcript: "Say only the codeword once.".to_string(),
+                        logprobs: None,
+                        usage: None,
+                    })),
+                    Ok(None),
+                ]))),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        let seed_messages = vec![Message::User(meerkat_core::UserMessage::text(
+            "remember amber lantern",
+        ))];
+
+        session
+            .seed_history_projection(&seed_messages, &[])
+            .await
+            .expect("seed history projection");
+        assert_eq!(seen.lock().await.len(), 1);
+
+        assert!(matches!(
+            session.next_event().await.expect("commit"),
+            Some(RealtimeSessionEvent::TurnCommitted)
+        ));
+        assert!(matches!(
+            session.next_event().await.expect("final"),
+            Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                item_id,
+                previous_item_id: None,
+                text,
+                ..
+            }) if item_id == "item_live_user" && text == "Say only the codeword once."
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }

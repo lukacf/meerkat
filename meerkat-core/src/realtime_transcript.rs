@@ -31,6 +31,12 @@ pub enum RealtimeTranscriptEvent {
         role: RealtimeTranscriptRole,
         response_id: Option<String>,
     },
+    /// Observe a provider item that participates in provider causal ordering
+    /// but must not materialize transcript content.
+    ItemSkipped {
+        item_id: String,
+        previous_item_id: Option<String>,
+    },
     /// Provider finalized the transcript for a user input item.
     UserTranscriptFinal {
         item_id: String,

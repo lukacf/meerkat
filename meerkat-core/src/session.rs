@@ -73,6 +73,8 @@ struct RealtimeTranscriptItemState {
     #[serde(default)]
     content_segments: BTreeMap<u32, String>,
     #[serde(default)]
+    skipped: bool,
+    #[serde(default)]
     ready: bool,
     #[serde(default)]
     materialized: bool,
@@ -89,7 +91,20 @@ impl RealtimeTranscriptItemState {
             previous_item_id,
             response_id,
             content_segments: BTreeMap::new(),
+            skipped: false,
             ready: false,
+            materialized: false,
+        }
+    }
+
+    fn skipped(previous_item_id: Option<String>) -> Self {
+        Self {
+            role: RealtimeTranscriptRole::Assistant,
+            previous_item_id,
+            response_id: None,
+            content_segments: BTreeMap::new(),
+            skipped: true,
+            ready: true,
             materialized: false,
         }
     }
@@ -814,6 +829,12 @@ impl Session {
             } => {
                 observe_realtime_item(&mut state, item_id, previous_item_id, role, response_id);
             }
+            RealtimeTranscriptEvent::ItemSkipped {
+                item_id,
+                previous_item_id,
+            } => {
+                observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
+            }
             RealtimeTranscriptEvent::UserTranscriptFinal {
                 item_id,
                 previous_item_id,
@@ -827,7 +848,15 @@ impl Session {
                     RealtimeTranscriptRole::User,
                     None,
                 ) {
-                    item.content_segments.insert(content_index, text);
+                    let segment = item.content_segments.entry(content_index).or_default();
+                    if segment.is_empty() && !text.is_empty() {
+                        *segment = text;
+                    } else if !text.is_empty() && segment.as_str() != text {
+                        tracing::warn!(
+                            content_index,
+                            "ignoring conflicting realtime user transcript segment replay"
+                        );
+                    }
                     item.ready = true;
                 }
             }
@@ -950,15 +979,23 @@ impl Session {
         let mut materialized = Vec::new();
         loop {
             let order = realtime_transcript_order(state);
+            let mut skipped_batch = Vec::new();
             let mut batch = Vec::new();
             for item_id in order {
                 let Some(item) = state.items.get(&item_id) else {
                     continue;
                 };
-                if item.materialized || !item.ready {
+                if item.materialized {
                     continue;
                 }
                 if !realtime_predecessor_materialized(state, item.previous_item_id.as_deref()) {
+                    continue;
+                }
+                if item.skipped {
+                    skipped_batch.push(item_id.clone());
+                    continue;
+                }
+                if !item.ready {
                     continue;
                 }
                 let text = item.text();
@@ -994,8 +1031,13 @@ impl Session {
                     }
                 }
             }
-            if batch.is_empty() {
+            if skipped_batch.is_empty() && batch.is_empty() {
                 break;
+            }
+            for item_id in skipped_batch {
+                if let Some(item) = state.items.get_mut(&item_id) {
+                    item.materialized = true;
+                }
             }
             for message in batch {
                 match &message {
@@ -1708,6 +1750,14 @@ fn observe_realtime_item(
     let item = state.items.entry(item_id.clone()).or_insert_with(|| {
         RealtimeTranscriptItemState::new(role, previous_item_id.clone(), response_id.clone())
     });
+    if item.skipped {
+        tracing::warn!(
+            item_id = %item_id,
+            observed_role = ?role,
+            "ignoring realtime transcript content for item previously observed as non-dialogue"
+        );
+        return None;
+    }
     if item.role != role {
         tracing::warn!(
             item_id = %item_id,
@@ -1736,6 +1786,34 @@ fn observe_realtime_item(
         }
     }
     Some(item)
+}
+
+fn observe_realtime_skipped_item(
+    state: &mut SessionRealtimeTranscriptState,
+    item_id: String,
+    previous_item_id: Option<String>,
+) {
+    let Some(item_id) = normalize_realtime_item_id(item_id) else {
+        return;
+    };
+    let previous_item_id = normalize_realtime_previous_item_id(previous_item_id);
+    if !state
+        .first_seen_order
+        .iter()
+        .any(|existing| existing == &item_id)
+    {
+        state.first_seen_order.push(item_id.clone());
+    }
+    let item = state
+        .items
+        .entry(item_id)
+        .or_insert_with(|| RealtimeTranscriptItemState::skipped(previous_item_id.clone()));
+    if !item.content_segments.is_empty() || !item.skipped {
+        return;
+    }
+    if item.previous_item_id.is_none() && previous_item_id.is_some() {
+        item.previous_item_id = previous_item_id;
+    }
 }
 
 fn mark_realtime_assistant_response_ready(
@@ -2048,6 +2126,149 @@ mod tests {
             assert!(session.append_realtime_transcript_event(event).is_inert());
         }
 
+        assert_eq!(
+            serde_json::to_value(session.messages()).unwrap(),
+            first_messages
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_user_final_replay_cannot_erase_existing_segment() {
+        let mut session = Session::new();
+
+        let user = RealtimeTranscriptEvent::UserTranscriptFinal {
+            item_id: "item_user".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: "remember amber lantern".to_string(),
+        };
+        assert!(
+            !session
+                .append_realtime_transcript_event(user.clone())
+                .is_inert()
+        );
+        let first_messages = serde_json::to_value(session.messages()).unwrap();
+
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "item_user".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: String::new(),
+                })
+                .is_inert()
+        );
+        assert!(session.append_realtime_transcript_event(user).is_inert());
+        assert_eq!(
+            serde_json::to_value(session.messages()).unwrap(),
+            first_messages
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_empty_user_final_can_be_filled_by_later_nonempty_replay() {
+        let mut session = Session::new();
+
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "item_user".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: String::new(),
+                })
+                .is_inert()
+        );
+        assert!(session.messages().is_empty());
+
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_user".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "remember amber lantern".to_string(),
+            },
+        );
+        assert_eq!(outcome.materialized_messages.len(), 1);
+        assert_eq!(session.messages().len(), 1);
+        assert!(matches!(
+            &session.messages()[0],
+            Message::User(user) if user.text_content() == "remember amber lantern"
+        ));
+    }
+
+    #[test]
+    fn realtime_transcript_skipped_provider_items_preserve_causal_order_without_content() {
+        let mut session = Session::new();
+
+        let assistant_delta = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_assistant".to_string(),
+            delta_id: "evt_delta_1".to_string(),
+            item_id: "item_assistant".to_string(),
+            previous_item_id: Some("item_tool".to_string()),
+            content_index: 0,
+            delta: "done".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(assistant_delta.clone())
+                .is_inert()
+        );
+        let assistant_complete = RealtimeTranscriptEvent::AssistantTurnCompleted {
+            response_id: "resp_assistant".to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(assistant_complete.clone())
+                .is_inert()
+        );
+
+        let skipped = RealtimeTranscriptEvent::ItemSkipped {
+            item_id: "item_tool".to_string(),
+            previous_item_id: Some("item_user".to_string()),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(skipped.clone())
+                .is_inert(),
+            "a skipped provider item must not append transcript content"
+        );
+        assert!(session.messages().is_empty());
+
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_user".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "please use the tool".to_string(),
+            },
+        );
+        assert_eq!(outcome.materialized_messages.len(), 2);
+        assert_eq!(session.messages().len(), 2);
+        assert!(matches!(
+            &session.messages()[0],
+            Message::User(user) if user.text_content() == "please use the tool"
+        ));
+        assert!(matches!(
+            &session.messages()[1],
+            Message::BlockAssistant(assistant) if block_assistant_text(assistant) == "done"
+        ));
+
+        let first_messages = serde_json::to_value(session.messages()).unwrap();
+        assert!(session.append_realtime_transcript_event(skipped).is_inert());
+        assert!(
+            session
+                .append_realtime_transcript_event(assistant_delta)
+                .is_inert()
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(assistant_complete)
+                .is_inert()
+        );
         assert_eq!(
             serde_json::to_value(session.messages()).unwrap(),
             first_messages

@@ -29,7 +29,7 @@ Meerkat is a **library-first, modular agent harness** -- composable Rust crates 
 
 That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
-It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces).
+It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Critical lifecycle flows are specified as typed machines and checked with TLA+ where it matters, which keeps cancellation, auth freshness, schedules, and realtime attachment predictable across surfaces.
 
 The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
@@ -90,10 +90,10 @@ Same realm means shared sessions, config, backend, credentials, schedules, blobs
 ```bash
 rkat auth login openai
 rkat auth profiles --realm dev
-rkat run --connection-ref dev:openai_oauth "Summarize this pull request"
+rkat run --model gpt-5.5 --connection-ref dev:openai_oauth "Summarize this pull request"
 ```
 
-Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys.
+Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys. Bindings are provider-checked against the selected model, so an OpenAI binding should be paired with an OpenAI model, an Anthropic binding with an Anthropic model, and so on.
 
 **Give it tools and let it work.** Enable shell access, MCP tools, schedules, comms, and mob orchestration with the `full` tool preset:
 
@@ -159,7 +159,7 @@ rkat run -m gemma-4-31b "Explain the code in main.rs"
 rkat doctor
 ```
 
-Self-hosted credential resolution uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility.
+Self-hosted credential resolution uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. Legacy compatibility is intentionally fail-closed for credentials: if a legacy server defines bearer material but no usable connection/auth binding is configured, Meerkat refuses to synthesize bearer auth; a selected realm without a self-hosted binding also fails instead of falling back to legacy config.
 
 ## Testing
 
@@ -240,7 +240,7 @@ Run `make buildbuddy-doctor` if remote build setup looks suspicious.
 
 **Web/WASM.** `@rkat/web` wraps `MeerkatRuntime`, browser sessions and mobs, typed event subscriptions, JS tools, structural `connectionRef`, provider proxy support, and host-page auth resolvers. Mobpacks can also be built into browser bundles with `rkat mob web build`.
 
-**Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`. Proposal-only targets such as `embed` and `compile` are not part of the shipped surface.
+**Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`.
 
 **Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-mini` and `rkat-rpc-mini` are separate slim release surfaces.
 
@@ -357,7 +357,7 @@ The agent returns validated JSON matching your schema, enforced by budget limits
 After defining a realm binding and storing its credentials, pass the binding explicitly:
 
 ```bash
-rkat run --realm prod --connection-ref prod:default \
+rkat run --realm prod --model gpt-5.5 --connection-ref prod:openai \
   "Summarize the incident queue with the production OpenAI binding."
 ```
 
@@ -405,7 +405,7 @@ result = await client.create_session(
     },
 )
 
-return json.loads(result.structured_output)["failures"]
+return result.structured_output["failures"]
 ```
 
 The orchestrator agent delegates investigation, collects findings, and synthesizes a structured report. Budget and tool scopes keep the work bounded.
@@ -474,11 +474,14 @@ Browser auth can be supplied at runtime bootstrap, through the `@rkat/web` provi
 Build once, run in multiple environments with a portable `.mobpack`:
 
 ```bash
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key --signer-id release-team
 rkat mob inspect ./dist/release-triage.mobpack
 rkat mob validate ./dist/release-triage.mobpack
 rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
 ```
+
+Strict trust requires the signer ID and public key to be present in the user or project trusted-signers store before deploy.
 
 Browser target from the same artifact:
 

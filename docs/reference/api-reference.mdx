@@ -6,6 +6,37 @@ icon: "book"
 
 This page is a quick-lookup index. For current session/runtime semantics, see [Session contracts](/reference/session-contracts). For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
 
+## Generated wire catalogs
+
+The public protocol catalogs are generated from `meerkat-contracts` and
+committed with the repository:
+
+| Artifact | Source | Purpose |
+|----------|--------|---------|
+| `artifacts/schemas/rpc-methods.json` | `meerkat_contracts::rpc_method_catalog` | Canonical JSON-RPC method names, descriptions, parameter types, result types, and request lifecycle rules |
+| `artifacts/schemas/rest-openapi.json` | REST router/OpenAPI emission | Canonical HTTP paths, methods, summaries, and schema references |
+| `artifacts/schemas/wire-types.json` | `meerkat-contracts` schemas | Wire request/result/event types shared by protocol and SDK layers |
+| `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Stable wire error strings, JSON-RPC codes, HTTP statuses, and CLI exits |
+| `artifacts/schemas/runtime-host.json` | Runtime host schema emission | Runtime host info, capability, and health projections |
+
+`rkat-rpc initialize` returns the compiled feature subset at runtime. The
+catalog above is the full documented surface with blob, sessions, events,
+streams, schedule, skills, runtime, realtime, mob, MCP, comms, auth, realm, and
+approval methods enabled.
+
+## Surface entry points
+
+| Surface | API authority |
+|---------|---------------|
+| CLI | `rkat` commands in [CLI commands](/cli/commands); `rkat-mini` is the reduced CLI build |
+| REST | HTTP paths in [REST API](/api/rest) and `artifacts/schemas/rest-openapi.json` |
+| JSON-RPC | `rkat-rpc` methods in [JSON-RPC API](/api/rpc) and `artifacts/schemas/rpc-methods.json` |
+| MCP | `rkat-mcp` public `meerkat_*` tools in [MCP](/api/mcp) |
+| Rust SDK | `SessionService`, `AgentFactory`, and runtime build modes in [Rust SDK overview](/rust/overview) |
+| Python SDK | Async wrappers over `rkat-rpc`; see [Python SDK reference](/sdks/python/reference) |
+| TypeScript SDK | Node wrappers over `rkat-rpc`; see [TypeScript SDK reference](/sdks/typescript/reference) |
+| Web SDK | Browser/WASM runtime and mobpack deployment target; see [WASM example](/examples/wasm) |
+
 ## Core types
 
 | Type | Module | Purpose |
@@ -29,6 +60,10 @@ This page is a quick-lookup index. For current session/runtime semantics, see [S
 | `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
 | `RuntimeBuildMode` | `meerkat_core` | Explicit runtime ownership mode (`SessionOwned` vs `StandaloneEphemeral`) |
 | `SessionRuntimeBindings` | `meerkat_core` | Runtime-backed session bindings (`session_id`, `epoch_id`, ops lifecycle, cursor state) |
+| `SessionBuildOptions` | `meerkat_core::service` | Build-time surface options including provider params, structured output, hooks, skills, auth binding, external callback/MCP tools, mob tools, schedule tools, and runtime mode |
+| `AuthBindingRef` | `meerkat_core` | Realm-scoped provider credential binding reference carried by sessions and mob members |
+| `BlobPayload` | `meerkat_core` | Blob metadata and bytes returned by blob fetch APIs |
+| `ArtifactRecord` | `meerkat_core` | Stable artifact metadata for blob-backed generated content |
 | `MobRun` | `meerkat_mob` | Persisted flow run aggregate |
 | `MobRunStatus` | `meerkat_mob` | Flow run lifecycle (`pending`, `running`, `completed`, `failed`, `canceled`) |
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
@@ -188,7 +223,8 @@ fn with_mob_tools(session_service: Arc<dyn MobSessionService>) -> SessionBuildOp
 
 This is the in-session mechanism for granting `mob_*` tools to the agent.
 `external_tools` remains the surface for custom callback tools and MCP-backed
-dispatchers; mob orchestration now has its own late-bound factory slot.
+dispatchers. Mob orchestration has its own late-bound `mob_tools` factory slot,
+which receives session-scoped runtime authority before producing the dispatcher.
 
 Public host surfaces use typed control planes instead:
 
@@ -202,6 +238,17 @@ For mob-only MCP hosts, `meerkat-mob-mcp` also exposes:
 
 Those helpers are for public host control-plane tools. `MobMcpDispatcher`
 remains the agent-side `mob_*` tool surface.
+
+### Public mob host methods
+
+Public application hosts should use the typed control planes rather than the
+agent-internal `mob_*` tool dispatcher:
+
+| Surface | Contract |
+|---------|----------|
+| JSON-RPC / SDKs | `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/spawn`, `mob/spawn_many`, `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/member_send`, `mob/turn_start`, `mob/ingress_interaction`, `mob/events`, `mob/stream_open`, `mob/stream_close`, flow, work-lane, wait, snapshot, destroy, supervisor, and profile methods |
+| MCP | `meerkat_mob_*` tools from `meerkat-mob-mcp::public_tools_list()` plus MCP event stream tools from `rkat-mcp` |
+| REST | Helper and observation endpoints (`/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff); full typed lifecycle remains RPC/SDK |
 
 For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), see [Mobs](/guides/mobs).
 

@@ -3115,7 +3115,7 @@ async fn handle_auth_command(
                 "REALM              BINDING              BACKEND_PROFILE      AUTH_PROFILE         DEFAULT_MODEL"
             );
             for (realm_id, section) in &config.realm {
-                if let Some(filter) = realm_filter.as_deref()
+                if let Some(filter) = realm_filter
                     && filter != realm_id
                 {
                     continue;

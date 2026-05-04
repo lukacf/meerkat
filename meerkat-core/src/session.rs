@@ -1751,10 +1751,13 @@ fn observe_realtime_item(
         RealtimeTranscriptItemState::new(role, previous_item_id.clone(), response_id.clone())
     });
     if item.skipped {
+        if item.previous_item_id.is_none() && previous_item_id.is_some() {
+            item.previous_item_id = previous_item_id;
+        }
         tracing::warn!(
             item_id = %item_id,
             observed_role = ?role,
-            "ignoring realtime transcript content for item previously observed as non-dialogue"
+            "ignoring realtime transcript content for item already marked as a contentless causal anchor"
         );
         return None;
     }
@@ -1841,7 +1844,8 @@ fn discard_realtime_assistant_response(
             && !item.materialized
         {
             item.content_segments.clear();
-            item.ready = false;
+            item.skipped = true;
+            item.ready = true;
         }
     }
     state.assistant_completions.remove(response_id);
@@ -2272,6 +2276,71 @@ mod tests {
         assert_eq!(
             serde_json::to_value(session.messages()).unwrap(),
             first_messages
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_interrupted_assistant_item_unblocks_later_provider_items() {
+        let mut session = Session::new();
+
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_repeat".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "repeat until stop".to_string(),
+            },
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::AssistantTextDelta {
+                    response_id: "resp_loop".to_string(),
+                    delta_id: "evt_loop_1".to_string(),
+                    item_id: "item_loop".to_string(),
+                    previous_item_id: Some("item_repeat".to_string()),
+                    content_index: 0,
+                    delta: "Looping now".to_string(),
+                })
+                .is_inert()
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "item_stop".to_string(),
+                    previous_item_id: Some("item_loop".to_string()),
+                    content_index: 0,
+                    text: "Stop.".to_string(),
+                })
+                .is_inert(),
+            "the stop turn waits until the interrupted assistant provider item is resolved"
+        );
+
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_loop".to_string(),
+            },
+        );
+
+        assert_eq!(outcome.materialized_messages.len(), 1);
+        assert_eq!(session.messages().len(), 2);
+        assert!(matches!(
+            &session.messages()[0],
+            Message::User(user) if user.text_content() == "repeat until stop"
+        ));
+        assert!(matches!(
+            &session.messages()[1],
+            Message::User(user) if user.text_content() == "Stop."
+        ));
+        assert!(
+            session
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::BlockAssistant(assistant) => Some(block_assistant_text(assistant)),
+                    _ => None,
+                })
+                .all(|text| !text.contains("Looping now")),
+            "interrupted assistant text must remain non-canonical"
         );
     }
 

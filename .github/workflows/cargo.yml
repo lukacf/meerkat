@@ -152,7 +152,7 @@ jobs:
         with:
           prefix-key: machine-authority
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
         with:
           distribution: temurin

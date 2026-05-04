@@ -7,8 +7,11 @@ use meerkat_core::{AgentEvent, ScopedAgentEvent};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Write};
 
-/// Maximum lines of tool result output to display.
-const MAX_TOOL_RESULT_LINES: usize = 20;
+/// Maximum lines of tool result output to display in the default renderer.
+const MAX_TOOL_RESULT_LINES: usize = 8;
+
+/// Maximum width for each default tool result line preview (bytes).
+const MAX_TOOL_RESULT_LINE_BYTES: usize = 240;
 
 /// Maximum width for tool args preview (bytes).
 const MAX_TOOL_ARGS_PREVIEW: usize = 200;
@@ -39,6 +42,26 @@ struct ScopeRenderState {
     reasoning_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ToolResultPreviewLimits {
+    max_lines: usize,
+    max_line_bytes: usize,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ToolResultPreview {
+    lines: Vec<String>,
+    omitted_lines: usize,
+    shortened_lines: usize,
+    hidden_bytes: usize,
+}
+
+impl ToolResultPreview {
+    fn is_truncated(&self) -> bool {
+        self.omitted_lines > 0 || self.shortened_lines > 0
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamRenderSummary {
     pub focus_requested: Option<String>,
@@ -53,6 +76,7 @@ pub struct StreamRenderSummary {
 pub struct StreamRenderer {
     ansi: bool,
     policy: StreamRenderPolicy,
+    verbose: bool,
     states: HashMap<String, ScopeRenderState>,
     discovered_scopes: BTreeSet<String>,
     focus_seen: bool,
@@ -60,10 +84,11 @@ pub struct StreamRenderer {
 
 impl StreamRenderer {
     /// Create a new renderer.
-    pub fn new(ansi: bool, policy: StreamRenderPolicy) -> Self {
+    pub fn new(ansi: bool, policy: StreamRenderPolicy, verbose: bool) -> Self {
         Self {
             ansi,
             policy,
+            verbose,
             states: HashMap::new(),
             discovered_scopes: BTreeSet::new(),
             focus_seen: false,
@@ -103,6 +128,7 @@ impl StreamRenderer {
             matches!(self.policy, StreamRenderPolicy::MuxAll),
             &scope_id,
             state,
+            self.verbose,
             &scoped.event,
         );
     }
@@ -139,6 +165,7 @@ fn render_event(
     mux: bool,
     scope_id: &str,
     state: &mut ScopeRenderState,
+    verbose: bool,
     event: &AgentEvent,
 ) {
     match event {
@@ -275,25 +302,25 @@ fn render_event(
                 ),
             );
             if !result.is_empty() {
-                let lines: Vec<&str> = result.lines().collect();
-                let show = lines.len().min(MAX_TOOL_RESULT_LINES);
-                for line in &lines[..show] {
+                let preview = preview_tool_result(
+                    result,
+                    (!verbose).then_some(ToolResultPreviewLimits {
+                        max_lines: MAX_TOOL_RESULT_LINES,
+                        max_line_bytes: MAX_TOOL_RESULT_LINE_BYTES,
+                    }),
+                );
+                for line in &preview.lines {
                     chrome_line(
                         mux,
                         scope_id,
                         &format!("{}    {}{}", style(ansi, DIM), line, reset(ansi)),
                     );
                 }
-                if lines.len() > MAX_TOOL_RESULT_LINES {
+                if let Some(summary) = tool_result_truncation_summary(&preview) {
                     chrome_line(
                         mux,
                         scope_id,
-                        &format!(
-                            "{}    ... ({} more lines){}",
-                            style(ansi, DIM),
-                            lines.len() - MAX_TOOL_RESULT_LINES,
-                            reset(ansi)
-                        ),
+                        &format!("{}    ... ({summary}){}", style(ansi, DIM), reset(ansi)),
                     );
                 }
             }
@@ -659,6 +686,69 @@ fn end_text_block(state: &mut ScopeRenderState) {
     }
 }
 
+fn preview_tool_result(result: &str, limits: Option<ToolResultPreviewLimits>) -> ToolResultPreview {
+    let lines: Vec<&str> = result.lines().collect();
+    let Some(limits) = limits else {
+        return ToolResultPreview {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            omitted_lines: 0,
+            shortened_lines: 0,
+            hidden_bytes: 0,
+        };
+    };
+
+    let shown = lines.len().min(limits.max_lines);
+    let mut preview = ToolResultPreview {
+        lines: Vec::with_capacity(shown),
+        omitted_lines: lines.len().saturating_sub(shown),
+        shortened_lines: 0,
+        hidden_bytes: 0,
+    };
+
+    for line in &lines[..shown] {
+        if line.len() <= limits.max_line_bytes {
+            preview.lines.push((*line).to_string());
+            continue;
+        }
+
+        let prefix = truncate_str(line, limits.max_line_bytes);
+        preview.hidden_bytes += line.len().saturating_sub(prefix.len());
+        preview.shortened_lines += 1;
+        preview.lines.push(format!("{prefix}..."));
+    }
+
+    preview
+}
+
+fn tool_result_truncation_summary(preview: &ToolResultPreview) -> Option<String> {
+    if !preview.is_truncated() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if preview.omitted_lines > 0 {
+        let noun = if preview.omitted_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        parts.push(format!("{} more {noun}", preview.omitted_lines));
+    }
+    if preview.shortened_lines > 0 {
+        let noun = if preview.shortened_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        parts.push(format!(
+            "{} bytes hidden from {} long {noun}",
+            preview.hidden_bytes, preview.shortened_lines
+        ));
+    }
+    parts.push("use --verbose for full output".to_string());
+    Some(parts.join("; "))
+}
+
 /// Truncate a string to `max_bytes` respecting UTF-8 boundaries.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -724,6 +814,60 @@ mod tests {
     }
 
     #[test]
+    fn test_preview_tool_result_shortens_long_single_line() {
+        let result = "a".repeat(20);
+        let preview = preview_tool_result(
+            &result,
+            Some(ToolResultPreviewLimits {
+                max_lines: 8,
+                max_line_bytes: 5,
+            }),
+        );
+
+        assert_eq!(preview.lines, vec!["aaaaa..."]);
+        assert_eq!(preview.omitted_lines, 0);
+        assert_eq!(preview.shortened_lines, 1);
+        assert_eq!(preview.hidden_bytes, 15);
+        assert_eq!(
+            tool_result_truncation_summary(&preview).as_deref(),
+            Some("15 bytes hidden from 1 long line; use --verbose for full output")
+        );
+    }
+
+    #[test]
+    fn test_preview_tool_result_limits_line_count() {
+        let result = (0..12)
+            .map(|index| format!("line{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = preview_tool_result(
+            &result,
+            Some(ToolResultPreviewLimits {
+                max_lines: 3,
+                max_line_bytes: 80,
+            }),
+        );
+
+        assert_eq!(preview.lines, vec!["line0", "line1", "line2"]);
+        assert_eq!(preview.omitted_lines, 9);
+        assert_eq!(
+            tool_result_truncation_summary(&preview).as_deref(),
+            Some("9 more lines; use --verbose for full output")
+        );
+    }
+
+    #[test]
+    fn test_preview_tool_result_unlimited_for_verbose_renderer() {
+        let long = "x".repeat(20);
+        let result = format!("{long}\nsecond");
+        let preview = preview_tool_result(&result, None);
+
+        assert_eq!(preview.lines, vec![long, "second".to_string()]);
+        assert!(!preview.is_truncated());
+        assert_eq!(tool_result_truncation_summary(&preview), None);
+    }
+
+    #[test]
     fn test_scope_id_validation() {
         assert!(is_valid_scope_id("primary"));
         assert!(is_valid_scope_id("primary/sub:op_1"));
@@ -737,7 +881,8 @@ mod tests {
 
     #[test]
     fn test_renderer_policy_focus() {
-        let mut renderer = StreamRenderer::new(false, StreamRenderPolicy::Focus("mob:a".into()));
+        let mut renderer =
+            StreamRenderer::new(false, StreamRenderPolicy::Focus("mob:a".into()), false);
         renderer.render(&ScopedAgentEvent {
             scope_id: "mob:b".into(),
             scope_path: vec![],
@@ -759,7 +904,7 @@ mod tests {
 
     #[test]
     fn test_renderer_policy_primary_only_matches_literal_primary_scope() {
-        let mut renderer = StreamRenderer::new(false, StreamRenderPolicy::PrimaryOnly);
+        let mut renderer = StreamRenderer::new(false, StreamRenderPolicy::PrimaryOnly, false);
         renderer.render(&ScopedAgentEvent {
             scope_id: "primary/sub:child-1".into(),
             scope_path: vec![],

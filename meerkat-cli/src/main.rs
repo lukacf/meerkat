@@ -93,6 +93,9 @@ const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, realtime\n 
 
 const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
 
+const DEFAULT_TRACE_FILTER: &str = "off";
+const VERBOSE_TRACE_FILTER: &str = "info";
+
 /// Safely truncate a string to approximately `max_bytes`, respecting UTF-8 char boundaries.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -133,10 +136,11 @@ fn spawn_verbose_event_handler(
 fn spawn_scoped_event_handler(
     mut scoped_event_rx: mpsc::Receiver<ScopedAgentEvent>,
     policy: stream_renderer::StreamRenderPolicy,
+    verbose: bool,
 ) -> tokio::task::JoinHandle<stream_renderer::StreamRenderSummary> {
     tokio::spawn(async move {
         let ansi = stream_renderer::stderr_is_tty();
-        let mut renderer = stream_renderer::StreamRenderer::new(ansi, policy);
+        let mut renderer = stream_renderer::StreamRenderer::new(ansi, policy, verbose);
         while let Some(event) = scoped_event_rx.recv().await {
             renderer.render(&event);
         }
@@ -184,7 +188,7 @@ impl CliOutputPipeline {
 
             pipeline.event_tx = Some(primary_tx);
             pipeline.scoped_event_tx = Some(scoped_tx);
-            pipeline.stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
+            pipeline.stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy, verbose));
         } else if verbose {
             let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
             pipeline.event_tx = Some(tx);
@@ -1968,24 +1972,38 @@ impl From<CliMcpScope> for Option<McpScope> {
     }
 }
 
+fn cli_enables_verbose_tracing(cli: &Cli) -> bool {
+    matches!(&cli.command, Commands::Run { verbose: true, .. })
+}
+
+fn default_trace_filter(cli: &Cli) -> &'static str {
+    if cli_enables_verbose_tracing(cli) {
+        VERBOSE_TRACE_FILTER
+    } else {
+        DEFAULT_TRACE_FILTER
+    }
+}
+
+fn init_tracing(cli: &Cli) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_trace_filter(cli)));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
 #[tokio::main]
 #[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
     let auth_config_realm = if matches!(&cli.command, Commands::Auth { .. }) {
         cli.realm.clone()
     } else {
         None
     };
+    init_tracing(&cli);
 
     let cli_scope = if auth_config_realm.is_some() {
         resolve_runtime_scope_with_realm(&cli, None)?
@@ -9753,7 +9771,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let activation_params = parse_run_flow_params(params)?;
             let (scoped_event_tx, stream_task) = if let Some(policy) = stream_policy {
                 let (tx, rx) = mpsc::channel::<ScopedAgentEvent>(200);
-                let task = spawn_scoped_event_handler(rx, policy);
+                let task = spawn_scoped_event_handler(rx, policy, false);
                 (Some(tx), Some(task))
             } else {
                 (None, None)
@@ -12852,6 +12870,27 @@ default_model = "gemma"
             }
             _ => unreachable!("expected run"),
         }
+    }
+
+    #[test]
+    fn test_default_trace_filter_is_quiet_unless_run_verbose() {
+        let cli = Cli::try_parse_from(normalize_cli_args(["rkat", "run", "hello"].map(Into::into)))
+            .expect("run should parse");
+        assert_eq!(default_trace_filter(&cli), DEFAULT_TRACE_FILTER);
+
+        let cli = Cli::try_parse_from(normalize_cli_args(
+            ["rkat", "run", "--verbose", "hello"].map(Into::into),
+        ))
+        .expect("run --verbose should parse");
+        assert_eq!(default_trace_filter(&cli), VERBOSE_TRACE_FILTER);
+
+        let cli = Cli::try_parse_from(normalize_cli_args(["rkat", "-v", "hello"].map(Into::into)))
+            .expect("prompt shortcut with -v should parse as run --verbose");
+        assert_eq!(default_trace_filter(&cli), VERBOSE_TRACE_FILTER);
+
+        let cli = Cli::try_parse_from(normalize_cli_args(["rkat", "models"].map(Into::into)))
+            .expect("models should parse");
+        assert_eq!(default_trace_filter(&cli), DEFAULT_TRACE_FILTER);
     }
 
     #[test]

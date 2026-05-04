@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use meerkat_core::skills::{SkillFilter, SkillRuntime};
+use meerkat_core::skills::{SkillFilter, SkillRuntime, SourceUuid};
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,7 +17,6 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct BrowseSkillsArgs {
     /// Free-text search across skill names and descriptions.
     #[serde(default)]
@@ -62,19 +61,20 @@ impl BuiltinTool for BrowseSkillsTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string);
-        let source_uuid = match args.get("source_uuid").and_then(|v| v.as_str()) {
+        let args: BrowseSkillsArgs = serde_json::from_value(args)
+            .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
+        let source_uuid = match args.source_uuid.as_deref() {
             Some(raw) => Some(
-                meerkat_core::skills::SourceUuid::parse(raw)
+                SourceUuid::parse(raw)
                     .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?,
             ),
             None => None,
         };
 
-        let filter = SkillFilter { query, source_uuid };
+        let filter = SkillFilter {
+            query: args.query,
+            source_uuid,
+        };
 
         let entries = self
             .engine

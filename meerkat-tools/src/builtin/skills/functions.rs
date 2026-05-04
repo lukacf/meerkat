@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct SkillInvokeFunctionArgs {
     source_uuid: String,
     skill_name: String,
@@ -34,15 +33,7 @@ impl SkillInvokeFunctionTool {
     }
 }
 
-fn parse_key(args: &Value) -> Result<SkillKey, BuiltinToolError> {
-    let source_raw = args
-        .get("source_uuid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'source_uuid'".into()))?;
-    let skill_raw = args
-        .get("skill_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'skill_name'".into()))?;
+fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
     let source_uuid =
         SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     let skill_name =
@@ -79,13 +70,9 @@ impl BuiltinTool for SkillInvokeFunctionTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let raw_key = parse_key(&args)?;
-        let function_name = args
-            .get("function_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                BuiltinToolError::InvalidArgs("missing 'function_name' parameter".into())
-            })?;
+        let args: SkillInvokeFunctionArgs = serde_json::from_value(args)
+            .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
+        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -94,18 +81,14 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let output = self
             .engine
-            .invoke_function(
-                &key,
-                function_name,
-                args.get("arguments").cloned().unwrap_or(Value::Null),
-            )
+            .invoke_function(&key, &args.function_name, args.arguments)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolOutput::Json(json!({
             "source_uuid": key.source_uuid.to_string(),
             "skill_name": key.skill_name.as_str(),
-            "function_name": function_name,
+            "function_name": args.function_name,
             "output": output,
         })))
     }

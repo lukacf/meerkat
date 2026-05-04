@@ -1,13 +1,11 @@
 #![allow(clippy::panic)]
 
-//! Browse / load skill tool surface tests (C-T §6 #15).
+//! Skill builtin tool surface tests (C-T §6 #15).
 //!
-//! Covers the agent-facing tools `browse_skills` + `load_skill` exposed
-//! by `meerkat-tools::builtin::skills`. Post-V4 the surface is strictly
-//! typed: every identifier on the wire is `SkillKey = (SourceUuid,
-//! SkillName)`, no slash-path parsing. These tests ride the real
-//! `SkillRuntime` over an `InMemorySkillSource` so the BuiltinTool
-//! contract (def / call / output shape) is exercised end-to-end.
+//! Covers the agent-facing tools exposed by
+//! `meerkat-tools::builtin::skills`. Post-V4 the surface is strictly typed:
+//! every identifier on the wire is `SkillKey = (SourceUuid, SkillName)`, no
+//! slash-path parsing.
 //!
 //! Cases:
 //! - browse with no filter returns every listed skill.
@@ -26,13 +24,16 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillKey, SkillName, SkillRuntime, SkillScope,
-    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
-    SourceUuid,
+    SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
+    SkillKey, SkillName, SkillRuntime, SkillScope, SkillSource, SourceIdentityRecord,
+    SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind, SourceUuid, apply_filter,
 };
 use meerkat_skills::{DefaultSkillEngine, InMemorySkillSource};
 use meerkat_tools::BuiltinTool;
-use meerkat_tools::builtin::skills::{BrowseSkillsTool, LoadSkillTool};
+use meerkat_tools::builtin::skills::{
+    BrowseSkillsTool, LoadSkillTool, SkillInvokeFunctionTool, SkillListResourcesTool,
+    SkillReadResourceTool,
+};
 
 fn skill_doc(source: &SourceUuid, skill: &str, display: &str, body: &str) -> SkillDocument {
     SkillDocument {
@@ -108,6 +109,103 @@ fn runtime_with_unknown_source_identity() -> (Arc<SkillRuntime>, SourceUuid) {
     let engine = DefaultSkillEngine::new(source, Vec::new())
         .with_source_identity_registry(Arc::new(SourceIdentityRegistry::default()));
     (Arc::new(SkillRuntime::new(Arc::new(engine))), unknown)
+}
+
+struct HarnessSkillSource {
+    doc: SkillDocument,
+}
+
+impl HarnessSkillSource {
+    fn new(source: &SourceUuid) -> Self {
+        Self {
+            doc: skill_doc(source, "alpha", "Alpha", "# Alpha\n\nbody-alpha"),
+        }
+    }
+
+    fn artifact(&self) -> SkillArtifact {
+        SkillArtifact {
+            path: "README.md".to_string(),
+            mime_type: "text/markdown".to_string(),
+            byte_length: 12,
+        }
+    }
+
+    fn require_key(&self, key: &SkillKey) -> Result<(), SkillError> {
+        if key == &self.doc.descriptor.key {
+            Ok(())
+        } else {
+            Err(SkillError::NotFound { key: key.clone() })
+        }
+    }
+}
+
+impl SkillSource for HarnessSkillSource {
+    async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
+        Ok(apply_filter(&[self.doc.descriptor.clone()], filter))
+    }
+
+    async fn load(&self, key: &SkillKey) -> Result<SkillDocument, SkillError> {
+        self.require_key(key)?;
+        Ok(self.doc.clone())
+    }
+
+    async fn list_artifacts(&self, key: &SkillKey) -> Result<Vec<SkillArtifact>, SkillError> {
+        self.require_key(key)?;
+        Ok(vec![self.artifact()])
+    }
+
+    async fn read_artifact(
+        &self,
+        key: &SkillKey,
+        artifact_path: &str,
+    ) -> Result<SkillArtifactContent, SkillError> {
+        self.require_key(key)?;
+        if artifact_path != "README.md" {
+            return Err(SkillError::Load(
+                format!("missing artifact: {artifact_path}").into(),
+            ));
+        }
+        Ok(SkillArtifactContent {
+            path: artifact_path.to_string(),
+            mime_type: "text/markdown".to_string(),
+            content: "artifact body".to_string(),
+        })
+    }
+
+    async fn invoke_function(
+        &self,
+        key: &SkillKey,
+        function_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, SkillError> {
+        self.require_key(key)?;
+        if function_name != "echo" {
+            return Err(SkillError::Load(
+                format!("missing function: {function_name}").into(),
+            ));
+        }
+        Ok(serde_json::json!({ "received": arguments }))
+    }
+}
+
+fn harness_runtime() -> (Arc<SkillRuntime>, SourceUuid) {
+    let source = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap();
+    let registry = SourceIdentityRegistry::build(
+        vec![SourceIdentityRecord {
+            source_uuid: source.clone(),
+            display_name: "harness fixture".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: format!("fixture:{source}"),
+            status: SourceIdentityStatus::Active,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let engine = DefaultSkillEngine::new(HarnessSkillSource::new(&source), Vec::new())
+        .with_source_identity_registry(Arc::new(registry));
+    (Arc::new(SkillRuntime::new(Arc::new(engine))), source)
 }
 
 #[tokio::test]
@@ -322,4 +420,111 @@ async fn browse_output_always_carries_typed_key_fields() {
         SourceUuid::parse(obj["source_uuid"].as_str().unwrap()).unwrap();
         SkillName::parse(obj["skill_name"].as_str().unwrap()).unwrap();
     }
+}
+
+#[tokio::test]
+async fn list_resources_returns_artifact_metadata_for_known_skill() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillListResourcesTool::new(runtime);
+
+    let output = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+        }))
+        .await
+        .unwrap();
+    let json = output.into_json().unwrap();
+    let artifacts = json["artifacts"].as_array().unwrap();
+
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0]["path"].as_str().unwrap(), "README.md");
+    assert_eq!(artifacts[0]["mime_type"].as_str().unwrap(), "text/markdown");
+}
+
+#[tokio::test]
+async fn read_resource_returns_artifact_content_for_known_path() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillReadResourceTool::new(runtime);
+
+    let output = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "path": "README.md",
+        }))
+        .await
+        .unwrap();
+    let json = output.into_json().unwrap();
+
+    assert_eq!(json["artifact"]["path"].as_str().unwrap(), "README.md");
+    assert_eq!(
+        json["artifact"]["content"].as_str().unwrap(),
+        "artifact body"
+    );
+}
+
+#[tokio::test]
+async fn read_resource_missing_path_returns_invalid_args() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillReadResourceTool::new(runtime);
+
+    let err = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+        }))
+        .await
+        .unwrap_err();
+
+    match &err {
+        meerkat_tools::BuiltinToolError::InvalidArgs(msg) => {
+            assert!(
+                msg.contains("path"),
+                "InvalidArgs must name the missing path; got {msg:?}"
+            );
+        }
+        other => panic!("expected InvalidArgs for missing path; got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invoke_function_passes_typed_key_and_default_arguments() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillInvokeFunctionTool::new(runtime);
+
+    let output = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "function_name": "echo",
+        }))
+        .await
+        .unwrap();
+    let json = output.into_json().unwrap();
+
+    assert_eq!(json["function_name"].as_str().unwrap(), "echo");
+    assert!(json["output"]["received"].is_null());
+}
+
+#[tokio::test]
+async fn invoke_function_preserves_structured_arguments() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillInvokeFunctionTool::new(runtime);
+
+    let output = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "function_name": "echo",
+            "arguments": { "subject": "typed" },
+        }))
+        .await
+        .unwrap();
+    let json = output.into_json().unwrap();
+
+    assert_eq!(
+        json["output"]["received"]["subject"].as_str().unwrap(),
+        "typed"
+    );
 }

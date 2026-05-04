@@ -16,7 +16,6 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct LoadSkillArgs {
     source_uuid: String,
     skill_name: String,
@@ -33,15 +32,7 @@ impl LoadSkillTool {
     }
 }
 
-fn parse_key(args: &Value) -> Result<SkillKey, BuiltinToolError> {
-    let source_raw = args
-        .get("source_uuid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'source_uuid'".into()))?;
-    let skill_raw = args
-        .get("skill_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'skill_name'".into()))?;
+fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
     let source_uuid =
         SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     let skill_name =
@@ -78,7 +69,9 @@ impl BuiltinTool for LoadSkillTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let raw_key = parse_key(&args)?;
+        let args: LoadSkillArgs = serde_json::from_value(args)
+            .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
+        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
         // Apply the source-identity lineage remap chain before dispatch
         // so legacy source_uuids that have since been rotated/merged
         // still resolve to the canonical backing skill.

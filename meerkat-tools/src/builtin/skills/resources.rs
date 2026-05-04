@@ -15,29 +15,19 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct SkillListResourcesArgs {
     source_uuid: String,
     skill_name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct SkillReadResourceArgs {
     source_uuid: String,
     skill_name: String,
     path: String,
 }
 
-fn parse_key(args: &Value) -> Result<SkillKey, BuiltinToolError> {
-    let source_raw = args
-        .get("source_uuid")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'source_uuid'".into()))?;
-    let skill_raw = args
-        .get("skill_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'skill_name'".into()))?;
+fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
     let source_uuid =
         SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     let skill_name =
@@ -93,7 +83,9 @@ impl BuiltinTool for SkillListResourcesTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let raw_key = parse_key(&args)?;
+        let args: SkillListResourcesArgs = serde_json::from_value(args)
+            .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
+        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -139,11 +131,9 @@ impl BuiltinTool for SkillReadResourceTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let raw_key = parse_key(&args)?;
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| BuiltinToolError::InvalidArgs("missing 'path' parameter".into()))?;
+        let args: SkillReadResourceArgs = serde_json::from_value(args)
+            .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
+        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -152,7 +142,7 @@ impl BuiltinTool for SkillReadResourceTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let artifact = self
             .engine
-            .read_artifact(&key, path)
+            .read_artifact(&key, &args.path)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         Ok(ToolOutput::Json(json!({

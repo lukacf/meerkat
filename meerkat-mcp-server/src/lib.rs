@@ -2035,10 +2035,12 @@ async fn handle_meerkat_interrupt(
         Ok(()) => {}
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
             if interrupt_not_ready_is_noop(state) => {}
-        Err(meerkat_runtime::RuntimeDriverError::NotReady {
-            state: meerkat_runtime::RuntimeState::Destroyed,
-        })
-        | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+        Err(
+            meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            }
+            | meerkat_runtime::RuntimeDriverError::Destroyed,
+        ) => {
             if let Some(runtime_state) = state
                 .service
                 .persisted_runtime_state(&session_id)

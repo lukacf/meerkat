@@ -300,7 +300,7 @@ mod tests {
     use meerkat_core::interaction::{PeerIngressIdentity, ResponseStatus};
 
     fn make_interaction_id() -> meerkat_core::interaction::InteractionId {
-        meerkat_core::interaction::InteractionId(uuid::Uuid::now_v7())
+        meerkat_core::interaction::InteractionId(meerkat_core::time_compat::new_uuid_v7())
     }
 
     fn plain_event_ingress(

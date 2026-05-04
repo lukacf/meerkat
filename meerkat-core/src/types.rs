@@ -783,7 +783,7 @@ pub struct SessionId(#[cfg_attr(feature = "schema", schemars(with = "String"))] 
 impl SessionId {
     /// Create a new session ID using UUID v7
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 
     /// Create from an existing UUID

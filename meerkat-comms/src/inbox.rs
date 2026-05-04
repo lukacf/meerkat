@@ -1513,7 +1513,7 @@ mod tests {
             entries[0]
                 .from_peer_display
                 .as_ref()
-                .map(|peer| peer.as_str()),
+                .map(meerkat_core::PeerIngressDiagnosticDisplay::as_str),
             Some("peer")
         );
         assert_eq!(entries[0].lifecycle_peer_display, None);
@@ -1529,7 +1529,7 @@ mod tests {
             entries[1]
                 .from_peer_display
                 .as_ref()
-                .map(|peer| peer.as_str()),
+                .map(meerkat_core::PeerIngressDiagnosticDisplay::as_str),
             Some("peer")
         );
 
@@ -1542,7 +1542,7 @@ mod tests {
             entries[2]
                 .from_peer_display
                 .as_ref()
-                .map(|peer| peer.as_str()),
+                .map(meerkat_core::PeerIngressDiagnosticDisplay::as_str),
             Some("peer")
         );
 
@@ -1552,14 +1552,14 @@ mod tests {
             entries[3]
                 .lifecycle_peer_display
                 .as_ref()
-                .map(|peer| peer.as_str()),
+                .map(meerkat_core::PeerIngressDiagnosticDisplay::as_str),
             Some("worker-1")
         );
         assert_eq!(
             entries[3]
                 .from_peer_display
                 .as_ref()
-                .map(|peer| peer.as_str()),
+                .map(meerkat_core::PeerIngressDiagnosticDisplay::as_str),
             Some("peer")
         );
 

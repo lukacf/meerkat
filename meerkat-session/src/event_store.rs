@@ -14,13 +14,13 @@
 
 use async_trait::async_trait;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
-use std::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncWriteExt;
 #[cfg(not(target_arch = "wasm32"))]
@@ -326,6 +326,7 @@ impl EventStore for FileEventStore {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

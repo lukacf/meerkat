@@ -23,18 +23,39 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Spawn an RPC binary with --tcp on a random port, return (child, port).
-async fn spawn_rpc_tcp_with_bin(bin: &str) -> (tokio::process::Child, u16) {
+struct RpcTestServer {
+    child: tokio::process::Child,
+    tcp_port: u16,
+    ws_port: Option<u16>,
+    _state_root: tempfile::TempDir,
+}
+
+impl RpcTestServer {
+    async fn kill(&mut self) {
+        self.child.kill().await.ok();
+    }
+}
+
+/// Spawn an RPC binary with --tcp on a random port.
+async fn spawn_rpc_tcp_with_bin(bin: &str) -> RpcTestServer {
     // Bind a listener to discover a free port, then release it.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
+    let state_root = tempfile::tempdir().expect("state root tempdir");
+    let state_root_arg = state_root.path().join("state");
 
     let child = tokio::process::Command::new(bin)
-        .args(["--isolated", "--tcp", &format!("127.0.0.1:{port}")])
+        .args([
+            "--isolated",
+            "--state-root",
+            state_root_arg.to_str().expect("utf-8 state root"),
+            "--tcp",
+            &format!("127.0.0.1:{port}"),
+        ])
         .env("RKAT_TEST_CLIENT", "1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap_or_else(|_| panic!("failed to spawn {bin}"));
@@ -46,14 +67,19 @@ async fn spawn_rpc_tcp_with_bin(bin: &str) -> (tokio::process::Child, u16) {
             .await
             .is_ok()
         {
-            return (child, port);
+            return RpcTestServer {
+                child,
+                tcp_port: port,
+                ws_port: None,
+                _state_root: state_root,
+            };
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("{bin} --tcp did not become reachable on port {port}");
 }
 
-async fn spawn_rpc_tcp() -> (tokio::process::Child, u16) {
+async fn spawn_rpc_tcp() -> RpcTestServer {
     spawn_rpc_tcp_with_bin(env!("CARGO_BIN_EXE_rkat-rpc")).await
 }
 
@@ -84,13 +110,11 @@ async fn tcp_e2e_rejects_wildcard_bind_without_allow_remote() {
 }
 
 /// Spawn an RPC binary with --tcp and --realtime-ws on random ports.
-async fn spawn_rpc_tcp_with_realtime_ws() -> (tokio::process::Child, u16, u16) {
+async fn spawn_rpc_tcp_with_realtime_ws() -> RpcTestServer {
     spawn_rpc_tcp_with_realtime_ws_env(&[]).await
 }
 
-async fn spawn_rpc_tcp_with_realtime_ws_env(
-    extra_env: &[(&str, &str)],
-) -> (tokio::process::Child, u16, u16) {
+async fn spawn_rpc_tcp_with_realtime_ws_env(extra_env: &[(&str, &str)]) -> RpcTestServer {
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tcp_port = tcp_listener.local_addr().unwrap().port();
     drop(tcp_listener);
@@ -98,11 +122,15 @@ async fn spawn_rpc_tcp_with_realtime_ws_env(
     let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws_port = ws_listener.local_addr().unwrap().port();
     drop(ws_listener);
+    let state_root = tempfile::tempdir().expect("state root tempdir");
+    let state_root_arg = state_root.path().join("state");
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_rkat-rpc"));
     command
         .args([
             "--isolated",
+            "--state-root",
+            state_root_arg.to_str().expect("utf-8 state root"),
             "--tcp",
             &format!("127.0.0.1:{tcp_port}"),
             "--realtime-ws",
@@ -120,7 +148,7 @@ async fn spawn_rpc_tcp_with_realtime_ws_env(
         .env_remove("OPENAI_API_KEY")
         .env_remove("RKAT_OPENAI_API_KEY")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     for (key, value) in extra_env {
         command.env(key, value);
@@ -146,7 +174,12 @@ async fn spawn_rpc_tcp_with_realtime_ws_env(
             .await
             .is_ok()
         {
-            return (child, tcp_port, ws_port);
+            return RpcTestServer {
+                child,
+                tcp_port,
+                ws_port: Some(ws_port),
+                _state_root: state_root,
+            };
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -184,7 +217,8 @@ async fn read_response_for_id(
 
 #[tokio::test]
 async fn tcp_e2e_initialize_and_config_roundtrip() {
-    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut server = spawn_rpc_tcp().await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -221,12 +255,13 @@ async fn tcp_e2e_initialize_and_config_roundtrip() {
     assert_eq!(config_resp["id"], 2);
     assert!(config_resp["result"]["config"].is_object());
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 async fn tcp_e2e_session_create_deferred() {
-    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut server = spawn_rpc_tcp().await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -281,12 +316,13 @@ async fn tcp_e2e_session_create_deferred() {
         "created session should appear in list"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 async fn tcp_e2e_capabilities_get() {
-    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut server = spawn_rpc_tcp().await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -312,12 +348,13 @@ async fn tcp_e2e_capabilities_get() {
     assert_eq!(resp["id"], 2);
     assert!(resp["result"]["capabilities"].is_array());
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 async fn tcp_e2e_runtime_host_reports_remote_rpc_not_secure() {
-    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut server = spawn_rpc_tcp().await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -337,12 +374,14 @@ async fn tcp_e2e_runtime_host_reports_remote_rpc_not_secure() {
         "plain TCP JSON-RPC must not advertise production secure remote RPC"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 async fn tcp_e2e_realtime_ws_host_coexists_with_tcp_rpc() {
-    let (mut child, tcp_port, ws_port) = spawn_rpc_tcp_with_realtime_ws().await;
+    let mut server = spawn_rpc_tcp_with_realtime_ws().await;
+    let tcp_port = server.tcp_port;
+    let ws_port = server.ws_port.expect("realtime ws port");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{tcp_port}"))
         .await
@@ -443,13 +482,14 @@ async fn tcp_e2e_realtime_ws_host_coexists_with_tcp_rpc() {
         "expected channel.opened, got {opened_payload:?}"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 async fn tcp_e2e_realtime_session_targets_accept_env_default_openai_credentials() {
-    let (mut child, tcp_port, _ws_port) =
+    let mut server =
         spawn_rpc_tcp_with_realtime_ws_env(&[("OPENAI_API_KEY", "test-openai-key")]).await;
+    let tcp_port = server.tcp_port;
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{tcp_port}"))
         .await
@@ -539,13 +579,14 @@ async fn tcp_e2e_realtime_session_targets_accept_env_default_openai_credentials(
         "env-default OpenAI credentials should open explicit_commit realtime sessions: {open_info}"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 #[ignore = "lane:e2e-build"]
 async fn tcp_e2e_session_create_and_turn_start_with_test_client() {
-    let (mut child, port) = spawn_rpc_tcp().await;
+    let mut server = spawn_rpc_tcp().await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -607,13 +648,14 @@ async fn tcp_e2e_session_create_and_turn_start_with_test_client() {
         "turn/start failed: {turn_resp}"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }
 
 #[tokio::test]
 #[ignore = "lane:e2e-build"]
 async fn tcp_e2e_rkat_rpc_mini_initialize_and_roundtrip() {
-    let (mut child, port) = spawn_rpc_tcp_with_bin(env!("CARGO_BIN_EXE_rkat-rpc-mini")).await;
+    let mut server = spawn_rpc_tcp_with_bin(env!("CARGO_BIN_EXE_rkat-rpc-mini")).await;
+    let port = server.tcp_port;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
@@ -695,5 +737,5 @@ async fn tcp_e2e_rkat_rpc_mini_initialize_and_roundtrip() {
         "turn/start should return assistant text: {turn_resp}"
     );
 
-    child.kill().await.ok();
+    server.kill().await;
 }

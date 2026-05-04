@@ -2869,12 +2869,30 @@ async fn open_product_session_bridge(
 }
 
 async fn cleanup_realtime_binding(
-    _runtime: &SessionRuntime,
-    _binding: Option<&RealtimeSocketBinding>,
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
 ) -> Result<(), RealtimeChannelErrorFrame> {
-    // Realtime attachment lifecycle is capability-driven by the runtime. A
-    // websocket close only releases the channel-local product bridge; it does
-    // not caller-drive `DetachRealtimeBinding`.
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    if !binding.is_primary() {
+        return Ok(());
+    }
+    let session_id = resolve_binding_session_id(
+        runtime,
+        Some(binding),
+        "realtime channel is not wired to a session target",
+    )
+    .await?;
+    let adapter = runtime.runtime_adapter();
+    adapter
+        .detach_live(&session_id)
+        .await
+        .map_err(|err| runtime_error_frame(err, "detach"))?;
+    adapter
+        .project_realtime_attachment_intent(&session_id, false)
+        .await
+        .map_err(|err| runtime_error_frame(err, "clear intent"))?;
     Ok(())
 }
 

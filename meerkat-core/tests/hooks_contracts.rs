@@ -1,4 +1,4 @@
-#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::field_reassign_with_default, clippy::panic)]
 
 use meerkat_core::{
     AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookCapability,

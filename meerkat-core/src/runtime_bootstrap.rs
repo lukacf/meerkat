@@ -150,7 +150,7 @@ pub fn validate_explicit_realm_id(realm_id: &str) -> Result<(), RuntimeBootstrap
 }
 
 pub fn generate_realm_id() -> String {
-    format!("realm-{}", Uuid::now_v7())
+    format!("realm-{}", crate::time_compat::new_uuid_v7())
 }
 
 pub fn derive_workspace_realm_id(path: &Path) -> String {

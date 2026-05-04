@@ -1313,7 +1313,7 @@ mod scenario_10_memory {
         memory_session
             .set_session_metadata(SessionMetadata {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model: smoke_model().to_string(),
+                model: smoke_model(),
                 max_tokens: 512,
                 structured_output_retries: 2,
                 provider: Provider::Anthropic,

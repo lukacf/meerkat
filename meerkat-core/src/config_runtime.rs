@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
@@ -209,7 +208,10 @@ impl ConfigRuntime {
             .state_path
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let tmp = parent.join(format!(".config_state.tmp.{}", Uuid::now_v7()));
+        let tmp = parent.join(format!(
+            ".config_state.tmp.{}",
+            crate::time_compat::new_uuid_v7()
+        ));
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

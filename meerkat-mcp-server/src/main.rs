@@ -377,6 +377,7 @@ fn request_lifecycle_error_response(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

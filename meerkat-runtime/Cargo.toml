@@ -23,7 +23,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-base64 = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 meerkat-machine-derive = { workspace = true }
 rusqlite = { workspace = true, optional = true }

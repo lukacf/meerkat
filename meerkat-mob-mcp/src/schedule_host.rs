@@ -527,6 +527,7 @@ fn mob_flow_completion_future(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -907,7 +908,10 @@ mod tests {
         let (_, identity, options) = &helpers[0];
         assert_eq!(identity, "deploy-monitor");
         assert_eq!(
-            options.role_name.as_ref().map(|name| name.as_str()),
+            options
+                .role_name
+                .as_ref()
+                .map(meerkat_mob::ProfileName::as_str),
             Some("delegate")
         );
         assert_eq!(
@@ -941,7 +945,7 @@ mod tests {
         let binding = MobTargetBinding::Flow {
             mob_id: "ops".to_string(),
             flow_id: "release-check".to_string(),
-            params: raw_json(r#"{}"#),
+            params: raw_json(r"{}"),
         };
         let occurrence = sample_occurrence(binding.clone());
 

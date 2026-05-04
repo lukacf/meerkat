@@ -203,11 +203,13 @@ impl HnswMemoryStore {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     fn hnsw_index_count(&self) -> usize {
         self.indices.read().unwrap().len()
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     fn hnsw_point_count(&self) -> usize {
         self.indices
             .read()
@@ -218,6 +220,7 @@ impl HnswMemoryStore {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
     fn hnsw_index_hints(&self) -> Vec<usize> {
         self.indices
             .read()

@@ -1032,7 +1032,7 @@ fn runtime_binding_from_wire(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::MobMcpState;

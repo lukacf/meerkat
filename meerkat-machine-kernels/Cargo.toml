@@ -22,7 +22,6 @@ ignored = ["indexmap"]
 [dependencies]
 indexmap.workspace = true
 meerkat-core.workspace = true
-meerkat-machine-dsl.workspace = true
 meerkat-machine-schema.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use meerkat_contracts::wire::WireConnectionRef;
 use meerkat_contracts::wire::runtime::{

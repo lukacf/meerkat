@@ -17,7 +17,6 @@ use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionHistoryQuery;
-#[cfg(not(feature = "mini-surface"))]
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 #[cfg(feature = "mob")]
@@ -551,7 +550,6 @@ pub struct MethodRouter {
 }
 
 impl MethodRouter {
-    #[cfg(not(feature = "mini-surface"))]
     fn session_metadata_marks_archived(session: &Session) -> bool {
         session
             .metadata()
@@ -614,7 +612,7 @@ impl MethodRouter {
                     // this capture leaks the thread; see
                     // `ConfiguredRpcMobMcpKeepalive`.
                     #[cfg(feature = "mcp")]
-                    let _configured_mcp_keepalive = configured_mcp_keepalive.clone();
+                    let _configured_mcp_keepalive = configured_mcp_keepalive;
                     move || {
                         let callback_tools: Option<Arc<dyn AgentToolDispatcher>> =
                             runtime.callback_request_tx().map(|tx| {
@@ -865,7 +863,6 @@ impl MethodRouter {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
     async fn ensure_runtime_session_registered(
         &self,
         session_id: &SessionId,

@@ -3623,6 +3623,7 @@ async fn session_task<A: SessionAgent>(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod runtime_turn_metadata_tests {
     use super::*;
     use async_trait::async_trait;
@@ -4037,6 +4038,7 @@ mod runtime_turn_metadata_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod admission_window_tests {
     use super::*;
     use async_trait::async_trait;
@@ -4393,6 +4395,7 @@ mod admission_window_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod inline_video_admission_tests {
     use super::*;
     use async_trait::async_trait;

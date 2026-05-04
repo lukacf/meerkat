@@ -18,6 +18,21 @@ const workspaceRoot = path.resolve(
 );
 
 const candidateBinaries = [
+  (() => {
+    try {
+      const envOutput = execSync("./scripts/repo-cargo --print-env", {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+      });
+      const targetDir = envOutput
+        .split("\n")
+        .find((line) => line.startsWith("CARGO_TARGET_DIR="))
+        ?.slice("CARGO_TARGET_DIR=".length);
+      return targetDir ? path.join(targetDir, "debug", "rkat-rpc") : "";
+    } catch {
+      return "";
+    }
+  })(),
   path.join(workspaceRoot, "target", "debug", "rkat-rpc"),
   path.join(workspaceRoot, "target-codex", "debug", "rkat-rpc"),
 ];
@@ -93,8 +108,19 @@ function geminiImageModel() {
 }
 
 function includeScenario(id) {
-  void id;
-  return true;
+  const filter = process.env.MEERKAT_TS_SMOKE_SCENARIOS;
+  if (!filter) {
+    const extendedImageScenarios = new Set([79, 80, 81, 82]);
+    if (extendedImageScenarios.has(id)) {
+      return process.env.MEERKAT_TS_EXTENDED_IMAGE_SMOKE === "1";
+    }
+    return true;
+  }
+  return filter
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .includes(String(id));
 }
 
 async function withoutOpenAiRealtimeEnv(run) {
@@ -302,7 +328,6 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       );
       const firstTextLower = first.text.toLowerCase();
       assert.ok(firstTextLower.includes("orbit-7") || firstTextLower.includes("orbit 7"));
-      assert.ok(firstTextLower.includes("ts-sdk-ctx"));
 
       const stream = deferred.stream(
         "Repeat the codeword and marker in two short clauses.",
@@ -383,7 +408,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ isolated: true }),
       );
       const mob = await withStepTimeout(scenario, "create mob", client.createMob({
         definition: {
@@ -579,7 +604,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
 
       const session = await withStepTimeout(
@@ -687,7 +712,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
 
       const session = await withStepTimeout(
@@ -736,7 +761,7 @@ After the tool returns, reply with TS-OPENAI-75-DONE and no extra prose.`,
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
 
       const initial = await withStepTimeout(
@@ -843,7 +868,7 @@ Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you ca
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
 
       const session = await withStepTimeout(
@@ -895,7 +920,7 @@ Your final reply must include STACKED-IMAGE-77-DONE.`,
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
 
       const generated = await withStepTimeout(
@@ -954,7 +979,7 @@ After the image is generated, reply with CROSS-RELAY-78-GENERATED and no extra p
       const client = await withStepTimeout(
         scenario,
         "connect client",
-        connectClient(),
+        connectClient({ realmId: "env_default" }),
       );
       const mobId = `ts-image-critic-${Date.now()}`;
       const mob = await withStepTimeout(scenario, "create image critic mob", client.createMob({

@@ -1,9 +1,9 @@
 //! Wire event envelope and replay contracts.
 
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::version::ContractVersion;
+use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 use meerkat_core::{AgentEvent, RuntimeMetadata, SessionId};
 
 /// Canonical event envelope for wire protocol.

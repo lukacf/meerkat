@@ -861,7 +861,6 @@ Not `Eq`: `profiles` transitively carries float provider params."""
     event_router: Optional[MobEventRouterConfigInput] = None
     flows: Optional[dict[str, MobFlowSpecInput]] = None
     limits: Optional[MobLimitsSpecInput] = None
-    mcp_servers: Optional[dict[str, MobMcpServerConfigInput]] = None
     orchestrator: Optional[MobOrchestratorInput] = None
     skills: Optional[dict[str, MobSkillSourceInput]] = None
     spawn_policy: Optional[MobSpawnPolicyInput] = None
@@ -933,14 +932,6 @@ class MobLimitsSpecInput:
     max_frame_depth: Optional[int] = None
     max_orphaned_turns: Optional[int] = None
     max_step_retries: Optional[int] = None
-
-
-@dataclass
-class MobMcpServerConfigInput:
-    """Request payload for MobMcpServerConfigInput."""
-    command: Optional[list[str]] = None
-    env: Optional[dict[str, str]] = None
-    url: Optional[str] = None
 
 
 @dataclass

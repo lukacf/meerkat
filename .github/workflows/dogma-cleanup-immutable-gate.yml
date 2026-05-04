@@ -19,9 +19,7 @@ permissions:
 jobs:
   dogma-cleanup-immutable-gate:
     name: CI gate
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout pull request content
         uses: actions/checkout@v6

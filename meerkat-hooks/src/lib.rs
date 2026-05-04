@@ -868,6 +868,7 @@ impl HookEngine for DefaultHookEngine {
 #[allow(
     clippy::expect_used,
     clippy::field_reassign_with_default,
+    clippy::panic,
     clippy::unwrap_used
 )]
 mod tests {

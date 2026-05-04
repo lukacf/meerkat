@@ -1030,6 +1030,7 @@ fn loop_state_from_turn_phase(phase: TurnPhase) -> crate::LoopState {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::ops::{AsyncOpRef, OperationId};

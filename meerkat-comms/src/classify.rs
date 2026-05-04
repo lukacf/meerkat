@@ -355,7 +355,12 @@ impl IngressClassificationContext {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::redundant_clone,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey, Signature};
@@ -770,7 +775,7 @@ mod tests {
         let prepared_plain = ctx
             .prepare(InboxItem::PlainEvent {
                 blocks: None,
-                body: plain_facts.body.clone(),
+                body: plain_facts.body,
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 interaction_id: None,

@@ -17,7 +17,7 @@ impl JobId {
     ///
     /// The format is "job_" followed by a lowercase UUID v7.
     pub fn new() -> Self {
-        Self(format!("job_{}", uuid::Uuid::now_v7()))
+        Self(format!("job_{}", meerkat_core::time_compat::new_uuid_v7()))
     }
 
     /// Create a JobId from an existing string

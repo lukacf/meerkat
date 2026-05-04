@@ -43,7 +43,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 #[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock};
-use uuid::Uuid;
 
 type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
 
@@ -806,7 +805,10 @@ fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
 fn pending_system_context_appends_for_runtime_executor(
     appends: &[meerkat_core::lifecycle::run_primitive::ConversationContextAppend],
 ) -> Vec<PendingSystemContextAppend> {
+    #[cfg(not(target_arch = "wasm32"))]
     let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    #[cfg(target_arch = "wasm32")]
+    let accepted_at = meerkat_core::time_compat::UNIX_EPOCH;
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
@@ -2050,7 +2052,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         supervisor: sup_spec.into(),
                         epoch: authority.epoch,
                         protocol_version: authority.protocol_version,
-                        input_id: Uuid::now_v7().to_string(),
+                        input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                         content: req.prompt.clone(),
                         handling_mode: req.handling_mode,
                     },

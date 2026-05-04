@@ -215,6 +215,7 @@ fn gemini_base_image_output_options(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::image_generation::{

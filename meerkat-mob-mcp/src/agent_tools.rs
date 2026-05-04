@@ -3825,7 +3825,7 @@ mod tests {
                 authority
                     .witnesses
                     .get(name.as_str())
-                    .is_some_and(|witness| witness.has_identity_witness()),
+                    .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
                 "inherited filter should carry witness for {name}"
             );
         }

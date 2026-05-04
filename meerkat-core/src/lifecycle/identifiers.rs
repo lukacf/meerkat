@@ -15,7 +15,7 @@ pub struct RunId(pub Uuid);
 impl RunId {
     /// Create a new run ID using UUID v7 (time-ordered).
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 
     /// Create from an existing UUID.
@@ -46,7 +46,7 @@ pub struct WaitRequestId(pub Uuid);
 impl WaitRequestId {
     /// Create a new wait request ID using UUID v7 (time-ordered).
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 
     /// Create from an existing UUID.
@@ -77,7 +77,7 @@ pub struct InputId(pub Uuid);
 impl InputId {
     /// Create a new input ID using UUID v7 (time-ordered).
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 
     /// Create from an existing UUID.

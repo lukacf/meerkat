@@ -1873,7 +1873,7 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::{
         ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
@@ -1934,7 +1934,7 @@ mod tests {
                         PeerResponseTerminalTransportIdentity::parse("transport-runtime-1")
                             .expect("transport identity"),
                     ),
-                    route_identity.clone(),
+                    route_identity,
                     PeerResponseTerminalDisplayIdentity::parse("Analyst")
                         .expect("display identity"),
                 ),

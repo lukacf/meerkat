@@ -3178,7 +3178,7 @@ capabilities = [{capability_values}]
         ))
         .unwrap_or(0);
         tx.send(meerkat_core::EventEnvelope::new_session(
-            session_id.clone(),
+            session_id,
             2,
             None,
             meerkat_core::AgentEvent::TextDelta {

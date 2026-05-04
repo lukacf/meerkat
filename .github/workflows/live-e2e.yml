@@ -43,9 +43,7 @@ jobs:
   cargo-e2e-live:
     name: Cargo E2E live lane
     if: ${{ (inputs.runner == 'cargo' || inputs.runner == 'both') && (inputs.lane == 'live' || inputs.lane == 'both') }}
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -68,9 +66,7 @@ jobs:
   cargo-e2e-smoke:
     name: Cargo E2E smoke lane
     if: ${{ (inputs.runner == 'cargo' || inputs.runner == 'both') && (inputs.lane == 'smoke' || inputs.lane == 'both') }}
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -93,9 +89,7 @@ jobs:
   buildbuddy-e2e-live:
     name: BuildBuddy E2E live lane
     if: ${{ (inputs.runner == 'buildbuddy' || inputs.runner == 'both') && (inputs.lane == 'live' || inputs.lane == 'both') }}
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -109,9 +103,7 @@ jobs:
   buildbuddy-e2e-smoke:
     name: BuildBuddy E2E smoke lane
     if: ${{ (inputs.runner == 'buildbuddy' || inputs.runner == 'both') && (inputs.lane == 'smoke' || inputs.lane == 'both') }}
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
         with:

@@ -148,7 +148,7 @@ pub fn terminal_tool_outcome_for_error(
 impl OperationId {
     /// Create a new operation ID
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 }
 

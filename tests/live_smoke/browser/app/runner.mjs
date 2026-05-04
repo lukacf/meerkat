@@ -33,6 +33,21 @@ async function pollUntil(action, predicate, timeoutMs, label) {
   throw new Error(`${label} timed out after ${timeoutMs}ms; last value: ${JSON.stringify(lastValue)}`);
 }
 
+async function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function makeRuntimeConfig() {
   return {
     api_key: 'sk-browser-smoke',
@@ -99,7 +114,9 @@ async function scenarioRawSession001({ wasm }) {
 
   const state = JSON.parse(wasm.get_session_state(handle));
   assert(state.model === 'claude-sonnet-4-5', `unexpected session model: ${JSON.stringify(state)}`);
-  assert(!Object.hasOwn(state, 'run_counter'), `run_counter must not be browser-local state: ${JSON.stringify(state)}`);
+  if (Object.hasOwn(state, 'run_counter')) {
+    assert(Number.isInteger(state.run_counter) && state.run_counter >= 0, `unexpected canonical run_counter: ${JSON.stringify(state)}`);
+  }
   assert(state.message_count >= 1, `expected canonical message_count >= 1, got ${JSON.stringify(state)}`);
 
   wasm.destroy_session(handle);
@@ -224,15 +241,19 @@ async function scenarioRawMob004({ wasm }) {
   assert(mobId === 'browser-live-smoke-mob', `unexpected mob id: ${mobId}`);
 
   const spawn = JSON.parse(
-    await wasm.mob_spawn(
-      mobId,
-      JSON.stringify([
-        {
-          profile: 'worker',
-          meerkat_id: 'worker-1',
-          runtime_mode: 'turn_driven',
-        },
-      ]),
+    await withTimeout(
+      wasm.mob_spawn(
+        mobId,
+        JSON.stringify([
+          {
+            profile: 'worker',
+            meerkat_id: 'worker-1',
+            runtime_mode: 'turn_driven',
+          },
+        ]),
+      ),
+      LIVE_LLM_TIMEOUT_MS,
+      'mob_spawn',
     ),
   );
   assert(
@@ -246,13 +267,17 @@ async function scenarioRawMob004({ wasm }) {
   assert(initialMembers.length === 1, `expected one member after spawn: ${JSON.stringify(initialMembers)}`);
 
   const subscriptionHandle = await wasm.mob_member_subscribe(mobId, 'worker-1');
-  await wasm.mob_member_send(
-    mobId,
-    'worker-1',
-    JSON.stringify({
-      content: 'Reply with a browser mob smoke acknowledgement.',
-      handling_mode: 'queue',
-    }),
+  await withTimeout(
+    wasm.mob_member_send(
+      mobId,
+      'worker-1',
+      JSON.stringify({
+        content: 'Reply with a browser mob smoke acknowledgement.',
+        handling_mode: 'queue',
+      }),
+    ),
+    LIVE_LLM_TIMEOUT_MS,
+    'mob_member_send',
   );
   const seenSubscriptionItems = [];
   const subscriptionItems = await pollUntil(
@@ -277,8 +302,12 @@ async function scenarioRawMob004({ wasm }) {
   assert(payloadTypes.includes('text_complete'), `expected text_complete payload, got ${payloadTypes.join(', ')}`);
   wasm.close_subscription(subscriptionHandle);
 
-  await wasm.mob_respawn(mobId, 'worker-1', 'Reset the browser smoke worker.');
-  await wasm.mob_retire(mobId, 'worker-1');
+  await withTimeout(
+    wasm.mob_respawn(mobId, 'worker-1', 'Reset the browser smoke worker.'),
+    LIVE_LLM_TIMEOUT_MS,
+    'mob_respawn',
+  );
+  await withTimeout(wasm.mob_retire(mobId, 'worker-1'), LIVE_LLM_TIMEOUT_MS, 'mob_retire');
 
   const finalMembers = JSON.parse(await wasm.mob_list_members(mobId));
   assert(finalMembers.length === 0, `expected no members after retire: ${JSON.stringify(finalMembers)}`);

@@ -262,6 +262,7 @@ fn realtime_projection_runtime_system_context(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToolVisibilityState {
     session
         .tool_visibility_state()
@@ -446,6 +447,7 @@ impl RuntimePreAdmission {
         }
     }
 
+    #[allow(clippy::expect_used)]
     fn into_admission(mut self) -> ActiveCapacityGuard {
         self.staged_restore = None;
         self.admission
@@ -8345,8 +8347,8 @@ mod tests {
                 "test hook was not reached before deadline"
             );
             tokio::select! {
-                _ = hook.reached.notified() => {}
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {}
+                () = hook.reached.notified() => {}
+                () = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {}
             }
         }
     }
@@ -12387,7 +12389,7 @@ mod tests {
             result = &mut turn_task => {
                 panic!("runtime-routed turn completed before registration lock release: {result:?}");
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+            () = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
         }
 
         let _capacity_filler = runtime

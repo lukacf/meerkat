@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,28 @@ POLL_TIMEOUT_SECS = 45.0
 T = TypeVar("T")
 
 
+def _repo_cargo_target_dir() -> Path | None:
+    wrapper = REPO_ROOT / "scripts" / "repo-cargo"
+    if not wrapper.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [str(wrapper), "--print-env"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("CARGO_TARGET_DIR="):
+            value = line.split("=", 1)[1].strip()
+            return Path(value) if value else None
+    return None
+
+
 def resolve_rkat_rpc_path() -> str | None:
     """Resolve a real rkat-rpc binary for live smoke tests."""
     override = os.environ.get("MEERKAT_BIN_PATH")
@@ -34,6 +57,18 @@ def resolve_rkat_rpc_path() -> str | None:
                 return str(candidate)
             return None
         return shutil.which(override)
+
+    env_target_dir = os.environ.get("CARGO_TARGET_DIR")
+    if env_target_dir:
+        candidate = Path(env_target_dir) / "debug" / "rkat-rpc"
+        if candidate.exists():
+            return str(candidate)
+
+    repo_target_dir = _repo_cargo_target_dir()
+    if repo_target_dir is not None:
+        candidate = repo_target_dir / "debug" / "rkat-rpc"
+        if candidate.exists():
+            return str(candidate)
 
     for candidate in WORKSPACE_CANDIDATES:
         if candidate.exists():

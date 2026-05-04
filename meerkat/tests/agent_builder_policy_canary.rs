@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unnecessary_literal_bound,
+    clippy::unwrap_used
+)]
+
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::ffi::OsString;

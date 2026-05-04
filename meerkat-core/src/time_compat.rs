@@ -18,3 +18,19 @@ pub use std::time::UNIX_EPOCH;
 
 #[cfg(target_arch = "wasm32")]
 pub use web_time::UNIX_EPOCH;
+
+/// Mint a fresh UUID without relying on unsupported wasm system time.
+///
+/// Native builds keep UUIDv7 time ordering. Browser/WASM builds use UUIDv4
+/// because `uuid::Uuid::now_v7()` currently reaches `std::time` and panics
+/// under `wasm32-unknown-unknown`.
+pub fn new_uuid_v7() -> uuid::Uuid {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        uuid::Uuid::now_v7()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        uuid::Uuid::new_v4()
+    }
+}

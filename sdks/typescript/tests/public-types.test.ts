@@ -96,14 +96,8 @@ void spawnSpecWithGeneration;
 const publicMobDefinition: MobDefinition = {
   id: "mob-1",
   profiles: {
-    worker: { model: "claude-sonnet-4-6", tools: { shell: true } },
+    worker: { model: "claude-sonnet-4-6", tools: { shell: true, mcp: ["browser"] } },
     reviewer: { realm_profile: "reviewer-default" },
-  },
-  mcp_servers: {
-    browser: {
-      command: ["npx", "@modelcontextprotocol/server-browser"],
-      env: { NODE_ENV: "test" },
-    },
   },
   flows: {
     kickoff: {
@@ -141,11 +135,13 @@ void publicMobDefinitionWithBadFlow;
 
 const publicMobDefinitionWithBadMcpEnv: MobDefinition = {
   id: "mob-bad-mcp",
-  profiles: { worker: { model: "claude-sonnet-4-6" } },
-  mcp_servers: {
-    browser: {
-      // @ts-expect-error MCP server env values are strings in the public contract.
-      env: { NODE_ENV: 1 },
+  profiles: {
+    worker: {
+      model: "claude-sonnet-4-6",
+      tools: {
+        // @ts-expect-error MCP tool allowlist entries are registry names.
+        mcp: [1],
+      },
     },
   },
 };

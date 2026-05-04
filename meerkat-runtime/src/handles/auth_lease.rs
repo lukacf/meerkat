@@ -19,7 +19,6 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Weak;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::ConnectionRef;
@@ -27,6 +26,7 @@ use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
     LeaseKey,
 };
+use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
 use crate::auth_machine::dsl as auth_dsl;
 

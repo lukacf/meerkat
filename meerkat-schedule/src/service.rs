@@ -373,6 +373,7 @@ impl ScheduleService {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::OccurrenceLifecycleInput;

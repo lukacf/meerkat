@@ -150,7 +150,6 @@ export type {
   MobFlowStepInput,
   MobFrameSpecInput,
   MobLimitsSpecInput,
-  MobMcpServerConfigInput,
   MobMemberListEntryWire,
   MobMemberSpecWire,
   MobOrchestratorInput,

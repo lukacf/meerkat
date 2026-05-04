@@ -361,6 +361,7 @@ pub fn wrap_with_comms(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::inbox::Inbox;

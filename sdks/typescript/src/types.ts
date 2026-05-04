@@ -9,7 +9,6 @@ import type {
   MobEventRouterConfigInput,
   MobFlowSpecInput,
   MobLimitsSpecInput,
-  MobMcpServerConfigInput,
   MobOrchestratorInput,
   MobSkillSourceInput,
   MobSpawnPolicyInput,
@@ -290,7 +289,6 @@ export interface MobDefinition {
   readonly id: string;
   readonly orchestrator?: MobOrchestratorInput;
   readonly profiles: Readonly<Record<string, MobProfileBinding>>;
-  readonly mcp_servers?: Readonly<Record<string, MobMcpServerConfigInput>>;
   readonly wiring?: MobWiringRulesInput;
   readonly flows?: Readonly<Record<string, MobFlowSpecInput>>;
   readonly skills?: Readonly<Record<string, MobSkillSourceInput>>;

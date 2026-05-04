@@ -42,9 +42,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
-    proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
-    ] + all_crate_deps(
+    proc_macro_deps = all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
@@ -73,9 +71,7 @@ rust_library(
     visibility = [
         "//meerkat:__pkg__",
     ],
-    proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
-    ] + all_crate_deps(
+    proc_macro_deps = all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
@@ -122,9 +118,7 @@ rust_test(
     env = {
         "RUST_MIN_STACK": "16777216",
     },
-    proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
-    ] + all_crate_deps(
+    proc_macro_deps = all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
         proc_macro_dev = True,

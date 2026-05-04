@@ -469,7 +469,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                     })?;
                     let service = Arc::clone(&self.service);
                     let adapter = Arc::clone(&self.adapter);
-                    materialize_session(
+                    Box::pin(materialize_session(
                         &self.service,
                         &self.adapter,
                         session,
@@ -481,7 +481,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                                 session_id,
                             )
                         },
-                    )
+                    ))
                     .await
                     .map_err(|error| {
                         CoreExecutorError::apply_failed_runtime_context(error.to_string())
@@ -1401,9 +1401,10 @@ mod tests {
             } => {
                 assert_eq!(outcome, meerkat_core::TurnTerminalOutcome::Failed);
                 assert_eq!(cause_kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
-                assert!(
-                    message.contains("provider auth denied"),
-                    "unexpected terminal message: {message}"
+                assert_eq!(
+                    message,
+                    meerkat_core::TurnTerminalCauseKind::LlmFailure
+                        .default_message(meerkat_core::TurnTerminalOutcome::Failed)
                 );
             }
             other => panic!("expected typed terminal failure, got {other:?}"),

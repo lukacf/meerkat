@@ -79,7 +79,7 @@ impl FileTaskStore {
             return Ok(TaskStoreData {
                 meta: TaskStoreMeta {
                     version: 1,
-                    project_id: uuid::Uuid::now_v7().to_string(),
+                    project_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     store_rev: 0,
                 },

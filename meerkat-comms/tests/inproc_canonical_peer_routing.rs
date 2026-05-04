@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 use std::sync::{Arc, LazyLock};
 
 use meerkat_comms::{

@@ -14,7 +14,7 @@ pub struct TaskId(pub String);
 impl TaskId {
     /// Create a new TaskId with a generated UUID v7
     pub fn new() -> Self {
-        Self(uuid::Uuid::now_v7().to_string())
+        Self(meerkat_core::time_compat::new_uuid_v7().to_string())
     }
 
     /// Create a TaskId from an existing string

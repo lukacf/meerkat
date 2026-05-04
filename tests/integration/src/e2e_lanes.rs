@@ -156,10 +156,10 @@ struct CompletedCommand {
     output: String,
 }
 
-const WEB_RUNTIME_BUILD_IF_MISSING: &[&str] = &[
+const WEB_RUNTIME_BUILD_IF_STALE: &[&str] = &[
     "/bin/sh",
     "-c",
-    "if test -f ../../../sdks/web/wasm/meerkat_web_runtime.js && test -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm; then :; else npm --prefix ../../../sdks/web run build; fi",
+    "if test ! -f ../../../sdks/web/wasm/meerkat_web_runtime.js || test ! -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm || test -n \"$(find ../../../meerkat-web-runtime ../../../sdks/web/src ../../../sdks/web/scripts ../../../sdks/web/package.json ../../../sdks/web/tsconfig.json -type f -newer ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm -print -quit)\"; then npm --prefix ../../../sdks/web run build; fi",
 ];
 
 const MEERKAT_E2E_EXECUTION_MODE: &str = "MEERKAT_E2E_EXECUTION_MODE";
@@ -2342,7 +2342,7 @@ fn materialize_node_build(cwd: &str) -> Result<(), String> {
             )?;
             run_materialize_command_with_env(
                 cwd,
-                WEB_RUNTIME_BUILD_IF_MISSING,
+                WEB_RUNTIME_BUILD_IF_STALE,
                 &[
                     ("CARGO_BUILD_JOBS", "1"),
                     ("MEERKAT_WEB_WASM_PROFILE", "dev"),
@@ -2998,7 +2998,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             ],
             command: CommandSpec::Pytest {
                 test_file: "tests/test_e2e_smoke.py",
-                test_name: "test_smoke_scenario_39_persistent_reconnect_and_session_submit",
+                test_name: "test_smoke_scenario_39_persistent_reconnect_and_turn_start",
             },
         }),
         40 => Some(&Spec {
@@ -3172,7 +3172,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                WEB_RUNTIME_BUILD_IF_MISSING,
+                WEB_RUNTIME_BUILD_IF_STALE,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -3204,7 +3204,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                WEB_RUNTIME_BUILD_IF_MISSING,
+                WEB_RUNTIME_BUILD_IF_STALE,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -3236,7 +3236,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                WEB_RUNTIME_BUILD_IF_MISSING,
+                WEB_RUNTIME_BUILD_IF_STALE,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {
@@ -3268,7 +3268,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "-c",
                     "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
                 ],
-                WEB_RUNTIME_BUILD_IF_MISSING,
+                WEB_RUNTIME_BUILD_IF_STALE,
                 &["npx", "playwright", "install", "chromium"],
             ],
             command: CommandSpec::Raw {

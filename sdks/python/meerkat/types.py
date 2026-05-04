@@ -35,7 +35,6 @@ from .generated.types import (
     MobFlowStepInput as MobFlowStepInput,
     MobFrameSpecInput as MobFrameSpecInput,
     MobLimitsSpecInput as MobLimitsSpecInput,
-    MobMcpServerConfigInput as MobMcpServerConfigInput,
     MobMemberListEntryWire as MobMemberListEntryWire,
     MobMemberSpecWire as MobMemberSpecWire,
     MobOrchestratorInput as MobOrchestratorInput,

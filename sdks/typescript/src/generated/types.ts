@@ -623,7 +623,6 @@ export interface MobDefinitionInput {
   flows?: Record<string, MobFlowSpecInput>;
   id: string;
   limits?: MobLimitsSpecInput;
-  mcp_servers?: Record<string, MobMcpServerConfigInput>;
   orchestrator?: MobOrchestratorInput;
   profiles: Record<string, MobProfileBindingInput>;
   skills?: Record<string, MobSkillSourceInput>;
@@ -682,12 +681,6 @@ export interface MobLimitsSpecInput {
   max_frame_depth?: number;
   max_orphaned_turns?: number;
   max_step_retries?: number;
-}
-
-export interface MobMcpServerConfigInput {
-  command?: string[];
-  env?: Record<string, string>;
-  url?: string;
 }
 
 export interface MobOrchestratorInput {

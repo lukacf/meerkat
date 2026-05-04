@@ -204,7 +204,6 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "MobFlowStepInput",
     "MobFrameSpecInput",
     "MobLimitsSpecInput",
-    "MobMcpServerConfigInput",
     "MobOrchestratorInput",
     "MobProfileInput",
     "MobRoleWiringRuleInput",

@@ -1993,10 +1993,10 @@ mod tests {
         let mut config = Config::default();
         config
             .merge_toml_str(
-                r#"
+                r"
 [limits]
 max_sessions = 7
-"#,
+",
             )
             .expect("merge max_sessions");
         assert_eq!(config.max_sessions(), 7);

@@ -216,10 +216,7 @@ mod tests {
     #[test]
     fn bootstrap_handlers_do_not_use_attachment_status_as_eligibility() {
         let source = include_str!("realtime.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source should precede tests");
+        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
         assert!(
             !production_source.contains("realtime_attachment_status"),
             "realtime/capabilities and realtime/open_info must not gate bootstrap on attachment-status availability"

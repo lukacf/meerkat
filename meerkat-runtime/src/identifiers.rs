@@ -14,7 +14,7 @@ pub struct RuntimeEventId(pub Uuid);
 
 impl RuntimeEventId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(meerkat_core::time_compat::new_uuid_v7())
     }
 }
 
@@ -79,7 +79,7 @@ pub struct ConversationId(pub Uuid);
 
 impl ConversationId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(meerkat_core::time_compat::new_uuid_v7())
     }
 }
 
@@ -107,7 +107,7 @@ impl Default for CausationId {
 
 impl CausationId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(meerkat_core::time_compat::new_uuid_v7())
     }
 
     pub fn from_uuid(uuid: Uuid) -> Self {
@@ -133,7 +133,7 @@ impl Default for CorrelationId {
 
 impl CorrelationId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(meerkat_core::time_compat::new_uuid_v7())
     }
 
     pub fn from_uuid(uuid: Uuid) -> Self {

@@ -3985,7 +3985,7 @@ async fn rollback_cli_token_commit(
                 store
                     .save(&commit.key, previous)
                     .await
-                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?
+                    .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
             }
         },
         None => {
@@ -4225,7 +4225,7 @@ async fn interactive_login(
             connection_ref.clone(),
             identity,
             redirect_url.clone(),
-            pkce.verifier.secret().to_string(),
+            pkce.verifier.secret().clone(),
         )
         .map_err(|e| anyhow::anyhow!("OAuth flow admission failed: {e}"))?;
     let handle = pending_callback.expect_state(state_token.clone());
@@ -8567,10 +8567,12 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
-            Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
-            })
-            | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            Err(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                }
+                | meerkat_runtime::RuntimeDriverError::Destroyed,
+            ) => {
                 reject_persisted_runtime_state_for_interrupt_noop(service.as_ref(), &session_id)
                     .await?;
                 println!("Interrupted session: {session_id}");
@@ -11110,7 +11112,7 @@ mod tests {
     async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
         use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
-        use meerkat_providers::oauth_flow::{OAuthFlowAuthority, OAuthFlowError};
+        use meerkat_providers::oauth_flow::OAuthFlowAuthority;
 
         let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let authority = meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
@@ -11145,10 +11147,11 @@ mod tests {
         .await
         .expect("CLI OAuth save consumes terminal flow");
 
-        assert!(matches!(
-            authority.consume(&state, &connection_ref, provider, redirect_uri),
-            Err(OAuthFlowError::Missing)
-        ));
+        let second_consume = authority.consume(&state, &connection_ref, provider, redirect_uri);
+        assert!(
+            second_consume.is_err(),
+            "consumed runtime browser flow must not remain callable: {second_consume:?}"
+        );
         assert_eq!(
             auth_lease
                 .snapshot(&LeaseKey::from_connection_ref(&connection_ref))

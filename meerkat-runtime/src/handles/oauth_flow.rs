@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use meerkat_auth_core::oauth_flow::{
     OAuthDeviceFlowRecord, OAuthDevicePollLease, OAuthDevicePollLifecycle, OAuthFlowAuthority,
@@ -17,6 +17,7 @@ use meerkat_auth_core::oauth_flow::{
 };
 use meerkat_core::ConnectionRef;
 use meerkat_core::handles::{DslTransitionError, LeaseKey};
+use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
 use crate::auth_machine::dsl as auth_dsl;
 use crate::store::RuntimeStore;

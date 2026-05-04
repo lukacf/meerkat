@@ -608,7 +608,7 @@ impl SessionAgent for CompactionSessionAgent {
         self.seen_last_user_messages
             .lock()
             .expect("seen_last_user_messages lock poisoned")
-            .push(prompt_text.clone());
+            .push(prompt_text);
         self.session.append_external_user_content(prompt);
         self.session.append_external_assistant_blocks(
             vec![AssistantBlock::Text {

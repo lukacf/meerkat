@@ -41,9 +41,6 @@ meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtim
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
-meerkat-anthropic = { workspace = true, features = ["oauth"] }
-meerkat-openai = { workspace = true, features = ["oauth"] }
-meerkat-gemini = { workspace = true, features = ["oauth"] }
 meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
@@ -88,12 +85,9 @@ http-body-util = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = [
-    "async-trait",     # proc macro (derive)
     "hyper",           # dev-dependency used in tests
     "meerkat-comms",   # optional dep behind comms feature
     "meerkat-mcp",     # optional dep behind mcp feature
-    "meerkat-mob",     # optional dep behind mob feature
-    "meerkat-mob-mcp", # optional dep behind mob feature
     "meerkat-tools",   # used via meerkat facade re-exports
     "thiserror",       # proc macro (derive)
 ]

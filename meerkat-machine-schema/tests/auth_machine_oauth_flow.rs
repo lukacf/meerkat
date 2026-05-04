@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 use meerkat_machine_schema::TypeRef;
 use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
 

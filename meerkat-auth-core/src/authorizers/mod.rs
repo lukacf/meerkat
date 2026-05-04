@@ -285,6 +285,7 @@ fn epoch_secs(ts: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_core::connection::{BindingId, RealmId};

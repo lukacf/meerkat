@@ -66,10 +66,10 @@ async fn token_handler(State(state): State<MockState>, Form(form): Form<TokenFor
     {
         sleep(state.delay).await;
     }
-    if let Some(failure) = &state.failure {
-        if call >= failure.from_call {
-            return (failure.status, Json(failure.body.clone())).into_response();
-        }
+    if let Some(failure) = &state.failure
+        && call >= failure.from_call
+    {
+        return (failure.status, Json(failure.body.clone())).into_response();
     }
     let expires_in = state
         .expires_in_by_call

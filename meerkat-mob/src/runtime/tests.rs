@@ -519,6 +519,7 @@ fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
         usage: Usage::default(),
         turns: 1,
         tool_calls: 0,
+        terminal_cause_kind: None,
         structured_output: None,
         schema_warnings: None,
         skill_diagnostics: None,
@@ -1260,6 +1261,7 @@ impl SessionService for MockSessionService {
                                 session_id,
                                 error_class: meerkat_core::event::AgentErrorClass::Internal,
                                 error: "mock flow turn failure".to_string(),
+                                terminal_cause_kind: None,
                                 error_report: None,
                             },
                         ))
@@ -1274,6 +1276,7 @@ impl SessionService for MockSessionService {
                                 session_id,
                                 result: completed_result,
                                 usage: Usage::default(),
+                                terminal_cause_kind: None,
                             },
                         ))
                         .await;
@@ -4535,6 +4538,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
                 session_id,
                 result: result.text.clone(),
                 usage: result.usage.clone(),
+                terminal_cause_kind: None,
             })
             .await;
         Ok(result)

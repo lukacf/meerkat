@@ -9,6 +9,7 @@ printf '%s\n' \
   meerkat-machine-dsl \
   meerkat-machine-schema \
   meerkat-machine-kernels \
+  meerkat-agent-build-authority \
   meerkat-core \
   meerkat-llm-core \
   meerkat-auth-core \

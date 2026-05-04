@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
 
 /// Resolved paths attached to a config store context.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -196,7 +195,7 @@ impl ConfigStore for FileConfigStore {
             .path
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let tmp_path = parent.join(format!(".config.tmp.{}", Uuid::now_v7()));
+        let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
         let mut tmp = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

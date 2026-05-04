@@ -25,6 +25,7 @@
 use crate::event_store::EventStore;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// Projector that materializes session files from the event store.
@@ -217,18 +218,18 @@ impl SessionProjector {
                     .last_seq(session_id)
                     .await
                     .map_err(|e| ProjectionError::EventStore(e.to_string()))?;
-                if checkpoint > durable_last_seq {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        checkpoint,
-                        durable_last_seq,
-                        "projection checkpoint is ahead of durable event store; replaying derived files"
-                    );
-                    self.replay(event_store, session_id).await
-                } else if checkpoint == durable_last_seq {
-                    Ok(checkpoint)
-                } else {
-                    self.project(event_store, session_id, checkpoint + 1).await
+                match checkpoint.cmp(&durable_last_seq) {
+                    Ordering::Greater => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            checkpoint,
+                            durable_last_seq,
+                            "projection checkpoint is ahead of durable event store; replaying derived files"
+                        );
+                        self.replay(event_store, session_id).await
+                    }
+                    Ordering::Equal => Ok(checkpoint),
+                    Ordering::Less => self.project(event_store, session_id, checkpoint + 1).await,
                 }
             }
             CheckpointState::Missing => self.project(event_store, session_id, 1).await,

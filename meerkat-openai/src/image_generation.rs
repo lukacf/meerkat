@@ -364,6 +364,7 @@ fn openai_image_provider_params(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::image_generation::{

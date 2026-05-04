@@ -68,14 +68,14 @@ fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
 }
 
 const PEER_ENDPOINT_TYPE: &str = "PeerEndpoint";
-const RUNTIME_LEGACY_SOURCE_TOKEN_FIXTURE: &str = r#"
+const RUNTIME_LEGACY_SOURCE_TOKEN_FIXTURE: &str = r"
 pub struct PeerEndpoint {
     pub name: PeerName,
     pub peer_id: PeerId,
     pub address: PeerAddress,
     pub signing_key: PeerSigningKey,
 }
-"#;
+";
 
 const EXPECTED_PEER_ENDPOINT_FIELDS: &[(&str, &str)] = &[
     ("name", "PeerName"),

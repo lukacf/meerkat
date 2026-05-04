@@ -911,7 +911,7 @@ mod tests {
         };
         assert_eq!(to.peer_id, requester_peer_id);
         assert_eq!(
-            to.display_name.as_ref().map(|name| name.as_str()),
+            to.display_name.as_ref().map(meerkat_core::PeerName::as_str),
             Some("operator")
         );
         assert_eq!(in_reply_to.0, request_id);

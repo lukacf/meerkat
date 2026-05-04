@@ -487,7 +487,11 @@ async fn resume_after_archive_fails() {
 
     // Archive the session.
     let (delete_status, delete_body) = archive_session(s.state(), &sid).await;
-    assert_eq!(delete_status, StatusCode::OK, "{delete_body}");
+    assert_eq!(
+        delete_status,
+        StatusCode::OK,
+        "archive response body: {delete_body}"
+    );
 
     // Reconstruct and attempt to resume the archived session.
     let state2 = s.state();

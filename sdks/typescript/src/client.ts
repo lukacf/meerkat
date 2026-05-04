@@ -308,6 +308,7 @@ function mobTurnStartPayload(
 
 export class MeerkatClient {
   private process: ChildProcess | null = null;
+  private processStderr = "";
   private requestId = 0;
   private _capabilities: Capability[] = [];
   private _methods = new Set<string>();
@@ -386,6 +387,38 @@ export class MeerkatClient {
     this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const child = this.process;
+    this.processStderr = "";
+    child.stderr?.on("data", (chunk: string | Buffer) => {
+      this.processStderr = (this.processStderr + String(chunk)).slice(-8192);
+    });
+    child.once("error", (error) => {
+      if (this.process === child) {
+        this.process = null;
+        this.rejectPendingRequests(
+          new MeerkatError("PROCESS_ERROR", `Failed to start ${this.rkatPath}: ${error.message}`),
+        );
+        this.closeQueues();
+      }
+    });
+    child.once("close", (code, signal) => {
+      const expectedClose = this.process !== child;
+      if (this.process === child) {
+        this.process = null;
+        this.rl?.close();
+        this.rl = null;
+      }
+      if (!expectedClose) {
+        const suffix = this.processStderr.trim() ? `: ${this.processStderr.trim()}` : "";
+        this.rejectPendingRequests(
+          new MeerkatError(
+            "PROCESS_EXITED",
+            `${this.rkatPath} exited before replying (code ${code ?? "null"}, signal ${signal ?? "null"})${suffix}`,
+          ),
+        );
+        this.closeQueues();
+      }
+    });
 
     this.rl = createInterface({ input: this.process.stdout! });
     this.rl.on("line", (line: string) => this.handleLine(line));
@@ -452,10 +485,18 @@ export class MeerkatClient {
       process.stdout?.destroy();
       process.stderr?.destroy();
     }
+    this.rejectPendingRequests(new MeerkatError("CLIENT_CLOSED", "Client closed"));
+    this.closeQueues();
+  }
+
+  private rejectPendingRequests(reason: unknown): void {
     for (const [, pending] of this.pendingRequests) {
-      pending.reject(new MeerkatError("CLIENT_CLOSED", "Client closed"));
+      pending.reject(reason);
     }
     this.pendingRequests.clear();
+  }
+
+  private closeQueues(): void {
     for (const [, queue] of this.eventQueues) {
       queue.put(null);
     }

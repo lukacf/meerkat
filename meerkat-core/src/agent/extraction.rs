@@ -189,6 +189,7 @@ pub(super) fn unwrap_named_object_wrapper(parsed: Value, output_schema: &OutputS
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::OutputSchema;

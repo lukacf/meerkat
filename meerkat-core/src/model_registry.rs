@@ -589,9 +589,10 @@ mod tests {
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let entry = registry
-            .entry("gemini-3-flash-preview")
-            .expect("catalog entry must exist");
+        let entry = match registry.entry("gemini-3-flash-preview") {
+            Some(entry) => entry,
+            None => panic!("catalog entry must exist"),
+        };
         assert_eq!(entry.provider, Provider::Gemini);
         assert_eq!(entry.id, "gemini-3-flash-preview");
         let rendered = format!("{entry:?}");
@@ -600,9 +601,11 @@ mod tests {
             "model-only projection entry must not expose capability fields: {rendered}"
         );
 
-        let profile = registry
-            .profile_for_provider(Provider::Gemini, "gemini-3-flash-preview")
-            .expect("typed provider-aware capability lookup should resolve");
+        let profile =
+            match registry.profile_for_provider(Provider::Gemini, "gemini-3-flash-preview") {
+                Some(profile) => profile,
+                None => panic!("typed provider-aware capability lookup should resolve"),
+            };
         assert!(profile.inline_video);
         assert!(
             registry
@@ -646,13 +649,18 @@ mod tests {
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        registry
-            .require_inline_video_for_provider(Provider::Gemini, "gemini-3-flash-preview")
-            .expect("Gemini catalog owner should authorize inline video");
+        if let Err(err) =
+            registry.require_inline_video_for_provider(Provider::Gemini, "gemini-3-flash-preview")
+        {
+            panic!("Gemini catalog owner should authorize inline video: {err}");
+        }
 
-        let err = registry
+        let err = match registry
             .require_inline_video_for_provider(Provider::OpenAI, "gemini-3-flash-preview")
-            .expect_err("same model name under another provider must fail closed");
+        {
+            Ok(()) => panic!("same model name under another provider must fail closed"),
+            Err(err) => err,
+        };
         assert_eq!(err.capability, ModelCapability::InlineVideo);
         assert_eq!(err.provider, Provider::OpenAI);
         assert_eq!(err.model, "gemini-3-flash-preview");
@@ -669,17 +677,22 @@ mod tests {
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let disabled = registry
-            .require_inline_video_for_provider(Provider::OpenAI, "gpt-5.4")
-            .expect_err("known OpenAI model has catalog-owned inline video disabled");
+        let disabled = match registry.require_inline_video_for_provider(Provider::OpenAI, "gpt-5.4")
+        {
+            Ok(()) => panic!("known OpenAI model has catalog-owned inline video disabled"),
+            Err(err) => err,
+        };
         assert_eq!(
             disabled.reason,
             UnsupportedModelCapabilityReason::CapabilityDisabled
         );
 
-        let unknown = registry
+        let unknown = match registry
             .require_inline_video_for_provider(Provider::Other, "uncatalogued-video-model")
-            .expect_err("unknown provider/model pair must fail closed");
+        {
+            Ok(()) => panic!("unknown provider/model pair must fail closed"),
+            Err(err) => err,
+        };
         assert_eq!(
             unknown.reason,
             UnsupportedModelCapabilityReason::ProviderModelProfileMissing
@@ -702,9 +715,11 @@ mod tests {
             Err(err) => panic!("registry construction failed: {err}"),
         };
 
-        let reason = registry
-            .provider_override_mismatch_reason(Provider::Anthropic, "gpt-5.4")
-            .expect("wrong-provider override for a catalog model should be rejected");
+        let reason =
+            match registry.provider_override_mismatch_reason(Provider::Anthropic, "gpt-5.4") {
+                Some(reason) => reason,
+                None => panic!("wrong-provider override for a catalog model should be rejected"),
+            };
         assert!(reason.contains("model 'gpt-5.4'"));
         assert!(reason.contains("registered for provider 'openai'"));
         assert!(reason.contains("not provider 'anthropic'"));

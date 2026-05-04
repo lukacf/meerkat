@@ -1364,6 +1364,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use meerkat::surface::build_runtime_backed_service;

@@ -25,9 +25,7 @@ env:
 jobs:
   fmt-lint:
     name: Format, lint, and static checks
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -70,9 +68,7 @@ jobs:
 
   sdk-suites:
     name: SDK suites + parity gates
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -109,9 +105,7 @@ jobs:
 
   machine-authority:
     name: Machine authority workflow
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -204,9 +198,7 @@ jobs:
 
   rmat-audit:
     name: RMAT audit + ownership ledger
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -230,9 +222,7 @@ jobs:
 
   seam-inventory:
     name: Seam inventory (strict)
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -250,9 +240,7 @@ jobs:
 
   wasm-contract-tests:
     name: WASM contract tests
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -315,9 +303,7 @@ jobs:
 
   test-unit:
     name: Unit tests
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -336,9 +322,7 @@ jobs:
 
   integration-fast:
     name: Integration-fast lane
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -367,9 +351,7 @@ jobs:
 
   e2e-fast:
     name: E2E fast lane
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -390,9 +372,7 @@ jobs:
 
   e2e-system:
     name: E2E system lane
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -421,9 +401,7 @@ jobs:
 
   test-minimal:
     name: Minimal feature builds
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -450,9 +428,7 @@ jobs:
 
   test-feature-matrix-lib:
     name: Feature matrix (library)
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -482,9 +458,7 @@ jobs:
 
   test-feature-matrix-surface-checks:
     name: Feature matrix (surface checks)
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -505,9 +479,7 @@ jobs:
 
   wasm-check:
     name: WASM compilation check
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -535,9 +507,7 @@ jobs:
 
   audit:
     name: Security audit
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -549,9 +519,7 @@ jobs:
     name: Cargo CI gate
     if: always()
     needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, wasm-contract-tests, rmat-audit, seam-inventory, audit]
-    runs-on:
-      - self-hosted
-      - meerkat-temp-linux
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Check results
         run: |

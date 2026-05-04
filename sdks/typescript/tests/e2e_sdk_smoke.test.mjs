@@ -6,6 +6,24 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const binaryPath = (() => {
+  try {
+    const envOutput = execSync("../../scripts/repo-cargo --print-env", {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      encoding: "utf8",
+    });
+    const targetDir = envOutput
+      .split("\n")
+      .find((line) => line.startsWith("CARGO_TARGET_DIR="))
+      ?.slice("CARGO_TARGET_DIR=".length);
+    if (targetDir) {
+      const repoCargoBinary = `${targetDir}/debug/rkat-rpc`;
+      if (existsSync(repoCargoBinary)) {
+        return repoCargoBinary;
+      }
+    }
+  } catch {
+    // Fall through to legacy workspace/PATH resolution for installed-package smoke.
+  }
   const workspaceBinary = fileURLToPath(
     new URL("../../../target-codex/debug/rkat-rpc", import.meta.url),
   );

@@ -8855,30 +8855,6 @@
         },
         "type": "object"
       },
-      "MobMcpServerConfigInput": {
-        "additionalProperties": false,
-        "properties": {
-          "command": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "env": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
       "MobOrchestratorInput": {
         "additionalProperties": false,
         "properties": {
@@ -9966,12 +9942,6 @@
             "type": "null"
           }
         ]
-      },
-      "mcp_servers": {
-        "additionalProperties": {
-          "$ref": "#/$defs/MobMcpServerConfigInput"
-        },
-        "type": "object"
       },
       "orchestrator": {
         "anyOf": [

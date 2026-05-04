@@ -578,7 +578,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
 ))]
 fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String> {
     binding
-        .backend_profile
+        .backend_profile()
         .options
         .get(key)
         .and_then(serde_json::Value::as_str)

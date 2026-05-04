@@ -1338,6 +1338,9 @@ impl AgentFactory {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
+        if selected_realm == "env_default" {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        }
         let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
         Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm)
     }
@@ -3749,8 +3752,13 @@ impl AgentFactory {
                 extra_sections.push(instruction.as_str());
             }
         }
-        let should_apply_system_prompt =
-            build_config.resume_session.is_none() || per_request_prompt.is_some();
+        let resume_session_is_precreated_empty = build_config
+            .resume_session
+            .as_ref()
+            .is_some_and(|session| session.messages().is_empty());
+        let should_apply_system_prompt = build_config.resume_session.is_none()
+            || resume_session_is_precreated_empty
+            || per_request_prompt.is_some();
         #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = if should_apply_system_prompt {
             Some(
@@ -5094,6 +5102,22 @@ mod tests {
         let (realm, binding_id, connection_ref) =
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::Gemini, None)
                 .expect("unscoped image lookup may use env_default");
+
+        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(binding_id, "default");
+        assert_eq!(connection_ref.realm.as_str(), "env_default");
+        assert_eq!(connection_ref.binding.as_str(), "default");
+    }
+
+    #[test]
+    fn selected_env_default_image_binding_can_synthesize_env_default() {
+        let config = Config::default();
+        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::Gemini,
+            Some("env_default"),
+        )
+        .expect("explicit env_default image lookup may use env_default credentials");
 
         assert_eq!(realm.realm_id, "env_default");
         assert_eq!(binding_id, "default");

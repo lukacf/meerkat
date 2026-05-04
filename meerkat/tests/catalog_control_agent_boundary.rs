@@ -1,4 +1,8 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::unnecessary_literal_bound,
+    clippy::unwrap_used
+)]
 
 use std::sync::{Arc, Mutex};
 

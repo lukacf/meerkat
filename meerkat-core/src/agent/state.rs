@@ -5847,7 +5847,7 @@ mod tests {
 
         let err = agent
             .apply_turn_input(TurnExecutionInput::FatalFailure {
-                run_id: run_id.clone(),
+                run_id,
                 reason: TurnFailureReason::with_cause(
                     crate::TurnTerminalCauseKind::Unknown,
                     crate::event::AgentErrorClass::Terminal,
@@ -5929,9 +5929,7 @@ mod tests {
             .expect("force terminal failure without cause");
 
         let err = agent
-            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                run_id: run_id.clone(),
-            })
+            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal { run_id })
             .expect_err("unrecognized failed transition without machine cause should fail closed");
 
         match err {

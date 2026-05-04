@@ -818,7 +818,7 @@ impl<T> EventEnvelope<T> {
         };
         let source_id = source.legacy_source_id();
         Self {
-            event_id: uuid::Uuid::now_v7(),
+            event_id: crate::time_compat::new_uuid_v7(),
             source,
             source_id,
             seq,
@@ -1805,7 +1805,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
@@ -1895,7 +1895,7 @@ mod tests {
         let received = AgentEvent::ToolResultReceived {
             id: "tc_text".to_string(),
             name: "text_tool".to_string(),
-            content: content.clone(),
+            content,
             is_error: false,
         };
 
@@ -1930,7 +1930,7 @@ mod tests {
         let received = AgentEvent::ToolResultReceived {
             id: "tc_image".to_string(),
             name: "view_image".to_string(),
-            content: content.clone(),
+            content,
             is_error: false,
         };
 
@@ -3071,7 +3071,7 @@ mod tests {
             "event_id": uuid::Uuid::now_v7(),
             "source": {
                 "type": "session",
-                "session_id": session_id.clone(),
+                "session_id": session_id,
             },
             "source_id": "session:not-a-uuid",
             "seq": 7,

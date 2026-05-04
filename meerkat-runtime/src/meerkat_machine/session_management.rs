@@ -1066,10 +1066,7 @@ impl MeerkatMachine {
 
     /// Detach the runtime-owned binding. Preserves the durable intent bit so
     /// `realtime_attachment_status` can still project `IntentPresentUnbound`.
-    pub(crate) async fn detach_live(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
+    pub async fn detach_live(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::DetachRealtimeBinding,

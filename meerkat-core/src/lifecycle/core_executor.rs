@@ -444,6 +444,7 @@ pub trait CoreExecutor: Send + Sync {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 

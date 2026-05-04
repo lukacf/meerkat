@@ -48,7 +48,7 @@ const PEER_ID_ED25519_PUBKEY_NAMESPACE: Uuid =
 impl PeerId {
     /// Mint a new `PeerId` with a fresh UUID v7 (time-ordered).
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(crate::time_compat::new_uuid_v7())
     }
 
     /// Wrap an existing UUID.

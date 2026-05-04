@@ -5969,7 +5969,12 @@ async fn archive_session_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
+        let result = service
+            .archive_with_machine_authority(
+                &session_id,
+                state.runtime_adapter.session_control_authority(),
+            )
+            .await;
         let result = match result {
             Ok(()) | Err(SessionError::NotFound { .. }) => {
                 cleanup_archived_session_runtime(&state, &session_id).await

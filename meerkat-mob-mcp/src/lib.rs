@@ -1924,6 +1924,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })
@@ -2004,6 +2005,7 @@ impl SessionService for LocalSessionService {
                     session_id: id.clone(),
                     result: "ok".to_string(),
                     structured_output: None,
+                    extraction_required: false,
                     usage,
                     terminal_cause_kind: None,
                 },
@@ -2017,6 +2019,7 @@ impl SessionService for LocalSessionService {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })
@@ -3721,6 +3724,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -3750,6 +3754,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })

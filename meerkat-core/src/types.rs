@@ -608,8 +608,9 @@ impl<'a> Iterator for ToolCallIter<'a> {
 ///
 /// When provided to an agent, the agent will perform an extraction turn after
 /// completing the agentic work, forcing the LLM to output validated JSON that
-/// conforms to the provided schema. The extraction JSON becomes the final
-/// response text (schema-only) in [`RunResult`].
+/// conforms to the provided schema. [`RunResult::text`] remains the committed
+/// main-turn output; extraction populates [`RunResult::structured_output`] on
+/// success or [`RunResult::extraction_error`] on failure.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputSchema {
@@ -1758,14 +1759,30 @@ impl ToolDef {
     }
 }
 
+/// Structured-output extraction failure details for a run whose main agentic
+/// turn completed successfully.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ExtractionError {
+    /// The committed main-turn assistant output that extraction attempted to
+    /// transform.
+    pub last_output: String,
+    /// Number of extraction attempts made before the failure was reported.
+    ///
+    /// For validation exhaustion this is the number of failed validation
+    /// attempts. Other extraction failures may report the attempts completed
+    /// before the failing extraction step.
+    pub attempts: u32,
+    /// Human-readable extraction failure reason.
+    pub reason: String,
+}
+
 /// Result of a successful agent run
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RunResult {
-    /// Final text response.
-    ///
-    /// When `output_schema` is set, this is the raw JSON string produced by the
-    /// extraction turn (schema-only; no additional text).
+    /// Final committed text response from the main agentic turn.
     pub text: String,
     /// Session ID for resumption
     pub session_id: SessionId,
@@ -1780,11 +1797,13 @@ pub struct RunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_cause_kind: Option<crate::turn_execution_authority::TurnTerminalCauseKind>,
     /// Structured output (if output_schema was provided and extraction succeeded).
-    ///
-    /// This is the parsed JSON value corresponding to `text` when schema
-    /// extraction is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<Value>,
+    /// Extraction failure details when output_schema extraction was configured
+    /// and a post-main-turn extraction step failed after the main run
+    /// completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extraction_error: Option<ExtractionError>,
     /// Warnings produced during schema compilation (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_warnings: Option<Vec<SchemaWarning>>,

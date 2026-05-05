@@ -16,6 +16,8 @@ import {
   parseEvent,
   isTextDelta,
   isRunCompleted,
+  isExtractionSucceeded,
+  isExtractionFailed,
   isTurnCompleted,
   MeerkatClient,
   Mob,
@@ -284,14 +286,45 @@ describe("Typed Events", () => {
       result: "Done!",
       structured_output: { answer: 42 },
       usage: { input_tokens: 100, output_tokens: 50 },
+      extraction_required: true,
     });
     if (isRunCompleted(event)) {
       assert.equal(event.sessionId, "abc-123");
       assert.equal(event.result, "Done!");
       assert.deepEqual(event.structuredOutput, { answer: 42 });
+      assert.equal(event.extractionRequired, true);
       assert.equal(event.usage.inputTokens, 100);
     } else {
       assert.fail("Expected RunCompletedEvent");
+    }
+  });
+
+  it("should parse extraction terminal events", () => {
+    const succeeded = parseEvent({
+      type: "extraction_succeeded",
+      session_id: "abc-123",
+      structured_output: { answer: 42 },
+      schema_warnings: [{ provider: "openai", path: "$", message: "warn" }],
+    });
+    assert.equal(isExtractionSucceeded(succeeded), true);
+    if (isExtractionSucceeded(succeeded)) {
+      assert.equal(succeeded.sessionId, "abc-123");
+      assert.deepEqual(succeeded.structuredOutput, { answer: 42 });
+      assert.equal(succeeded.schemaWarnings?.[0].provider, "openai");
+    }
+
+    const failed = parseEvent({
+      type: "extraction_failed",
+      session_id: "abc-123",
+      last_output: "main answer",
+      attempts: 2,
+      reason: "Invalid JSON",
+    });
+    assert.equal(isExtractionFailed(failed), true);
+    if (isExtractionFailed(failed)) {
+      assert.equal(failed.lastOutput, "main answer");
+      assert.equal(failed.attempts, 2);
+      assert.equal(failed.reason, "Invalid JSON");
     }
   });
 
@@ -1370,6 +1403,7 @@ describe("RunResult parsing", () => {
       },
       structured_output: { answer: 42 },
       schema_warnings: [{ provider: "openai", path: "$.foo", message: "bad" }],
+      extraction_error: { last_output: "Hello!", attempts: 2, reason: "Invalid JSON" },
     };
     const result = MeerkatClient.parseRunResult(raw);
     assert.equal(result.sessionId, "s1");
@@ -1381,6 +1415,11 @@ describe("RunResult parsing", () => {
     assert.equal(result.usage.outputTokens, 50);
     assert.equal(result.usage.cacheCreationTokens, 10);
     assert.deepEqual(result.structuredOutput, { answer: 42 });
+    assert.deepEqual(result.extractionError, {
+      lastOutput: "Hello!",
+      attempts: 2,
+      reason: "Invalid JSON",
+    });
     assert.equal(result.schemaWarnings?.length, 1);
     assert.equal(result.schemaWarnings?.[0].provider, "openai");
   });

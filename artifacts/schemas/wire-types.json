@@ -400,6 +400,11 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "extraction_required": {
+                "default": false,
+                "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
+                "type": "boolean"
+              },
               "result": {
                 "type": "string"
               },
@@ -432,6 +437,65 @@
               "session_id",
               "result",
               "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction succeeded after a completed main run.",
+            "properties": {
+              "schema_warnings": {
+                "items": {
+                  "$ref": "#/$defs/SchemaWarning"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "structured_output": true,
+              "type": {
+                "const": "extraction_succeeded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "structured_output"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction failed after a completed main run.",
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_output": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "extraction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "last_output",
+              "attempts",
+              "reason"
             ],
             "type": "object"
           },
@@ -1652,6 +1716,37 @@
         "required": [
           "failure",
           "plan"
+        ],
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "SchemaWarning": {
+        "description": "Warnings emitted during schema lowering.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "path",
+          "message"
         ],
         "type": "object"
       },
@@ -4901,12 +4996,16 @@
       "request_intent": {
         "$ref": "#/$defs/CommsChecksumTokenResultIntent"
       },
+      "request_subject": {
+        "type": "string"
+      },
       "token": {
         "type": "string"
       }
     },
     "required": [
       "request_intent",
+      "request_subject",
       "token"
     ],
     "title": "CommsChecksumTokenResult",
@@ -5846,12 +5945,16 @@
           "request_intent": {
             "$ref": "#/$defs/CommsChecksumTokenResultIntent"
           },
+          "request_subject": {
+            "type": "string"
+          },
           "token": {
             "type": "string"
           }
         },
         "required": [
           "request_intent",
+          "request_subject",
           "token"
         ],
         "type": "object"
@@ -7552,12 +7655,16 @@
           "request_intent": {
             "$ref": "#/$defs/CommsChecksumTokenResultIntent"
           },
+          "request_subject": {
+            "type": "string"
+          },
           "token": {
             "type": "string"
           }
         },
         "required": [
           "request_intent",
+          "request_subject",
           "token"
         ],
         "type": "object"
@@ -8997,7 +9104,7 @@
         "type": "object"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -17182,7 +17289,7 @@
         "type": "string"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -18711,7 +18818,7 @@
         "type": "string"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -25808,6 +25915,31 @@
   },
   "WireRunResult": {
     "$defs": {
+      "ExtractionError": {
+        "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
+        "properties": {
+          "attempts": {
+            "description": "Number of extraction attempts made before the failure was reported.\n\nFor validation exhaustion this is the number of failed validation\nattempts. Other extraction failures may report the attempts completed\nbefore the failing extraction step.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_output": {
+            "description": "The committed main-turn assistant output that extraction attempted to\ntransform.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Human-readable extraction failure reason.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "last_output",
+          "attempts",
+          "reason"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.",
         "enum": [
@@ -26038,6 +26170,16 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical run result for wire protocol.",
     "properties": {
+      "extraction_error": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ExtractionError"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "schema_warnings": {
         "items": {
           "$ref": "#/$defs/SchemaWarning"

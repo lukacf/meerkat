@@ -43,6 +43,7 @@ fn wire_run_result_required_fields() {
         usage: WireUsage::default(),
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
@@ -70,6 +71,7 @@ fn wire_run_result_optional_omitted() {
         usage: WireUsage::default(),
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
@@ -114,6 +116,7 @@ fn wire_run_result_roundtrip() {
         },
         terminal_cause_kind: None,
         structured_output: Some(serde_json::json!({"key": "value"})),
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
@@ -363,6 +366,7 @@ fn agent_event_all_variants_roundtrip() {
             session_id: session_id.clone(),
             result: "done".to_string(),
             structured_output: Some(serde_json::json!({"ok": true})),
+            extraction_required: false,
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -591,6 +595,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             session_id: SessionId::new(),
             result: "done".to_string(),
             structured_output: None,
+            extraction_required: false,
             usage: Usage::default(),
             terminal_cause_kind: None,
         },
@@ -768,6 +773,7 @@ fn wire_run_result_from_run_result_conversion() {
         tool_calls: 7,
         terminal_cause_kind: None,
         structured_output: Some(serde_json::json!({"answer": 42})),
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };

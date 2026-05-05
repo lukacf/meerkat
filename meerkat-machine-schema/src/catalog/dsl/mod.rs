@@ -709,6 +709,7 @@ runtime_internal_inputs!(
         DrainExitedRespawnable,
         EnterExtraction,
         ExhaustRealtimeReconnectCycle,
+        ExtractionFailed,
         ExtractionStart,
         ExtractionValidationFailed,
         ExtractionValidationPassed,

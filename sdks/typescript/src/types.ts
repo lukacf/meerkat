@@ -150,8 +150,15 @@ export interface RunResult {
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly structuredOutput?: unknown;
+  readonly extractionError?: ExtractionError;
   readonly schemaWarnings?: readonly SchemaWarning[];
   readonly skillDiagnostics?: SkillRuntimeDiagnostics;
+}
+
+export interface ExtractionError {
+  readonly lastOutput: string;
+  readonly attempts: number;
+  readonly reason: string;
 }
 
 export type HelpExecutionMode = "explain_only" | "plan_execution";

@@ -20,6 +20,7 @@ export interface WireRunResult {
   usage: WireUsage;
   terminal_cause_kind?: string;
   structured_output?: unknown;
+  extraction_error?: { last_output: string; attempts: number; reason: string };
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
 }
 
@@ -873,6 +874,7 @@ export interface CommsChecksumTokenParams {
 
 export interface CommsChecksumTokenResult {
   request_intent: CommsChecksumTokenResultIntent;
+  request_subject: string;
   token: string;
 }
 

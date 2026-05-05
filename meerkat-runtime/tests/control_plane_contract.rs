@@ -64,6 +64,7 @@ fn make_run_result(text: &str) -> RunResult {
         tool_calls: 0,
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     }
@@ -156,9 +157,9 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
             Box::new(RecordingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
                 stop_calls: Arc::clone(&stop_calls),
-                terminal: Some(CoreApplyTerminal::RunResult(make_run_result(
+                terminal: Some(CoreApplyTerminal::RunResult(Box::new(make_run_result(
                     "should not run",
-                ))),
+                )))),
             }),
         )
         .await;
@@ -225,9 +226,9 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
             Box::new(RecordingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
                 stop_calls: Arc::clone(&stop_calls),
-                terminal: Some(CoreApplyTerminal::RunResult(make_run_result(
+                terminal: Some(CoreApplyTerminal::RunResult(Box::new(make_run_result(
                     "should not run",
-                ))),
+                )))),
             }),
         )
         .await;

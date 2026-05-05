@@ -961,6 +961,9 @@ where
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
     /// True once the current run has accepted `RunCompleted` hooks.
     pub(crate) run_completed_hooks_applied: bool,
+    /// True once the current run's public `RunCompleted` event has been
+    /// emitted. Extraction may continue afterward as a separate post-run phase.
+    pub(crate) run_completed_event_emitted: bool,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled

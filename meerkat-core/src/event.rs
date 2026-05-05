@@ -858,6 +858,8 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::RunStarted { .. } => "run_started",
         AgentEvent::RunCompleted { .. } => "run_completed",
+        AgentEvent::ExtractionSucceeded { .. } => "extraction_succeeded",
+        AgentEvent::ExtractionFailed { .. } => "extraction_failed",
         AgentEvent::RunFailed { .. } => "run_failed",
         AgentEvent::HookStarted { .. } => "hook_started",
         AgentEvent::HookCompleted { .. } => "hook_completed",
@@ -1309,9 +1311,29 @@ pub enum AgentEvent {
         /// produced a typed value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<Value>,
+        /// Whether a separate extraction terminal event is expected after this
+        /// completed main run.
+        #[serde(default)]
+        extraction_required: bool,
         usage: Usage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    },
+
+    /// Structured-output extraction succeeded after a completed main run.
+    ExtractionSucceeded {
+        session_id: SessionId,
+        structured_output: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+    },
+
+    /// Structured-output extraction failed after a completed main run.
+    ExtractionFailed {
+        session_id: SessionId,
+        last_output: String,
+        attempts: u32,
+        reason: String,
     },
 
     /// Agent run failed
@@ -2234,6 +2256,7 @@ mod tests {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
                 structured_output: None,
+                extraction_required: false,
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
@@ -2756,6 +2779,7 @@ mod tests {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
                 structured_output: None,
+                extraction_required: false,
                 usage: Usage::default(),
                 terminal_cause_kind: None,
             },

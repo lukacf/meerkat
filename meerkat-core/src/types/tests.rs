@@ -272,6 +272,7 @@ fn test_run_result_json_schema() {
         tool_calls: 5,
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
@@ -608,6 +609,7 @@ fn test_run_result_with_structured_output() {
         tool_calls: 0,
         terminal_cause_kind: None,
         structured_output: Some(json!({"name": "Alice", "age": 30})),
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };
@@ -632,6 +634,7 @@ fn test_run_result_without_structured_output_skips_field() {
         tool_calls: 0,
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     };

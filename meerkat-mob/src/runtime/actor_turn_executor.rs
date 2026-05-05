@@ -151,6 +151,7 @@ impl ActorFlowTurnExecutor {
     {
         tokio::spawn(async move {
             let mut completion_tx = Some(completion_tx);
+            let mut pending_completed_run: Option<(String, Option<serde_json::Value>)> = None;
             while let Some(event) = events.recv().await {
                 let payload = extract_payload(event);
                 if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
@@ -161,12 +162,48 @@ impl ActorFlowTurnExecutor {
                     AgentEvent::RunCompleted {
                         result,
                         structured_output,
+                        extraction_required,
                         ..
                     } => {
+                        if extraction_required {
+                            pending_completed_run = Some((result, structured_output));
+                            continue;
+                        }
                         if let Some(tx) = completion_tx.take() {
                             let _ = tx.send(FlowTurnOutcome::Completed {
                                 output: result,
                                 structured_output,
+                            });
+                        }
+                        return;
+                    }
+                    AgentEvent::ExtractionSucceeded {
+                        structured_output, ..
+                    } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let (output, _) = pending_completed_run
+                                .take()
+                                .unwrap_or_else(|| (structured_output.to_string(), None));
+                            let _ = tx.send(FlowTurnOutcome::Completed {
+                                output,
+                                structured_output: Some(structured_output),
+                            });
+                        }
+                        return;
+                    }
+                    AgentEvent::ExtractionFailed {
+                        last_output,
+                        attempts,
+                        reason,
+                        ..
+                    } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let (output, _) =
+                                pending_completed_run.take().unwrap_or((last_output, None));
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: format!(
+                                    "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
+                                ),
                             });
                         }
                         return;
@@ -574,6 +611,7 @@ mod tests {
                 session_id: meerkat_core::SessionId::new(),
                 result: "{\"answer\":42}".to_string(),
                 structured_output: Some(serde_json::json!({"answer": 42})),
+                extraction_required: false,
                 usage: meerkat_core::Usage::default(),
                 terminal_cause_kind: None,
             })
@@ -591,5 +629,95 @@ mod tests {
             other => panic!("expected completed outcome, got {other:?}"),
         }
         bridge.await.expect("bridge exits after terminal event");
+    }
+
+    #[tokio::test]
+    async fn test_subscription_bridge_waits_for_required_extraction_success() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(2);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(events_rx, completion_tx, None, None);
+
+        let session_id = meerkat_core::SessionId::new();
+        events_tx
+            .send(AgentEvent::RunCompleted {
+                session_id: session_id.clone(),
+                result: "main answer".to_string(),
+                structured_output: None,
+                extraction_required: true,
+                usage: meerkat_core::Usage::default(),
+                terminal_cause_kind: None,
+            })
+            .await
+            .expect("send run completed event");
+        events_tx
+            .send(AgentEvent::ExtractionSucceeded {
+                session_id,
+                structured_output: serde_json::json!({"answer": 42}),
+                schema_warnings: None,
+            })
+            .await
+            .expect("send extraction succeeded event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Completed {
+                output,
+                structured_output,
+            } => {
+                assert_eq!(output, "main answer");
+                assert_eq!(structured_output, Some(serde_json::json!({"answer": 42})));
+            }
+            other => panic!("expected completed outcome, got {other:?}"),
+        }
+        bridge.await.expect("bridge exits after extraction event");
+    }
+
+    #[tokio::test]
+    async fn test_subscription_bridge_treats_extraction_failure_as_failed_step() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(2);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(events_rx, completion_tx, None, None);
+
+        let session_id = meerkat_core::SessionId::new();
+        events_tx
+            .send(AgentEvent::RunCompleted {
+                session_id: session_id.clone(),
+                result: "main answer".to_string(),
+                structured_output: None,
+                extraction_required: true,
+                usage: meerkat_core::Usage::default(),
+                terminal_cause_kind: None,
+            })
+            .await
+            .expect("send run completed event");
+        events_tx
+            .send(AgentEvent::ExtractionFailed {
+                session_id,
+                last_output: "main answer".to_string(),
+                attempts: 2,
+                reason: "Invalid JSON".to_string(),
+            })
+            .await
+            .expect("send extraction failed event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Failed { reason } => {
+                assert!(
+                    reason.contains("structured output extraction failed after 2 attempt(s)"),
+                    "reason should preserve extraction attempts: {reason}"
+                );
+                assert!(
+                    reason.contains("Invalid JSON"),
+                    "reason should preserve extraction failure reason: {reason}"
+                );
+                assert!(
+                    reason.contains("main answer"),
+                    "reason should preserve main output context: {reason}"
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+        bridge.await.expect("bridge exits after extraction event");
     }
 }

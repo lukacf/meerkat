@@ -247,6 +247,7 @@ class RunResult:
     terminal_cause_kind: str | None = None
     session_ref: str | None = None
     structured_output: Any = None
+    extraction_error: ExtractionError | None = None
     schema_warnings: list[SchemaWarning] | None = None
     skill_diagnostics: SkillRuntimeDiagnostics | None = None
 
@@ -261,6 +262,15 @@ class HelpRequest(TypedDict):
     model: NotRequired[str]
     provider: NotRequired[str]
     max_tokens: NotRequired[int]
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionError:
+    """Structured-output extraction failure after a completed main run."""
+
+    last_output: str = ""
+    attempts: int = 0
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -75,6 +75,8 @@ fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<Sess
     match event {
         meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
         | meerkat_core::event::AgentEvent::RunCompleted { session_id, .. }
+        | meerkat_core::event::AgentEvent::ExtractionSucceeded { session_id, .. }
+        | meerkat_core::event::AgentEvent::ExtractionFailed { session_id, .. }
         | meerkat_core::event::AgentEvent::RunFailed { session_id, .. } => Some(session_id.clone()),
         _ => None,
     }
@@ -1608,7 +1610,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let output = match terminal {
             Some(CoreApplyTerminal::RunResult(run_result)) => {
-                CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), run_result)
+                CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), *run_result)
             }
             Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
                 CoreApplyOutput::with_callback_pending(
@@ -1813,7 +1815,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(run_result)),
+                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
                     pre_turn_context_events,
                 )
                 .await
@@ -1890,7 +1892,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(run_result)),
+                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
                     pre_turn_context_events,
                 )
                 .await
@@ -3601,6 +3603,7 @@ mod tests {
                     tool_calls: 0,
                     terminal_cause_kind: None,
                     structured_output: None,
+                    extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
                 }
@@ -3825,6 +3828,7 @@ mod tests {
                     session_id,
                     result: result.text.clone(),
                     structured_output: result.structured_output.clone(),
+                    extraction_required: false,
                     usage: result.usage.clone(),
                     terminal_cause_kind: result.terminal_cause_kind,
                 })
@@ -4349,6 +4353,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -4568,6 +4573,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })

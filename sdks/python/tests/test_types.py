@@ -66,6 +66,8 @@ from meerkat.events import (
     BudgetWarning,
     CompactionStarted,
     Event,
+    ExtractionFailed,
+    ExtractionSucceeded,
     HookDenied,
     InteractionComplete,
     Retrying,
@@ -628,6 +630,26 @@ def test_parse_run_result_skill_diagnostics():
     assert result.skill_diagnostics is not None
     assert result.skill_diagnostics.source_health.state == "healthy"
     assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
+
+
+def test_parse_run_result_extraction_error():
+    raw = {
+        "session_id": "s1",
+        "text": "main answer",
+        "turns": 1,
+        "tool_calls": 0,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "extraction_error": {
+            "last_output": "main answer",
+            "attempts": 2,
+            "reason": "Invalid JSON",
+        },
+    }
+    result = MeerkatClient._parse_run_result(raw)
+    assert result.extraction_error is not None
+    assert result.extraction_error.last_output == "main answer"
+    assert result.extraction_error.attempts == 2
+    assert result.extraction_error.reason == "Invalid JSON"
 
 
 def test_parse_run_result_rejects_malformed_counters():
@@ -1430,6 +1452,7 @@ def test_parse_run_completed():
         "session_id": "abc-123",
         "result": "Done!",
         "structured_output": {"answer": 42},
+        "extraction_required": True,
         "usage": {"input_tokens": 100, "output_tokens": 50},
     }
     event = parse_event(raw)
@@ -1437,7 +1460,36 @@ def test_parse_run_completed():
     assert event.session_id == "abc-123"
     assert event.result == "Done!"
     assert event.structured_output == {"answer": 42}
+    assert event.extraction_required is True
     assert event.usage.input_tokens == 100
+
+
+def test_parse_extraction_terminal_events():
+    succeeded = parse_event(
+        {
+            "type": "extraction_succeeded",
+            "session_id": "abc-123",
+            "structured_output": {"answer": 42},
+            "schema_warnings": [{"provider": "openai", "path": "$", "message": "warn"}],
+        }
+    )
+    assert isinstance(succeeded, ExtractionSucceeded)
+    assert succeeded.session_id == "abc-123"
+    assert succeeded.structured_output == {"answer": 42}
+
+    failed = parse_event(
+        {
+            "type": "extraction_failed",
+            "session_id": "abc-123",
+            "last_output": "main answer",
+            "attempts": 2,
+            "reason": "Invalid JSON",
+        }
+    )
+    assert isinstance(failed, ExtractionFailed)
+    assert failed.last_output == "main answer"
+    assert failed.attempts == 2
+    assert failed.reason == "Invalid JSON"
 
 
 def test_parse_run_failed_preserves_hook_denied_error_report():

@@ -240,6 +240,8 @@ export type {
   StreamScopeFrame,
   RunStartedEvent,
   RunCompletedEvent,
+  ExtractionSucceededEvent,
+  ExtractionFailedEvent,
   RunFailedEvent,
   AgentErrorClass,
   AgentErrorReport,
@@ -300,5 +302,7 @@ export {
   isTurnCompleted,
   isToolCallRequested,
   isRunCompleted,
+  isExtractionSucceeded,
+  isExtractionFailed,
   isRunFailed,
 } from "./events.js";

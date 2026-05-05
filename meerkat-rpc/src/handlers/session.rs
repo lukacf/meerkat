@@ -506,6 +506,7 @@ pub async fn handle_create(
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         }
@@ -657,6 +658,7 @@ mod tests {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
                 source_health: meerkat_core::skills::SourceHealthSnapshot {

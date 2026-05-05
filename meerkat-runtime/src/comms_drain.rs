@@ -2939,7 +2939,7 @@ mod tests {
         let interaction_id = InteractionId(Uuid::new_v4());
         let event = interaction_terminal_event(
             interaction_id,
-            CompletionOutcome::Completed(meerkat_core::RunResult {
+            CompletionOutcome::Completed(Box::new(meerkat_core::RunResult {
                 text: "{\"answer\":42}".to_string(),
                 session_id: meerkat_core::SessionId::new(),
                 usage: meerkat_core::Usage::default(),
@@ -2947,9 +2947,10 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: Some(json!({"answer": 42})),
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
-            }),
+            })),
         );
 
         match event {

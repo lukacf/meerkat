@@ -113,6 +113,7 @@ impl SessionAgent for MockAgent {
                 session_id: self.session_id.clone(),
                 result: "Hello from mock".to_string(),
                 structured_output: None,
+                extraction_required: false,
                 usage: usage.clone(),
                 terminal_cause_kind: None,
             })
@@ -126,6 +127,7 @@ impl SessionAgent for MockAgent {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })
@@ -215,6 +217,7 @@ impl SessionAgent for SnapshotAgent {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })
@@ -431,6 +434,7 @@ impl SessionAgent for RecordingTurnAgent {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })
@@ -459,6 +463,7 @@ impl SessionAgent for RecordingTurnAgent {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         })

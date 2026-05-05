@@ -104,7 +104,7 @@ fn resolve_completion_waiters(
         }
         Some(CoreApplyTerminal::RunResult(result)) => {
             for input_id in input_ids {
-                registry.resolve_completed(input_id, result.clone());
+                registry.resolve_completed(input_id, result.as_ref().clone());
             }
         }
         Some(CoreApplyTerminal::NoPendingBoundary) | None => {
@@ -2151,6 +2151,7 @@ mod tests {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         };
@@ -2158,7 +2159,7 @@ mod tests {
         resolve_completion_waiters(
             &mut registry,
             std::slice::from_ref(&input_id),
-            Some(CoreApplyTerminal::RunResult(run_result)),
+            Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
         );
 
         match handle.wait().await {

@@ -1246,12 +1246,16 @@
           "request_intent": {
             "$ref": "#/components/schemas/CommsChecksumTokenResultIntent"
           },
+          "request_subject": {
+            "type": "string"
+          },
           "token": {
             "type": "string"
           }
         },
         "required": [
           "request_intent",
+          "request_subject",
           "token"
         ],
         "title": "CommsChecksumTokenResult",
@@ -2081,6 +2085,31 @@
         ],
         "title": "ErrorCode",
         "type": "string"
+      },
+      "ExtractionError": {
+        "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
+        "properties": {
+          "attempts": {
+            "description": "Number of extraction attempts made before the failure was reported.\n\nFor validation exhaustion this is the number of failed validation\nattempts. Other extraction failures may report the attempts completed\nbefore the failing extraction step.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_output": {
+            "description": "The committed main-turn assistant output that extraction attempted to\ntransform.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Human-readable extraction failure reason.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "last_output",
+          "attempts",
+          "reason"
+        ],
+        "type": "object"
       },
       "ForkContextSpec": {
         "oneOf": [
@@ -2916,7 +2945,7 @@
         "type": "object"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/components/schemas/SchemaCompat",
@@ -6738,6 +6767,16 @@
       "WireRunResult": {
         "description": "Canonical run result for wire protocol.",
         "properties": {
+          "extraction_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_warnings": {
             "items": {
               "$ref": "#/components/schemas/SchemaWarning"

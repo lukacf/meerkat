@@ -3506,7 +3506,7 @@ fn completion_outcome_to_api_result(
     session_created: bool,
 ) -> Result<meerkat_core::types::RunResult, ApiError> {
     match outcome {
-        meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(run_result),
+        meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(*run_result),
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
             ApiError::Internal("turn completed without result".to_string()),
         ),
@@ -11085,6 +11085,7 @@ mod tests {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
                 source_health: meerkat_core::skills::SourceHealthSnapshot {
@@ -11809,6 +11810,7 @@ mod tests {
                     tool_calls: 0,
                     terminal_cause_kind: None,
                     structured_output: None,
+                    extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
                 },

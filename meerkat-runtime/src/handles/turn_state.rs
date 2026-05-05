@@ -225,6 +225,14 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
+    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
+        self.dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::ExtractionFailed { error },
+            "TurnStateHandle::extraction_failed",
+        )
+    }
+
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(

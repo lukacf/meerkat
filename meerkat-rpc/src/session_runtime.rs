@@ -7983,7 +7983,7 @@ fn completion_outcome_to_rpc_result(
     use meerkat_runtime::completion::CompletionOutcome;
 
     match outcome {
-        CompletionOutcome::Completed(result) => Ok(result),
+        CompletionOutcome::Completed(result) => Ok(*result),
         CompletionOutcome::CompletedWithoutResult => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: "turn completed without result".to_string(),

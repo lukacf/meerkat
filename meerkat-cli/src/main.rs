@@ -298,7 +298,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
 ) -> anyhow::Result<CliRuntimeTurnResult> {
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
-            Ok(CliRuntimeTurnResult::Completed(result))
+            Ok(CliRuntimeTurnResult::Completed(*result))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
@@ -7013,6 +7013,7 @@ async fn run_agent(
                             "output_tokens": result.usage.output_tokens,
                         },
                         "structured_output": result.structured_output,
+                        "extraction_error": result.extraction_error,
                         "schema_warnings": result.schema_warnings,
                         "skill_diagnostics": result.skill_diagnostics,
                     });
@@ -7666,6 +7667,7 @@ async fn resume_session_with_llm_override(
                             "output_tokens": result.usage.output_tokens,
                         },
                         "structured_output": result.structured_output,
+                        "extraction_error": result.extraction_error,
                         "schema_warnings": result.schema_warnings,
                         "skill_diagnostics": result.skill_diagnostics,
                     });
@@ -12421,6 +12423,7 @@ default_model = "gemma"
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -12442,6 +12445,7 @@ default_model = "gemma"
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -12604,6 +12608,7 @@ default_model = "gemma"
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -12643,6 +12648,7 @@ default_model = "gemma"
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -16777,6 +16783,7 @@ supports_reasoning = true
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
                 source_health: meerkat_core::skills::SourceHealthSnapshot {
@@ -16800,6 +16807,7 @@ supports_reasoning = true
                 "output_tokens": result.usage.output_tokens,
             },
             "structured_output": result.structured_output,
+            "extraction_error": result.extraction_error,
             "schema_warnings": result.schema_warnings,
             "skill_diagnostics": result.skill_diagnostics,
         });

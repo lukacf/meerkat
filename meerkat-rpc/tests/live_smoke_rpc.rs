@@ -422,6 +422,7 @@ async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
         tool_calls: 0,
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
             source_health: meerkat_core::skills::SourceHealthSnapshot {

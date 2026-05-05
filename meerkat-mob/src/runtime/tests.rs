@@ -558,6 +558,7 @@ fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
         tool_calls: 0,
         terminal_cause_kind: None,
         structured_output: None,
+        extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
     }
@@ -1327,6 +1328,7 @@ impl SessionService for MockSessionService {
                                 session_id,
                                 result: completed_result,
                                 structured_output: None,
+                                extraction_required: false,
                                 usage: Usage::default(),
                                 terminal_cause_kind: None,
                             },
@@ -4846,6 +4848,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
                 session_id,
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
+                extraction_required: false,
                 usage: result.usage.clone(),
                 terminal_cause_kind: None,
             })

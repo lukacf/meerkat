@@ -1017,12 +1017,16 @@
           "request_intent": {
             "$ref": "#/$defs/CommsChecksumTokenResultIntent"
           },
+          "request_subject": {
+            "type": "string"
+          },
           "token": {
             "type": "string"
           }
         },
         "required": [
           "request_intent",
+          "request_subject",
           "token"
         ],
         "type": "object"
@@ -3082,7 +3086,7 @@
         "type": "object"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -5205,7 +5209,7 @@
         "type": "object"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -5967,7 +5971,7 @@
         "type": "object"
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",
@@ -10093,7 +10097,7 @@
         ]
       },
       "OutputSchema": {
-        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
           "compat": {
             "$ref": "#/$defs/SchemaCompat",

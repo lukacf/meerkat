@@ -308,7 +308,7 @@ impl CoreExecutorError {
 #[derive(Debug, Clone)]
 pub enum CoreApplyTerminal {
     /// The run completed and produced a result.
-    RunResult(RunResult),
+    RunResult(Box<RunResult>),
     /// A resume-pending request reached the session with no pending boundary.
     NoPendingBoundary,
     /// The run committed a continuation boundary and is waiting for external
@@ -339,7 +339,7 @@ impl CoreApplyOutput {
         Self {
             receipt,
             session_snapshot,
-            terminal: Some(CoreApplyTerminal::RunResult(run_result)),
+            terminal: Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
         }
     }
 

@@ -2488,6 +2488,7 @@ async fn dedup_terminal_input_returns_none_handle() {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             };
@@ -2597,6 +2598,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             };

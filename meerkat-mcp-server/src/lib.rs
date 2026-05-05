@@ -1210,6 +1210,7 @@ fn format_agent_result(
                 "turns": result.turns,
                 "tool_calls": result.tool_calls,
                 "structured_output": result.structured_output,
+                "extraction_error": result.extraction_error,
                 "schema_warnings": result.schema_warnings,
                 "skill_diagnostics": result.skill_diagnostics
             });
@@ -4769,6 +4770,7 @@ mod tests {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: Some(meerkat_core::skills::SkillRuntimeDiagnostics {
                 source_health: meerkat_core::skills::SourceHealthSnapshot {

@@ -7,9 +7,177 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-05
+
+Meerkat 0.6.0 is the machine-authority release. It converges the runtime onto **five canonical machines** generated from a single DSL source of truth, lands **identity-first live voice** so realtime attachment is keyed on stable `AgentIdentity` rather than per-runtime bindings, completes the AuthMachine OAuth freshness model under scoped leases, types every major runtime contract that previously rode on strings or `serde_json::Value`, hardens fail-closed semantics across the runtime/REST/RPC/WASM surfaces, makes durable event storage sequence-authoritative, retires the last legacy compatibility paths from peer ingress and runtime visibility, and ships a realtime audio example plus a documentation refresh for every shipping surface.
+
+This is a breaking release. Wire contracts that previously accepted free-form strings now require typed variants (`TerminalCause`, `CommsIntent`, `CommsResult`, `HookId`, `terminal_status`, `MemberSessionBinding`, `ProviderRuntimeBackend`, etc.). Several legacy session/runtime verbs and the `mob/realtime_attach` / `mob/realtime_detach` REST endpoints have been removed. SDK consumers should regenerate against `meerkat-contracts@0.6.0`.
+
+### Added
+
+#### Machine-authority architecture
+- **Single-source machine DSL** (#259) — new `machine_dsl!` proc macro with parser and code generators emits runtime dispatch, phase projection, input/signal/effect enums, state structs, and `MachineSchema` artifacts from one DSL body. Catalog DSL (`meerkat-machine-schema/src/catalog/dsl/`) is the sole source of truth for production machine semantics.
+- **Two-kernel DSL cutover** (#259) — handwritten authorities absorbed into canonical machines; production modules become bridge shells around catalog-owned DSL bodies. The old hand-written machine catalog has been deleted.
+- **Five canonical machines** — `MeerkatMachine`, `MobMachine`, `ScheduleLifecycleMachine`, `OccurrenceLifecycleMachine`, and `AuthMachine` (split out of `MeerkatMachine` in 0.6) are now the only canonical machines, each with a DSL source under `meerkat-machine-schema/src/catalog/dsl/`.
+- **Composition-protocol seams** — five typed composition protocols formalized at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
+- **Catalog/production parity gates** — `runtime_schema_parity` and `runtime_alphabet_parity` are CI-enforced ratchets; string whitelists for command classification are forbidden, replaced by typed alphabet manifests.
+- **TLA+ generation and TLC verification** — `meerkat-machine-codegen` generates TLA+ models from the catalog DSL and runs TLC for closed-world composition verification.
+
+#### Identity-first live voice
+- **Identity-first live voice groundwork** (#250) — realtime attachment is keyed on stable `AgentIdentity` (survives respawn) and `AgentRuntimeId` / `FenceToken` for per-binding rotation safety. SDKs now resolve identity first, then open the realtime channel.
+- **Capability-driven realtime transport** — `ModelCapabilities.realtime` on the session's resolved model decides attach/detach. There is no caller-initiated attach/detach RPC.
+- **`realtime_attachment_status` projection** — typed projection on session and per-member surfaces (`session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`).
+- **Live-topology reconfigure flow** — `reconfigure_live_topology` orchestration in `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs` covers in-place model/provider swaps without tearing down the session.
+- **Python and TypeScript SDK ports** — both SDKs ported to identity-first resolve-then-open for `RealtimeChannel.mob_member`.
+
+#### Realtime audio and protocol
+- **Realtime audio Python example** (#539) — end-to-end OpenAI Realtime API example with streaming audio input/output, proper shutdown, and error handling.
+- **Typed realtime protocol version** (#584) — `protocol_version` is now wire-typed; runtime owns version validation.
+- **Realtime tool timeouts via runtime dispatch** (#610) — tool timeout enforcement routed through runtime dispatch rather than inline, so timeouts are observable per session.
+- **Realtime transcript canonicalization** (#611) — transcript appends canonicalized at ingress to prevent duplicates and ordering skew across reconnects.
+- **Machine-owned realtime bootstrap eligibility** (#587) — realtime attachment eligibility validated at the machine boundary; invalid reconnect states rejected.
+
+#### Durable event storage
+- **FileEventStore sequence authority** (#591) — file-backed event streams carry typed sequence authority; importers gate on sequence numbers to prevent gaps and out-of-order replay.
+
+#### Typed machine contracts
+- **Typed terminal cause spine** (#564) — structured `TerminalCause` enum replaces stringly-typed terminal reasons; invalid terminal transitions rejected at the DSL boundary.
+- **Typed comms intent/result contract** (#572) — `CommsIntent` and `CommsResult` typed variants replace bare strings; routing authority validated at the machine level.
+- **Typed background job completion status** (#579) — `background_job_completed` events now require typed `terminal_status`; the legacy `status` string is retained only as an optional display mirror.
+- **Typed `HookId`** — hook event errors carry typed `HookId` instead of string names.
+- **Typed provider runtime backend/auth matrix** (#571) — provider overrides typed with validated policy lookups.
+- **Typed mob spawn-many member outcomes** (#586) — `SpawnMemberOutcome` variants typed for success/failed/skipped paths; spawn-many batches envelope results.
+- **Typed mob lifecycle action dispatch** (#577) — mob lifecycle actions carry typed dispatch envelopes through machine transitions.
+- **Typed `EventEnvelope` source identity** (#585) — source identity carried as typed context; source-string drift scanner replaces text-based fallbacks.
+- **Typed peer directory wire facts** — peer directory facts (LUC-154) and peer endpoint parity scanner (#559) replaced with typed AST-based authority.
+- **Typed runtime alphabet manifests** — generated named string domains constrained at codegen (LUC-290, LUC-292).
+
+#### AuthMachine and OAuth freshness
+- **AuthMachine OAuth freshness gate** (#612) — OAuth freshness enforced at turn admission; stale tokens rejected before execution.
+- **AuthMachine cloud authorizer freshness** (#575) — cloud token leases tracked under the auth seam; freshness enforced via lease authority.
+- **OAuth flow lifecycle under scoped auth authority** (#521) — OAuth flow transitions move under the scoped auth machine.
+- **Managed OAuth freshness under lease** (#552) — managed OAuth admission recut under explicit lease semantics; stale poll persistence and admission resurrection prevented.
+- **Auth status derived from typed phase** (#407) — auth status surfaces are lease-owned and projected from typed phases (LUC-58, LUC-193).
+- **OAuth terminal state machine-owned** (#598) — OAuth terminal transitions (success/error/cancelled) owned by AuthMachine; no external override path.
+
+#### Machine-owned policy and lifecycle
+- **Machine-owned budget exhaustion** (#599) — budget-exceeded transitions owned by the machine; stale budget state in agents prevented.
+- **Machine-owned hook failure policy** (#597) — hook denial/failure handling policy-enforced at the machine; terminalization atomic.
+- **Mob admission via MobMachine guards** — mob membership admission centralized in MobMachine guards (LUC-189, LUC-200, LUC-205, LUC-214).
+- **Surface request lifecycle classification** (#432) — request lifecycle (start/resume/external-event) routed through canonical lifecycle authority (LUC-190).
+- **Comms ingress classification at machine** (#427) — comms ingress classification owned by the machine; stale/duplicate ingress events prevented.
+
+#### Profile and tool scoping
+- **`profile.tools.{mob,mcp}` actually-scoping** (#600) — tool scoping applies the canonical resolver and provenance filter; tools inherit from parent scope correctly.
+- **Catalog-owned image generation defaults** (#583) — image generation defaults sourced from the model catalog rather than provider-specific overrides.
+- **Provider-aware model capability boundary** (#562) — capability detection (vision, web search, reasoning) gated on the provider boundary.
+
+#### Runtime composition and recovery
+- **Boundary-atomic runtime terminalization** (#608) — surface request terminals routed through canonical lifecycle authority; cleanup atomic.
+- **Scoped session recovery config** (#601) — session recovery configuration is realm-scoped and supports pluggable recovery strategies per session family.
+- **Canonical runtime identity** (#526) — runtime identity split from session aliases; canonical alias recovery and snapshot authority preserved across restarts (LUC-209).
+- **Mob-aware schedule delivery** (#446) — schedule delivery unified across mob members under a single typed dispatch path (LUC-93).
+
+#### Web/SDK improvements
+- **Generated Web auth wire contracts** (#580) — Web SDK auth contracts generated from `meerkat-contracts`; bearer-string fallback removed.
+- **Profile overrides for TS/Web auth helpers** — auth helpers in TS and Web SDKs accept profile overrides (LUC-48).
+- **Typed MCP add-config contract** (#596) — MCP add-config operations validated through typed contracts.
+- **Configured MCP tools exposed to RPC mob members** (#566) — mob members reached over RPC see the same configured MCP toolset as direct callers.
+- **RPC mob MCP transports kept alive** (#609) — mob MCP transports survive idle periods on RPC.
+
+#### Help and discoverability
+- **Dedicated Meerkat help surfaces** (#629) — first-class `rkat help` and platform help skill provide accurate, grounded answers about CLI commands, flags, and surfaces (LUC-443).
+- **Embedded `rkat` CLI help skill** — CLI help skill embedded in the binary for offline use; help prompt grounding hardened against fabrication.
+- **Refreshed platform help skill CLI facts** (#630) — platform help skill updated with current CLI command names, flags, aliases, and negative facts.
+- **`meerkat-cli-reference` skill** — exact CLI command contract published as the authority for help answers.
+
+#### Completion events
+- **Structured output in completion events** (#627) — completion events now carry typed structured-output payloads (text + tool result blocks) for downstream consumption; replaces opaque string concatenation.
+
+#### Robustness and validation
+- **Fail-closed supervisor rotation** (#625) — mob supervisor rotation rejects partial / inconsistent rotations rather than advancing local authority on a divergent peer (LUC-438).
+- **Fail-closed partial mob destroy** (#626) — partial mob destroy rejected; either the entire mob tears down cleanly or the operation errors and rolls back.
+- **Quarantined hook semantic rewrites** (#624) — hooks that attempt semantic rewrites on event contents are now quarantined and rejected at the boundary.
+- **Amputated skill builtin raw ingress paths** (#623) — built-in skills no longer admit raw ingress; all skill content flows through the typed skill resolver.
+- **Hardened mobpack validation** (#621) — mobpack archive validation rejects malformed/inconsistent archives earlier and surfaces structured errors.
+- **Release-grade auth smoke lane** (#616) — new dedicated smoke lane exercises live auth flows end-to-end before tag-cut.
+
+#### Dogma gate and machine-schema audit
+- **Dogma cleanup review gate** (#558) — mandatory review gate for dogma cleanup changes.
+- **Self-validating immutable dogma gate** (#589) — dogma gate self-validates and audits its own freshness against generated artifacts.
+- **AST-based machine drift detection** — peer terminal string ratchet and other text-based drift detectors replaced by AST checks.
+
+#### CI / infrastructure
+- **BuildBuddy stabilization** — workspace CI profiling, stale run cancellation, and self-hosted runner tuning for deterministic builds.
+- **Per-branch stale CI cancellation** — superseded CI runs on the same branch are cancelled to reduce slot burn.
+- **0.6 release gate stabilization** (#606) — release-preflight lanes stabilized for the 0.6 cut.
+
+#### Documentation
+- **README architecture diagram** — README now ships a top-level architecture diagram and surface map, placed in the architecture section.
+- **README and example refresh** (#613, #614) — README rewritten for current Meerkat surfaces; examples updated and validated.
+- **Architecture and API references refresh** (#622) — architecture and API reference docs updated for 0.6 surfaces, contracts, and machine boundaries.
+- **Skills refresh for 0.6** (#615) — `meerkat-platform`, `meerkat-architecture`, `meerkat-wasm` skills updated for 0.6 wire contracts and surfaces.
+
 ### Changed
 
-- `background_job_completed` events now require typed `terminal_status` for completion semantics; the legacy `status` string is retained only as an optional display mirror.
+- `background_job_completed` events require typed `terminal_status` for completion semantics; the legacy `status` string is retained only as an optional display mirror.
+- `TerminalCause`, `CommsIntent`, `CommsResult`, and `HookId` are now typed enums on the wire — code matching on bare strings will fail to deserialize.
+- `MobMemberListEntry` and `SpawnResult` tightened to use typed `MemberSessionBinding` atoms.
+- Provider policy overrides validated against catalog owner authority; mismatches rejected at admission.
+- Session capacity is now active-work bounded; agents that previously accumulated unbounded queued turns will be admission-limited (LUC-294, LUC-298).
+- OAuth freshness enforced at turn admission rather than at provider-call time; previously-stale tokens that would have been rejected mid-turn now fail before execution.
+- Stale session projections from persistence rejected if they disagree with live runtime state; persistent stores with diverged state will fail recovery instead of silently masquerading (#560, #573).
+- Tool-call argument projection now fail-closed (#581) — serialization failures block tool execution rather than silently degrading.
+- Tool-call result content now preserves multimodal blocks through hook events and persisted history.
+- Multimodal history preserved through compaction via blob-backed placeholders rather than text degradation.
+- Provider identity sourced from the agent builder's durable identity, not from runtime overrides.
+- WASM subscription mutations that fail to serialize now rejected at the boundary (#569) — prevents client/server subscription desync.
+- REST terminal operations require runtime-stamped terminal evidence (#593).
+- Inproc comms sends routed by canonical peer identity (LUC-287).
+- Zero-pubkey peer trust paths rejected at admission (#545, LUC-286).
+- Web mob decoders fail closed on schema mismatch (#567, LUC-339).
+- `connection_ref` renamed to `auth_binding` across all wire contracts, REST/RPC payloads, and SDK surfaces (#618, LUC-404). Semantics unchanged.
+- `rkat` default tracing quieted (#620) — default log output trimmed to user-relevant signal; verbose runtime tracing now opt-in.
+- Default session capacity raised (hotfix 67afe9b65) — single-process default cap increased to better fit current mob workloads.
+
+### Removed
+
+- **Hand-written machine catalog** — handwritten machine bodies have been deleted; the catalog DSL is the sole source of truth for production machine semantics. Production modules that previously authored competing semantics are now bridge shells around catalog-owned DSL bodies.
+- **`mob/realtime_attach` and `mob/realtime_detach` REST endpoints** — caller-initiated realtime attach/detach removed; transport is capability-driven via `ModelCapabilities.realtime`. Use the `realtime_attachment_status` projection instead.
+- **Retired runtime/session verbs** — Python SDK and RPC docs scrubbed of dead verbs (`status`, `submit`, `retire`, `reset`, `submission`, `submissions`, `realtime_attachment_statuses`); typed `auth_binding` and typed realm context replace the legacy locator shapes.
+- **WASM bearer-string auth fallback** (#516) — legacy string-based WASM auth path removed; all WASM surfaces route through the typed auth seam (`auth_binding` / `AuthProfile`).
+- **`connection_ref` (renamed to `auth_binding`)** (#618) — the `connection_ref` field name is removed from all wire contracts, REST/RPC payloads, and SDKs; use `auth_binding` instead. The semantics are unchanged (LUC-404).
+- **Peer ingress compatibility authority** (#568) — legacy peer ingress routes removed; the typed peer ingress machine is the sole authority.
+- **Runtime visibility fallback** (#561) — fallback visibility restoration removed; visibility must be machine-owned or denied.
+- **Recovered runtime force-authority fallback** (fd8ac40ec) — the force-authority fallback used during recovery has been amputated.
+- **Runtime session compat nouns** (#576) — legacy compat nouns retired from the runtime session API surface (LUC-345).
+- **Runtime session control compat routes** (#563) — legacy session-control compat routes retired.
+- **Store-only session promotion** (#578) — automatic promotion of store-only sessions to live runtime removed; explicit recovery required (LUC-350).
+- **Source-string machine drift scanner** (#592) — text-based drift scanner demoted in favor of AST-based detection.
+
+### Fixed
+
+- **Realtime reconnect retry truth machine-owned** — reconnect retry state fully machine-owned; stale retry attempts across runtime cycles prevented.
+- **Flow projection persistence atomic** — flow projection state persistence atomic; half-written flow state prevented.
+- **MCP identity for mob wiring** — mob-to-peer wiring uses typed identities instead of placeholder session keys.
+- **Durable session fallback truth** (#401) — durable session recovery gates on real persistence state, not soft defaults.
+- **Hook denial terminalization** — pre-tool and post-tool hook denials now properly terminate the turn; stale pending turns cleaned up.
+- **Deferred tool load authority** (#542) — deferred tool admission owned by the machine; previously-skipped tools no longer silently disappear (LUC-288).
+- **Effect authority audit self-test** (LUC-305) — multiline interrupt audit coverage restored; effect authority audit shrunk and self-validated.
+- **Memory prompt extraction state** — memory prompt extraction state corrected (LUC-91).
+- **Mob flow supervisor authority** — mob flow supervisor authority corrected (LUC-90).
+- **Hook execution allocations** — hook execution path optimized to remove redundant allocations.
+- **AGX Orin / aarch64 build hygiene** — feature-matrix lanes and surface modularity gates stabilized for cross-target builds.
+- **OAuth browser auth release UX** (#619) — OAuth browser-flow release path now surfaces clear status to the user; release acknowledgement no longer hangs.
+- **OAuth login config TOML serialization** (9e78ce719) — OAuth login config round-trips correctly through TOML; previous serialization could drop nested fields.
+- **OAuth provider canaries** (52e50acf8) — provider canary jobs now exercise the full OAuth admission path; previously they short-circuited and missed regressions.
+- **e2e-smoke realtime + WASM setup** (#617) — fixed setup races in the e2e smoke lane that surfaced as flaky realtime / WASM failures.
+- **e2e-smoke realtime mob root cause** (dbdd3114f) — root-caused intermittent realtime mob failures in the smoke lane and stabilized the lane.
+- **BuildBuddy bazel metadata refresh** (c02e6695f) — Bazel metadata refresh now correctly invalidates stale lanes after lockfile churn.
+- **Decoupled structured output extraction terminalization** (#634) — structured-output extraction no longer terminalizes the turn on its own; ordering now matches the rest of the completion path.
+- **Image tool visible without image auth** (#633) — image tool is now listed in the agent's tool catalog even when image-generation auth is absent; previously it disappeared silently from prompts.
+- **Runtime boundary rollback and REST capacity tests** (7ed7cd712) — fixed flaky runtime boundary rollback and REST capacity tests.
+- **Bazel generator awareness of CLI help skill** (fb2421e17) — Bazel BUILD-file generator now includes the embedded CLI help skill.
 
 ## [0.5.2] - 2026-04-12
 

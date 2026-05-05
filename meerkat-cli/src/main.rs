@@ -15909,6 +15909,77 @@ capabilities = ["definitely_missing_capability"]
         assert!(names.contains("generate_image"));
     }
 
+    #[tokio::test]
+    async fn test_run_session_build_keeps_generate_image_visible_without_executor() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(true);
+        let service = Arc::new(build_cli_service_with_defaults(
+            factory,
+            Config::default(),
+            CliServiceBuildDefaults {
+                image_generation_machine: Some(runtime_adapter.clone()),
+                default_blob_store: Some(Arc::new(meerkat_store::MemoryBlobStore::default())),
+                ..Default::default()
+            },
+        ));
+
+        let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            captured_tool_names.clone(),
+            captured_system_prompt,
+        ));
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id)
+            .await
+            .expect("runtime bindings should be prepared");
+
+        let req = CreateSessionRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: "list tools".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: Some(32),
+            event_tx: None,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+                    None,
+                )),
+                llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                    llm_override,
+                )),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+
+        service
+            .create_session(req)
+            .await
+            .expect("session should run with llm override");
+
+        let names: std::collections::BTreeSet<String> = captured_tool_names
+            .lock()
+            .expect("captured tool mutex should not be poisoned")
+            .iter()
+            .cloned()
+            .collect();
+
+        assert!(
+            names.contains("generate_image"),
+            "generate_image should remain visible even when image credentials are unavailable"
+        );
+    }
+
     #[cfg(feature = "mob")]
     async fn call_tool_json(
         dispatcher: &Arc<dyn AgentToolDispatcher>,

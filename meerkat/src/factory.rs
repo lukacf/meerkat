@@ -794,6 +794,25 @@ pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct UnavailableImageGenerationExecutor;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl meerkat_llm_core::ImageGenerationExecutor for UnavailableImageGenerationExecutor {
+    async fn execute_image_generation(
+        &self,
+        _request: meerkat_llm_core::ProviderImageGenerationRequest,
+    ) -> Result<meerkat_llm_core::ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
+        Err(meerkat_llm_core::LlmError::InvalidRequest {
+            message: "image generation is available, but no image provider credential or executor \
+                      could be resolved for this session; configure an OpenAI or Gemini image \
+                      binding, or pass an image-generation executor override"
+                .to_string(),
+        })
+    }
+}
+
 #[cfg(feature = "openai")]
 const SELF_HOSTED_LEGACY_REALM_ID: &str = "self_hosted_legacy";
 
@@ -1342,6 +1361,14 @@ impl AgentFactory {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         }
         let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
+        if !config.realm.contains_key(selected_realm.as_str()) {
+            return Self::resolve_realm_binding_for_provider(
+                config,
+                provider,
+                None,
+                Some(selected_realm.as_str()),
+            );
+        }
         Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm)
     }
 
@@ -3377,7 +3404,13 @@ impl AgentFactory {
                         build_config
                             .image_generation_executor_override
                             .clone()
-                            .or_else(|| auto_image_generation_executor.clone()),
+                            .or_else(|| auto_image_generation_executor.clone())
+                            .or_else(|| {
+                                image_generation_planner.as_ref().map(|_| {
+                                    Arc::new(UnavailableImageGenerationExecutor)
+                                        as Arc<dyn meerkat_llm_core::ImageGenerationExecutor>
+                                })
+                            }),
                         image_generation_planner.clone(),
                         build_config.blob_store_override.clone(),
                     )
@@ -5073,26 +5106,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_selected_realm_image_binding_rejects_configured_default_realm() {
+    fn unconfigured_storage_realm_can_still_use_configured_default_realm() {
         let mut config = Config::default();
         config.realm.insert(
             "default".to_string(),
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
-        let err = AgentFactory::resolve_image_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("session_missing"),
         )
-        .expect_err("missing selected image realm must not fall back to configured default");
+        .expect("unconfigured storage realm may use configured default credentials");
 
-        assert!(
-            err.contains("provider 'openai'")
-                && err.contains("selected realm 'session_missing'")
-                && err.contains("not found"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(realm.realm_id, "default");
+        assert_eq!(binding_id, "default_openai");
+        assert_eq!(auth_binding.realm.as_str(), "default");
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
     }
 
     #[test]
@@ -5143,21 +5174,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_selected_realm_image_binding_rejects_env_default_synthesis() {
+    fn unconfigured_storage_realm_can_still_synthesize_env_default_image_binding() {
         let config = Config::default();
-        let err = AgentFactory::resolve_image_binding_for_provider(
+        let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("workspace_derived"),
         )
-        .expect_err("selected image realm without credential config must not use env_default");
+        .expect("workspace storage realm without credential config may use env_default");
 
-        assert!(
-            err.contains("provider 'openai'")
-                && err.contains("selected realm 'workspace_derived'")
-                && err.contains("not found"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(binding_id, "default");
+        assert_eq!(auth_binding.realm.as_str(), "env_default");
+        assert_eq!(auth_binding.binding.as_str(), "default");
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]

@@ -213,6 +213,13 @@ rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000
 
 Generated assistant images appear in `session/history` as assistant blocks with `block_type: "image"`; fetch bytes via `blob/get` using `data.blob_ref.blob_id`.
 
+CLI image generation is assistant-mediated; there is no direct `rkat image` command and no `rkat rpc` subcommand. Use:
+
+```bash
+rkat run --allow-tool generate_image "Use generate_image to create a 1024x1024 PNG of a meerkat on a laptop. Return the blob id."
+rkat blob get <BLOB-ID> --output meerkat.png
+```
+
 ### Realtime (capability-driven)
 
 - `realtime/open_info` — open audio channel info

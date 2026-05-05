@@ -8337,6 +8337,44 @@
         "summary": "Get product-layer realtime channel status for a target"
       }
     },
+    "/requests/{request_id}/cancel": {
+      "post": {
+        "operationId": "post_requests_request_id_cancel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonValue"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Cancel an uncommitted in-flight request"
+      }
+    },
     "/runtime/capabilities": {
       "get": {
         "operationId": "get_runtime_capabilities",

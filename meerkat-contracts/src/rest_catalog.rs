@@ -105,6 +105,13 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             vec![RestOperationDescriptor::new("get", "SSE event stream")],
         ),
         RestPathDescriptor::new(
+            "/requests/{request_id}/cancel",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Cancel an uncommitted in-flight request",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/schedule/tools",
             vec![RestOperationDescriptor::new("get", "List schedule tools")],
         ),

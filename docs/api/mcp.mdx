@@ -60,7 +60,22 @@ second surface-local execution loop.
 | `meerkat_mob_status` | Get lifecycle status for one mob (mob feature) |
 | `meerkat_mob_lifecycle` | Apply a lifecycle action to a mob (mob feature) |
 | `meerkat_mob_spawn` | Spawn a member into a mob (mob feature) |
+| `meerkat_mob_spawn_many` | Spawn multiple members into a mob (mob feature) |
+| `meerkat_mob_retire` | Retire a mob member (mob feature) |
+| `meerkat_mob_respawn` | Respawn a mob member with topology restore (mob feature) |
+| `meerkat_mob_wire` | Wire two mob members or an external peer (mob feature) |
+| `meerkat_mob_unwire` | Remove mob comms wiring (mob feature) |
 | `meerkat_mob_member_send` | Deliver host-owned work to a specific mob member (mob feature) |
+| `meerkat_mob_append_system_context` | Stage system context for a member session (mob feature) |
+| `meerkat_mob_events` | Read mob event history (mob feature) |
+| `meerkat_mob_flows` | List flows defined for a mob (mob feature) |
+| `meerkat_mob_flow_run` | Start a mob flow run (mob feature) |
+| `meerkat_mob_flow_status` | Get flow run status (mob feature) |
+| `meerkat_mob_flow_cancel` | Cancel a flow run (mob feature) |
+| `meerkat_mob_force_cancel` | Force-cancel a member's active work (mob feature) |
+| `meerkat_mob_wait_kickoff` | Wait for autonomous kickoff completion (mob feature) |
+| `meerkat_mob_wait_ready` | Wait for mob startup readiness (mob feature) |
+| `meerkat_mob_profile_*` tools | Realm-scoped mob profile create/get/list/update/delete (mob feature) |
 | `meerkat_mob_event_stream_open` | Open a mob-level event stream (mob feature) |
 | `meerkat_mob_event_stream_read` | Read the next event from an open mob stream (mob feature) |
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
@@ -68,10 +83,12 @@ second surface-local execution loop.
 | `meerkat_comms_peers` | List peers visible to a session (comms feature) |
 | `meerkat_realtime_open_info` | Issue a single-use bootstrap token for opening a realtime channel (realtime feature) |
 | `meerkat_realtime_status` | Read product-layer realtime channel status for a session or mob member (realtime feature) |
-| `meerkat_realtime_capabilities` | Read product-layer realtime capabilities for a target (realtime feature) |
 
 <Note>
-Default `rkat-mcp` builds are driven by the crate feature set. The base/default tool surface includes the core session/config/history/blob/skills surface plus schedule tools. Mob and realtime MCP tools are feature-gated and appear only when the `mob` feature is compiled in.
+Default `rkat-mcp` builds are driven by the crate feature set. The base/default
+tool surface includes core session/config/history/blob/skills tools, schedule
+tools, and `meerkat_realtime_open_info`. Mob tools and
+`meerkat_realtime_status` appear when the `mob` feature is compiled in.
 </Note>
 
 <Note>
@@ -87,9 +104,10 @@ model. Public host MCP surfaces should not re-export that raw dispatcher.
 `ModelCapabilities.realtime` on the session's model; it attaches
 automatically when the session runs a realtime-capable model (e.g.
 `gpt-realtime-1.5`). The public MCP tool set exposes only the product-layer
-bootstrap and status surfaces (`meerkat_realtime_open_info`,
-`meerkat_realtime_status`, `meerkat_realtime_capabilities`) — there is
-no MCP attach/detach tool. See the [Realtime
+bootstrap and status surfaces (`meerkat_realtime_open_info` and
+`meerkat_realtime_status`) — there is no MCP attach/detach tool and no
+MCP realtime capabilities tool. Use RPC `realtime/capabilities` when an app
+needs the detailed product-layer capability projection. See the [Realtime
 guide](/guides/realtime) for the capability-driven model and the full
 attachment state machine.
 </Note>

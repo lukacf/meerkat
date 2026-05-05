@@ -67,6 +67,11 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 
 ## Method overview
 
+This table mirrors the generated catalog in `artifacts/schemas/rpc-methods.json`
+(`meerkat_contracts::rpc_method_catalog`). `initialize` returns the methods
+enabled in the running binary, so reduced or feature-limited builds expose a
+subset.
+
 | Method | Category | Description |
 |--------|----------|-------------|
 | `initialize` | Handshake | Returns server capabilities |
@@ -118,10 +123,6 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/member_send` | Mob | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
 | `mob/append_system_context` | Mob | Stage system context for a member session (mob feature) |
 | `mob/flows` | Mob | List mob flows (mob feature) |
-
-<Note>
-Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.
-</Note>
 | `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | Get flow run status (mob feature) |
 | `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
@@ -182,6 +183,10 @@ Generated assistant images use the same surface-neutral history and blob APIs as
 | `realm/get` | Realm | Get full realm connection set |
 
 <Note>
+Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.
+</Note>
+
+<Note>
 Realtime is a delivery mode of the session's LLM, driven by
 `ModelCapabilities.realtime`. To enable realtime audio on a session,
 create the session with a realtime-capable model (for example
@@ -191,7 +196,7 @@ There is no caller-initiated attach/detach RPC.
 </Note>
 
 <Note>
-RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, host-ingress, and observation methods from apps. Inside running sessions, mob capability is still exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the agent.
+RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, host-ingress, and observation methods from apps. Inside running sessions, mob capability is exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `AgentMobToolSurfaceFactory`) into `SessionBuildOptions.mob_tools`, which provides authorized `mob_*` tools to the agent. `external_tools` remains for callback and MCP-backed tool dispatchers.
 </Note>
 
 ## Protocol
@@ -250,34 +255,19 @@ Handshake. Returns server capabilities.
     "contract_version": "0.6.0",
     "methods": [
       "initialize", "initialized",
-      "session/create", "session/list", "session/read", "session/history",
-      "session/archive", "session/external_event", "session/peer_response_terminal", "session/inject_context",
-      "blob/get",
+      "session/create", "session/list", "session/read",
       "turn/start", "turn/interrupt",
-      "config/get", "config/set", "config/patch",
-      "capabilities/get", "models/catalog",
-      "skills/list",
-      "realtime/open_info", "realtime/status", "realtime/capabilities",
-      "session/realtime_attachment_status",
-      "session/stream_open", "session/stream_close",
-      "mob/create", "mob/list", "mob/status",
-      "mob/members", "mob/spawn", "mob/spawn_many",
-      "mob/retire", "mob/respawn",
-      "mob/wire", "mob/unwire", "mob/lifecycle",
-      "mob/events", "mob/stream_open", "mob/stream_close",
-      "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
-      "mob/flow_status", "mob/flow_cancel",
-      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
-      "mob/wait_kickoff", "mob/wait_ready", "mob/turn_start",
-      "mob/profile/create", "mob/profile/get", "mob/profile/list",
-      "mob/profile/update", "mob/profile/delete",
-      "mcp/add", "mcp/remove", "mcp/reload",
-      "comms/send", "comms/peers",
+      "runtime/host_info", "config/get",
+      "realtime/open_info", "mob/create"
     ]
   }
 }
 ```
 </CodeGroup>
+
+The actual array contains every method compiled into the server. For the full
+documented list and parameter/result type names, use
+`artifacts/schemas/rpc-methods.json`.
 
 <ResponseField name="server_info.name" type="string">
   Server name.
@@ -897,7 +887,6 @@ Read the runtime-owned realtime attachment status projection for a session.
   "jsonrpc": "2.0",
   "id": 22,
   "result": {
-    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "status": "binding_ready"
   }
 }

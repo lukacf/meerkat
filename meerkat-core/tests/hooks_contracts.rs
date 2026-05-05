@@ -65,16 +65,12 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
     };
 
     let outcome = HookOutcome {
-        hook_id: HookId::new("rewrite-llm"),
+        hook_id: HookId::new("observe-llm"),
         point: HookPoint::PreLlmRequest,
         priority: 1,
         registration_index: 0,
         decision: Some(HookDecision::Allow),
-        patches: vec![HookPatch::LlmRequest {
-            max_tokens: Some(256),
-            temperature: Some(0.2),
-            provider_params: Some(json!({"reasoning_effort": "low"})),
-        }],
+        patches: vec![],
         published_patches: vec![],
         error: None,
         duration_ms: Some(2),
@@ -97,6 +93,33 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         })
     );
     assert_eq!(out_rt, outcome);
+    Ok(())
+}
+
+#[test]
+fn legacy_semantic_hook_patch_payloads_are_rejected_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    let payloads = [
+        json!({
+            "patch_type": "llm_request",
+            "max_tokens": 256,
+            "temperature": 0.2,
+            "provider_params": {"reasoning_effort": "low"}
+        }),
+        json!({"patch_type": "assistant_text", "text": "patched"}),
+        json!({"patch_type": "tool_args", "args": {"query": "patched"}}),
+        json!({"patch_type": "tool_result", "content": "patched", "is_error": false}),
+        json!({"patch_type": "run_result", "text": "patched"}),
+    ];
+
+    for payload in payloads {
+        let result = serde_json::from_value::<HookPatch>(payload.clone());
+        assert!(
+            result.is_err(),
+            "legacy semantic HookPatch payload must be rejected: {payload}"
+        );
+    }
+
     Ok(())
 }
 
@@ -283,11 +306,11 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
             id: HookId::new("run-hook"),
             point: HookPoint::PostToolExecution,
             mode: HookExecutionMode::Foreground,
-            capability: HookCapability::Rewrite,
+            capability: HookCapability::Guardrail,
             priority: 1,
             runtime: HookRuntimeConfig::new(
                 HookRuntimeKind::InProcess,
-                Some(json!({"name": "run_patch"})),
+                Some(json!({"name": "run_guardrail"})),
             )?,
             ..Default::default()
         }],

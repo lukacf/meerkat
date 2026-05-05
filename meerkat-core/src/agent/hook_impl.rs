@@ -111,19 +111,6 @@ where
             .await;
         }
 
-        for envelope in &report.published_patches {
-            crate::event_tap::tap_emit(
-                &self.event_tap,
-                event_tx,
-                AgentEvent::HookPatchPublished {
-                    hook_id: envelope.hook_id.clone(),
-                    point: envelope.point,
-                    envelope: envelope.clone(),
-                },
-            )
-            .await;
-        }
-
         Ok(report)
     }
 

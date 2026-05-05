@@ -5,19 +5,17 @@ audit logging, content filtering, approval gates, cost tracking, and more.
 
 ## Concepts
 - `HookPoint` — 8 interception points in the agent loop
-- `HookCapability` — observe (read-only) or gate (Allow/Deny/Rewrite)
+- `HookCapability` — observe (read-only) or guardrail (Allow/Deny)
 - `HookExecutionMode` — foreground (blocking) or background (async)
 - `HookRuntimeConfig` — command, HTTP, or in-process execution
-- `HookFailurePolicy` — what happens when a hook fails
+- `HookFailurePolicy` — compatibility field; runtime failures are typed engine errors
 - `DefaultHookEngine` — the standard hook processor
 
 ## Hook Points
 ```
-pre_llm_call → LLM → post_llm_response → pre_tool_dispatch → Tool
-    ↑                                                           ↓
-    └──────── turn_boundary ←── post_tool_result ←──────────────┘
-                    ↓
-         pre_compaction → Compactor → post_compaction
+pre_llm_request → LLM → post_llm_response → pre_tool_execution → Tool
+    ↑                                                               ↓
+    └────────── turn_boundary ←── post_tool_execution ←─────────────┘
 ```
 
 ## Run

@@ -8,8 +8,8 @@ use crate::event::{
     ToolConfigChangeStatus, ToolConfigChangedPayload,
 };
 use crate::hooks::{
-    HookExecutionReport, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
-    HookToolCall, HookToolResult,
+    HookExecutionReport, HookInvocation, HookLlmRequest, HookLlmResponse, HookPoint, HookToolCall,
+    HookToolResult,
 };
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
@@ -23,8 +23,8 @@ use crate::turn_execution_authority::{
     terminal_outcome_for_budget_exceeded,
 };
 use crate::types::{
-    AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
-    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, UserMessage,
+    BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
+    ToolDef, ToolNameSet, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -1543,14 +1543,14 @@ where
                         turn_number: turn_count,
                     });
 
-                    let mut effective_max_tokens = self.config.max_tokens_per_turn;
+                    let effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
                     let mut effective_provider_params = merged_provider_params(
                         self.config.provider_tool_defaults.as_ref(),
                         self.config.provider_params.as_ref(),
                     );
 
-                    // Pre-LLM hooks may rewrite request params or deny the turn.
+                    // Pre-LLM hooks may observe or deny the turn.
                     let pre_llm_report = self
                         .execute_turn_hooks(
                             HookInvocation {
@@ -1582,36 +1582,6 @@ where
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
-                    }
-
-                    for outcome in &pre_llm_report.outcomes {
-                        for patch in &outcome.patches {
-                            if let HookPatch::LlmRequest {
-                                max_tokens,
-                                temperature,
-                                provider_params,
-                            } = patch
-                            {
-                                emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.clone(),
-                                    point: HookPoint::PreLlmRequest,
-                                    patch: HookPatch::LlmRequest {
-                                        max_tokens: *max_tokens,
-                                        temperature: *temperature,
-                                        provider_params: provider_params.clone(),
-                                    },
-                                });
-                                if let Some(value) = max_tokens {
-                                    effective_max_tokens = *value;
-                                }
-                                if temperature.is_some() {
-                                    effective_temperature = *temperature;
-                                }
-                                if provider_params.is_some() {
-                                    effective_provider_params = provider_params.clone();
-                                }
-                            }
-                        }
                     }
 
                     // In extraction mode, override tools/temperature/params
@@ -1714,8 +1684,8 @@ where
                     }
 
                     let (blocks, stop_reason, usage) = result.into_parts();
-                    let mut assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
-                    let mut assistant_text = assistant_msg.to_string();
+                    let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
+                    let assistant_text = assistant_msg.to_string();
 
                     let post_llm_report = self
                         .execute_turn_hooks(
@@ -1751,20 +1721,6 @@ where
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
-                    }
-
-                    for outcome in &post_llm_report.outcomes {
-                        for patch in &outcome.patches {
-                            if let HookPatch::AssistantText { text } = patch {
-                                emit_event!(AgentEvent::HookRewriteApplied {
-                                    hook_id: outcome.hook_id.clone(),
-                                    point: HookPoint::PostLlmResponse,
-                                    patch: HookPatch::AssistantText { text: text.clone() },
-                                });
-                                rewrite_assistant_text(&mut assistant_msg.blocks, text.clone());
-                                assistant_text = assistant_msg.to_string();
-                            }
-                        }
                     }
 
                     if !assistant_text.is_empty() {
@@ -1853,7 +1809,7 @@ where
                             }))
                             .await;
 
-                        for (tool_index, ((mut tc, _args), pre_tool_report)) in tool_calls
+                        for (tool_index, ((tc, _args), pre_tool_report)) in tool_calls
                             .into_iter()
                             .zip(pre_tool_reports.into_iter())
                             .enumerate()
@@ -1877,27 +1833,6 @@ where
                                 )
                                 .await?;
                                 return Err(error);
-                            }
-
-                            for outcome in &pre_tool_report.outcomes {
-                                for patch in &outcome.patches {
-                                    if let HookPatch::ToolArgs { args } = patch {
-                                        emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.clone(),
-                                            point: HookPoint::PreToolExecution,
-                                            patch: HookPatch::ToolArgs { args: args.clone() },
-                                        });
-                                        if let Err(error) = tc.set_args(args) {
-                                            let error =
-                                                tool_call_args_projection_error(&tc.name, error);
-                                            self.terminalize_fatal_error(
-                                                &run_id, turn_count, &event_tx, &error,
-                                            )
-                                            .await?;
-                                            return Err(error);
-                                        }
-                                    }
-                                }
                             }
 
                             if let Err(error) = precheck_visible_tool_call(
@@ -2013,28 +1948,6 @@ where
                                 )
                                 .await?;
                                 return Err(error);
-                            }
-
-                            for outcome in &post_tool_report.outcomes {
-                                for patch in &outcome.patches {
-                                    if let HookPatch::ToolResult { content, is_error } = patch {
-                                        emit_event!(AgentEvent::HookRewriteApplied {
-                                            hook_id: outcome.hook_id.clone(),
-                                            point: HookPoint::PostToolExecution,
-                                            patch: HookPatch::ToolResult {
-                                                content: content.clone(),
-                                                is_error: *is_error,
-                                            },
-                                        });
-                                        // Rebuild: patched text first, then image blocks
-                                        // in their original relative order.
-                                        crate::hooks::apply_tool_result_patch(
-                                            &mut tool_result,
-                                            content.clone(),
-                                            *is_error,
-                                        );
-                                    }
-                                }
                             }
 
                             // Emit execution complete
@@ -2471,35 +2384,6 @@ where
     }
 }
 
-pub(crate) fn rewrite_assistant_text(blocks: &mut Vec<AssistantBlock>, replacement: String) {
-    let first_text_idx = blocks
-        .iter()
-        .position(|block| matches!(block, AssistantBlock::Text { .. }));
-
-    if let Some(idx) = first_text_idx {
-        if let AssistantBlock::Text { text, .. } = &mut blocks[idx] {
-            *text = replacement;
-        }
-        let mut i = idx + 1;
-        while i < blocks.len() {
-            if matches!(blocks[i], AssistantBlock::Text { .. }) {
-                blocks.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-        return;
-    }
-
-    blocks.insert(
-        0,
-        AssistantBlock::Text {
-            text: replacement,
-            meta: None,
-        },
-    );
-}
-
 #[derive(Debug, Clone)]
 struct ToolCallOwned {
     id: String,
@@ -2523,15 +2407,6 @@ impl ToolCallOwned {
             args: &self.args,
         }
     }
-
-    fn set_args(&mut self, args: &ToolCallArguments) -> Result<(), ToolCallArgumentsError> {
-        self.args = RawValue::from_string(args.as_value().to_string()).map_err(|error| {
-            ToolCallArgumentsError::new(format!(
-                "validated tool call arguments failed raw projection: {error}"
-            ))
-        })?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -2542,7 +2417,7 @@ impl ToolCallOwned {
     clippy::manual_async_fn
 )]
 mod tests {
-    use super::{SystemNoticeKind, is_synthetic_notice, rewrite_assistant_text};
+    use super::{SystemNoticeKind, is_synthetic_notice};
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
@@ -2600,38 +2475,6 @@ mod tests {
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
-    }
-
-    #[test]
-    fn rewrite_assistant_text_rewrites_all_text_blocks() {
-        let mut blocks = vec![
-            AssistantBlock::Text {
-                text: "first".to_string(),
-                meta: None,
-            },
-            AssistantBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "tool".into(),
-                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
-                meta: None,
-            },
-            AssistantBlock::Text {
-                text: "second".to_string(),
-                meta: None,
-            },
-        ];
-
-        rewrite_assistant_text(&mut blocks, "redacted".to_string());
-
-        let text_blocks: Vec<&str> = blocks
-            .iter()
-            .filter_map(|b| match b {
-                AssistantBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(text_blocks, vec!["redacted"]);
     }
 
     struct StaticLlmClient;
@@ -4057,17 +3900,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_completed_event_uses_hook_rewritten_text() {
+    async fn run_completed_event_uses_canonical_text_after_hook_observation() {
         use crate::hooks::{
             HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookOutcome,
-            HookPatch, HookPoint,
+            HookPoint,
         };
 
-        struct RewriteRunCompletedHook;
+        struct ObserveRunCompletedHook;
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-        impl HookEngine for RewriteRunCompletedHook {
+        impl HookEngine for ObserveRunCompletedHook {
             async fn execute(
                 &self,
                 invocation: HookInvocation,
@@ -4078,14 +3921,12 @@ mod tests {
                 }
                 Ok(HookExecutionReport {
                     outcomes: vec![HookOutcome {
-                        hook_id: crate::hooks::HookId::new("rewrite-run-completed"),
+                        hook_id: crate::hooks::HookId::new("observe-run-completed"),
                         point: HookPoint::RunCompleted,
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: vec![HookPatch::RunResult {
-                            text: "patched-final-text".to_string(),
-                        }],
+                        patches: Vec::new(),
                         published_patches: Vec::new(),
                         error: None,
                         duration_ms: None,
@@ -4098,7 +3939,7 @@ mod tests {
         }
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .with_hook_engine(Arc::new(RewriteRunCompletedHook))
+            .with_hook_engine(Arc::new(ObserveRunCompletedHook))
             .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
@@ -4111,7 +3952,7 @@ mod tests {
             .run_with_events("prompt".to_string().into(), tx)
             .await
             .unwrap();
-        assert_eq!(result.text, "patched-final-text");
+        assert_eq!(result.text, "ok");
 
         let mut run_completed_text = None;
         while let Ok(event) = rx.try_recv() {
@@ -4121,8 +3962,8 @@ mod tests {
         }
         assert_eq!(
             run_completed_text.as_deref(),
-            Some("patched-final-text"),
-            "RunCompleted should reflect the hook-rewritten final result"
+            Some("ok"),
+            "RunCompleted should reflect canonical final text, not hook mutation"
         );
     }
 
@@ -4905,7 +4746,7 @@ mod tests {
     #[tokio::test]
     async fn llm_hidden_tool_denial_terminalizes_without_tool_result() {
         use crate::hooks::{
-            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPatch, HookPoint,
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4932,10 +4773,7 @@ mod tests {
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: vec![HookPatch::ToolResult {
-                            content: "{\"error\":\"hook_observed_hidden_denial\"}".to_string(),
-                            is_error: Some(true),
-                        }],
+                        patches: Vec::new(),
                         published_patches: Vec::new(),
                         error: None,
                         duration_ms: None,

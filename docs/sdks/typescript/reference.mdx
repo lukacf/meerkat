@@ -351,8 +351,6 @@ type AgentEvent =
   | HookCompletedEvent
   | HookFailedEvent
   | HookDeniedEvent
-  | HookRewriteAppliedEvent
-  | HookPatchPublishedEvent
   | SkillsResolvedEvent
   | SkillResolutionFailedEvent
   | InteractionCompleteEvent
@@ -437,8 +435,6 @@ interface HookStartedEvent        { type: "hook_started";         hookId: string
 interface HookCompletedEvent      { type: "hook_completed";        hookId: string; point: HookPoint; durationMs: number }
 interface HookFailedEvent         { type: "hook_failed";           hookId: string; point: HookPoint; error: string }
 interface HookDeniedEvent         { type: "hook_denied";           hookId: string; point: HookPoint; reasonCode: string; message: string; payload?: unknown }
-interface HookRewriteAppliedEvent { type: "hook_rewrite_applied";  hookId: string; point: HookPoint; patch: Record<string, unknown> }
-interface HookPatchPublishedEvent { type: "hook_patch_published";  hookId: string; point: HookPoint; envelope: Record<string, unknown> }
 ```
 
 ### Skill events

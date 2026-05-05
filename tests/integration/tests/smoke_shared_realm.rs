@@ -6132,10 +6132,14 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             )
             .into());
         }
-        if let Some(checksum_request_subject) =
+        let checksum_request_subject =
             mob_stream_send_response_request_subject(&analyst_checksum_response_requested)
-            && checksum_request_subject != "alpha beta gamma"
-        {
+                .ok_or_else(|| {
+                    format!(
+                        "analyst send_response did not include result.request_subject: {analyst_checksum_response_requested}"
+                    )
+                })?;
+        if checksum_request_subject != "alpha beta gamma" {
             return Err(format!(
                 "analyst send_response carried unexpected request_subject `{checksum_request_subject}`: {analyst_checksum_response_requested}"
             )
@@ -6719,10 +6723,14 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             )
             .into());
         }
-        if let Some(haiku_request_subject) =
+        let haiku_request_subject =
             mob_stream_send_response_request_subject(&analyst_haiku_response_requested)
-            && haiku_request_subject != "haiku"
-        {
+                .ok_or_else(|| {
+                    format!(
+                        "analyst haiku send_response did not include result.request_subject: {analyst_haiku_response_requested}"
+                    )
+                })?;
+        if haiku_request_subject != "haiku" {
             return Err(format!(
                 "analyst haiku send_response carried unexpected request_subject `{haiku_request_subject}`: {analyst_haiku_response_requested}"
             )

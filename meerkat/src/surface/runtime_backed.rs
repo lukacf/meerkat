@@ -1571,7 +1571,7 @@ mod tests {
                     context_appends: vec![ConversationContextAppend {
                         key: "peer_response_terminal:analyst-rt:req-123".to_string(),
                         content: CoreRenderable::Text {
-                            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}.".to_string(),
+                            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
                         },
                     }],
                     contributing_input_ids: vec![InputId::new()],

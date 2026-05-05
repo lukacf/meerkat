@@ -3176,7 +3176,7 @@ impl AgentFactory {
             if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
                 return Err(BuildAgentError::Config(
                     "SessionRuntimeBindings were not prepared by MeerkatMachine; \
-                     session-owned runtime builds must use MeerkatMachine::prepare_bindings"
+                     session-owned runtime builds must use MeerkatMachine-prepared bindings"
                         .to_string(),
                 ));
             }

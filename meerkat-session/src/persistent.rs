@@ -9300,7 +9300,7 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}.".to_string(),
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
                     source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
                     idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),

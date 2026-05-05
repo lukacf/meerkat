@@ -60,6 +60,8 @@ struct SessionRealtimeTranscriptState {
     seen_delta_ids: BTreeSet<String>,
     #[serde(default)]
     assistant_completions: BTreeMap<String, RealtimeAssistantCompletion>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    discarded_assistant_response_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -827,7 +829,16 @@ impl Session {
                 role,
                 response_id,
             } => {
-                observe_realtime_item(&mut state, item_id, previous_item_id, role, response_id);
+                let response_id = normalize_realtime_optional_response_id(response_id);
+                if role == RealtimeTranscriptRole::Assistant
+                    && response_id
+                        .as_ref()
+                        .is_some_and(|id| state.discarded_assistant_response_ids.contains(id))
+                {
+                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
+                } else {
+                    observe_realtime_item(&mut state, item_id, previous_item_id, role, response_id);
+                }
             }
             RealtimeTranscriptEvent::ItemSkipped {
                 item_id,
@@ -871,6 +882,15 @@ impl Session {
                 let Some(response_id) = normalize_realtime_response_id(response_id) else {
                     return RealtimeTranscriptApplyOutcome::default();
                 };
+                if state
+                    .discarded_assistant_response_ids
+                    .contains(&response_id)
+                {
+                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
+                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
+                    self.store_realtime_transcript_state(&state);
+                    return outcome;
+                }
                 if !delta_id.trim().is_empty() && !state.seen_delta_ids.insert(delta_id) {
                     return RealtimeTranscriptApplyOutcome::default();
                 }
@@ -900,6 +920,15 @@ impl Session {
                 let Some(response_id) = normalize_realtime_response_id(response_id) else {
                     return RealtimeTranscriptApplyOutcome::default();
                 };
+                if state
+                    .discarded_assistant_response_ids
+                    .contains(&response_id)
+                {
+                    observe_realtime_skipped_item(&mut state, item_id, None);
+                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
+                    self.store_realtime_transcript_state(&state);
+                    return outcome;
+                }
                 let response_completed = state.assistant_completions.contains_key(&response_id);
                 if let Some(item) = observe_realtime_item(
                     &mut state,
@@ -922,6 +951,15 @@ impl Session {
                 let Some(response_id) = normalize_realtime_response_id(response_id) else {
                     return RealtimeTranscriptApplyOutcome::default();
                 };
+                if state
+                    .discarded_assistant_response_ids
+                    .contains(&response_id)
+                {
+                    discard_realtime_assistant_response(&mut state, &response_id);
+                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
+                    self.store_realtime_transcript_state(&state);
+                    return outcome;
+                }
                 match stop_reason {
                     StopReason::Cancelled => {
                         discard_realtime_assistant_response(&mut state, &response_id);
@@ -1811,12 +1849,25 @@ fn observe_realtime_skipped_item(
         .items
         .entry(item_id)
         .or_insert_with(|| RealtimeTranscriptItemState::skipped(previous_item_id.clone()));
-    if !item.content_segments.is_empty() || !item.skipped {
-        return;
-    }
     if item.previous_item_id.is_none() && previous_item_id.is_some() {
         item.previous_item_id = previous_item_id;
     }
+    if item.materialized || item.skipped {
+        return;
+    }
+    if item.role != RealtimeTranscriptRole::Assistant {
+        tracing::warn!(
+            existing_role = ?item.role,
+            "ignoring realtime skipped-item observation for non-assistant item"
+        );
+        return;
+    }
+    if !item.content_segments.is_empty() {
+        tracing::warn!("ignoring realtime skipped-item observation for content-bearing item");
+        return;
+    }
+    item.skipped = true;
+    item.ready = true;
 }
 
 fn mark_realtime_assistant_response_ready(
@@ -1838,6 +1889,9 @@ fn discard_realtime_assistant_response(
     state: &mut SessionRealtimeTranscriptState,
     response_id: &str,
 ) {
+    state
+        .discarded_assistant_response_ids
+        .insert(response_id.to_string());
     for item in state.items.values_mut() {
         if item.role == RealtimeTranscriptRole::Assistant
             && item.response_id.as_deref() == Some(response_id)
@@ -2341,6 +2395,88 @@ mod tests {
                 })
                 .all(|text| !text.contains("Looping now")),
             "interrupted assistant text must remain non-canonical"
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_late_interrupted_assistant_delta_stays_noncanonical() {
+        let mut session = Session::new();
+
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_repeat".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "repeat until stop".to_string(),
+            },
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::ItemObserved {
+                    item_id: "item_loop".to_string(),
+                    previous_item_id: Some("item_repeat".to_string()),
+                    role: RealtimeTranscriptRole::Assistant,
+                    response_id: None,
+                })
+                .is_inert(),
+            "provider can observe an assistant item before the adapter learns its response id"
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(
+                    RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                        response_id: "resp_loop".to_string(),
+                    }
+                )
+                .is_inert(),
+            "an interruption can arrive before delayed transcript deltas for the response"
+        );
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "item_stop".to_string(),
+                    previous_item_id: Some("item_loop".to_string()),
+                    content_index: 0,
+                    text: "Stop.".to_string(),
+                })
+                .is_inert(),
+            "the stop turn waits for the provider's interrupted assistant item anchor"
+        );
+
+        let late_delta_outcome =
+            session.append_realtime_transcript_event(RealtimeTranscriptEvent::AssistantTextDelta {
+                response_id: "resp_loop".to_string(),
+                delta_id: "evt_loop_late".to_string(),
+                item_id: "item_loop".to_string(),
+                previous_item_id: Some("item_repeat".to_string()),
+                content_index: 0,
+                delta: "Looping now".to_string(),
+            });
+        assert_eq!(late_delta_outcome.materialized_messages.len(), 1);
+        assert!(matches!(
+            &session.messages()[1],
+            Message::User(user) if user.text_content() == "Stop."
+        ));
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: "resp_loop".to_string(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+                .is_inert(),
+            "late completion for an interrupted response must not resurrect its deltas"
+        );
+        assert!(
+            session
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::BlockAssistant(assistant) => Some(block_assistant_text(assistant)),
+                    _ => None,
+                })
+                .all(|text| !text.contains("Looping now")),
+            "late interrupted assistant text must remain non-canonical"
         );
     }
 

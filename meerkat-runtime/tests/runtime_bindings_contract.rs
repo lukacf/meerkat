@@ -38,7 +38,7 @@ async fn prepare_bindings_returns_matching_session_id() {
 }
 
 #[tokio::test]
-async fn local_session_bindings_do_not_satisfy_machine_authority() {
+async fn local_session_bindings_still_carry_unforgeable_machine_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -49,8 +49,8 @@ async fn local_session_bindings_do_not_satisfy_machine_authority() {
 
     assert_eq!(bindings.session_id(), &session_id);
     assert!(
-        !meerkat_runtime::session_runtime_bindings_have_machine_authority(&bindings),
-        "local-only session resources must not carry the machine authority accepted by AgentFactory"
+        meerkat_runtime::session_runtime_bindings_have_machine_authority(&bindings),
+        "local-only session resources must still be MeerkatMachine-minted so AgentFactory can accept them without publishing runtime readiness"
     );
 }
 

@@ -85,7 +85,6 @@ sh_test(
     args = ["sdk-suites"],
     data = [
         "//:workspace_runfiles",
-        "//meerkat-rpc:rkat_rpc_bin",
     ] + RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
     size = "enormous",
     timeout = "eternal",

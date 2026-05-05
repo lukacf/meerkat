@@ -637,6 +637,14 @@ mod tests {
             .expect("bridge reply should serialize")
     }
 
+    fn checksum_token_reply_json(subject: &str, token: &str) -> Value {
+        json!({
+            "request_intent": "checksum_token",
+            "request_subject": subject,
+            "token": token
+        })
+    }
+
     struct RecordingRuntime {
         sent: Mutex<Vec<CommsCommand>>,
         peers: Vec<PeerDirectoryEntry>,
@@ -1344,6 +1352,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_response_checksum_token_requires_request_subject() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let request_id = uuid::Uuid::from_u128(4);
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": {
+                    "request_intent": "checksum_token",
+                    "token": "birch seventeen"
+                }
+            }),
+        )
+        .await
+        .expect_err("checksum token response without request_subject must fail before dispatch");
+
+        assert!(
+            error.contains("Invalid arguments"),
+            "expected typed result serde error, got: {error}"
+        );
+        assert_eq!(runtime.sent_len(), 0);
+    }
+
+    #[tokio::test]
     async fn test_runtime_bound_send_request_returns_typed_receipt() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
@@ -1419,5 +1458,39 @@ mod tests {
             panic!("expected one peer response command, got {sent:?}");
         };
         assert_eq!(result, &bridge_reply_json());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bound_send_response_accepts_checksum_token_subject() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let request_id = uuid::Uuid::from_u128(4);
+
+        let result = handle_tools_call(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": checksum_token_reply_json("alpha beta gamma", "birch seventeen")
+            }),
+        )
+        .await
+        .expect("runtime-backed checksum token send_response should succeed");
+
+        assert_eq!(runtime.sent_len(), 1);
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["kind"], "peer_response");
+        let sent = runtime.sent.lock();
+        let [CommsCommand::PeerResponse { result, .. }] = sent.as_slice() else {
+            panic!("expected one peer response command, got {sent:?}");
+        };
+        assert_eq!(
+            result,
+            &checksum_token_reply_json("alpha beta gamma", "birch seventeen")
+        );
     }
 }

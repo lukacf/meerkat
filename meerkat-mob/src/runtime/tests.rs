@@ -24636,6 +24636,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
             "status": "completed",
             "result": {
                 "request_intent": "checksum_token",
+                "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             },
             "handling_mode": "steer"
@@ -24664,6 +24665,9 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
                         && append
                             .text
                             .contains("\"request_intent\": \"checksum_token\"")
+                        && append
+                            .text
+                            .contains("\"request_subject\": \"alpha beta gamma\"")
                         && append.text.contains("\"token\": \"birch seventeen\"")
                 })
                 .cloned()

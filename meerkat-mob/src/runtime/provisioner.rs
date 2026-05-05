@@ -1004,10 +1004,15 @@ impl MobProvisioner for SessionBackend {
                     }
                     id
                 });
+            // MobMachine::Spawn routes the authoritative member runtime id
+            // and fence token after the bridge session exists. This call only
+            // needs the session-local handle bundle for AgentFactory.
             let bindings = adapter
-                .prepare_bindings(member_bridge_session_id.clone())
+                .prepare_local_session_bindings(member_bridge_session_id.clone())
                 .await
-                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+                .map_err(|e| {
+                    MobError::Internal(format!("prepare local session bindings failed: {e}"))
+                })?;
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);

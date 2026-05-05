@@ -67,6 +67,22 @@ fi
 
 workspace_root="$(git rev-parse --show-toplevel)"
 cd "${workspace_root}"
+source "${workspace_root}/scripts/build-backend-env"
+
+source_local_secrets_env() {
+  # Source only on the coordinator, through the shared whitelist loader. Bazel
+  # receives selected values via --test_env=NAME in buildbuddy-bazel-poc; never
+  # make secrets.env a Bazel input/runfile or write its contents to logs.
+  meerkat_load_local_secrets_env "${workspace_root}"
+  if [[ -z "${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" &&
+        -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" &&
+        -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
+    GOOGLE_APPLICATION_CREDENTIALS_JSON="$(<"${GOOGLE_APPLICATION_CREDENTIALS}")"
+    export GOOGLE_APPLICATION_CREDENTIALS_JSON
+  fi
+}
+
+source_local_secrets_env
 
 is_native_lane=0
 case "${lane}" in
@@ -277,7 +293,7 @@ case "${lane}" in
     run_bazel_lane e2e-live-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-smoke)
-    run_bazel_lane e2e-smoke-rbe --jobs="${bazel_jobs}"
+    run_bazel_lane e2e-smoke-remote-rbe --jobs="${bazel_jobs}"
     ;;
   minimal-feature-builds)
     run_bazel_lane minimal-feature-builds-rbe --jobs="${bazel_jobs}"

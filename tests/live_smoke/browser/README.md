@@ -40,7 +40,8 @@ npm run smoke:headed
 
 ## Notes
 
-- The harness serves the checked-in raw WASM export bundle under `sdks/web/wasm/`.
+- The harness serves the raw WASM export bundle from
+  `MEERKAT_WEB_WASM_OUT_DIR` when set, otherwise `sdks/web/wasm/`.
 - Provider traffic goes through the checked-in `@rkat/web` reverse proxy, so the
   browser client stays browser-safe while still exercising the real live provider.
 - `ANTHROPIC_API_KEY` is required for the current browser matrix.

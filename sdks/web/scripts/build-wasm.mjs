@@ -8,10 +8,12 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SDK_DIR = path.resolve(__dirname, "..");
-const LOCK_DIR = path.join(SDK_DIR, ".wasm-build.lock");
+const OUT_DIR = path.resolve(process.env.MEERKAT_WEB_WASM_OUT_DIR || path.join(SDK_DIR, "wasm"));
+const LOCK_DIR = path.resolve(
+  process.env.MEERKAT_WEB_WASM_LOCK_DIR || path.join(SDK_DIR, ".wasm-build.lock"),
+);
 const LOCK_OWNER_FILE = path.join(LOCK_DIR, "owner.json");
 const LOCK_HEARTBEAT_FILE = path.join(LOCK_DIR, "heartbeat");
-const OUT_DIR = path.join(SDK_DIR, "wasm");
 const CRATE_DIR = path.resolve(SDK_DIR, "../../meerkat-web-runtime");
 const WORKSPACE_DIR = path.resolve(SDK_DIR, "../..");
 const CACHE_MANIFEST = path.join(OUT_DIR, ".meerkat-wasm-build.json");

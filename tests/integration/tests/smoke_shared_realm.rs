@@ -6675,16 +6675,27 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             analyst_event_count_before_turn7,
             120,
             |event| {
+                let subject_matches =
+                    mob_stream_send_response_request_subject(event).as_deref() == Some("haiku");
+                let token_matches = mob_stream_send_response_token(event)
+                    .as_deref()
+                    .map(normalize_semantic_text)
+                    .is_some_and(|token| token.contains("silver harbor"));
                 mob_stream_event_type(event) == Some("tool_call_requested")
                     && mob_stream_tool_name(event) == Some("send_response")
                     && mob_stream_send_response_token(event).is_some()
+                    && mob_stream_send_response_request_intent(event).as_deref()
+                        == Some("checksum_token")
+                    && (subject_matches || token_matches)
             },
         )
         .await?;
+        let analyst_event_count_after_haiku_response =
+            pump.mob_stream_events(&analyst_stream).len();
         pump.wait_for_mob_stream_event_after(
             &mut rpc,
             &analyst_stream,
-            analyst_event_count_before_turn7,
+            analyst_event_count_after_haiku_response,
             120,
             |event| {
                 mob_stream_event_type(event) == Some("tool_execution_completed")

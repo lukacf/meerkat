@@ -5381,6 +5381,7 @@ args = [{}]
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({
                     "request_intent": "checksum_token",
+                    "request_subject": "alpha beta gamma",
                     "token": "birch seventeen",
                 }),
                 handling_mode: None,

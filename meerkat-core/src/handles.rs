@@ -1942,6 +1942,7 @@ mod tests {
                 PeerResponseTerminalProjectionStatus::Completed,
                 PeerResponseTerminalRenderPayload::new(Some(serde_json::json!({
                     "request_intent": "checksum_token",
+                    "request_subject": "alpha beta gamma",
                     "token": "birch seventeen"
                 }))),
             ),
@@ -1953,7 +1954,7 @@ mod tests {
         );
         assert_eq!(
             projection.prompt_text(),
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
         );
     }
 

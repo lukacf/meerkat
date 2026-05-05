@@ -9552,6 +9552,7 @@ mod tests {
                     body: "done".to_string(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
+                        "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
                     blocks: None,
@@ -9664,6 +9665,7 @@ mod tests {
                     body: "done".to_string(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
+                        "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
                     blocks: None,
@@ -9844,6 +9846,7 @@ mod tests {
                     body: "done".to_string(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
+                        "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
                     blocks: None,
@@ -9971,6 +9974,7 @@ mod tests {
                     body: "done".to_string(),
                     payload: Some(serde_json::json!({
                         "request_intent": "checksum_token",
+                        "request_subject": "alpha beta gamma",
                         "token": "birch seventeen",
                     })),
                     blocks: None,
@@ -10131,6 +10135,7 @@ mod tests {
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({
                     "request_intent": "checksum_token",
+                    "request_subject": "alpha beta gamma",
                     "token": "birch seventeen",
                 }),
                 handling_mode: None,
@@ -10206,7 +10211,7 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
                     source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
@@ -10320,7 +10325,7 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
                     source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),

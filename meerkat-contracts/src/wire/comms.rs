@@ -90,6 +90,7 @@ pub enum CommsChecksumTokenResultIntent {
 #[serde(deny_unknown_fields)]
 pub struct CommsChecksumTokenResult {
     pub request_intent: CommsChecksumTokenResultIntent,
+    pub request_subject: String,
     pub token: String,
 }
 
@@ -835,6 +836,7 @@ mod tests {
             "status": "completed",
             "result": {
                 "request_intent": "checksum_token",
+                "request_subject": "alpha beta gamma",
                 "token": "birch seventeen"
             }
         }))
@@ -851,6 +853,23 @@ mod tests {
         };
 
         assert_eq!(result["request_intent"], "checksum_token");
+        assert_eq!(result["request_subject"], "alpha beta gamma");
         assert_eq!(result["token"], "birch seventeen");
+    }
+
+    #[test]
+    fn public_peer_response_result_rejects_checksum_token_without_subject() {
+        serde_json::from_value::<CommsSendParams>(json!({
+            "session_id": "sid_1",
+            "kind": "peer_response",
+            "to": peer_id().to_string(),
+            "in_reply_to": uuid::Uuid::new_v4().to_string(),
+            "status": "completed",
+            "result": {
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            }
+        }))
+        .expect_err("checksum token replies must carry the request subject discriminator");
     }
 }

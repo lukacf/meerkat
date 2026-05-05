@@ -20,7 +20,29 @@ http_archive(
 
 http_archive(
     name = "node_darwin_arm64",
-    build_file_content = 'filegroup(name = "node", srcs = glob(["**/*"]), visibility = ["//visibility:public"])',
+    build_file_content = '''
+filegroup(
+    name = "node",
+    srcs = glob(["**/*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "npm_runtime",
+    srcs = glob(["lib/node_modules/npm/**"]) + [
+        "bin/node",
+        "bin/npm",
+        "bin/npx",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "bin/node",
+    "lib/node_modules/npm/bin/npm-cli.js",
+    "lib/node_modules/npm/bin/npx-cli.js",
+], visibility = ["//visibility:public"])
+''',
     sha256 = "db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000",
     strip_prefix = "node-v22.22.2-darwin-arm64",
     urls = ["https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.gz"],
@@ -28,7 +50,10 @@ http_archive(
 
 http_archive(
     name = "python_darwin_arm64",
-    build_file_content = 'filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])',
+    build_file_content = '''
+filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
+''',
     sha256 = "6f304f4ec30854611f23316578302235fb517cd970519ecdd11a8c4db87fd843",
     urls = ["https://github.com/astral-sh/python-build-standalone/releases/download/20260414/cpython-3.14.4%2B20260414-aarch64-apple-darwin-install_only_stripped.tar.gz"],
 )
@@ -41,12 +66,23 @@ http_archive(
     urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-aarch64-apple-darwin.tar.gz"],
 )
 
+http_archive(
+    name = "rust_std_wasm32_unknown_unknown_1_94_0",
+    build_file_content = '''
+filegroup(name = "rust_std", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+''',
+    sha256 = "bc65af3c0bfa2e5b20e299358710a26ce33a3674c762a2a010bc383c5b7fc202",
+    strip_prefix = "rust-std-1.94.0-wasm32-unknown-unknown/rust-std-wasm32-unknown-unknown",
+    urls = ["https://static.rust-lang.org/dist/rust-std-1.94.0-wasm32-unknown-unknown.tar.xz"],
+)
+
 buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
 use_repo(buildbuddy, "buildbuddy_toolchain")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
+    extra_target_triples = ["wasm32-unknown-unknown"],
     versions = ["1.94.0"],
 )
 use_repo(rust, "rust_toolchains")

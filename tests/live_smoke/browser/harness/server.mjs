@@ -9,7 +9,9 @@ import { buildFixtureMobpack } from './mobpack-builder.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const APP_DIR = path.join(ROOT, 'app');
-const RUNTIME_DIR = path.resolve(ROOT, '..', '..', '..', 'sdks', 'web', 'wasm');
+const RUNTIME_DIR = path.resolve(
+  process.env.MEERKAT_WEB_WASM_OUT_DIR || path.resolve(ROOT, '..', '..', '..', 'sdks', 'web', 'wasm'),
+);
 const FIXTURE_DIR = path.join(ROOT, 'fixtures', 'browser_safe_mobpack');
 
 const MIME_TYPES = new Map([

@@ -159,7 +159,7 @@ struct CompletedCommand {
 const WEB_RUNTIME_BUILD_IF_STALE: &[&str] = &[
     "/bin/sh",
     "-c",
-    "if test \"${MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT:-0}\" = 1; then test -f ../../../sdks/web/wasm/meerkat_web_runtime.js && test -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm; elif test ! -f ../../../sdks/web/wasm/meerkat_web_runtime.js || test ! -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm || test -n \"$(find ../../../meerkat-web-runtime ../../../sdks/web/src ../../../sdks/web/scripts ../../../sdks/web/package.json ../../../sdks/web/tsconfig.json -type f -newer ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm -print -quit)\"; then npm --prefix ../../../sdks/web run build; fi",
+    "wasm_dir=\"${MEERKAT_WEB_WASM_OUT_DIR:-../../../sdks/web/wasm}\"; if test \"${MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT:-0}\" = 1; then test -f \"${wasm_dir}/meerkat_web_runtime.js\" && test -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || { echo \"missing assumed prebuilt web WASM bundle in ${wasm_dir}\" >&2; exit 1; }; elif test ! -f \"${wasm_dir}/meerkat_web_runtime.js\" || test ! -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || test -n \"$(find ../../../meerkat-web-runtime ../../../sdks/web/src ../../../sdks/web/scripts ../../../sdks/web/package.json ../../../sdks/web/tsconfig.json -type f -newer \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" -print -quit)\"; then npm --prefix ../../../sdks/web run build; fi",
 ];
 
 const MEERKAT_E2E_EXECUTION_MODE: &str = "MEERKAT_E2E_EXECUTION_MODE";

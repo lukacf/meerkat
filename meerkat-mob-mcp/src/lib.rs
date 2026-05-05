@@ -77,7 +77,101 @@ struct ManagedMob {
     storage_path: Option<PathBuf>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum MobMcpDestroyError {
+    #[error("mob destroy incomplete: {}", destroy_report_summary(.report))]
+    Incomplete {
+        report: meerkat_mob::MobDestroyReport,
+    },
+
+    #[error(transparent)]
+    Mob(#[from] MobError),
+}
+
+impl MobMcpDestroyError {
+    pub fn incomplete_message(report: &meerkat_mob::MobDestroyReport) -> String {
+        format!("mob destroy incomplete: {}", destroy_report_summary(report))
+    }
+
+    pub fn incomplete_error_data(report: &meerkat_mob::MobDestroyReport) -> serde_json::Value {
+        json!({
+            "code": "mob_destroy_incomplete",
+            "destroy_report": report,
+            "retryable": true,
+        })
+    }
+
+    pub fn error_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Incomplete { report } => Some(Self::incomplete_error_data(report)),
+            Self::Mob(_) => None,
+        }
+    }
+
+    fn into_mob_error(self) -> MobError {
+        match self {
+            Self::Incomplete { report } => MobError::Internal(Self::incomplete_message(&report)),
+            Self::Mob(error) => error,
+        }
+    }
+
+    pub fn into_session_error(self, context: &str) -> SessionError {
+        match self {
+            Self::Incomplete { report } => SessionError::FailedWithData {
+                message: format!("{context}: {}", Self::incomplete_message(&report)),
+                data: Self::incomplete_error_data(&report),
+            },
+            Self::Mob(error) => SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!("{context}: {error}")),
+            ),
+        }
+    }
+}
+
+fn destroy_report_summary(report: &meerkat_mob::MobDestroyReport) -> String {
+    if !report.errors.is_empty() {
+        return report.errors.join("; ");
+    }
+    if report.remote_cleanup_deadline_exceeded {
+        return "remote cleanup deadline exceeded".to_string();
+    }
+    if !report.orphaned_remote_members.is_empty() {
+        return format!(
+            "orphaned remote members: {}",
+            report
+                .orphaned_remote_members
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    "destroy cleanup did not complete".to_string()
+}
+
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
+const BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY: &str =
+    "bridge session not found in any live mob authority:";
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct InMemoryArchiveFailureControl {
+    failures: RwLock<HashMap<SessionId, String>>,
+}
+
+impl InMemoryArchiveFailureControl {
+    pub async fn fail_archive(&self, id: SessionId, reason: impl Into<String>) {
+        self.failures.write().await.insert(id, reason.into());
+    }
+
+    pub async fn clear_archive_failure(&self, id: &SessionId) {
+        self.failures.write().await.remove(id);
+    }
+
+    async fn failure_for(&self, id: &SessionId) -> Option<String> {
+        self.failures.read().await.get(id).cloned()
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KickoffMemberSnapshot {
@@ -538,7 +632,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         action: WireMobLifecycleAction,
-    ) -> Result<Option<meerkat_mob::MobDestroyReport>, MobError> {
+    ) -> Result<Option<meerkat_mob::MobDestroyReport>, MobMcpDestroyError> {
         match action {
             WireMobLifecycleAction::Stop => {
                 self.mob_stop(mob_id).await?;
@@ -564,21 +658,20 @@ impl MobMcpState {
     /// [`destroy_bridge_session_mobs`](Self::destroy_bridge_session_mobs) for
     /// bridge-session cleanup.
     ///
-    /// Returns the structured [`meerkat_mob::MobDestroyReport`] so RPC/MCP
-    /// surfaces can project every cleanup result (force-destroyed members,
-    /// orphaned remote members, deadline exceeded, partial errors) — the
-    /// report was previously dropped on the floor, leaving mobkit and the
-    /// RPC client unable to tell partial failures from clean destroys.
+    /// Returns the structured [`meerkat_mob::MobDestroyReport`] only after
+    /// canonical destroy completes. Partial cleanup is surfaced as
+    /// [`MobMcpDestroyError::Incomplete`] with the report attached so callers
+    /// can retry or inspect the still-retained mob authority.
     pub async fn mob_destroy(
         &self,
         mob_id: &MobId,
-    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
+    ) -> Result<meerkat_mob::MobDestroyReport, MobMcpDestroyError> {
         if self.is_implicit_mob(mob_id).await {
-            return Err(MobError::Internal(
+            return Err(MobMcpDestroyError::Mob(MobError::Internal(
                 "Cannot destroy implicit delegation mob directly. \
                  It is cleaned up automatically when the owning session is archived."
                     .to_string(),
-            ));
+            )));
         }
         self.mob_destroy_unchecked(mob_id).await
     }
@@ -589,7 +682,7 @@ impl MobMcpState {
     pub(crate) async fn mob_destroy_unchecked(
         &self,
         mob_id: &MobId,
-    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
+    ) -> Result<meerkat_mob::MobDestroyReport, MobMcpDestroyError> {
         self.ensure_restored().await?;
         self.mob_destroy_unchecked_loaded(mob_id).await
     }
@@ -597,62 +690,36 @@ impl MobMcpState {
     async fn mob_destroy_unchecked_loaded(
         &self,
         mob_id: &MobId,
-    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
+    ) -> Result<meerkat_mob::MobDestroyReport, MobMcpDestroyError> {
         let managed = {
-            let mut mobs = self.mobs.write().await;
-            mobs.remove(mob_id)
-                .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))?
+            let mobs = self.mobs.read().await;
+            mobs.get(mob_id).cloned().ok_or_else(|| {
+                MobMcpDestroyError::Mob(MobError::Internal(format!("mob not found: {mob_id}")))
+            })?
         };
 
         match managed.handle.destroy().await {
             Ok(report) => {
-                Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
+                let removed = self.mobs.write().await.remove(mob_id);
+                Self::maybe_remove_storage_file(
+                    removed
+                        .as_ref()
+                        .and_then(|managed| managed.storage_path.as_deref()),
+                )
+                .await;
                 Ok(report)
             }
             Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {
-                // Partial cleanup is a successful destroy with non-empty
-                // errors. Finding A9: callers shouldn't have to match on an
-                // Err variant to read the report — every consumer either
-                // ignored the report or did the match dance. Keep the
-                // storage file cleanup as-is (destroy attempt reached the
-                // reporting stage, so the storage side is considered
-                // finalised) and surface the report with its errors
-                // populated.
-                Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
-                Ok(report)
+                Err(MobMcpDestroyError::Incomplete { report })
             }
-            Err(meerkat_mob::MobDestroyError::Mob(error)) => {
-                let mut mobs = self.mobs.write().await;
-                match mobs.entry(mob_id.clone()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(managed);
-                    }
-                    Entry::Occupied(_) => {
-                        tracing::warn!(
-                            mob_id = %mob_id,
-                            "mob destroy failed after a replacement mob with the same id was inserted; preserving replacement"
-                        );
-                    }
-                }
-                Err(error)
-            }
+            Err(meerkat_mob::MobDestroyError::Mob(error)) => Err(MobMcpDestroyError::Mob(error)),
             Err(other) => {
                 // MobDestroyError is #[non_exhaustive]; future variants we
                 // haven't coded for fall through to a generic internal
                 // error so the caller still gets a readable message.
-                let mut mobs = self.mobs.write().await;
-                match mobs.entry(mob_id.clone()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(managed);
-                    }
-                    Entry::Occupied(_) => {
-                        tracing::warn!(
-                            mob_id = %mob_id,
-                            "mob destroy failed after a replacement mob with the same id was inserted; preserving replacement"
-                        );
-                    }
-                }
-                Err(MobError::Internal(format!("mob destroy failed: {other}")))
+                Err(MobMcpDestroyError::Mob(MobError::Internal(format!(
+                    "mob destroy failed: {other}"
+                ))))
             }
         }
     }
@@ -696,6 +763,64 @@ impl MobMcpState {
     }
 
     #[doc(hidden)]
+    pub fn is_missing_bridge_session_retire_error(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::Internal(message)
+                if message.starts_with(BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY)
+        )
+    }
+
+    #[doc(hidden)]
+    pub async fn archive_mob_owned_bridge_session_with_cleanup(
+        &self,
+        bridge_session_id: &SessionId,
+        cleanup_context: &'static str,
+    ) -> Result<bool, SessionError> {
+        let bridge_session_key = bridge_session_id.to_string();
+        let mob_owned = self.owns_live_bridge_session(bridge_session_id).await
+            || self
+                .owns_service_reported_bridge_session(bridge_session_id)
+                .await
+            || self.owns_persisted_bridge_session(bridge_session_id).await;
+        if !mob_owned {
+            return Ok(false);
+        }
+
+        match self
+            .retire_member_by_bridge_session_id(bridge_session_id)
+            .await
+        {
+            Ok(()) => {
+                self.destroy_bridge_session_mobs(&bridge_session_key)
+                    .await
+                    .map_err(|error| error.into_session_error(cleanup_context))?;
+                Ok(true)
+            }
+            Err(error) if Self::is_missing_bridge_session_retire_error(&error) => {
+                if self
+                    .has_bridge_session_scoped_mobs(&bridge_session_key)
+                    .await
+                {
+                    self.destroy_bridge_session_mobs(&bridge_session_key)
+                        .await
+                        .map_err(|error| error.into_session_error(cleanup_context))?;
+                    Ok(true)
+                } else {
+                    Err(SessionError::NotFound {
+                        id: bridge_session_id.clone(),
+                    })
+                }
+            }
+            Err(error) => Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to archive mob-owned bridge session '{bridge_session_id}': {error}"
+                )),
+            )),
+        }
+    }
+
+    #[doc(hidden)]
     pub async fn retire_member_by_bridge_session_id(
         &self,
         bridge_session_id: &SessionId,
@@ -714,7 +839,11 @@ impl MobMcpState {
             }
         }
         let Some((mob_id, identity)) = resolved else {
-            if self.owns_persisted_bridge_session(bridge_session_id).await {
+            if self
+                .owns_service_reported_bridge_session(bridge_session_id)
+                .await
+                || self.owns_persisted_bridge_session(bridge_session_id).await
+            {
                 return self
                     .session_service()
                     .archive(bridge_session_id)
@@ -726,7 +855,7 @@ impl MobMcpState {
                     });
             }
             return Err(MobError::Internal(format!(
-                "bridge session not found in any live mob authority: {bridge_session_id}"
+                "{BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY} {bridge_session_id}"
             )));
         };
         self.mob_retire(&mob_id, identity).await
@@ -744,6 +873,32 @@ impl MobMcpState {
         for mob_id in mob_ids {
             if let Ok(handle) = self.handle_for(&mob_id).await
                 && handle.roster().await.has_bridge_session(bridge_session_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[doc(hidden)]
+    pub async fn owns_service_reported_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> bool {
+        if !self
+            .session_service()
+            .has_live_session(bridge_session_id)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            if self
+                .session_service()
+                .session_belongs_to_mob(bridge_session_id, &mob_id)
+                .await
             {
                 return true;
             }
@@ -1229,6 +1384,14 @@ impl MobMcpState {
             .collect()
     }
 
+    #[doc(hidden)]
+    pub async fn has_bridge_session_scoped_mobs(&self, bridge_session_id: &str) -> bool {
+        !self
+            .find_bridge_session_scoped_mobs(bridge_session_id)
+            .await
+            .is_empty()
+    }
+
     async fn implicit_mob_matches_session_model(
         &self,
         mob_id: &MobId,
@@ -1288,7 +1451,9 @@ impl MobMcpState {
             {
                 return Ok((mob_id, false));
             }
-            self.mob_destroy_unchecked(&mob_id).await?;
+            self.mob_destroy_unchecked(&mob_id)
+                .await
+                .map_err(MobMcpDestroyError::into_mob_error)?;
         }
 
         let mob_id = self
@@ -1323,7 +1488,7 @@ impl MobMcpState {
     pub async fn destroy_bridge_session_mobs(
         &self,
         bridge_session_id: &str,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobMcpDestroyError> {
         self.ensure_restored().await?;
         let mob_ids = self
             .find_bridge_session_scoped_mobs(bridge_session_id)
@@ -1331,6 +1496,7 @@ impl MobMcpState {
         if mob_ids.is_empty() {
             return Ok(());
         }
+        let mut first_error = None;
         for mob_id in &mob_ids {
             if let Err(error) = self.mob_destroy_unchecked(mob_id).await {
                 tracing::warn!(
@@ -1339,7 +1505,13 @@ impl MobMcpState {
                     error = %error,
                     "failed to destroy bridge-session-scoped mob during cleanup"
                 );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         // Prune the per-bridge-session lock to avoid unbounded growth in long-lived processes.
         let mut locks = self.implicit_mob_locks.lock().await;
@@ -1690,10 +1862,15 @@ struct LocalSessionService {
         RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
     counter: std::sync::atomic::AtomicU64,
     archive_delay_ms: std::sync::atomic::AtomicU64,
+    archive_failures: Arc<InMemoryArchiveFailureControl>,
 }
 
 impl LocalSessionService {
     fn new() -> Self {
+        Self::new_with_archive_failures(Arc::new(InMemoryArchiveFailureControl::default()))
+    }
+
+    fn new_with_archive_failures(archive_failures: Arc<InMemoryArchiveFailureControl>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             archived_views: RwLock::new(HashMap::new()),
@@ -1701,6 +1878,7 @@ impl LocalSessionService {
             event_txs: RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
             archive_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            archive_failures,
         }
     }
 
@@ -1824,6 +2002,7 @@ impl SessionService for LocalSessionService {
                 AgentEvent::RunCompleted {
                     session_id: id.clone(),
                     result: "ok".to_string(),
+                    structured_output: None,
                     usage,
                     terminal_cause_kind: None,
                 },
@@ -1847,6 +2026,10 @@ impl SessionService for LocalSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         Ok(())
+    }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -1897,6 +2080,9 @@ impl SessionService for LocalSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        if let Some(reason) = self.archive_failures.failure_for(id).await {
+            return Err(SessionError::Unsupported(reason));
+        }
         let archive_delay_ms = self
             .archive_delay_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -2078,6 +2264,16 @@ impl MobMcpState {
         let session_service = Arc::new(LocalSessionService::new());
         session_service.set_archive_delay_ms(delay_ms);
         Arc::new(Self::new(session_service))
+    }
+
+    #[doc(hidden)]
+    pub fn new_in_memory_with_archive_failure_control()
+    -> (Arc<Self>, Arc<InMemoryArchiveFailureControl>) {
+        let failures = Arc::new(InMemoryArchiveFailureControl::default());
+        let session_service = Arc::new(LocalSessionService::new_with_archive_failures(
+            failures.clone(),
+        ));
+        (Arc::new(Self::new(session_service)), failures)
     }
 }
 
@@ -2392,6 +2588,20 @@ fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
     ToolError::execution_failed(format!("tool '{}' failed: {err}", call.name))
 }
 
+fn map_destroy_err(call: ToolCallView<'_>, err: MobMcpDestroyError) -> ToolError {
+    match err {
+        MobMcpDestroyError::Incomplete { report } => ToolError::execution_failed_with_data(
+            format!(
+                "tool '{}' failed: mob destroy incomplete: {}",
+                call.name,
+                destroy_report_summary(&report)
+            ),
+            MobMcpDestroyError::incomplete_error_data(&report),
+        ),
+        MobMcpDestroyError::Mob(error) => map_mob_err(call, error),
+    }
+}
+
 #[derive(Deserialize)]
 struct MobCreateArgs {
     definition: MobDefinitionInput,
@@ -2657,7 +2867,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .state
                     .mob_lifecycle_action(&mob_id, args.action)
                     .await
-                    .map_err(|e| map_mob_err(call, e))?;
+                    .map_err(|e| map_destroy_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
             "mob_events" => {
@@ -2970,6 +3180,14 @@ impl McpToolError {
             data: None,
         }
     }
+
+    pub fn destroy_incomplete(report: &meerkat_mob::MobDestroyReport) -> Self {
+        Self {
+            code: meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
+            message: MobMcpDestroyError::incomplete_message(report),
+            data: Some(MobMcpDestroyError::incomplete_error_data(report)),
+        }
+    }
 }
 
 /// Return the agent-side `mob_*` dispatcher tool inventory.
@@ -3019,7 +3237,7 @@ pub async fn handle_tools_call(
         .map_err(|e| McpToolError {
             code: -32000,
             message: e.to_string(),
-            data: None,
+            data: e.structured_data(),
         })?;
     let text = result.result.text_content();
     serde_json::from_str(&text).map_err(|e| McpToolError {
@@ -3310,6 +3528,7 @@ mod tests {
                     .send(AgentEvent::InteractionComplete {
                         interaction_id: interaction_id_for_task,
                         result: "ok".to_string(),
+                        structured_output: None,
                     })
                     .await;
             });
@@ -3417,6 +3636,7 @@ mod tests {
     struct MockSessionSvc {
         sessions: RwLock<HashMap<SessionId, Arc<MockComms>>>,
         persisted_sessions: RwLock<HashMap<SessionId, Session>>,
+        archive_failures: RwLock<HashMap<SessionId, String>>,
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
@@ -3428,6 +3648,7 @@ mod tests {
             Self {
                 sessions: RwLock::new(HashMap::new()),
                 persisted_sessions: RwLock::new(HashMap::new()),
+                archive_failures: RwLock::new(HashMap::new()),
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
@@ -3444,6 +3665,22 @@ mod tests {
                 .write()
                 .await
                 .insert(session.id().clone(), session);
+        }
+
+        async fn fail_archive(&self, id: SessionId, reason: impl Into<String>) {
+            self.archive_failures
+                .write()
+                .await
+                .insert(id, reason.into());
+        }
+
+        async fn clear_archive_failure(&self, id: &SessionId) {
+            self.archive_failures.write().await.remove(id);
+        }
+
+        async fn session_exists(&self, id: &SessionId) -> bool {
+            self.sessions.read().await.contains_key(id)
+                || self.persisted_sessions.read().await.contains_key(id)
         }
     }
 
@@ -3589,6 +3826,9 @@ mod tests {
         }
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+            if let Some(reason) = self.archive_failures.read().await.get(id).cloned() {
+                return Err(SessionError::Unsupported(reason));
+            }
             let removed_live = self.sessions.write().await.remove(id).is_some();
             let removed_persisted = self.persisted_sessions.write().await.remove(id).is_some();
             if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
@@ -4027,6 +4267,29 @@ mod tests {
         d.dispatch(mk_call(name, &raw))
             .await
             .expect_err("tool call should fail")
+    }
+
+    #[test]
+    fn test_map_destroy_err_preserves_incomplete_error_data() {
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = mk_call("mob_lifecycle", &raw);
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.errors.push("worker: archive failed".to_string());
+
+        let error = map_destroy_err(call, MobMcpDestroyError::Incomplete { report });
+        let data = error
+            .structured_data()
+            .expect("incomplete destroy should include structured data");
+
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(data.get("destroy_report").is_some());
     }
 
     #[tokio::test]
@@ -5262,6 +5525,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_incomplete_mob_destroy_retains_storage_and_retry_anchor() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(
+            MobMcpState::new(svc.clone())
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+
+        let mob_id = state
+            .mob_create_definition(explicit_definition("partial-destroy-explicit"))
+            .await
+            .expect("create explicit mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let handle = state.handle_for(&mob_id).await.expect("mob handle");
+        let bridge_session_id = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+            .await
+            .expect("worker bridge session");
+        svc.fail_archive(
+            bridge_session_id.clone(),
+            "forced archive failure for partial destroy test",
+        )
+        .await;
+
+        let storage_root = MobMcpState::persistent_mob_root(root.path());
+        let storage_path = MobMcpState::persistent_storage_path(&storage_root, &mob_id);
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_ok(),
+            "persistent mob db should exist before destroy"
+        );
+
+        let public_payload = json!({
+            "mob_id": mob_id.to_string(),
+            "action": "destroy",
+        });
+        let err = crate::public_mcp::handle_public_tools_call(
+            &state,
+            "meerkat_mob_lifecycle",
+            &public_payload,
+        )
+        .await
+        .expect_err("incomplete destroy must fail closed");
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::InternalError.jsonrpc_code()
+        );
+        let data = err.data.expect("incomplete destroy should include data");
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            data.get("destroy_report")
+                .and_then(|report| report.get("errors"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|errors| !errors.is_empty()),
+            "partial destroy error data should include the destroy report errors: {data}"
+        );
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_ok(),
+            "incomplete destroy must retain persistent mob db"
+        );
+        assert!(
+            svc.session_exists(&bridge_session_id).await,
+            "failed ArchiveSession cleanup must leave the bridge session available for retry"
+        );
+        let members = state
+            .mob_list_members(&mob_id)
+            .await
+            .expect("list members after incomplete destroy");
+        assert!(
+            members
+                .iter()
+                .any(|member| member.agent_identity == "worker-1"),
+            "incomplete destroy must retain the failed member as retry work"
+        );
+        let mobs = state.mob_list().await;
+        assert!(
+            mobs.iter().any(|(id, _)| id == &mob_id),
+            "incomplete destroy must retain in-memory retry anchor"
+        );
+
+        svc.clear_archive_failure(&bridge_session_id).await;
+        let retry_report = state
+            .mob_destroy(&mob_id)
+            .await
+            .expect("retry should complete cleanup once archive succeeds");
+        assert!(retry_report.metadata_scrubbed);
+        assert!(retry_report.events_cleared);
+        assert!(retry_report.namespace_cleaned);
+        assert!(
+            !svc.session_exists(&bridge_session_id).await,
+            "complete retry must actually archive the bridge session before storage removal"
+        );
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_err(),
+            "complete retry should remove persistent mob db"
+        );
+        assert!(
+            state.mob_list().await.is_empty(),
+            "complete retry should remove retry anchor"
+        );
+    }
+
+    #[tokio::test]
     async fn test_default_constructor_exposes_realm_profile_crud_with_in_memory_store() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -5327,6 +5708,249 @@ mod tests {
                 .find_implicit_mob_for_bridge_session(&sid)
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_destroy_bridge_session_mobs_fails_closed_on_incomplete_destroy() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+        let sid = SessionId::new().to_string();
+
+        let mut definition = explicit_definition("bridge-session-partial-destroy");
+        definition.mark_owner_bridge_session_indexed(&sid);
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("create bridge-session-scoped mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let bridge_session_id = state
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle")
+            .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+            .await
+            .expect("worker bridge session");
+        svc.fail_archive(
+            bridge_session_id.clone(),
+            "forced bridge-session cleanup archive failure",
+        )
+        .await;
+
+        let err = state
+            .destroy_bridge_session_mobs(&sid)
+            .await
+            .expect_err("partial bridge-session cleanup must fail closed");
+        assert!(
+            matches!(err, MobMcpDestroyError::Incomplete { .. }),
+            "expected typed incomplete cleanup error, got {err:?}"
+        );
+        assert!(
+            state.handle_for(&mob_id).await.is_ok(),
+            "incomplete bridge-session cleanup must retain the mob retry anchor"
+        );
+
+        svc.clear_archive_failure(&bridge_session_id).await;
+        state
+            .destroy_bridge_session_mobs(&sid)
+            .await
+            .expect("retry should clean bridge-session mob");
+        assert!(
+            state.handle_for(&mob_id).await.is_err(),
+            "successful retry should remove bridge-session mob"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_session_with_mob_cleanup_surfaces_incomplete_and_retries_success() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+        let owner_session_id = SessionId::new();
+        svc.insert_persisted_session(Session::with_id(owner_session_id.clone()))
+            .await;
+
+        let mut definition = explicit_definition("archive-helper-partial-destroy");
+        definition.mark_owner_bridge_session_indexed(&owner_session_id.to_string());
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("create archive-helper-owned mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let bridge_session_id = state
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle")
+            .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+            .await
+            .expect("worker bridge session");
+        svc.fail_archive(
+            bridge_session_id.clone(),
+            "forced archive-helper cleanup archive failure",
+        )
+        .await;
+
+        let err = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &owner_session_id,
+        )
+        .await
+        .expect_err("archive helper must fail closed on incomplete mob cleanup");
+        let SessionError::FailedWithData { data, .. } = err else {
+            panic!("expected typed incomplete session error, got {err:?}");
+        };
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            state.handle_for(&mob_id).await.is_ok(),
+            "incomplete archive helper cleanup must retain the mob retry anchor"
+        );
+        assert!(
+            !svc.session_exists(&owner_session_id).await,
+            "first archive attempt should have removed the owner session before mob cleanup failed"
+        );
+        assert!(
+            svc.session_exists(&bridge_session_id).await,
+            "failed member archive must retain the bridge session for retry"
+        );
+
+        svc.clear_archive_failure(&bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &owner_session_id,
+        )
+        .await
+        .expect("retry should report success after retained mob cleanup completes");
+        assert!(
+            state.handle_for(&mob_id).await.is_err(),
+            "successful archive helper retry should remove the mob retry anchor"
+        );
+        assert!(
+            !svc.session_exists(&bridge_session_id).await,
+            "successful archive helper retry must archive the worker bridge session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_session_with_mob_cleanup_runs_member_retire_then_child_cleanup() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+        let parent_mob_id = state
+            .mob_create_definition(explicit_definition("archive-helper-live-parent"))
+            .await
+            .expect("create parent mob");
+        let parent_identity = AgentIdentity::from("worker-1");
+        state
+            .mob_spawn(
+                &parent_mob_id,
+                ProfileName::from("worker"),
+                parent_identity.clone(),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn parent worker");
+        let member_session_id = state
+            .handle_for(&parent_mob_id)
+            .await
+            .expect("parent mob handle")
+            .resolve_bridge_session_id(&parent_identity)
+            .await
+            .expect("parent member bridge session");
+
+        let mut child_definition = explicit_definition("archive-helper-live-member-child");
+        child_definition.mark_owner_bridge_session_indexed(&member_session_id.to_string());
+        let child_mob_id = state
+            .mob_create_definition(child_definition)
+            .await
+            .expect("create child mob owned by parent member session");
+        let child_identity = AgentIdentity::from("child-worker-1");
+        state
+            .mob_spawn(
+                &child_mob_id,
+                ProfileName::from("worker"),
+                child_identity.clone(),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn child worker");
+        let child_bridge_session_id = state
+            .handle_for(&child_mob_id)
+            .await
+            .expect("child mob handle")
+            .resolve_bridge_session_id(&child_identity)
+            .await
+            .expect("child worker bridge session");
+        svc.fail_archive(
+            child_bridge_session_id.clone(),
+            "forced archive-helper live-member child cleanup failure",
+        )
+        .await;
+
+        let err = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &member_session_id,
+        )
+        .await
+        .expect_err("archive helper must fail closed on child cleanup after member retire");
+        let SessionError::FailedWithData { data, .. } = err else {
+            panic!("expected typed incomplete child cleanup error, got {err:?}");
+        };
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert!(
+            !svc.session_exists(&member_session_id).await,
+            "successful parent retire must archive the mob member bridge session before child cleanup"
+        );
+        assert!(
+            state.handle_for(&child_mob_id).await.is_ok(),
+            "incomplete child cleanup must retain the child mob retry anchor"
+        );
+
+        svc.clear_archive_failure(&child_bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &member_session_id,
+        )
+        .await
+        .expect("retry should complete retained child cleanup after parent member retire");
+        assert!(
+            state.handle_for(&child_mob_id).await.is_err(),
+            "successful retry must remove the child mob retry anchor"
+        );
+        assert!(
+            !svc.session_exists(&child_bridge_session_id).await,
+            "successful retry must archive the child worker bridge session"
         );
     }
 

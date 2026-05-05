@@ -315,8 +315,6 @@ match event {
     AgentEvent::HookCompleted { hook_id, point, duration_ms } => {}
     AgentEvent::HookFailed { hook_id, point, error } => {}
     AgentEvent::HookDenied { hook_id, point, reason_code, message, .. } => {}
-    AgentEvent::HookRewriteApplied { hook_id, point, patch } => {}
-    AgentEvent::HookPatchPublished { hook_id, point, envelope } => {}
 
     // LLM interaction
     AgentEvent::TurnStarted { turn_number } => {}

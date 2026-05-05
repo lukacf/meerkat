@@ -136,6 +136,13 @@ pub enum ToolError {
     #[error("Tool execution failed: {message}")]
     ExecutionFailed { message: String },
 
+    /// The tool execution failed with structured error data for protocol surfaces.
+    #[error("Tool execution failed: {message}")]
+    ExecutionFailedWithData {
+        message: String,
+        data: serde_json::Value,
+    },
+
     /// The tool execution timed out
     #[error("Tool '{name}' timed out after {timeout_ms}ms")]
     Timeout { name: String, timeout_ms: u64 },
@@ -166,7 +173,9 @@ impl ToolError {
             Self::NotFound { .. } => "tool_not_found",
             Self::Unavailable { .. } => "tool_unavailable",
             Self::InvalidArguments { .. } => "invalid_arguments",
-            Self::ExecutionFailed { .. } => "execution_failed",
+            Self::ExecutionFailed { .. } | Self::ExecutionFailedWithData { .. } => {
+                "execution_failed"
+            }
             Self::Timeout { .. } => "timeout",
             Self::AccessDenied { .. } => "access_denied",
             Self::Other(_) => "tool_error",
@@ -175,10 +184,14 @@ impl ToolError {
     }
 
     pub fn to_error_payload(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "error": self.error_code(),
             "message": self.to_string(),
-        })
+        });
+        if let Some(data) = self.structured_data() {
+            payload["data"] = data;
+        }
+        payload
     }
 
     pub fn not_found(name: impl Into<String>) -> Self {
@@ -199,6 +212,18 @@ impl ToolError {
     pub fn execution_failed(message: impl Into<String>) -> Self {
         Self::ExecutionFailed {
             message: message.into(),
+        }
+    }
+    pub fn execution_failed_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self::ExecutionFailedWithData {
+            message: message.into(),
+            data,
+        }
+    }
+    pub fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::ExecutionFailedWithData { data, .. } => Some(data.clone()),
+            _ => None,
         }
     }
     pub fn timeout(name: impl Into<String>, timeout_ms: u64) -> Self {

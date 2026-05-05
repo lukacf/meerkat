@@ -728,16 +728,37 @@ if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
   )
 fi
 
+bb_args=()
+if [[ "${#startup_args[@]}" -gt 0 ]]; then
+  bb_args+=("${startup_args[@]}")
+fi
+bb_args+=("${command}")
+if [[ "${#module_lock_args[@]}" -gt 0 ]]; then
+  bb_args+=("${module_lock_args[@]}")
+fi
+if [[ "${#common_args[@]}" -gt 0 ]]; then
+  bb_args+=("${common_args[@]}")
+fi
+bb_args+=(
+  --config="${config}"
+  --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
+)
+if [[ "${#apple_platform_args[@]}" -gt 0 ]]; then
+  bb_args+=("${apple_platform_args[@]}")
+fi
+if [[ "${#extra_args[@]}" -gt 0 ]]; then
+  bb_args+=("${extra_args[@]}")
+fi
+if [[ -n "${target}" ]]; then
+  target_args=(${target})
+  if [[ "${#target_args[@]}" -gt 0 ]]; then
+    bb_args+=("${target_args[@]}")
+  fi
+fi
+bb_args+=("$@")
+
 set +e
-"${bb_bin}" "${startup_args[@]}" "${command}" \
-  "${module_lock_args[@]}" \
-  "${common_args[@]}" \
-  --config="${config}" \
-  --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}" \
-  "${apple_platform_args[@]}" \
-  "${extra_args[@]}" \
-  ${target} \
-  "$@"
+"${bb_bin}" "${bb_args[@]}"
 status="$?"
 set -e
 

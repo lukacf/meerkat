@@ -158,6 +158,22 @@ struct ArchiveRuntimeCleanup {
 }
 
 impl ArchiveRuntimeCleanup {
+    async fn has_retained_mob_cleanup(&self, session_id: &SessionId) -> bool {
+        #[cfg(feature = "mob")]
+        if let Some(mob_state) = self.mob_state.as_ref()
+            && mob_state
+                .has_bridge_session_scoped_mobs(&session_id.to_string())
+                .await
+        {
+            return true;
+        }
+
+        #[cfg(not(feature = "mob"))]
+        let _ = session_id;
+
+        false
+    }
+
     async fn archive_service(
         &self,
         service: &PersistentSessionService<FactoryAgentBuilder>,
@@ -171,7 +187,7 @@ impl ArchiveRuntimeCleanup {
             .await
     }
 
-    async fn run(&self, session_id: &SessionId) {
+    async fn run(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.runtime_adapter.unregister_session(session_id).await;
         if let Some(streams) = self.pending_session_event_streams.as_ref() {
             streams.lock().await.remove(session_id);
@@ -184,12 +200,16 @@ impl ArchiveRuntimeCleanup {
         }
         #[cfg(feature = "mob")]
         if let Some(mob_state) = self.mob_state.as_ref() {
-            let _ = mob_state
+            mob_state
                 .destroy_bridge_session_mobs(&session_id.to_string())
-                .await;
+                .await
+                .map_err(|error| {
+                    error.into_session_error("mob cleanup during archive incomplete")
+                })?;
         }
         #[cfg(feature = "comms")]
         self.runtime_adapter.abort_comms_drain(session_id).await;
+        Ok(())
     }
 }
 
@@ -500,8 +520,10 @@ async fn await_guarded_session_cleanup(
         if matches!(operation, GuardedSessionCleanupOperation::Archive)
             && matches!(result, Ok(()) | Err(SessionError::NotFound { .. }))
             && let Some(cleanup) = runtime_cleanup.as_ref()
+            && let Err(error) = cleanup.run(&session_id).await
         {
-            cleanup.run(&session_id).await;
+            let _ = result_tx.send(Err(error));
+            return;
         }
         let _ = result_tx.send(result);
     });
@@ -530,7 +552,19 @@ async fn await_guarded_staged_archive(
     tokio::spawn(async move {
         let result = match runtime_cleanup.archive_service(&service, &session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {
-                runtime_cleanup.run(&session_id).await;
+                if let Err(error) = runtime_cleanup.run(&session_id).await {
+                    let _ = staged_sessions.restore_archive(&session_id).await;
+                    staged_archive_guard.disarm();
+                    if let Some(admission) = staged_capacity_admission.take() {
+                        restore_staged_capacity_admission(
+                            &staged_capacity_admissions,
+                            session_id.clone(),
+                            admission,
+                        );
+                    }
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
                 #[cfg(test)]
                 if let Some(hook) = after_service_hook {
                     hook.reached_flag
@@ -576,8 +610,21 @@ async fn await_session_archive_with_runtime_cleanup(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = runtime_cleanup.archive_service(&service, &session_id).await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            runtime_cleanup.run(&session_id).await;
+        let service_not_found = matches!(&result, Err(SessionError::NotFound { .. }));
+        let retained_mob_cleanup = if service_not_found {
+            runtime_cleanup.has_retained_mob_cleanup(&session_id).await
+        } else {
+            false
+        };
+        if (result.is_ok() || service_not_found)
+            && let Err(error) = runtime_cleanup.run(&session_id).await
+        {
+            let _ = result_tx.send(Err(error));
+            return;
+        }
+        if service_not_found && retained_mob_cleanup {
+            let _ = result_tx.send(Ok(()));
+            return;
         }
         let _ = result_tx.send(result);
     });
@@ -914,6 +961,7 @@ struct RpcMobSessionService {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     staged_sessions: Arc<StagedSessionRegistry>,
     runtime_adapter: Arc<MeerkatMachine>,
+    mob_state: Arc<StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>>,
     #[cfg(test)]
     direct_create_after_ack_hook: Option<Arc<PendingPromotionPreTurnHook>>,
 }
@@ -927,7 +975,7 @@ impl RpcMobSessionService {
             #[cfg(feature = "mcp")]
             mcp_sessions: None,
             #[cfg(feature = "mob")]
-            mob_state: None,
+            mob_state: self.mob_state.read().ok().and_then(|slot| slot.clone()),
         }
     }
 
@@ -935,11 +983,13 @@ impl RpcMobSessionService {
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
         staged_sessions: Arc<StagedSessionRegistry>,
         runtime_adapter: Arc<MeerkatMachine>,
+        mob_state: Arc<StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>>,
     ) -> Self {
         Self {
             service,
             staged_sessions,
             runtime_adapter,
+            mob_state,
             #[cfg(test)]
             direct_create_after_ack_hook: None,
         }
@@ -1310,12 +1360,22 @@ impl SessionService for RpcMobSessionService {
         if self.staged_sessions.contains(id).await {
             return Err(SessionError::Busy { id: id.clone() });
         }
+        let cleanup = self.archive_runtime_cleanup();
         let result = self
             .service
             .archive_with_machine_authority(id, self.runtime_adapter.session_control_authority())
             .await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            self.archive_runtime_cleanup().run(id).await;
+        let service_not_found = matches!(&result, Err(SessionError::NotFound { .. }));
+        let retained_mob_cleanup = if service_not_found {
+            cleanup.has_retained_mob_cleanup(id).await
+        } else {
+            false
+        };
+        if result.is_ok() || service_not_found {
+            cleanup.run(id).await?;
+        }
+        if service_not_found && retained_mob_cleanup {
+            return Ok(());
         }
         result
     }
@@ -2147,7 +2207,7 @@ pub struct SessionRuntime {
     skill_identity_context_root: Arc<StdRwLock<Option<PathBuf>>>,
     skill_identity_user_root: Arc<StdRwLock<Option<PathBuf>>>,
     #[cfg(feature = "mob")]
-    mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
+    mob_state: Arc<StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Channel for sending callback tool requests to the RPC server loop.
@@ -2406,7 +2466,10 @@ impl SessionRuntime {
         }
         let _ = self.service.discard_live_session(session_id).await;
         self.discard_staged_capacity_admission(session_id);
-        self.archive_runtime_cleanup().run(session_id).await;
+        self.archive_runtime_cleanup()
+            .run(session_id)
+            .await
+            .map_err(session_error_to_rpc)?;
         Ok(true)
     }
 
@@ -2511,7 +2574,7 @@ impl SessionRuntime {
             skill_identity_context_root: Arc::new(StdRwLock::new(None)),
             skill_identity_user_root: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
+            mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             callback_request_tx: StdRwLock::new(None),
@@ -2607,7 +2670,7 @@ impl SessionRuntime {
             skill_identity_context_root: Arc::new(StdRwLock::new(None)),
             skill_identity_user_root: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
+            mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             callback_request_tx: StdRwLock::new(None),
@@ -2985,7 +3048,7 @@ impl SessionRuntime {
             .is_some_and(session_metadata_marks_archived);
         if archived_now {
             let _ = self.service.discard_live_session(session_id).await;
-            self.archive_runtime_cleanup().run(session_id).await;
+            let _ = self.archive_runtime_cleanup().run(session_id).await;
             return;
         }
 
@@ -2998,7 +3061,7 @@ impl SessionRuntime {
             || (!live_present && Self::completion_outcome_is_apply_failure(outcome))
         {
             let _ = self.service.discard_live_session(session_id).await;
-            self.archive_runtime_cleanup().run(session_id).await;
+            let _ = self.archive_runtime_cleanup().run(session_id).await;
         }
     }
 
@@ -3696,7 +3759,7 @@ impl SessionRuntime {
         runtime_was_registered: bool,
     ) {
         if !runtime_was_registered {
-            self.archive_runtime_cleanup().run(session_id).await;
+            let _ = self.archive_runtime_cleanup().run(session_id).await;
         }
     }
 
@@ -4413,6 +4476,7 @@ impl SessionRuntime {
             Arc::clone(&self.service),
             Arc::clone(&self.staged_sessions),
             Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state),
         ))
     }
 
@@ -5958,7 +6022,7 @@ impl SessionRuntime {
                 .create_session_after_prepare_bindings_session_id
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.clone());
-            self.archive_runtime_cleanup().run(&session_id).await;
+            let _ = self.archive_runtime_cleanup().run(&session_id).await;
             return Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message,
@@ -5973,7 +6037,7 @@ impl SessionRuntime {
         {
             Ok(build_config) => build_config,
             Err(err) => {
-                self.archive_runtime_cleanup().run(&session_id).await;
+                let _ = self.archive_runtime_cleanup().run(&session_id).await;
                 return Err(err);
             }
         };
@@ -5996,7 +6060,7 @@ impl SessionRuntime {
             )
             .await
         {
-            self.archive_runtime_cleanup().run(&session_id).await;
+            let _ = self.archive_runtime_cleanup().run(&session_id).await;
             return Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: format!("failed to stage session {session_id}: {err}"),
@@ -6005,7 +6069,7 @@ impl SessionRuntime {
         }
         if let Err(err) = self.insert_staged_capacity_admission(session_id.clone(), admission) {
             let _ = self.staged_sessions.abandon(&session_id).await;
-            self.archive_runtime_cleanup().run(&session_id).await;
+            let _ = self.archive_runtime_cleanup().run(&session_id).await;
             return Err(err);
         }
 
@@ -7890,9 +7954,11 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
     RpcError {
         code,
         message: err.to_string(),
-        data: core_apply_failure_cause.map(|cause| {
-            serde_json::json!({
-                "core_apply_failure_cause": cause
+        data: err.structured_data().or_else(|| {
+            core_apply_failure_cause.map(|cause| {
+                serde_json::json!({
+                    "core_apply_failure_cause": cause
+                })
             })
         }),
     }
@@ -13022,6 +13088,167 @@ mod tests {
     }
 
     #[cfg(feature = "mob")]
+    struct DirectArchiveFailClearEventStore {
+        inner: meerkat_mob::store::InMemoryMobEventStore,
+        fail_clear: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    impl DirectArchiveFailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
+                fail_clear: AtomicBool::new(true),
+            }
+        }
+
+        fn allow_clear(&self) {
+            self.fail_clear.store(false, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl meerkat_mob::store::MobEventStore for DirectArchiveFailClearEventStore {
+        async fn append(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<meerkat_mob::NewMobEvent>,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
+        {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
+            if self.fail_clear.load(AtomicOrdering::Relaxed) {
+                return Err(meerkat_mob::store::MobStoreError::Internal(
+                    "forced direct mob session archive clear failure".to_string(),
+                ));
+            }
+            self.inner.clear().await
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    async fn insert_direct_archive_partial_destroy_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &str,
+    ) -> (meerkat_mob::MobId, Arc<DirectArchiveFailClearEventStore>) {
+        let mob_id = meerkat_mob::MobId::from("direct-session-archive-partial-destroy");
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let events = Arc::new(DirectArchiveFailClearEventStore::new());
+        let storage = meerkat_mob::MobStorage::with_events(events.clone());
+        let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create direct-archive-owned mob with failing event clear");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        (mob_id, events)
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_archive_retry_returns_success_after_retained_cleanup_completes() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let service = runtime.session_service();
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(service.clone()));
+        runtime.set_mob_state(mob_state.clone());
+        let created = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create direct session service session");
+        let session_id = created.session_id;
+        let (mob_id, events) =
+            insert_direct_archive_partial_destroy_mob(&mob_state, &session_id.to_string()).await;
+
+        let first = service
+            .archive(&session_id)
+            .await
+            .expect_err("first direct archive should surface incomplete mob cleanup");
+        assert!(
+            matches!(first, SessionError::FailedWithData { .. }),
+            "direct archive should return typed incomplete cleanup data: {first:?}"
+        );
+        let retry = service
+            .archive(&session_id)
+            .await
+            .expect_err("retry should still report retained cleanup while fault persists");
+        assert!(
+            matches!(retry, SessionError::FailedWithData { .. }),
+            "direct archive retry should not collapse to stale NotFound: {retry:?}"
+        );
+
+        events.allow_clear();
+        service
+            .archive(&session_id)
+            .await
+            .expect("retry after retained mob cleanup completes should return success");
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_err(),
+            "successful direct archive retry must remove the retained mob cleanup anchor"
+        );
+    }
+
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_session_service_cancelled_deferred_create_after_ack_discards_admission() {
         let temp = tempfile::tempdir().unwrap();
@@ -13032,6 +13259,7 @@ mod tests {
                 Arc::clone(&runtime.service),
                 Arc::clone(&runtime.staged_sessions),
                 Arc::clone(&runtime.runtime_adapter),
+                Arc::clone(&runtime.mob_state),
             )
             .with_direct_create_after_ack_hook(Arc::clone(&hook)),
         );

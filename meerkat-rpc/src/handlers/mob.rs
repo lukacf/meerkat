@@ -27,7 +27,7 @@ use meerkat_mob::{
     MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult,
     ToolConfig,
 };
-use meerkat_mob_mcp::MobMcpState;
+use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -89,6 +89,18 @@ fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse
         }
         _ => invalid_params(id, err.to_string()),
     }
+}
+
+fn destroy_incomplete_response(
+    id: Option<RpcId>,
+    report: &meerkat_mob::MobDestroyReport,
+) -> RpcResponse {
+    RpcResponse::error_with_data(
+        id,
+        error::INTERNAL_ERROR,
+        MobMcpDestroyError::incomplete_message(report),
+        MobMcpDestroyError::incomplete_error_data(report),
+    )
 }
 
 fn mob_runtime_mode_from_wire(mode: WireMobRuntimeMode) -> MobRuntimeMode {
@@ -750,12 +762,9 @@ pub async fn handle_lifecycle(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    // `destroy` returns a structured `MobDestroyReport` with
-    // force_destroyed_members, orphaned_remote_members, partial errors, etc.
-    // The other lifecycle actions are `()` on success. Surface the report on
-    // destroy so clients (mobkit, tests) can distinguish clean destroy from
-    // partial cleanup instead of assuming `ok: true` means everything
-    // succeeded.
+    // `destroy` returns a structured `MobDestroyReport` only on complete
+    // cleanup. Incomplete cleanup is a typed JSON-RPC error carrying that
+    // report, which keeps `ok: true` reserved for fully completed destroy.
     let destroy_report = match params.action {
         WireMobLifecycleAction::Stop => match state.mob_stop(&mob_id).await {
             Ok(()) => None,
@@ -775,7 +784,10 @@ pub async fn handle_lifecycle(
         },
         WireMobLifecycleAction::Destroy => match state.mob_destroy(&mob_id).await {
             Ok(report) => Some(report),
-            Err(err) => return invalid_params(id, err.to_string()),
+            Err(MobMcpDestroyError::Incomplete { report }) => {
+                return destroy_incomplete_response(id, &report);
+            }
+            Err(MobMcpDestroyError::Mob(err)) => return invalid_params(id, err.to_string()),
         },
     };
     let mut body = serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true});
@@ -1311,11 +1323,9 @@ pub async fn handle_force_cancel(
 // mob/destroy (Finding C3)
 // ---------------------------------------------------------------------------
 
-/// Handle `mob/destroy` — dedicated destroy endpoint that always returns the
-/// structured `MobDestroyReport`. `mob/lifecycle action=destroy` already
-/// surfaces the report (A1), but callers often want an explicit destroy
-/// endpoint so the response body shape is predictable without branching on
-/// `action`. Finding C3.
+/// Handle `mob/destroy` — dedicated destroy endpoint that returns the
+/// structured `MobDestroyReport` on complete cleanup and a typed incomplete
+/// error with the report when cleanup remains retryable.
 pub async fn handle_destroy(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -1349,7 +1359,8 @@ pub async fn handle_destroy(
                 }),
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(MobMcpDestroyError::Incomplete { report }) => destroy_incomplete_response(id, &report),
+        Err(MobMcpDestroyError::Mob(err)) => invalid_params(id, err.to_string()),
     }
 }
 
@@ -2184,7 +2195,215 @@ pub async fn handle_list_members_matching(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use meerkat_mob::{AgentIdentity, AgentRuntimeId, FenceToken};
+    use async_trait::async_trait;
+    use meerkat_mob::store::{
+        InMemoryMobEventStore, MobEventReceiver, MobEventStore, MobStoreError,
+    };
+    use meerkat_mob::{
+        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobEvent, MobStorage,
+        NewMobEvent,
+    };
+    use std::sync::Arc;
+
+    struct FailClearEventStore {
+        inner: InMemoryMobEventStore,
+    }
+
+    impl FailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryMobEventStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MobEventStore for FailClearEventStore {
+        async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: NewMobEvent,
+        ) -> Result<Option<MobEvent>, MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<NewMobEvent>,
+        ) -> Result<Vec<MobEvent>, MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<MobEvent>, MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(&self) -> Result<MobEventReceiver, MobStoreError> {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), MobStoreError> {
+            Err(MobStoreError::Internal(
+                "forced destroy event clear failure".to_string(),
+            ))
+        }
+    }
+
+    fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mut definition = MobDefinition::explicit(mob_id.clone());
+        definition.profiles = profiles;
+        definition
+    }
+
+    async fn state_with_incomplete_destroy(mob_id: &MobId) -> Arc<MobMcpState> {
+        let state = MobMcpState::new_in_memory();
+        let storage = MobStorage::with_events(Arc::new(FailClearEventStore::new()));
+        let handle = MobBuilder::new(rpc_destroy_test_definition(mob_id), storage)
+            .with_session_service(state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create mob with failing clear store");
+        state.mob_insert_handle(mob_id.clone(), handle).await;
+        state
+    }
+
+    fn assert_destroy_incomplete_rpc_error(response: RpcResponse) {
+        assert!(response.result.is_none());
+        let error = response.error.expect("incomplete destroy should be error");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error.message.contains("mob destroy incomplete"),
+            "message should identify incomplete destroy: {}",
+            error.message
+        );
+        let data = error.data.expect("typed incomplete destroy data");
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let first_error = data
+            .get("destroy_report")
+            .and_then(|value| value.get("errors"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|errors| errors.first())
+            .and_then(serde_json::Value::as_str)
+            .expect("destroy report first error");
+        assert!(
+            first_error.contains("forced destroy event clear failure"),
+            "unexpected destroy report error: {first_error}"
+        );
+    }
+
+    #[test]
+    fn destroy_incomplete_response_is_typed_error_with_report()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.errors.push("worker-1: archive failed".to_string());
+
+        let response = destroy_incomplete_response(Some(RpcId::Num(7)), &report);
+
+        assert_destroy_incomplete_rpc_error_with_message(response, "worker-1: archive failed");
+        Ok(())
+    }
+
+    fn assert_destroy_incomplete_rpc_error_with_message(
+        response: RpcResponse,
+        expected_error: &str,
+    ) {
+        assert!(response.result.is_none());
+        let error = response.error.expect("incomplete destroy should be error");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error.message.contains("mob destroy incomplete"),
+            "message should identify incomplete destroy: {}",
+            error.message
+        );
+        let data = error.data.expect("typed incomplete destroy data");
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let first_error = data
+            .get("destroy_report")
+            .and_then(|value| value.get("errors"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|errors| errors.first())
+            .and_then(serde_json::Value::as_str)
+            .expect("destroy report first error");
+        assert!(
+            first_error.contains(expected_error),
+            "unexpected destroy report error: {first_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mob_destroy_handler_surfaces_incomplete_destroy_as_typed_error() {
+        let mob_id = MobId::from("rpc-partial-destroy");
+        let state = state_with_incomplete_destroy(&mob_id).await;
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+        }))
+        .expect("params");
+
+        let response = handle_destroy(Some(RpcId::Num(8)), Some(params.as_ref()), &state).await;
+
+        assert_destroy_incomplete_rpc_error(response);
+    }
+
+    #[tokio::test]
+    async fn mob_lifecycle_destroy_handler_surfaces_incomplete_destroy_as_typed_error() {
+        let mob_id = MobId::from("rpc-lifecycle-partial-destroy");
+        let state = state_with_incomplete_destroy(&mob_id).await;
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "action": "destroy",
+        }))
+        .expect("params");
+
+        let response = handle_lifecycle(Some(RpcId::Num(9)), Some(params.as_ref()), &state).await;
+
+        assert_destroy_incomplete_rpc_error(response);
+    }
 
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()

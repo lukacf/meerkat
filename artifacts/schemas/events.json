@@ -575,142 +575,6 @@
         "description": "Stable identifier for a configured hook.",
         "type": "string"
       },
-      "HookPatch": {
-        "description": "Typed patch intents used by rewrite hooks.",
-        "oneOf": [
-          {
-            "description": "Mutate effective LLM request parameters.",
-            "properties": {
-              "max_tokens": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "patch_type": {
-                "const": "llm_request",
-                "type": "string"
-              },
-              "provider_params": true,
-              "temperature": {
-                "format": "float",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "patch_type"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Replace assistant text content in the latest model response.",
-            "properties": {
-              "patch_type": {
-                "const": "assistant_text",
-                "type": "string"
-              },
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "text"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Replace serialized tool arguments.",
-            "properties": {
-              "args": {
-                "$ref": "#/$defs/ToolCallArguments"
-              },
-              "patch_type": {
-                "const": "tool_args",
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "args"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Mutate tool result payload before it is persisted.",
-            "properties": {
-              "content": {
-                "type": "string"
-              },
-              "is_error": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "patch_type": {
-                "const": "tool_result",
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "content"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Mutate final run output text.",
-            "properties": {
-              "patch_type": {
-                "const": "run_result",
-                "type": "string"
-              },
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "text"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "HookPatchEnvelope": {
-        "description": "Stable envelope emitted for async patch publication.",
-        "properties": {
-          "hook_id": {
-            "$ref": "#/$defs/HookId"
-          },
-          "patch": {
-            "$ref": "#/$defs/HookPatch"
-          },
-          "point": {
-            "$ref": "#/$defs/HookPoint"
-          },
-          "published_at": {
-            "type": "string"
-          },
-          "revision": {
-            "$ref": "#/$defs/HookRevision"
-          }
-        },
-        "required": [
-          "revision",
-          "hook_id",
-          "point",
-          "patch",
-          "published_at"
-        ],
-        "type": "object"
-      },
       "HookPoint": {
         "description": "Hook points available in V1.",
         "enum": [
@@ -735,12 +599,6 @@
           "runtime_error"
         ],
         "type": "string"
-      },
-      "HookRevision": {
-        "description": "Monotonic patch revision metadata.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -1460,6 +1318,9 @@
           "session_id": {
             "$ref": "#/$defs/SessionId"
           },
+          "structured_output": {
+            "description": "Structured output from the completed run, when schema extraction\nproduced a typed value."
+          },
           "terminal_cause_kind": {
             "anyOf": [
               {
@@ -1632,56 +1493,6 @@
           "point",
           "reason_code",
           "message"
-        ],
-        "type": "object"
-      },
-      {
-        "description": "A rewrite patch was applied synchronously.",
-        "properties": {
-          "hook_id": {
-            "$ref": "#/$defs/HookId"
-          },
-          "patch": {
-            "$ref": "#/$defs/HookPatch"
-          },
-          "point": {
-            "$ref": "#/$defs/HookPoint"
-          },
-          "type": {
-            "const": "hook_rewrite_applied",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "hook_id",
-          "point",
-          "patch"
-        ],
-        "type": "object"
-      },
-      {
-        "description": "A background patch was published for downstream surfaces.",
-        "properties": {
-          "envelope": {
-            "$ref": "#/$defs/HookPatchEnvelope"
-          },
-          "hook_id": {
-            "$ref": "#/$defs/HookId"
-          },
-          "point": {
-            "$ref": "#/$defs/HookPoint"
-          },
-          "type": {
-            "const": "hook_patch_published",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "hook_id",
-          "point",
-          "envelope"
         ],
         "type": "object"
       },
@@ -2180,6 +1991,9 @@
           },
           "result": {
             "type": "string"
+          },
+          "structured_output": {
+            "description": "Structured output from the completed interaction, when schema\nextraction produced a typed value."
           },
           "type": {
             "const": "interaction_complete",
@@ -2717,6 +2531,9 @@
               "session_id": {
                 "$ref": "#/$defs/SessionId"
               },
+              "structured_output": {
+                "description": "Structured output from the completed run, when schema extraction\nproduced a typed value."
+              },
               "terminal_cause_kind": {
                 "anyOf": [
                   {
@@ -2889,56 +2706,6 @@
               "point",
               "reason_code",
               "message"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A rewrite patch was applied synchronously.",
-            "properties": {
-              "hook_id": {
-                "$ref": "#/$defs/HookId"
-              },
-              "patch": {
-                "$ref": "#/$defs/HookPatch"
-              },
-              "point": {
-                "$ref": "#/$defs/HookPoint"
-              },
-              "type": {
-                "const": "hook_rewrite_applied",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "hook_id",
-              "point",
-              "patch"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A background patch was published for downstream surfaces.",
-            "properties": {
-              "envelope": {
-                "$ref": "#/$defs/HookPatchEnvelope"
-              },
-              "hook_id": {
-                "$ref": "#/$defs/HookId"
-              },
-              "point": {
-                "$ref": "#/$defs/HookPoint"
-              },
-              "type": {
-                "const": "hook_patch_published",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "hook_id",
-              "point",
-              "envelope"
             ],
             "type": "object"
           },
@@ -3438,6 +3205,9 @@
               "result": {
                 "type": "string"
               },
+              "structured_output": {
+                "description": "Structured output from the completed interaction, when schema\nextraction produced a typed value."
+              },
               "type": {
                 "const": "interaction_complete",
                 "type": "string"
@@ -3768,142 +3538,6 @@
         "description": "Stable identifier for a configured hook.",
         "type": "string"
       },
-      "HookPatch": {
-        "description": "Typed patch intents used by rewrite hooks.",
-        "oneOf": [
-          {
-            "description": "Mutate effective LLM request parameters.",
-            "properties": {
-              "max_tokens": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "patch_type": {
-                "const": "llm_request",
-                "type": "string"
-              },
-              "provider_params": true,
-              "temperature": {
-                "format": "float",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "patch_type"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Replace assistant text content in the latest model response.",
-            "properties": {
-              "patch_type": {
-                "const": "assistant_text",
-                "type": "string"
-              },
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "text"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Replace serialized tool arguments.",
-            "properties": {
-              "args": {
-                "$ref": "#/$defs/ToolCallArguments"
-              },
-              "patch_type": {
-                "const": "tool_args",
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "args"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Mutate tool result payload before it is persisted.",
-            "properties": {
-              "content": {
-                "type": "string"
-              },
-              "is_error": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "patch_type": {
-                "const": "tool_result",
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "content"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Mutate final run output text.",
-            "properties": {
-              "patch_type": {
-                "const": "run_result",
-                "type": "string"
-              },
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "patch_type",
-              "text"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "HookPatchEnvelope": {
-        "description": "Stable envelope emitted for async patch publication.",
-        "properties": {
-          "hook_id": {
-            "$ref": "#/$defs/HookId"
-          },
-          "patch": {
-            "$ref": "#/$defs/HookPatch"
-          },
-          "point": {
-            "$ref": "#/$defs/HookPoint"
-          },
-          "published_at": {
-            "type": "string"
-          },
-          "revision": {
-            "$ref": "#/$defs/HookRevision"
-          }
-        },
-        "required": [
-          "revision",
-          "hook_id",
-          "point",
-          "patch",
-          "published_at"
-        ],
-        "type": "object"
-      },
       "HookPoint": {
         "description": "Hook points available in V1.",
         "enum": [
@@ -3928,12 +3562,6 @@
           "runtime_error"
         ],
         "type": "string"
-      },
-      "HookRevision": {
-        "description": "Monotonic patch revision metadata.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -4697,8 +4325,6 @@
       "hook_completed",
       "hook_failed",
       "hook_denied",
-      "hook_rewrite_applied",
-      "hook_patch_published",
       "turn_started",
       "reasoning_delta",
       "reasoning_complete",

@@ -190,14 +190,16 @@ done < <(collect_changed_paths | awk 'NF' | sort -u)
 
 relevant=()
 global=0
-for path in "${changed[@]}"; do
-  if is_rust_relevant_path "${path}"; then
-    relevant+=("${path}")
-    if is_global_path "${path}"; then
-      global=1
+if [[ "${#changed[@]}" -gt 0 ]]; then
+  for path in "${changed[@]}"; do
+    if is_rust_relevant_path "${path}"; then
+      relevant+=("${path}")
+      if is_global_path "${path}"; then
+        global=1
+      fi
     fi
-  fi
-done
+  done
+fi
 
 if [[ "${#relevant[@]}" -eq 0 ]]; then
   echo "Cargo agent gate: no Rust build-relevant changes detected."
@@ -237,7 +239,7 @@ for path in "${relevant[@]}"; do
   while [[ -n "${dir}" && "${dir}" != "." ]]; do
     if [[ -f "${dir}/Cargo.toml" ]]; then
       pkg="$(package_name_for_dir "${dir}")"
-      if [[ -n "${pkg}" ]] && ! array_contains "${pkg}" "${package_names[@]}"; then
+      if [[ -n "${pkg}" ]] && ! array_contains "${pkg}" ${package_names[@]+"${package_names[@]}"}; then
         package_names+=("${pkg}")
       fi
       break
@@ -276,13 +278,13 @@ if [[ -n "${exact_selector_output}" ]]; then
         ;;
       feature=*)
         feature="${line#feature=}"
-        if ! array_contains "${feature}" "${exact_selector_features[@]}"; then
+        if ! array_contains "${feature}" ${exact_selector_features[@]+"${exact_selector_features[@]}"}; then
           exact_selector_features+=("${feature}")
         fi
         ;;
       test=*)
         test_name="${line#test=}"
-        if ! array_contains "${test_name}" "${exact_selector_tests[@]}"; then
+        if ! array_contains "${test_name}" ${exact_selector_tests[@]+"${exact_selector_tests[@]}"}; then
           exact_selector_tests+=("${test_name}")
         fi
         ;;
@@ -346,7 +348,7 @@ if [[ "${dry_run}" -eq 1 ]]; then
 fi
 
 if [[ "${run_clippy}" -eq 1 ]]; then
-  "$CARGO" clippy "${clippy_flags[@]}" "${clippy_target_args[@]}" -- -D warnings
+  "$CARGO" clippy "${clippy_flags[@]}" ${clippy_target_args[@]+"${clippy_target_args[@]}"} -- -D warnings
 fi
 if [[ "${run_tests}" -eq 1 ]]; then
   "$CARGO" nextest run "${test_flags[@]}" --profile fast --no-tests=pass \

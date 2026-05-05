@@ -1814,10 +1814,12 @@ fn interaction_terminal_event(
         CompletionOutcome::Completed(result) => AgentEvent::InteractionComplete {
             interaction_id,
             result: result.text,
+            structured_output: result.structured_output,
         },
         CompletionOutcome::CompletedWithoutResult => AgentEvent::InteractionComplete {
             interaction_id,
             result: String::new(),
+            structured_output: None,
         },
         CompletionOutcome::CallbackPending { tool_name, args } => {
             AgentEvent::InteractionCallbackPending {
@@ -2929,6 +2931,38 @@ mod tests {
             ),
             lifecycle_peer: Some("peer-1".to_string()),
             response_terminality: None,
+        }
+    }
+
+    #[test]
+    fn completed_outcome_maps_structured_output_to_interaction_complete() {
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let event = interaction_terminal_event(
+            interaction_id,
+            CompletionOutcome::Completed(meerkat_core::RunResult {
+                text: "{\"answer\":42}".to_string(),
+                session_id: meerkat_core::SessionId::new(),
+                usage: meerkat_core::Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: Some(json!({"answer": 42})),
+                schema_warnings: None,
+                skill_diagnostics: None,
+            }),
+        );
+
+        match event {
+            AgentEvent::InteractionComplete {
+                interaction_id: actual_id,
+                result,
+                structured_output,
+            } => {
+                assert_eq!(actual_id, interaction_id);
+                assert_eq!(result, "{\"answer\":42}");
+                assert_eq!(structured_output, Some(json!({"answer": 42})));
+            }
+            other => panic!("expected InteractionComplete, got {other:?}"),
         }
     }
 

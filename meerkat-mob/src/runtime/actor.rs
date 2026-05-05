@@ -1,5 +1,6 @@
 use super::disposal::{
-    BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
+    AbortOnError, BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy,
+    WarnAndContinue,
 };
 use super::flow_frame_engine::FlowFrameLoopStorePlan;
 use super::mob_member_lifecycle_projection::{
@@ -297,6 +298,11 @@ struct RemoteDestroyOutcome {
     errors: Vec<String>,
 }
 
+struct RuntimeMetadataSnapshot {
+    supervisor: Option<crate::store::SupervisorAuthorityRecord>,
+    external_binding_overlays: Vec<crate::store::ExternalBindingOverlayRecord>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExpectedRevokeCleanupFailure {
@@ -391,6 +397,11 @@ pub(super) struct MobActor {
     /// first dispatch failure surfaces as a typed `MobError`, no silent
     /// drops.
     pub(super) pending_routed_effects: Vec<super::composition::MobSeamEffect>,
+    /// Durable destroy admission has been recorded. Once this flips, public
+    /// mutation authority is closed in-process even if cleanup returns
+    /// `Incomplete`; only a later destroy retry may continue cleanup.
+    pub(super) destroy_admitted: bool,
+    pub(super) destroy_cleanup_active: bool,
 }
 
 impl MobActor {
@@ -1293,18 +1304,39 @@ impl MobActor {
         Ok(())
     }
 
-    /// Project the DSL authority's `lifecycle_phase` into the shell
-    /// `MobState` enum. The DSL authority is the single source of truth
-    /// for the mob phase; external observers read the same value via
-    /// `MobCommand::QueryPhase` (dogma #1, #13, #17).
-    fn state(&self) -> MobState {
+    fn dsl_state(&self) -> MobState {
         project_dsl_phase(self.dsl_authority.state.lifecycle_phase)
+    }
+
+    /// Project observable shell phase. A durable `MobDestroying` event closes
+    /// public live authority before all cleanup necessarily completes, so the
+    /// same-process projection must match restart projection and fail closed.
+    fn state(&self) -> MobState {
+        if self.destroy_admitted {
+            MobState::Destroyed
+        } else {
+            self.dsl_state()
+        }
     }
 
     fn publish_machine_state_projection(&self) {
         let _ = self
             .machine_state_watch_tx
             .send(self.dsl_authority.state.clone());
+    }
+
+    fn destroy_admitted_error(&self, _context: &str) -> MobError {
+        MobError::InvalidTransition {
+            from: MobState::Destroyed,
+            to: MobState::Destroyed,
+        }
+    }
+
+    fn ensure_destroy_mutation_allowed(&self, context: &str) -> Result<(), MobError> {
+        if self.destroy_admitted && !self.destroy_cleanup_active {
+            return Err(self.destroy_admitted_error(context));
+        }
+        Ok(())
     }
 
     fn apply_dsl_input(
@@ -1321,6 +1353,7 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
             .map_err(|e| {
@@ -1353,6 +1386,7 @@ impl MobActor {
         inputs: &[mob_dsl::MobMachineInput],
         context: &str,
     ) -> Result<PreparedDslInput, MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
         let mut authority =
             mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
         let mut effects = Vec::new();
@@ -1451,6 +1485,7 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<mob_dsl::MobMachineState, MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
         let mut authority =
             mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
@@ -1470,6 +1505,7 @@ impl MobActor {
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<(), MobError> {
+        self.ensure_destroy_mutation_allowed(context)?;
         let signal_debug = format!("{signal:?}");
         let transition = self
             .dsl_authority
@@ -3657,7 +3693,10 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RotateSupervisor { reply_tx } => {
-                    let result = self.handle_rotate_supervisor().await;
+                    let result = match self.ensure_destroy_mutation_allowed("rotate_supervisor") {
+                        Ok(()) => self.handle_rotate_supervisor().await,
+                        Err(error) => Err(error),
+                    };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::PollEvents {
@@ -3807,6 +3846,17 @@ impl MobActor {
             // dropping the effect. Once the spine lands C-6c, the
             // dispatcher resolves cleanly and this path becomes
             // everyday.
+            if self.destroy_admitted
+                && !self.destroy_cleanup_active
+                && !self.pending_routed_effects.is_empty()
+            {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    queued_remaining = self.pending_routed_effects.len(),
+                    "retaining destroy cleanup routed effects for explicit destroy retry"
+                );
+                continue;
+            }
             if let Err(error) = self.flush_routed_effects().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
@@ -7131,6 +7181,48 @@ impl MobActor {
         }
     }
 
+    fn acknowledge_absent_session_ingress_for_mob_destroy(
+        &mut self,
+        agent_identity: &MeerkatId,
+        obligation: MobDestroyingSessionIngressObligation,
+    ) -> Result<(), MobError> {
+        crate::generated::protocol_mob_destroying_session_ingress::submit_session_ingress_detached_for_mob_destroy(
+            &mut self.dsl_authority,
+            obligation,
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine SessionIngressDetachedForMobDestroy transition rejected for member '{agent_identity}' without bridge session: {error}"
+            ))
+        })?;
+        self.publish_machine_state_projection();
+        Ok(())
+    }
+
+    fn destroy_ingress_detach_session_id(
+        entry: &RosterEntry,
+        releasing: Option<&mob_dsl::SessionId>,
+    ) -> Result<Option<SessionId>, MobError> {
+        if let Some(session_id) = entry.member_ref.bridge_session_id().cloned() {
+            return Ok(Some(session_id));
+        }
+        releasing
+            .map(|session_id| {
+                if session_id.0.is_empty() {
+                    return Ok(None);
+                }
+                SessionId::parse(&session_id.0).map_err(|_| {
+                    MobError::Internal(format!(
+                        "destroy retire for member '{}' has invalid bridge session binding '{}'",
+                        entry.agent_identity, session_id.0
+                    ))
+                })
+                .map(Some)
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
     async fn detach_runtime_session_ingress(&self, session_id: &SessionId) -> Result<(), MobError> {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = &self.runtime_adapter {
@@ -7153,21 +7245,42 @@ impl MobActor {
         entry: &RosterEntry,
     ) -> Result<(), MobError> {
         let agent_identity = &entry.agent_identity;
-        let retire_event_already_present = self
-            .retire_event_exists(agent_identity, &entry.member_ref)
-            .await?;
-        if !retire_event_already_present {
-            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
-                .await?;
-        }
-
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
         let releasing = self
             .dsl_authority
             .state
             .member_session_bindings
             .get(&dsl_identity)
             .cloned();
+        if self
+            .dsl_authority
+            .state
+            .pending_session_ingress_detach_runtime_ids
+            .contains(&dsl_runtime_id)
+        {
+            let obligation = MobDestroyingSessionIngressObligation {
+                mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+                agent_runtime_id: dsl_runtime_id,
+            };
+            if let Some(detach_session_id) =
+                Self::destroy_ingress_detach_session_id(entry, releasing.as_ref())?
+            {
+                self.detach_session_ingress_for_mob_destroy(&detach_session_id, obligation)
+                    .await?;
+            } else {
+                self.acknowledge_absent_session_ingress_for_mob_destroy(
+                    agent_identity,
+                    obligation,
+                )?;
+            }
+            {
+                let mut roster = self.roster.write().await;
+                roster.mark_retiring_by_identity(agent_identity);
+            }
+            return self.flush_routed_effects().await;
+        }
+
         let session_id_for_route = releasing
             .clone()
             .unwrap_or_else(mob_dsl::SessionId::default);
@@ -7187,18 +7300,17 @@ impl MobActor {
                 &effects,
             );
         if let Some(obligation) = detach_obligations.pop() {
-            let detach_session_id = entry
-                .member_ref
-                .bridge_session_id()
-                .cloned()
-                .or_else(|| releasing.and_then(|session_id| SessionId::parse(&session_id.0).ok()))
-                .ok_or_else(|| {
-                    MobError::Internal(format!(
-                        "destroy retire for member '{agent_identity}' opened a session ingress detach obligation without a bridge session id"
-                    ))
-                })?;
-            self.detach_session_ingress_for_mob_destroy(&detach_session_id, obligation)
-                .await?;
+            if let Some(detach_session_id) =
+                Self::destroy_ingress_detach_session_id(entry, releasing.as_ref())?
+            {
+                self.detach_session_ingress_for_mob_destroy(&detach_session_id, obligation)
+                    .await?;
+            } else {
+                self.acknowledge_absent_session_ingress_for_mob_destroy(
+                    agent_identity,
+                    obligation,
+                )?;
+            }
         }
 
         {
@@ -7819,6 +7931,51 @@ impl MobActor {
         report
     }
 
+    /// Destroy cleanup must keep canonical member/session authority until all
+    /// critical per-member cleanup steps succeed. General member disposal
+    /// removes roster state in a finally block, but destroy retries rebuild
+    /// cleanup work from the roster after a partial attempt.
+    async fn dispose_member_for_destroy(&mut self, ctx: &DisposalContext) -> DisposalReport {
+        let mut report = DisposalReport::new();
+        let mut policy = AbortOnError;
+
+        for &step in &DisposalStep::ORDERED {
+            match self.execute_destroy_step(step, ctx).await {
+                Ok(()) => report.completed.push(step),
+                Err(error) => {
+                    if policy.on_step_error(step, &error, ctx) {
+                        report.skipped.push((step, error));
+                    } else {
+                        report.aborted_at = Some((step, error));
+                        break;
+                    }
+                }
+            }
+        }
+        report
+    }
+
+    async fn execute_destroy_step(
+        &mut self,
+        step: DisposalStep,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        match step {
+            DisposalStep::StopHostLoop => self.dispose_stop_host_loop_for_destroy(ctx).await,
+            _ => self.execute_step(step, ctx).await,
+        }
+    }
+
+    fn destroy_disposal_failure(report: &DisposalReport) -> Option<String> {
+        if let Some((step, error)) = &report.aborted_at {
+            return Some(format!("disposal aborted at {step}: {error}"));
+        }
+        report
+            .skipped
+            .first()
+            .map(|(step, error)| format!("disposal completed but {step} failed: {error}"))
+    }
+
     /// Dispatch a disposal step. Exhaustive match ensures compiler forces new
     /// arms when `DisposalStep` variants are added.
     async fn execute_step(
@@ -7845,6 +8002,27 @@ impl MobActor {
                 .await;
         }
         Ok(())
+    }
+
+    async fn dispose_stop_host_loop_for_destroy(
+        &mut self,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        if ctx.entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+            return Ok(());
+        }
+        #[cfg(feature = "runtime-adapter")]
+        if let (Some(adapter), Some(session_id)) = (
+            &self.runtime_adapter,
+            ctx.entry.member_ref.bridge_session_id(),
+        ) && !adapter.contains_session(session_id).await
+        {
+            // A prior partial destroy can stop and unregister the autonomous
+            // runtime, then fail later at ArchiveSession. Retry must continue
+            // from the retained roster anchor and reach ArchiveSession again.
+            return Ok(());
+        }
+        self.dispose_stop_host_loop(ctx).await
     }
 
     /// Notify all wired peers that this member is retiring.
@@ -8084,6 +8262,114 @@ impl MobActor {
             .map_err(MobError::from)
     }
 
+    async fn record_destroy_member_retired_event(
+        &self,
+        entry: &RosterEntry,
+    ) -> Result<(), MobError> {
+        let retire_event_already_present = self
+            .retire_event_exists(&entry.agent_identity, &entry.member_ref)
+            .await?;
+        if !retire_event_already_present {
+            self.append_retire_event(&entry.agent_identity, &entry.role, &entry.member_ref)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn record_destroying_event(&mut self) -> Result<(), MobError> {
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobDestroying,
+            })
+            .await?;
+        self.destroy_admitted = true;
+        let _ = self.phase_watch_tx.send(MobState::Destroyed);
+        self.publish_machine_state_projection();
+        Ok(())
+    }
+
+    async fn destroy_storage_finalizing_event_exists(&self) -> Result<bool, MobError> {
+        let events = self.events.replay_all().await?;
+        let epoch_start = events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+            .map_or(0, |pos| pos + 1);
+        Ok(events[epoch_start..]
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing)))
+    }
+
+    async fn record_destroy_storage_finalizing_event(&self) -> Result<(), MobError> {
+        if self.destroy_storage_finalizing_event_exists().await? {
+            return Ok(());
+        }
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobDestroyStorageFinalizing,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn runtime_metadata_snapshot(&self) -> Result<RuntimeMetadataSnapshot, MobError> {
+        Ok(RuntimeMetadataSnapshot {
+            supervisor: self
+                .runtime_metadata
+                .load_supervisor_authority(&self.definition.id)
+                .await?,
+            external_binding_overlays: self
+                .runtime_metadata
+                .list_external_binding_overlays(&self.definition.id)
+                .await?,
+        })
+    }
+
+    async fn restore_runtime_metadata_snapshot(
+        &self,
+        snapshot: &RuntimeMetadataSnapshot,
+    ) -> Result<(), MobError> {
+        if let Some(supervisor) = &snapshot.supervisor {
+            self.runtime_metadata
+                .put_supervisor_authority(&self.definition.id, supervisor)
+                .await?;
+        }
+        for overlay in &snapshot.external_binding_overlays {
+            self.runtime_metadata
+                .upsert_external_binding_overlay(&self.definition.id, overlay)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn incomplete_after_metadata_scrub_error(
+        &self,
+        mut report: super::handle::MobDestroyReport,
+        snapshot: &RuntimeMetadataSnapshot,
+        error: impl std::fmt::Display,
+    ) -> super::handle::MobDestroyError {
+        report.push_error(error.to_string());
+        if let Err(restore_error) = self.restore_runtime_metadata_snapshot(snapshot).await {
+            report.push_error(format!(
+                "runtime metadata restore failed after incomplete destroy: {restore_error}"
+            ));
+        }
+        report.metadata_scrubbed = false;
+        super::handle::MobDestroyError::Incomplete { report }
+    }
+
+    fn incomplete_destroy_error(
+        mut report: super::handle::MobDestroyReport,
+        context: &str,
+        error: impl std::fmt::Display,
+    ) -> super::handle::MobDestroyError {
+        report.push_error(format!("{context}: {error}"));
+        super::handle::MobDestroyError::Incomplete { report }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn expected_revoke_cleanup_failure(error: &MobError) -> Option<ExpectedRevokeCleanupFailure> {
         match error {
@@ -8138,22 +8424,11 @@ impl MobActor {
         let ctx = self
             .disposal_context_from_entry(&agent_identity, &entry)
             .await;
-        let mut policy = BulkBestEffort;
-        let disposal = self.dispose_member(&ctx, &mut policy).await;
+        let disposal = self.dispose_member_for_destroy(&ctx).await;
 
-        let archive_error = disposal
-            .skipped
-            .iter()
-            .find(|(step, _)| *step == DisposalStep::ArchiveSession)
-            .map(|(_, error)| error.to_string())
-            .or_else(|| {
-                disposal.aborted_at.as_ref().and_then(|(step, error)| {
-                    (*step == DisposalStep::ArchiveSession).then(|| error.to_string())
-                })
-            });
-
-        let mut remote_cleanup_complete = archive_error.is_none();
-        if let Some(error) = archive_error {
+        let disposal_error = Self::destroy_disposal_failure(&disposal);
+        let mut remote_cleanup_complete = disposal_error.is_none();
+        if let Some(error) = disposal_error {
             outcome
                 .errors
                 .push(format!("graceful retire failed: {error}"));
@@ -8221,6 +8496,17 @@ impl MobActor {
         }
 
         outcome.orphaned = !remote_cleanup_complete || revoke_failed;
+        if !outcome.orphaned {
+            if let Err(error) = self.record_destroy_member_retired_event(&entry).await {
+                outcome
+                    .errors
+                    .push(format!("durable retire event append failed: {error}"));
+                outcome.orphaned = true;
+                return outcome;
+            }
+            self.dispose_prune_edge_locks(&ctx).await;
+            self.dispose_remove_from_roster(&ctx).await;
+        }
         outcome
     }
 
@@ -8307,28 +8593,9 @@ impl MobActor {
         let ctx = self
             .disposal_context_from_entry(&entry.agent_identity, &entry)
             .await;
-        let mut policy = BulkBestEffort;
-        let disposal_report = self.dispose_member(&ctx, &mut policy).await;
-        if let Some((_, error)) = disposal_report
-            .skipped
-            .iter()
-            .find(|(step, _)| *step == DisposalStep::ArchiveSession)
-        {
-            report.push_error(format!(
-                "{}: disposal completed but ArchiveSession failed: {error}",
-                entry.agent_identity
-            ));
-            return Err(super::handle::MobDestroyError::Incomplete {
-                report: report.clone(),
-            });
-        }
-        if let Some((step, error)) = &disposal_report.aborted_at
-            && *step == DisposalStep::ArchiveSession
-        {
-            report.push_error(format!(
-                "{}: disposal aborted at ArchiveSession: {error}",
-                entry.agent_identity
-            ));
+        let disposal_report = self.dispose_member_for_destroy(&ctx).await;
+        if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
+            report.push_error(format!("{}: {error}", entry.agent_identity));
             return Err(super::handle::MobDestroyError::Incomplete {
                 report: report.clone(),
             });
@@ -8342,57 +8609,143 @@ impl MobActor {
                 report: report.clone(),
             });
         }
+        if let Err(error) = self.record_destroy_member_retired_event(&entry).await {
+            report.push_error(format!(
+                "{}: durable retire event append failed: {error}",
+                entry.agent_identity
+            ));
+            return Err(super::handle::MobDestroyError::Incomplete {
+                report: report.clone(),
+            });
+        }
+        self.dispose_prune_edge_locks(&ctx).await;
+        self.dispose_remove_from_roster(&ctx).await;
         Ok(())
     }
 
     async fn handle_destroy(
         &mut self,
     ) -> Result<super::handle::MobDestroyReport, super::handle::MobDestroyError> {
+        let was_active = self.destroy_cleanup_active;
+        self.destroy_cleanup_active = true;
+        let result = self.handle_destroy_inner().await;
+        self.destroy_cleanup_active = was_active;
+        result
+    }
+
+    async fn handle_destroy_inner(
+        &mut self,
+    ) -> Result<super::handle::MobDestroyReport, super::handle::MobDestroyError> {
         use super::handle::{MobDestroyError, MobDestroyReport};
 
         let mut report = MobDestroyReport::default();
+        let destroy_input_needed = self.dsl_state() != crate::runtime::MobState::Destroyed;
 
         self.ensure_pending_spawn_alignment("handle_destroy preflight")
-            .map_err(MobDestroyError::from)?;
+            .map_err(|error| {
+                if self.destroy_admitted {
+                    Self::incomplete_destroy_error(
+                        report.clone(),
+                        "pending spawn alignment during admitted destroy failed",
+                        error,
+                    )
+                } else {
+                    MobDestroyError::from(error)
+                }
+            })?;
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await
-            .map_err(MobDestroyError::from)?;
-        self.fail_all_pending_spawns("mob is destroying").await;
+            .map_err(|error| {
+                if self.destroy_admitted {
+                    Self::incomplete_destroy_error(
+                        report.clone(),
+                        "flow tracker alignment during admitted destroy failed",
+                        error,
+                    )
+                } else {
+                    MobDestroyError::from(error)
+                }
+            })?;
         let entries = {
             let roster = self.roster.read().await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
-        if self.has_orchestrator {
+        if !self.destroy_admitted
+            && destroy_input_needed
+            && let Err(error) = self.record_destroying_event().await
+        {
+            report.push_error(format!("destroy marker append failed: {error}"));
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        self.fail_all_pending_spawns("mob is destroying").await;
+        if destroy_input_needed && self.has_orchestrator {
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::StopOrchestrator,
                 "stop_orchestrator_destroy",
             )
-            .map_err(MobDestroyError::from)?;
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "stop orchestrator during destroy failed",
+                    error,
+                )
+            })?;
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::DestroyOrchestrator,
                 "destroy_orchestrator",
             )
-            .map_err(MobDestroyError::from)?;
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "destroy orchestrator during destroy failed",
+                    error,
+                )
+            })?;
         }
-        for entry in &entries {
-            if let Err(error) = self.admit_member_retire_for_destroy(entry).await {
-                report.push_error(format!(
-                    "{}: destroy retire admission failed: {error}",
-                    entry.agent_identity
-                ));
-                return Err(MobDestroyError::Incomplete { report });
+        if destroy_input_needed {
+            for entry in &entries {
+                if let Err(error) = self.admit_member_retire_for_destroy(entry).await {
+                    report.push_error(format!(
+                        "{}: destroy retire admission failed: {error}",
+                        entry.agent_identity
+                    ));
+                    return Err(MobDestroyError::Incomplete { report });
+                }
             }
         }
-        self.cancel_all_flow_tasks()
-            .await
-            .map_err(MobDestroyError::from)?;
-        self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
-            .map_err(MobDestroyError::from)?;
-        self.flush_routed_effects()
-            .await
-            .map_err(MobDestroyError::from)?;
-        self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
+        self.cancel_all_flow_tasks().await.map_err(|error| {
+            Self::incomplete_destroy_error(
+                report.clone(),
+                "cancel flow tasks during destroy failed",
+                error,
+            )
+        })?;
+        if destroy_input_needed {
+            self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
+                .map_err(|error| {
+                    Self::incomplete_destroy_error(
+                        report.clone(),
+                        "destroy machine transition failed",
+                        error,
+                    )
+                })?;
+        }
+        if !self.pending_routed_effects.is_empty() {
+            self.flush_routed_effects().await.map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "destroy routed effect dispatch failed",
+                    error,
+                )
+            })?;
+        }
+        if destroy_input_needed {
+            self.notify_orchestrator_lifecycle(format!(
+                "Mob '{}' is destroying.",
+                self.definition.id
+            ))
             .await;
+        }
         let (remote_entries, local_entries): (Vec<_>, Vec<_>) = entries
             .into_iter()
             .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
@@ -8403,34 +8756,12 @@ impl MobActor {
         }
         self.destroy_remote_members_for_destroy(remote_entries, &mut report)
             .await;
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_external_binding_overlays(&self.definition.id)
-            .await
+        if report.remote_cleanup_deadline_exceeded
+            || !report.orphaned_remote_members.is_empty()
+            || !report.errors.is_empty()
         {
-            report.push_error(error.to_string());
             return Err(MobDestroyError::Incomplete { report });
         }
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_supervisor_authority(&self.definition.id)
-            .await
-        {
-            report.push_error(error.to_string());
-            return Err(MobDestroyError::Incomplete { report });
-        }
-        report.metadata_scrubbed = true;
-        if let Err(error) = self.events.clear().await {
-            report.push_error(error.to_string());
-            return Err(MobDestroyError::Incomplete { report });
-        }
-        report.events_cleared = true;
-        if let Err(error) = self.cleanup_namespace().await {
-            report.push_error(error.to_string());
-            return Err(MobDestroyError::Incomplete { report });
-        }
-        report.namespace_cleaned = true;
-        self.edge_locks.clear().await;
         self.ensure_pending_spawn_alignment("handle_destroy completion")
             .map_err(|error| {
                 let mut report = report.clone();
@@ -8444,6 +8775,52 @@ impl MobActor {
                 report.push_error(error.to_string());
                 MobDestroyError::Incomplete { report }
             })?;
+        if let Err(error) = self.cleanup_namespace().await {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        report.namespace_cleaned = true;
+        self.record_destroy_storage_finalizing_event()
+            .await
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "record destroy storage finalizing event failed",
+                    error,
+                )
+            })?;
+        let runtime_metadata_snapshot =
+            self.runtime_metadata_snapshot().await.map_err(|error| {
+                let mut report = report.clone();
+                report.push_error(error.to_string());
+                MobDestroyError::Incomplete { report }
+            })?;
+        if let Err(error) = self
+            .runtime_metadata
+            .delete_external_binding_overlays(&self.definition.id)
+            .await
+        {
+            return Err(self
+                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
+                .await);
+        }
+        if let Err(error) = self
+            .runtime_metadata
+            .delete_supervisor_authority(&self.definition.id)
+            .await
+        {
+            return Err(self
+                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
+                .await);
+        }
+        report.metadata_scrubbed = true;
+        if let Err(error) = self.events.clear().await {
+            return Err(self
+                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
+                .await);
+        }
+        report.events_cleared = true;
+        self.edge_locks.clear().await;
         if report.remote_cleanup_deadline_exceeded
             || !report.orphaned_remote_members.is_empty()
             || !report.errors.is_empty()
@@ -10734,7 +11111,10 @@ impl MobActor {
                 (TerminalizationTarget::Canceled, MobRunStatus::Failed)
             )
         {
-            return Ok(TerminalizationOutcome::Noop);
+            return self
+                .flow_engine
+                .repair_persisted_terminalization(run_id, flow_id, target)
+                .await;
         }
 
         let authority_input = command.authority_input(&run_id);

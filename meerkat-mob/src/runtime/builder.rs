@@ -439,11 +439,13 @@ fn seed_mob_authority_restore_failures(
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
-    /// Resumed-or-initial phase threaded from the builder's reconstruction
-    /// logic into `start_runtime_with_components` where it seeds the DSL
-    /// authority. The DSL authority is the single source of truth for the
-    /// lifecycle phase — no atomic shadow exists (dogma #1, #13, #17).
-    initial_phase: MobState,
+    /// Observable phase threaded from the builder's reconstruction logic into
+    /// `start_runtime_with_components`. This can differ from the DSL authority
+    /// phase after a retained `MobDestroying` marker: public authority is
+    /// terminal, while the DSL authority must still be able to replay missing
+    /// retire/destroy cleanup transitions on retry.
+    public_phase: MobState,
+    destroy_admitted: bool,
     /// DSL authority pre-seeded from the reconstructed roster on resume paths
     /// (and from scratch on create paths). Carried through the wiring so the
     /// actor receives membership-populated authority state before the first
@@ -833,22 +835,76 @@ impl MobBuilder {
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
+        // Determine resumed state from events in the current epoch (after the
+        // last MobReset, or all events if no reset has occurred). Do this
+        // before supervisor-authority recovery so destroy-finalizing storage
+        // can fail closed instead of minting replacement live authority.
+        let epoch_start = mob_events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+            .map_or(0, |pos| pos + 1);
+        let epoch_events = &mob_events[epoch_start..];
+        let destroy_storage_finalizing = epoch_events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroyStorageFinalizing));
+        let destroy_admitted = epoch_events.iter().any(|event| {
+            matches!(
+                event.kind,
+                MobEventKind::MobDestroying | MobEventKind::MobDestroyStorageFinalizing
+            )
+        });
+        let resumed_state = if destroy_admitted {
+            MobState::Destroyed
+        } else if epoch_events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
+        {
+            MobState::Completed
+        } else {
+            MobState::Running
+        };
+        let dsl_seed_state = if destroy_admitted && !destroy_storage_finalizing {
+            MobState::Running
+        } else {
+            resumed_state
+        };
         // Runtime metadata owns supervisor authority. External-binding
         // overlays are compatibility projections only: restart authority for
         // member material, bridge bindings, and lifecycle status comes from
         // the event-projected roster seeded into MobMachine below.
-        Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
+        if !destroy_storage_finalizing {
+            Self::ensure_supervisor_authority(
+                storage.runtime_metadata.clone(),
+                definition.id.clone(),
+            )
             .await?;
-        let supervisor_authority = storage
+        }
+        let supervisor_authority = match storage
             .runtime_metadata
             .load_supervisor_authority(&definition.id)
             .await?
-            .ok_or_else(|| {
-                MobError::Internal(format!(
+        {
+            Some(record) if record.protocol_version.is_supported() => record,
+            Some(record) => {
+                return Err(MobError::WiringError(format!(
+                    "unsupported supervisor bridge protocol version {} (supported {:?}; default {})",
+                    record.protocol_version,
+                    super::bridge_protocol::supervisor_bridge_supported_protocol_versions(),
+                    super::bridge_protocol::supervisor_bridge_default_protocol_version()
+                )));
+            }
+            None if destroy_storage_finalizing => {
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::supervisor_bridge_default_protocol_version(),
+                )
+            }
+            None => {
+                return Err(MobError::Internal(format!(
                     "cannot resume mob '{}': missing supervisor runtime metadata",
                     definition.id
-                ))
-            })?;
+                )));
+            }
+        };
         let supervisor_bridge = Arc::new(MobSupervisorBridge::new(
             &definition.id,
             supervisor_authority,
@@ -858,28 +914,13 @@ impl MobBuilder {
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
         let seeded_restore_diagnostics = HashMap::new();
         let task_board = TaskBoard::project(&mob_events);
-        // Determine resumed state from events in the current epoch (after the
-        // last MobReset, or all events if no reset has occurred).
-        let epoch_start = mob_events
-            .iter()
-            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
-            .map_or(0, |pos| pos + 1);
-        let resumed_state = if mob_events[epoch_start..]
-            .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
-        {
-            MobState::Completed
-        } else {
-            MobState::Running
-        };
-
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-        let initial_dsl_authority = Box::new(seed_mob_authority(resumed_state));
+        let initial_dsl_authority = Box::new(seed_mob_authority(dsl_seed_state));
         let (machine_state_watch_tx, machine_state_watch_rx) =
             tokio::sync::watch::channel(initial_dsl_authority.state.clone());
         // Preview phase watch so the preview handle can answer status()
@@ -889,7 +930,8 @@ impl MobBuilder {
         let mut wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
-            initial_phase: resumed_state,
+            public_phase: resumed_state,
+            destroy_admitted,
             // Placeholder; the final authority is seeded below after
             // `reconcile_resume` finalizes the shell roster. The DSL
             // membership state is populated from the finalized roster so
@@ -1565,7 +1607,8 @@ impl MobBuilder {
         let wiring = RuntimeWiring {
             roster,
             task_board,
-            initial_phase: initial_state,
+            public_phase: initial_state,
+            destroy_admitted: initial_state == MobState::Destroyed,
             dsl_authority,
             machine_state_watch_tx,
             restore_diagnostics,
@@ -1608,7 +1651,8 @@ impl MobBuilder {
         let RuntimeWiring {
             roster,
             task_board,
-            initial_phase: wiring_initial_phase,
+            public_phase: wiring_public_phase,
+            destroy_admitted,
             dsl_authority,
             machine_state_watch_tx,
             restore_diagnostics,
@@ -1622,7 +1666,7 @@ impl MobBuilder {
         // Terminal-phase watch: seed with the initial phase so a status()
         // call before any DSL transition returns the right answer.
         let (phase_watch_tx_actor, phase_watch_rx) =
-            tokio::sync::watch::channel(wiring_initial_phase);
+            tokio::sync::watch::channel(wiring_public_phase);
         let pending_supervisor_rotation_fallback = Arc::new(tokio::sync::RwLock::new(None));
         let handle = MobHandle {
             command_tx: command_tx.clone(),
@@ -1665,9 +1709,9 @@ impl MobBuilder {
         let topology_service = Arc::new(super::topology::MobTopologyService::new(
             definition.topology.clone(),
         ));
-        // Normalize initial phase: fresh creation + stale Creating restores both
+        // Normalize public phase: fresh creation + stale Creating restores both
         // become Running. Persisted Stopped/Completed/Destroyed are preserved.
-        let initial_phase = match wiring_initial_phase {
+        let public_phase = match wiring_public_phase {
             MobState::Creating => MobState::Running,
             phase => phase,
         };
@@ -1748,6 +1792,8 @@ impl MobBuilder {
             realm_profile_store,
             composition_binding,
             pending_routed_effects: Vec::new(),
+            destroy_admitted: destroy_admitted || public_phase == MobState::Destroyed,
+            destroy_cleanup_active: false,
         };
         tokio::spawn(actor.run(command_rx));
 

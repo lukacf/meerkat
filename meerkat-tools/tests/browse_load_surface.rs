@@ -141,7 +141,10 @@ impl HarnessSkillSource {
 
 impl SkillSource for HarnessSkillSource {
     async fn list(&self, filter: &SkillFilter) -> Result<Vec<SkillDescriptor>, SkillError> {
-        Ok(apply_filter(&[self.doc.descriptor.clone()], filter))
+        Ok(apply_filter(
+            std::slice::from_ref(&self.doc.descriptor),
+            filter,
+        ))
     }
 
     async fn load(&self, key: &SkillKey) -> Result<SkillDocument, SkillError> {

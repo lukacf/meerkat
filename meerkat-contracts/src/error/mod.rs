@@ -243,9 +243,16 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
-            meerkat_core::SessionError::Store(_) => ErrorCode::InternalError,
+            meerkat_core::SessionError::Store(_)
+            | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
         };
-        WireError::new(code, err.to_string())
+        let details = err.structured_data();
+        let wire = WireError::new(code, err.to_string());
+        if let Some(details) = details {
+            wire.with_details(details)
+        } else {
+            wire
+        }
     }
 }
 
@@ -287,6 +294,24 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::RequestCancelled);
         assert_eq!(err.category, ErrorCategory::Request);
+    }
+
+    #[test]
+    fn session_failed_with_data_wire_error_preserves_details() {
+        let details = serde_json::json!({
+            "code": "mob_destroy_incomplete",
+            "retryable": true,
+            "destroy_report": {
+                "errors": ["forced partial cleanup"]
+            }
+        });
+        let err = WireError::from(meerkat_core::SessionError::FailedWithData {
+            message: "mob cleanup incomplete".to_string(),
+            data: details.clone(),
+        });
+
+        assert_eq!(err.code, ErrorCode::InternalError);
+        assert_eq!(err.details, Some(details));
     }
 
     #[test]

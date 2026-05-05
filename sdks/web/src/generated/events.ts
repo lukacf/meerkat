@@ -103,39 +103,9 @@ export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "force
 
 export type HookId = string;
 
-export type HookPatch = {
-  max_tokens?: number | null;
-  patch_type: "llm_request";
-  provider_params?: unknown;
-  temperature?: number | null;
-} | {
-  patch_type: "assistant_text";
-  text: string;
-} | {
-  args: ToolCallArguments;
-  patch_type: "tool_args";
-} | {
-  content: string;
-  is_error?: boolean | null;
-  patch_type: "tool_result";
-} | {
-  patch_type: "run_result";
-  text: string;
-};
-
-export interface HookPatchEnvelope {
-  hook_id: HookId;
-  patch: HookPatch;
-  point: HookPoint;
-  published_at: string;
-  revision: HookRevision;
-}
-
 export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_llm_request" | "post_llm_response" | "pre_tool_execution" | "post_tool_execution" | "turn_boundary";
 
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
-
-export type HookRevision = number;
 
 export type InteractionId = string;
 
@@ -285,6 +255,7 @@ export interface RunStartedEvent {
 export interface RunCompletedEvent {
   result: string;
   session_id: SessionId;
+  structured_output?: unknown;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_completed";
   usage: Usage;
@@ -326,20 +297,6 @@ export interface HookDeniedEvent {
   point: HookPoint;
   reason_code: HookReasonCode;
   type: "hook_denied";
-}
-
-export interface HookRewriteAppliedEvent {
-  hook_id: HookId;
-  patch: HookPatch;
-  point: HookPoint;
-  type: "hook_rewrite_applied";
-}
-
-export interface HookPatchPublishedEvent {
-  envelope: HookPatchEnvelope;
-  hook_id: HookId;
-  point: HookPoint;
-  type: "hook_patch_published";
 }
 
 export interface TurnStartedEvent {
@@ -464,6 +421,7 @@ export interface SkillResolutionFailedEvent {
 export interface InteractionCompleteEvent {
   interaction_id: InteractionId;
   result: string;
+  structured_output?: unknown;
   type: "interaction_complete";
 }
 
@@ -507,8 +465,6 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "hook_completed",
   "hook_failed",
   "hook_denied",
-  "hook_rewrite_applied",
-  "hook_patch_published",
   "turn_started",
   "reasoning_delta",
   "reasoning_complete",
@@ -545,8 +501,6 @@ export type AgentEvent =
   HookCompletedEvent |
   HookFailedEvent |
   HookDeniedEvent |
-  HookRewriteAppliedEvent |
-  HookPatchPublishedEvent |
   TurnStartedEvent |
   ReasoningDeltaEvent |
   ReasoningCompleteEvent |

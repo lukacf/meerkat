@@ -68,7 +68,7 @@ impl HookPoint {
     }
 }
 
-/// Foreground hooks block loop progression; background hooks publish async patches.
+/// Foreground hooks block loop progression; background hooks run asynchronously.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HookExecutionMode {
@@ -82,6 +82,8 @@ pub enum HookExecutionMode {
 pub enum HookCapability {
     Observe,
     Guardrail,
+    /// Legacy fail-closed capability label. Semantic patch authority has been
+    /// removed from hooks; retained entries may observe and deny only.
     Rewrite,
 }
 
@@ -134,33 +136,17 @@ impl HookDecision {
     }
 }
 
-/// Typed patch intents used by rewrite hooks.
+/// Retired hook patch surface.
+///
+/// Hook patches previously allowed hooks to rewrite provider parameters,
+/// assistant text, tool arguments/results, and final run text. Those semantic
+/// mutations are no longer hook-authorized; this enum intentionally has no
+/// variants, so legacy patch payloads fail deserialization instead of being
+/// silently ignored or applied.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "patch_type", rename_all = "snake_case")]
-pub enum HookPatch {
-    /// Mutate effective LLM request parameters.
-    LlmRequest {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        temperature: Option<f32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provider_params: Option<Value>,
-    },
-    /// Replace assistant text content in the latest model response.
-    AssistantText { text: String },
-    /// Replace serialized tool arguments.
-    ToolArgs { args: ToolCallArguments },
-    /// Mutate tool result payload before it is persisted.
-    ToolResult {
-        content: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-    },
-    /// Mutate final run output text.
-    RunResult { text: String },
-}
+pub enum HookPatch {}
 
 /// Monotonic patch revision metadata.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -168,7 +154,7 @@ pub enum HookPatch {
 #[serde(transparent)]
 pub struct HookRevision(pub u64);
 
-/// Stable envelope emitted for async patch publication.
+/// Retired envelope for legacy async patch publication.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -352,7 +338,7 @@ pub struct HookOutcome {
     pub duration_ms: Option<u64>,
 }
 
-/// Aggregate result used by core loop to apply decisions and rewrites.
+/// Aggregate result used by the core loop to apply hook decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct HookExecutionReport {
@@ -399,31 +385,6 @@ pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
     match capability {
         HookCapability::Observe => HookFailurePolicy::FailOpen,
         HookCapability::Guardrail | HookCapability::Rewrite => HookFailurePolicy::FailClosed,
-    }
-}
-
-/// Apply a `HookPatch::ToolResult` to a `ToolResult`, preserving non-text blocks.
-///
-/// Deterministic rebuild rule:
-/// 1. Strip all `ContentBlock::Text` blocks from the original vec.
-/// 2. Prepend a single `ContentBlock::Text { text: patched_text }` at position 0.
-/// 3. Append all non-text blocks in their original relative order.
-pub fn apply_tool_result_patch(
-    tool_result: &mut ToolResult,
-    patched_text: String,
-    is_error: Option<bool>,
-) {
-    let non_text_blocks: Vec<ContentBlock> = tool_result
-        .content
-        .iter()
-        .filter(|b| !matches!(b, ContentBlock::Text { .. }))
-        .cloned()
-        .collect();
-    let mut new_content = vec![ContentBlock::Text { text: patched_text }];
-    new_content.extend(non_text_blocks);
-    tool_result.content = new_content;
-    if let Some(value) = is_error {
-        tool_result.is_error = value;
     }
 }
 
@@ -481,7 +442,7 @@ pub trait HookEngine: Send + Sync {
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
 
-    /// Drain background patches explicitly published for one session.
+    /// Drain retired background patch publications for one session.
     async fn drain_published_patches(
         &self,
         _session_id: &SessionId,
@@ -519,21 +480,6 @@ mod tests {
 
         let err = serde_json::from_value::<HookToolCall>(value)
             .expect_err("hook surface must reject string-success tool args");
-        assert!(
-            err.to_string().contains("JSON object, got string"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn hook_tool_args_patch_rejects_string_args_on_deserialize() {
-        let value = serde_json::json!({
-            "patch_type": "tool_args",
-            "args": "{\"query\":"
-        });
-
-        let err = serde_json::from_value::<HookPatch>(value)
-            .expect_err("hook patch surface must reject string-success tool args");
         assert!(
             err.to_string().contains("JSON object, got string"),
             "unexpected error: {err}"
@@ -651,98 +597,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_patch_replaces_text_preserves_images() {
-        let mut tr = ToolResult::with_blocks(
-            "tc_1".into(),
-            vec![
-                text_block("original text"),
-                image_block("image/png", "AAAA"),
-                image_block("image/jpeg", "BBBB"),
-            ],
-            false,
-        );
-        apply_tool_result_patch(&mut tr, "patched text".into(), None);
-        assert_eq!(tr.content.len(), 3);
-        assert_eq!(
-            tr.content[0],
-            ContentBlock::Text {
-                text: "patched text".into()
-            }
-        );
-        assert!(
-            matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png"
-                && matches!(data, crate::types::ImageData::Inline { data } if data == "AAAA"))
-        );
-        assert!(
-            matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg"
-                && matches!(data, crate::types::ImageData::Inline { data } if data == "BBBB"))
-        );
-    }
-
-    #[test]
-    fn hook_patch_text_only_unchanged() {
-        let mut tr = ToolResult::new("tc_1".into(), "original".into(), false);
-        apply_tool_result_patch(&mut tr, "patched".into(), None);
-        assert_eq!(tr.content.len(), 1);
-        assert_eq!(tr.text_content(), "patched");
-        assert!(!tr.is_error);
-    }
-
-    #[test]
-    fn hook_patch_image_only_result_prepends_text() {
-        let mut tr =
-            ToolResult::with_blocks("tc_1".into(), vec![image_block("image/png", "AAAA")], false);
-        apply_tool_result_patch(&mut tr, "added text".into(), None);
-        assert_eq!(tr.content.len(), 2);
-        assert_eq!(
-            tr.content[0],
-            ContentBlock::Text {
-                text: "added text".into()
-            }
-        );
-        assert!(matches!(&tr.content[1], ContentBlock::Image { .. }));
-    }
-
-    #[test]
-    fn hook_patch_interleaved_reorders_text_before_images() {
-        // [Text("a"), Image(X), Text("b"), Image(Y)] + patch "c"
-        // -> [Text("c"), Image(X), Image(Y)]
-        let mut tr = ToolResult::with_blocks(
-            "tc_1".into(),
-            vec![
-                text_block("a"),
-                image_block("image/png", "X"),
-                text_block("b"),
-                image_block("image/jpeg", "Y"),
-            ],
-            false,
-        );
-        apply_tool_result_patch(&mut tr, "c".into(), None);
-        assert_eq!(tr.content.len(), 3);
-        assert_eq!(tr.content[0], ContentBlock::Text { text: "c".into() });
-        assert!(
-            matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png"
-                && matches!(data, crate::types::ImageData::Inline { data } if data == "X"))
-        );
-        assert!(
-            matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg"
-                && matches!(data, crate::types::ImageData::Inline { data } if data == "Y"))
-        );
-    }
-
-    #[test]
-    fn hook_patch_sets_is_error() {
-        let mut tr = ToolResult::new("tc_1".into(), "ok".into(), false);
-        apply_tool_result_patch(&mut tr, "error".into(), Some(true));
-        assert!(tr.is_error);
-        assert_eq!(tr.text_content(), "error");
-    }
-
-    #[test]
     fn hook_tool_result_has_images_serde_default() {
         // Verify has_images defaults to false when deserializing JSON without it.
         // This ensures backwards compatibility with existing hook payloads.
@@ -783,5 +637,42 @@ mod tests {
         }))
         .expect("should deserialize");
         assert!(decoded.has_images);
+    }
+
+    #[test]
+    fn legacy_semantic_hook_patches_are_rejected_on_deserialize() {
+        let legacy_payloads = [
+            serde_json::json!({
+                "patch_type": "llm_request",
+                "max_tokens": 1,
+                "temperature": 0.1,
+                "provider_params": {"reasoning_effort": "low"}
+            }),
+            serde_json::json!({
+                "patch_type": "assistant_text",
+                "text": "patched"
+            }),
+            serde_json::json!({
+                "patch_type": "tool_args",
+                "args": {"value": "patched"}
+            }),
+            serde_json::json!({
+                "patch_type": "tool_result",
+                "content": "patched",
+                "is_error": false
+            }),
+            serde_json::json!({
+                "patch_type": "run_result",
+                "text": "patched"
+            }),
+        ];
+
+        for value in legacy_payloads {
+            let result = serde_json::from_value::<HookPatch>(value.clone());
+            assert!(
+                result.is_err(),
+                "legacy semantic hook patch payload must be rejected: {value}"
+            );
+        }
     }
 }

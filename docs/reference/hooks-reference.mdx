@@ -1,6 +1,6 @@
 ---
 title: "Hooks Reference"
-description: "Low-level hook surface reference: hook points, capabilities, execution modes, payload fields, and patch shapes."
+description: "Low-level hook surface reference: hook points, capabilities, execution modes, and payload fields."
 icon: "anchor"
 ---
 
@@ -11,7 +11,7 @@ Use this page when you need exact hook vocabulary and structure rather than a pr
 | Type | Values |
 |------|--------|
 | `HookPoint` | `RunStarted`, `PreLlmRequest`, `PreToolExecution`, `TurnBoundary`, `PostLlmResponse`, `PostToolExecution`, `RunCompleted`, `RunFailed` |
-| `HookCapability` | `Observe`, `Guardrail`, `Rewrite` |
+| `HookCapability` | `Observe`, `Guardrail`, `Rewrite` (retired compatibility label; no patch authority) |
 | `HookExecutionMode` | `Foreground`, `Background` |
 | `HookFailurePolicy` | `FailOpen`, `FailClosed` |
 
@@ -25,8 +25,7 @@ Use this page when you need exact hook vocabulary and structure rather than a pr
 
 - `HookInvocation`
 - `HookToolResult`
-- `HookPatch`
-- `HookPatchEnvelope`
+- `HookDecision`
 
 ## See also
 

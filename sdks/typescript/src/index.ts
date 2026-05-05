@@ -263,8 +263,6 @@ export type {
   HookCompletedEvent,
   HookFailedEvent,
   HookDeniedEvent,
-  HookRewriteAppliedEvent,
-  HookPatchPublishedEvent,
   SkillsResolvedEvent,
   SkillResolutionFailedEvent,
   SkillResolutionFailureReason,

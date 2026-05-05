@@ -35,10 +35,16 @@ fn walk_files(root: &Path, files: &mut Vec<PathBuf>) {
             .and_then(|name| name.to_str())
             .unwrap_or("");
         if entry.file_type().expect("file type").is_dir() {
+            let parent_name = path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             if matches!(
                 name,
                 ".git" | ".rct" | "bazel-bin" | "bazel-out" | "bazel-testlogs" | "node_modules"
-            ) || name.starts_with("target")
+            ) || (parent_name == ".claude" && name == "worktrees")
+                || name.starts_with("target")
                 || name.starts_with("bazel-")
             {
                 continue;

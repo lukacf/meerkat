@@ -158,10 +158,29 @@ impl ActorFlowTurnExecutor {
                     let _ = tx.send(scoped).await;
                 }
                 match payload {
-                    AgentEvent::RunCompleted { result, .. }
-                    | AgentEvent::InteractionComplete { result, .. } => {
+                    AgentEvent::RunCompleted {
+                        result,
+                        structured_output,
+                        ..
+                    } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Completed { output: result });
+                            let _ = tx.send(FlowTurnOutcome::Completed {
+                                output: result,
+                                structured_output,
+                            });
+                        }
+                        return;
+                    }
+                    AgentEvent::InteractionComplete {
+                        result,
+                        structured_output,
+                        ..
+                    } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(FlowTurnOutcome::Completed {
+                                output: result,
+                                structured_output,
+                            });
                         }
                         return;
                     }
@@ -455,10 +474,13 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
 mod tests {
     use super::ActorFlowTurnExecutor;
     use crate::ids::RunId;
+    use crate::runtime::FlowTurnOutcome;
+    use meerkat_core::AgentEvent;
+    use meerkat_core::interaction::InteractionId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
 
     #[test]
     fn test_release_orphan_slot_caps_at_max_budget() {
@@ -509,5 +531,65 @@ mod tests {
             !per_run_orphans.lock().await.contains_key(&run_id),
             "detached panic path should release per-run orphan accounting"
         );
+    }
+
+    #[tokio::test]
+    async fn test_subscription_bridge_preserves_interaction_structured_output() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(events_rx, completion_tx, None, None);
+
+        events_tx
+            .send(AgentEvent::InteractionComplete {
+                interaction_id: InteractionId(uuid::Uuid::new_v4()),
+                result: "{\"answer\":42}".to_string(),
+                structured_output: Some(serde_json::json!({"answer": 42})),
+            })
+            .await
+            .expect("send event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Completed {
+                output,
+                structured_output,
+            } => {
+                assert_eq!(output, "{\"answer\":42}");
+                assert_eq!(structured_output, Some(serde_json::json!({"answer": 42})));
+            }
+            other => panic!("expected completed outcome, got {other:?}"),
+        }
+        bridge.await.expect("bridge exits after terminal event");
+    }
+
+    #[tokio::test]
+    async fn test_subscription_bridge_preserves_run_structured_output() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(events_rx, completion_tx, None, None);
+
+        events_tx
+            .send(AgentEvent::RunCompleted {
+                session_id: meerkat_core::SessionId::new(),
+                result: "{\"answer\":42}".to_string(),
+                structured_output: Some(serde_json::json!({"answer": 42})),
+                usage: meerkat_core::Usage::default(),
+                terminal_cause_kind: None,
+            })
+            .await
+            .expect("send event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Completed {
+                output,
+                structured_output,
+            } => {
+                assert_eq!(output, "{\"answer\":42}");
+                assert_eq!(structured_output, Some(serde_json::json!({"answer": 42})));
+            }
+            other => panic!("expected completed outcome, got {other:?}"),
+        }
+        bridge.await.expect("bridge exits after terminal event");
     }
 }

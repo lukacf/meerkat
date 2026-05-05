@@ -11,8 +11,6 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "hook_completed",
     "hook_failed",
     "hook_denied",
-    "hook_rewrite_applied",
-    "hook_patch_published",
     "turn_started",
     "reasoning_delta",
     "reasoning_complete",

@@ -25,7 +25,7 @@ port = 8080
 
 [limits]
 # Live/staged session admission capacity. Persisted history does not count.
-max_sessions = 64
+max_sessions = 100000
 
 [compaction]
 auto_compact_threshold = 100000

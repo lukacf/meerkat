@@ -144,7 +144,7 @@ fn patch_fetch_response_url() {}
 
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
-const MAX_SESSIONS: usize = 64;
+const MAX_SESSIONS: usize = 100_000;
 
 // ═══════════════════════════════════════════════════════════
 // Mobpack Types
@@ -1147,7 +1147,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
+/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 100000 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();

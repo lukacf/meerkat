@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Default active session admission capacity for RPC/CLI runtime surfaces.
-pub const DEFAULT_MAX_SESSIONS: usize = 64;
+pub const DEFAULT_MAX_SESSIONS: usize = 100_000;
 
 /// Complete configuration for Meerkat
 #[derive(Debug, Clone, Serialize, Deserialize)]

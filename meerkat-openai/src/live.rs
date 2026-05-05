@@ -746,13 +746,7 @@ fn openai_output_audio_transcript_key(item_id: &str, content_index: u32) -> Stri
 }
 
 fn openai_realtime_synthetic_text_item_id() -> String {
-    let suffix: String = meerkat_core::time_compat::new_uuid_v7()
-        .to_string()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(24)
-        .collect();
-    format!("mk_text_{suffix}")
+    openai_realtime_client_event_id("mk_text")
 }
 
 fn openai_realtime_item_transcript_identity(
@@ -808,10 +802,25 @@ pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
 const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
+fn openai_realtime_client_event_id(prefix: &str) -> String {
+    let suffix: String = meerkat_core::time_compat::new_uuid_v7()
+        .to_string()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .collect();
+    format!("{prefix}_{suffix}")
+}
+
 fn openai_response_already_active_message(message: &str) -> bool {
     message
         .to_ascii_lowercase()
         .contains("active response in progress")
+}
+
+fn openai_response_cancel_no_active_response_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("cancellation failed") && message.contains("no active response found")
 }
 
 fn should_suppress_openai_active_response_error(
@@ -894,6 +903,7 @@ pub struct OpenAiRealtimeSession {
     /// A delayed client `channel.interrupt` must cancel this response, not the
     /// next response that may already be active by the time the command drains.
     pending_interrupted_response_cancel: Option<String>,
+    pending_response_cancel_event_ids: BTreeSet<String>,
     response_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
@@ -939,6 +949,7 @@ impl OpenAiRealtimeSession {
             pending_text_suppressions: VecDeque::new(),
             active_response_id: None,
             pending_interrupted_response_cancel: None,
+            pending_response_cancel_event_ids: BTreeSet::new(),
             response_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
@@ -1062,6 +1073,20 @@ impl OpenAiRealtimeSession {
         if let Some(response_id) = response_id {
             self.pending_interrupted_response_cancel = Some(response_id.to_string());
         }
+    }
+
+    fn should_suppress_response_cancel_error(&mut self, error: &OpenAiServerError) -> bool {
+        let Some(event_id) = error.event_id.as_deref() else {
+            return false;
+        };
+        if !self.pending_response_cancel_event_ids.contains(event_id) {
+            return false;
+        }
+        if !openai_response_cancel_no_active_response_message(&error.message) {
+            return false;
+        }
+        self.pending_response_cancel_event_ids.remove(event_id);
+        true
     }
 
     fn response_id_for_item(&self, item_id: &str) -> Option<String> {
@@ -1620,6 +1645,13 @@ impl OpenAiRealtimeSession {
                 })
             }
             ServerEvent::Error { error, .. } => {
+                if self.should_suppress_response_cancel_error(&error) {
+                    trace_openai_realtime_lifecycle(format!(
+                        "response.cancel idempotent_no_active_response event_id={:?}",
+                        error.event_id
+                    ));
+                    return Ok(None);
+                }
                 let suppress = should_suppress_openai_active_response_error(
                     &error.message,
                     self.provider_response_nudge_inflight,
@@ -1817,12 +1849,20 @@ impl RealtimeSession for OpenAiRealtimeSession {
             .pending_interrupted_response_cancel
             .take()
             .or_else(|| self.active_response_id.clone());
-        self.raw_mut()?
+        let event_id = openai_realtime_client_event_id("evt_cancel");
+        self.pending_response_cancel_event_ids
+            .insert(event_id.clone());
+        let result = self
+            .raw_mut()?
             .send_raw(ClientEvent::ResponseCancel {
-                event_id: None,
+                event_id: Some(event_id.clone()),
                 response_id,
             })
-            .await
+            .await;
+        if result.is_err() {
+            self.pending_response_cancel_event_ids.remove(&event_id);
+        }
+        result
     }
 
     async fn truncate_assistant_output(
@@ -2050,6 +2090,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.pending_mcp_calls.clear();
         self.pending_text_suppressions.clear();
         self.pending_interrupted_response_cancel = None;
+        self.pending_response_cancel_event_ids.clear();
         self.response_output_active = false;
         self.response_interrupt_emitted = false;
         self.response_tool_call_observed = false;
@@ -3281,6 +3322,68 @@ mod tests {
             cancel_response_ids,
             vec![Some("resp_loop"), Some("resp_stop")],
             "a delayed cancel must consume the interrupted response id before future interrupts target the new active response"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_neutral_session_treats_redundant_cancel_as_idempotent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::from(vec![Ok(Some(
+                    ServerEvent::ResponseOutputTextDelta {
+                        event_id: "evt_loop_delta".to_string(),
+                        response_id: "resp_loop".to_string(),
+                        item_id: "item_loop".to_string(),
+                        output_index: 0,
+                        content_index: 0,
+                        delta: "Looping now".to_string(),
+                    },
+                ))]))),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        assert!(matches!(
+            session.next_event().await.expect("text delta"),
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. })
+                if delta == "Looping now"
+        ));
+        session.interrupt().await.expect("interrupt should send");
+
+        let cancel_event_id = {
+            let seen = seen.lock().await;
+            seen.iter()
+                .find_map(|event| match event {
+                    ClientEvent::ResponseCancel { event_id, .. } => event_id.clone(),
+                    _ => None,
+                })
+                .expect("interrupt should tag response.cancel")
+        };
+
+        let mapped = session
+            .map_server_event(ServerEvent::Error {
+                event_id: "evt_error".to_string(),
+                error: OpenAiServerError {
+                    error_type: ApiErrorType::InvalidRequestError,
+                    code: None,
+                    message:
+                        "Cancellation failed: no active response found for response resp_loop."
+                            .to_string(),
+                    param: None,
+                    event_id: Some(cancel_event_id),
+                },
+            })
+            .expect("redundant cancel should not poison the realtime channel");
+
+        assert!(
+            mapped.is_none(),
+            "a redundant response.cancel is an idempotent terminal acknowledgement"
+        );
+        assert!(
+            session.pending_response_cancel_event_ids.is_empty(),
+            "the cancel correlation should be consumed after the provider acknowledgement"
         );
     }
 

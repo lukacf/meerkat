@@ -243,13 +243,21 @@ class RealtimeChannel:
         """
         conn = await self.connect_with_open_info(await self.open_info())
         if wait_for_attachment:
+            attached = False
             deadline = asyncio.get_running_loop().time() + attachment_timeout_secs
             while asyncio.get_running_loop().time() < deadline:
                 try:
                     st = await self.status()
                     if st.status.state == "ready":
+                        attached = True
                         break
                 except Exception:
                     pass
                 await asyncio.sleep(0.25)
+            if not attached:
+                await conn.close()
+                raise MeerkatError(
+                    "REALTIME_ATTACHMENT_TIMEOUT",
+                    f"realtime transport did not reach ready state within {attachment_timeout_secs}s",
+                )
         return conn

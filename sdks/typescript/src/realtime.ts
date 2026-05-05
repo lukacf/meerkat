@@ -236,15 +236,27 @@ export class RealtimeChannel {
     const conn = await this.connectWithOpenInfo(await this.openInfo());
     const wait = options?.waitForAttachment ?? true;
     if (wait) {
-      const deadline = Date.now() + (options?.attachmentTimeoutMs ?? 30_000);
+      const timeoutMs = options?.attachmentTimeoutMs ?? 30_000;
+      const deadline = Date.now() + timeoutMs;
+      let attached = false;
       while (Date.now() < deadline) {
         try {
           const st = await this.status();
-          if (st.status.state === "ready") break;
+          if (st.status.state === "ready") {
+            attached = true;
+            break;
+          }
         } catch {
           // status may fail transiently during attachment
         }
         await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!attached) {
+        conn.close();
+        throw new MeerkatError(
+          "REALTIME_ATTACHMENT_TIMEOUT",
+          `realtime transport did not reach ready state within ${timeoutMs}ms`,
+        );
       }
     }
     return conn;

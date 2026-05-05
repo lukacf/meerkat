@@ -132,10 +132,10 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
 
 ```bash
 # Add a stdio server
-rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Add a streamable HTTP server
-rkat mcp add remote-api --url https://mcp.example.com/api
+rkat mcp add remote-api --transport http --url https://mcp.example.com/api
 
 # List all registered servers
 rkat mcp list
@@ -147,9 +147,6 @@ rkat mcp get filesystem
 # Remove a server
 rkat mcp remove filesystem
 
-# Reload MCP servers on a live session
-rkat mcp reload --session <SESSION_ID> --live-server-url http://localhost:8080
-rkat mcp reload --session <SESSION_ID> --live-server-url http://localhost:8080 --name my-tools
 ```
 
 Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Project scope wins on name collisions.
@@ -170,7 +167,7 @@ connect_timeout_secs = 30
 Add, remove, or reload MCP servers on a running session without restarting the agent. Changes are staged and applied at the next turn boundary.
 
 <Note>
-CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.toml`). The methods below manage servers on a **running session** — changes are staged and applied at the next turn boundary.
+CLI `rkat mcp add/remove/list/get` manages server config (persisted to `.rkat/mcp.toml` or `~/.rkat/mcp.toml`). The methods below manage servers on a **running session** — changes are staged and applied at the next turn boundary.
 </Note>
 
 <Tabs>

@@ -271,10 +271,10 @@ Follow [Self-hosted Gemma 4](/guides/self-hosted-gemma4) for complete examples.
 `rkat mcp` is for local and project configuration only.
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
-rkat mcp remove <NAME> [--scope project|user]
-rkat mcp list [--scope project|user|all] [--json]
-rkat mcp get <NAME> [--scope project|user|all] [--json]
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp remove <NAME> [--scope project|user|local]
+rkat mcp list [--scope project|user|local|all] [--json]
+rkat mcp get <NAME> [--scope project|user|local|all] [--json]
 ```
 
 Examples:
@@ -296,13 +296,14 @@ rkat mob inspect <PACK.mobpack>
 rkat mob validate <PACK.mobpack>
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
 rkat mob web build <PACK.mobpack> -o <OUT_DIR>
-rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream]
+rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
-rkat mob spawn-helper <MOB_ID> <PROFILE_ID> [--model <MODEL>]
-rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> [--fork-context <full|last-n>]
-rkat mob member-status <MOB_ID> <AGENT_IDENTITY>
+rkat mob spawn-helper <MOB_ID> <PROMPT> [--profile <PROFILE>] [--agent-identity <ID>] [--json]
+rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> [--profile <PROFILE>] [--agent-identity <ID>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
+rkat mob member-status <MOB_ID> <AGENT_IDENTITY> [--json]
 rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>
-rkat mob respawn <MOB_ID> <AGENT_IDENTITY>
+rkat mob respawn <MOB_ID> <AGENT_IDENTITY> [--initial-message <MESSAGE>]
+rkat mob wait-kickoff <MOB_ID> [--member <AGENT_IDENTITY>...] [--timeout-ms <MS>] [--json]
 ```
 
 Examples:
@@ -345,7 +346,7 @@ rkat skill inspect <skill-name> --source-uuid <uuid> [--json]
 ## models
 
 ```bash
-rkat models [--json]
+rkat models
 ```
 
 Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat-models` catalog.

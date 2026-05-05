@@ -63,8 +63,8 @@ impl AgentToolDispatcher for MathTools {
 Register any MCP server and its tools automatically appear in the agent's tool set:
 
 ```bash
-rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
-rkat mcp add api --url https://mcp.example.com/api
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
+rkat mcp add api --transport http --url https://mcp.example.com/api
 ```
 
 Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Supports stdio, streamable HTTP, and SSE transports. See the [MCP reference](/api/mcp) for full details.
@@ -98,7 +98,7 @@ Tool visibility can change during a session without restarting the agent. Change
 
 ### Live MCP controls
 
-MCP servers can be added, removed, or reloaded on a running session via the RPC surface:
+MCP servers can be added, removed, or reloaded on a running session via JSON-RPC, REST, MCP-server tools, or SDK helpers:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"mcp/add","params":{
@@ -121,8 +121,9 @@ All mutations are staged and applied at the next turn boundary. Set `persisted: 
 | Surface | Live MCP | External tool filter |
 |---------|----------|---------------------|
 | JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via in-process `ToolScopeHandle` on the session runtime |
-| CLI | `rkat mcp reload --session --live-server-url ...` and related host-managed flows | No standalone public CLI surface today |
+| CLI | `rkat mcp add/remove/list/get` edits project/user config; start or resume a session to load it | No standalone public CLI filter surface today |
 | REST | `POST /sessions/{id}/mcp/add`, `remove`, `reload` | No standalone public REST filter surface today |
+| MCP server | `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload` | No standalone public MCP filter surface today |
 
 See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
 

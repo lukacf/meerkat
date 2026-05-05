@@ -127,6 +127,34 @@ mod tests {
     }
 
     #[test]
+    fn platform_skill_pins_current_cli_help_facts() {
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("rkat mcp add <NAME>"),
+            "help skill must teach the actual MCP CLI config surface"
+        );
+        assert!(
+            MEERKAT_PLATFORM_API_REFERENCE.contains("rkat help <QUESTION>"),
+            "API reference must include the dedicated help command"
+        );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("rkat run --auth-binding"),
+            "--auth-binding belongs to rkat run, not the global CLI"
+        );
+        assert!(
+            !MEERKAT_PLATFORM_SKILL_BODY.contains("rkat mcp reload --session"),
+            "rkat mcp reload is not a shipped CLI command"
+        );
+        assert!(
+            !MEERKAT_PLATFORM_API_REFERENCE.contains("rkat comms send"),
+            "there is no top-level rkat comms command"
+        );
+        assert!(
+            !MEERKAT_PLATFORM_API_REFERENCE.contains("rkat models [--json]"),
+            "rkat models has no --json flag"
+        );
+    }
+
+    #[test]
     fn platform_skill_key_uses_builtin_source() {
         let key = platform_skill_key();
         assert_eq!(key.source_uuid, meerkat_core::skills::SourceUuid::builtin());

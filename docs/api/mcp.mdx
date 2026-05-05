@@ -11,7 +11,7 @@ Model Context Protocol (MCP) is the tool protocol Meerkat uses in two ways: as a
 <Steps>
   <Step title="Add an MCP server">
     ```bash
-    rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+    rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
     ```
   </Step>
   <Step title="Verify it's registered">
@@ -120,10 +120,10 @@ Use the `rkat mcp` commands to manage MCP servers:
 
 ```bash
 # Add a stdio server
-rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Add a streamable HTTP server
-rkat mcp add api --url https://mcp.example.com/api
+rkat mcp add api --transport http --url https://mcp.example.com/api
 
 # List servers
 rkat mcp list

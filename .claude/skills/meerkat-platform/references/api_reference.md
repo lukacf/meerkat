@@ -57,13 +57,15 @@ rkat session list [--limit N] [--offset N] [--label KEY=VALUE]
 rkat session show <ID>
 rkat session delete <ID>
 rkat session interrupt <ID>
-rkat comms send <SESSION-ID> --json <JSON>        # (comms feature)
-rkat comms peers <SESSION-ID>                     # (comms feature)
+rkat realtime open-info|status|capabilities|bridge session <SESSION-ID>
+rkat realtime open-info|status|capabilities|bridge member <MOB-ID> <AGENT-IDENTITY>
+rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show
-rkat skill list [--json]
-rkat skill inspect <skill-name> --source-uuid <uuid> [--json]
-rkat models [--json]
-rkat auth login|logout|status|profile ...
+rkat mcp add|remove|list|get ...
+rkat skill add|remove|get|list|inspect ...
+rkat models
+rkat help <QUESTION> [--prompt <PROMPT>] [--plan-execution]
+rkat auth realms|profiles|profile|profile-delete|bindings|test|status|login|logout|refresh ...
 # (Scheduling has no top-level CLI subcommand. Schedules are managed
 # through the agent tools `meerkat_schedule_*` from `rkat run`,
 # the RPC `schedule/*` methods, REST schedule endpoints, or SDK helpers.)
@@ -80,6 +82,25 @@ CLI keep-alive terminology:
 
 - use `--keep-alive`
 - do not use `--host`
+
+### MCP CLI config surface
+
+`rkat mcp` edits project/user MCP server config; it is not the live mutation surface for an already-running session.
+
+```bash
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp remove <NAME> [--scope project|user|local]
+rkat mcp list [--scope project|user|local|all] [--json]
+rkat mcp get <NAME> [--scope project|user|local|all] [--json]
+```
+
+Examples:
+
+```bash
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+rkat mcp add linear --transport http --url https://mcp.example.com
+rkat mcp list --scope all
+```
 
 ### Mob CLI surface
 
@@ -233,6 +254,7 @@ Set `model: "gpt-realtime-1.5"` on `session/create` to enable realtime; transpor
 ### MCP live mutation
 
 - `mcp/add`, `mcp/remove`, `mcp/reload`
+- These are JSON-RPC live session operations. CLI `rkat mcp add/remove/list/get` is the config surface.
 
 ### Mob (feature-gated)
 
@@ -275,7 +297,7 @@ Profiles (when a profile store is present):
 
 ```bash
 rkat config get --format json --with-generation
-rkat config set --file config.toml --expected-generation 4
+rkat config set config.toml --expected-generation 4
 rkat config patch --json '{"agent":{"model":"gpt-5.2"}}' --expected-generation 4
 ```
 
@@ -590,7 +612,7 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
 - **Peer lifecycle typing**: mob lifecycle routing is typed at ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle notices; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not depend on mob defaults in `silent_comms_intents` for canonical behavior.
-- **Comms choice**: use `peer_message` for normal collaboration. `peer_request` is only structured correlated ask-reply. Public peer reservation streams were removed.
+- **Comms choice**: agents use `send_message` for ordinary collaboration, `send_request` for structured ask/reply, and `send_response` for replies. Public peer reservation streams were removed.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
 - **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins.
 - Multi-agent orchestration uses mobs exclusively. `MemberLaunchMode::Fork` provides history branching via `Session::fork()`. `spawn_helper()`/`fork_helper()` provide one-call convenience.

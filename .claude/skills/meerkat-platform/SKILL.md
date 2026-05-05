@@ -70,6 +70,46 @@ When a mob member runs in a different process or host, declare it with `MobBacke
 For full per-surface schemas and examples, load: `references/api_reference.md`.
 For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 
+## MCP server config (CLI)
+
+Use `rkat mcp ...` to manage local MCP server configuration. This writes config; new `rkat run` and `rkat resume` sessions load configured MCP servers and expose their tools to the agent.
+
+Config locations:
+
+- Project scope (default): `.rkat/mcp.toml`
+- User scope: `~/.rkat/mcp.toml`
+
+Command forms:
+
+```bash
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp remove <NAME> [--scope project|user|local]
+rkat mcp list [--scope project|user|local|all] [--json]
+rkat mcp get <NAME> [--scope project|user|local|all] [--json]
+```
+
+Examples:
+
+```bash
+# stdio server; command and args go after --
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+
+# HTTP server
+rkat mcp add linear --transport http --url https://mcp.example.com
+
+# User-wide server with environment passed to the stdio process
+rkat mcp add github --scope user -e GITHUB_TOKEN=ghp_... -- npx -y @modelcontextprotocol/server-github
+
+rkat mcp list --scope all
+rkat mcp get filesystem --scope project
+```
+
+Notes:
+
+- Use `--transport http` for streamable HTTP and `--transport sse` for legacy SSE.
+- `-H KEY:VALUE` is for HTTP/SSE headers; `-e KEY=VALUE` is for stdio process environment.
+- `rkat mcp` is a config surface. Live mutation of a running session uses JSON-RPC `mcp/add|remove|reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, or SDK helpers.
+
 ## Mob behavior (current contract)
 
 - CLI `run`/`resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration.
@@ -273,6 +313,7 @@ rkat "What is Rust?"                     # "run" is the default subcommand
 rkat run "What is Rust?"                 # equivalent explicit form
 rkat --realm team-alpha run "Create a todo app" --tools workspace --stream -v
 # Global flags: --realm, --isolated, --instance, --realm-backend, --state-root, --context-root, --user-config-root
+rkat help "How do I add an MCP server?"
 rkat run --resume "keep going"           # resume most recent session
 rkat run --resume 019c8b99 "continue"    # resume by short prefix
 rkat --realm team-alpha run --resume sid_abc123 "Now add error handling"
@@ -375,7 +416,7 @@ Every session resolves credentials through realm-scoped bindings. Two onramps:
 
 ```bash
 rkat auth login anthropic                                            # OAuth (PKCE S256)
-rkat --auth-binding prod:claude run "ship the release notes"
+rkat run --auth-binding prod:claude "ship the release notes"
 ```
 
 Supported auth methods:
@@ -494,6 +535,7 @@ Canonical skill identity is `SkillKey { source_uuid, skill_name }`. `preload_ski
 **Skill introspection** surfaces:
 
 - CLI: `rkat skill list [--json]`, `rkat skill inspect <skill-name> --source-uuid <uuid> [--json]`
+- CLI config: `rkat skill add <PATH_OR_ID> [--name <NAME>]`, `rkat skill remove <NAME_OR_ID_OR_PATH>`, `rkat skill get <NAME_OR_ID_OR_PATH> [--json]`
 - RPC: `skills/list`
 - REST: `GET /skills`
 - MCP: `meerkat_skills` tool (`action: "list"` or `"inspect"` with typed `skill_key` and optional `source` UUID)
@@ -535,7 +577,8 @@ Tool visibility can change during a session without restarting the agent. All ch
 
 - **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
 - **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
-- **Live MCP mutation** — `mcp/add`, `mcp/remove`, `mcp/reload` stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
+- **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat resume` sessions load that config.
+- **Live MCP mutation** — JSON-RPC `mcp/add`, `mcp/remove`, `mcp/reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, and SDK helpers stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
 - **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A `[MCP_PENDING]` system notice is injected while servers are still connecting.
   - Per-server timeout: `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s)
   - CLI: `--wait-for-mcp` flag blocks before the first turn until all servers finish connecting
@@ -546,11 +589,12 @@ Tool visibility can change during a session without restarting the agent. All ch
 
 Surface availability:
 
-| Surface | Live MCP | Tool filter | Status |
-|---------|----------|-------------|--------|
-| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via session runtime | Fully wired |
-| REST | `POST /sessions/{id}/mcp/*` | — | Fully wired |
-| CLI | `rkat mcp reload --session --live-server-url` | — | Host-managed live reload flow |
+| Surface | MCP config / live mutation | Tool filter | Status |
+|---------|----------------------------|-------------|--------|
+| CLI | `rkat mcp add/remove/list/get` edits project/user config | — | Config surface |
+| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` live session mutation | Via session runtime | Fully wired |
+| REST | `POST /sessions/{id}/mcp/add|remove|reload` live session mutation | — | Fully wired |
+| MCP server | `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload` live session mutation | — | Fully wired |
 
 ### Memory
 

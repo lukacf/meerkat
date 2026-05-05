@@ -117,7 +117,8 @@ MCP servers can be added or removed from a running session. Operations are stage
 |---------|--------|--------|
 | JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Fully wired (staged) |
 | REST | `POST /sessions/{id}/mcp/add\|remove\|reload` | Fully wired |
-| CLI | `rkat mcp reload --session <id> --live-server-url <url>` | Host-managed live reload flow |
+| CLI | `rkat mcp add/remove/list/get` | Config surface; start or resume a session to load config |
+| MCP server | `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload` | Fully wired |
 
 Servers being removed transition through `Active → Removing (draining) → Removed` to allow in-flight tool calls to complete before finalization.
 

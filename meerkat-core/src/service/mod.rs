@@ -81,6 +81,13 @@ pub enum SessionError {
     #[error("agent error: {0}")]
     Agent(#[from] crate::error::AgentError),
 
+    /// The operation failed with structured error data for protocol surfaces.
+    #[error("{message}")]
+    FailedWithData {
+        message: String,
+        data: serde_json::Value,
+    },
+
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
@@ -98,6 +105,14 @@ impl SessionError {
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::Agent(_) => "AGENT_ERROR",
+            Self::FailedWithData { .. } => "SESSION_ERROR",
+        }
+    }
+
+    pub fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::FailedWithData { data, .. } => Some(data.clone()),
+            _ => None,
         }
     }
 }

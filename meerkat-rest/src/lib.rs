@@ -4528,12 +4528,23 @@ async fn archive_session(
             "session_id": session_id.to_string(),
             "archived": true
         }))),
-        Err(SessionError::NotFound { .. }) => {
-            Err(ApiError::NotFound(format!("Session not found: {id}")))
-        }
-        Err(e) => Err(ApiError::Internal(format!(
-            "Failed to archive session: {e}"
-        ))),
+        Err(error) => Err(archive_session_error_to_api_error(&id, error)),
+    }
+}
+
+fn archive_session_error_to_api_error(id: &str, error: SessionError) -> ApiError {
+    match error {
+        SessionError::NotFound { .. } => ApiError::NotFound(format!("Session not found: {id}")),
+        SessionError::FailedWithData { message, data } => ApiError::InternalWithData {
+            message: format!("Failed to archive session: {message}"),
+            code: data
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("INTERNAL_ERROR")
+                .to_string(),
+            details: data,
+        },
+        other => ApiError::Internal(format!("Failed to archive session: {other}")),
     }
 }
 
@@ -5949,9 +5960,9 @@ async fn cleanup_archived_session_runtime(
         .destroy_bridge_session_mobs(&session_id.to_string())
         .await
         .map_err(|error| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to destroy bridge session mobs during REST runtime cleanup: {error}"
-            )))
+            error.into_session_error(
+                "failed to destroy bridge session mobs during REST runtime cleanup",
+            )
         })?;
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
@@ -5975,11 +5986,27 @@ async fn archive_session_with_runtime_cleanup(
                 state.runtime_adapter.session_control_authority(),
             )
             .await;
-        let result = match result {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {
-                cleanup_archived_session_runtime(&state, &session_id).await
+        let not_found = matches!(&result, Err(SessionError::NotFound { .. }));
+        #[cfg(feature = "mob")]
+        let retained_mob_cleanup = if not_found {
+            state
+                .mob_state
+                .has_bridge_session_scoped_mobs(&session_id.to_string())
+                .await
+        } else {
+            false
+        };
+        #[cfg(not(feature = "mob"))]
+        let retained_mob_cleanup = false;
+        if result.is_ok() || not_found {
+            if let Err(error) = cleanup_archived_session_runtime(&state, &session_id).await {
+                let _ = result_tx.send(Err(error));
+                return;
             }
-            Err(error) => Err(error),
+        }
+        if not_found && retained_mob_cleanup {
+            let _ = result_tx.send(Ok(()));
+            return;
         };
         let _ = result_tx.send(result);
     });
@@ -6822,6 +6849,104 @@ mod tests {
         try_create_deferred_rest_runtime_session(state)
             .await
             .expect("deferred session create should succeed")
+    }
+
+    #[cfg(feature = "mob")]
+    struct RestFailClearEventStore {
+        inner: meerkat_mob::store::InMemoryMobEventStore,
+    }
+
+    #[cfg(feature = "mob")]
+    impl RestFailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
+            }
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl meerkat_mob::store::MobEventStore for RestFailClearEventStore {
+        async fn append(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<meerkat_mob::NewMobEvent>,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
+        {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
+            Err(meerkat_mob::store::MobStoreError::Internal(
+                "forced REST archive mob destroy clear failure".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    async fn insert_rest_archive_partial_destroy_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &str,
+    ) -> meerkat_mob::MobId {
+        let mob_id = meerkat_mob::MobId::from("rest-session-archive-partial-destroy");
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let storage =
+            meerkat_mob::MobStorage::with_events(Arc::new(RestFailClearEventStore::new()));
+        let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create archive-owned mob with failing event clear");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        mob_id
     }
 
     async fn load_rest_state_with_capacity(temp: &TempDir, max_sessions: usize) -> AppState {
@@ -8541,6 +8666,143 @@ mod tests {
                 .is_some_and(|msg| msg.contains("reserved") && msg.contains("mob_id")),
             "reserved mob label rejection should explain the trust boundary: {}",
             String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_archive_session_route_missing_without_retained_mob_cleanup_returns_not_found() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        let app = router(state);
+        let uri = format!("/sessions/{session_id}");
+
+        let first = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let retry = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.status(),
+            StatusCode::NOT_FOUND,
+            "stale REST archive without retained mob cleanup must remain NotFound"
+        );
+        let body = retry.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("Session not found")),
+            "not found response should explain the missing session: {payload}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_archive_session_route_surfaces_incomplete_mob_cleanup_data() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        let mob_id =
+            insert_rest_archive_partial_destroy_mob(&state.mob_state, &session_id.to_string())
+                .await;
+        let mob_state = Arc::clone(&state.mob_state);
+        let app = router(state);
+        let uri = format!("/sessions/{session_id}");
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], "mob_destroy_incomplete");
+        let details = &payload["details"];
+        assert_eq!(details["code"], "mob_destroy_incomplete");
+        assert_eq!(details["retryable"], true);
+        assert!(
+            details["destroy_report"]["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "archive error should carry the incomplete destroy report: {payload}"
+        );
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_ok(),
+            "incomplete REST archive cleanup must retain the mob retry anchor"
+        );
+
+        let retry_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(retry_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let retry_body = retry_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let retry_payload: serde_json::Value = serde_json::from_slice(&retry_body).unwrap();
+        assert_eq!(
+            retry_payload["code"], "mob_destroy_incomplete",
+            "REST archive retry must report retained cleanup state, not session not found: {retry_payload}"
+        );
+        assert_eq!(
+            retry_payload["details"]["retryable"], true,
+            "REST archive retry should keep typed retryable incomplete data: {retry_payload}"
+        );
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_ok(),
+            "incomplete REST archive retry must still retain the mob retry anchor"
         );
     }
 

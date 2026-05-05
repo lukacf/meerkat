@@ -78,7 +78,7 @@ use wasm_bindgen::prelude::*;
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
 use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, RunId};
-use meerkat_mob_mcp::MobMcpState;
+use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
 
 // ═══════════════════════════════════════════════════════════
 // Tracing → browser console (wasm32 only)
@@ -536,6 +536,24 @@ fn err_mob(e: meerkat_mob::MobError) -> JsValue {
     err_str("mob_error", e)
 }
 
+fn mob_destroy_error_value(e: MobMcpDestroyError) -> serde_json::Value {
+    match e {
+        MobMcpDestroyError::Incomplete { report } => serde_json::json!({
+            "code": "mob_destroy_incomplete",
+            "message": MobMcpDestroyError::incomplete_message(&report),
+            "destroy_report": report,
+            "retryable": true,
+        }),
+        MobMcpDestroyError::Mob(error) => {
+            serde_json::json!({ "code": "mob_error", "message": error.to_string() })
+        }
+    }
+}
+
+fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
+    JsValue::from_str(&mob_destroy_error_value(e).to_string())
+}
+
 fn err_session(e: meerkat_core::SessionError) -> JsValue {
     match e {
         meerkat_core::SessionError::NotFound { .. } => {
@@ -554,6 +572,14 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
             err_js("SESSION_NOT_RUNNING", "session is not running")
         }
         meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
+        meerkat_core::SessionError::FailedWithData { message, data } => {
+            let mut data = data;
+            if let serde_json::Value::Object(map) = &mut data {
+                map.entry("message".to_string())
+                    .or_insert_with(|| serde_json::Value::String(message));
+            }
+            JsValue::from_str(&data.to_string())
+        }
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
         meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
     }
@@ -1498,14 +1524,65 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 /// Remove a session.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
-    let (session_service, session_id) = with_runtime_state(|state| {
+    let (session_service, mob_state, session_id) = with_runtime_state(|state| {
         let session = state
             .sessions
             .get(&handle)
             .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((state.session_service.clone(), session.session_id.clone()))
+        Ok((
+            state.session_service.clone(),
+            state.mob_state.clone(),
+            session.session_id.clone(),
+        ))
     })?;
-    futures::executor::block_on(session_service.archive(&session_id)).map_err(err_session)
+    futures::executor::block_on(destroy_session_with_services(
+        session_service,
+        mob_state,
+        session_id,
+    ))
+    .map_err(err_web_destroy_session)
+}
+
+#[derive(Debug)]
+enum WebDestroySessionError {
+    Session(meerkat_core::SessionError),
+    Mob(MobMcpDestroyError),
+}
+
+fn err_web_destroy_session(error: WebDestroySessionError) -> JsValue {
+    match error {
+        WebDestroySessionError::Session(error) => err_session(error),
+        WebDestroySessionError::Mob(error) => err_mob_destroy(error),
+    }
+}
+
+async fn destroy_session_with_services(
+    session_service: Arc<WasmSessionService>,
+    mob_state: Arc<MobMcpState>,
+    session_id: meerkat_core::SessionId,
+) -> Result<(), WebDestroySessionError> {
+    let archive_not_found = match session_service.archive(&session_id).await {
+        Ok(()) => None,
+        Err(error @ meerkat_core::SessionError::NotFound { .. }) => Some(error),
+        Err(error) => return Err(WebDestroySessionError::Session(error)),
+    };
+    let retained_mob_cleanup = if archive_not_found.is_some() {
+        mob_state
+            .has_bridge_session_scoped_mobs(&session_id.to_string())
+            .await
+    } else {
+        false
+    };
+    mob_state
+        .destroy_bridge_session_mobs(&session_id.to_string())
+        .await
+        .map_err(WebDestroySessionError::Mob)?;
+    if !retained_mob_cleanup {
+        if let Some(error) = archive_not_found {
+            return Err(WebDestroySessionError::Session(error));
+        }
+    }
+    Ok(())
 }
 
 /// Drain and return all pending agent events from the last turn(s).
@@ -1616,7 +1693,7 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     let _destroy_report = mob_state
         .mob_lifecycle_action(&id, action)
         .await
-        .map_err(err_mob)?;
+        .map_err(err_mob_destroy)?;
     Ok(())
 }
 
@@ -2501,8 +2578,9 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        merge_runtime_system_context_state, parse_mob_lifecycle_action_arg, parse_mobpack,
-        poll_subscription, serialize_subscription_item,
+        destroy_session_with_services, merge_runtime_system_context_state, mob_destroy_error_value,
+        parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
+        serialize_subscription_item,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2514,7 +2592,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
-    use meerkat::SessionServiceControlExt;
+    use meerkat::{SessionService, SessionServiceControlExt};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::Config;
     use meerkat_core::time_compat::{Duration, SystemTime};
@@ -2527,6 +2605,10 @@ mod tests {
     use serde_json::json;
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::Arc;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_mobpack_bytes(capabilities: &[&str]) -> Vec<u8> {
         let capability_values = capabilities
@@ -2587,6 +2669,113 @@ capabilities = [{capability_values}]
             .to_string(),
         );
         assert!(init.is_ok());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct WebFailClearEventStore {
+        inner: meerkat_mob::store::InMemoryMobEventStore,
+        fail_clear: AtomicBool,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl WebFailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
+                fail_clear: AtomicBool::new(true),
+            }
+        }
+
+        fn allow_clear(&self) {
+            self.fail_clear.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_mob::store::MobEventStore for WebFailClearEventStore {
+        async fn append(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<meerkat_mob::NewMobEvent>,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
+        {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
+            if self.fail_clear.load(Ordering::Relaxed) {
+                return Err(meerkat_mob::store::MobStoreError::Internal(
+                    "forced web destroy mob cleanup clear failure".to_string(),
+                ));
+            }
+            self.inner.clear().await
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn insert_web_partial_destroy_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &str,
+        events: Arc<WebFailClearEventStore>,
+    ) -> MobId {
+        let mob_id = MobId::from("web-session-destroy-partial");
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let storage = meerkat_mob::MobStorage::with_events(events);
+        let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create archive-owned mob with failing event clear");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        mob_id
     }
 
     #[test]
@@ -2976,6 +3165,142 @@ capabilities = [{capability_values}]
         );
         let member_ref = payload["member_ref"].as_str().expect("member_ref");
         assert!(!member_ref.is_empty(), "member_ref must be populated");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mob_destroy_error_value_preserves_typed_incomplete_data() {
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.errors.push("forced incomplete cleanup".to_string());
+
+        let value =
+            mob_destroy_error_value(meerkat_mob_mcp::MobMcpDestroyError::Incomplete { report });
+
+        assert_eq!(value["code"], "mob_destroy_incomplete");
+        assert_eq!(value["retryable"], true);
+        assert!(
+            value["destroy_report"]["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "web destroy error projection must carry the destroy report: {value}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn destroy_session_without_retained_mob_cleanup_returns_not_found_on_retry() {
+        let mut config = Config::default();
+        populate_realm_from_api_keys(
+            &mut config,
+            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            None,
+        );
+        let (service, mob_state) =
+            build_service_infrastructure(config, 8).expect("build runtime services");
+        let created = service
+            .create_session(meerkat_core::service::CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "".into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create deferred web session");
+        let session_id = created.session_id;
+
+        destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+            .await
+            .expect("first destroy without mob cleanup should archive session");
+        let retry = destroy_session_with_services(service, mob_state, session_id)
+            .await
+            .expect_err("stale destroy without retained mob cleanup should stay NotFound");
+        assert!(
+            matches!(
+                retry,
+                super::WebDestroySessionError::Session(meerkat_core::SessionError::NotFound { .. })
+            ),
+            "retry without retained mob cleanup should not be success-classified: {retry:?}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn destroy_session_cleanup_retry_surfaces_retained_mob_partial_state() {
+        let mut config = Config::default();
+        populate_realm_from_api_keys(
+            &mut config,
+            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            None,
+        );
+        let (service, mob_state) =
+            build_service_infrastructure(config, 8).expect("build runtime services");
+        let created = service
+            .create_session(meerkat_core::service::CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "".into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create deferred web session");
+        let session_id = created.session_id;
+        let events = Arc::new(WebFailClearEventStore::new());
+        let mob_id =
+            insert_web_partial_destroy_mob(&mob_state, &session_id.to_string(), events.clone())
+                .await;
+
+        let first =
+            destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+                .await
+                .expect_err("first cleanup should surface incomplete mob destroy");
+        assert!(
+            matches!(
+                first,
+                super::WebDestroySessionError::Mob(
+                    meerkat_mob_mcp::MobMcpDestroyError::Incomplete { .. }
+                )
+            ),
+            "web destroy should surface typed partial cleanup, got unexpected error"
+        );
+
+        let retry =
+            destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+                .await
+                .expect_err(
+                    "retry should report retained mob cleanup state, not session not found",
+                );
+        assert!(
+            matches!(
+                retry,
+                super::WebDestroySessionError::Mob(
+                    meerkat_mob_mcp::MobMcpDestroyError::Incomplete { .. }
+                )
+            ),
+            "web destroy retry should keep using retained mob cleanup authority"
+        );
+
+        events.allow_clear();
+        destroy_session_with_services(service, mob_state.clone(), session_id)
+            .await
+            .expect("retry after event store recovery should complete cleanup");
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_err(),
+            "complete web destroy retry must remove the mob retry anchor"
+        );
     }
 
     #[cfg(target_arch = "wasm32")]

@@ -226,12 +226,21 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
     }
 
     async fn interrupt_member(&self) -> Result<BridgeAck, MobError> {
-        self.machine
-            .cancel_after_boundary(&self.session_id)
-            .await
-            .map_err(|error| {
-                MobError::Internal(format!("local interrupt_member failed: {error}"))
-            })?;
+        match self.machine.cancel_after_boundary(&self.session_id).await {
+            Ok(()) => {}
+            Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Retired,
+            }) => {
+                // Destroy admission can retire the runtime before disposal asks
+                // the host loop to stop. Retired is already terminal for the
+                // loop, so interrupt is satisfied.
+            }
+            Err(error) => {
+                return Err(MobError::Internal(format!(
+                    "local interrupt_member failed: {error}"
+                )));
+            }
+        }
         Ok(BridgeAck { ok: true })
     }
 
@@ -317,6 +326,19 @@ mod tests {
 
         assert_eq!(report.inputs_abandoned, 0);
         assert_eq!(report.inputs_pending_drain, 0);
+    }
+
+    #[tokio::test]
+    async fn local_bridge_interrupt_retired_runtime_is_terminal_noop() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine.register_session(session_id.clone()).await;
+
+        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
+        bridge.retire_member().await.unwrap();
+        let ack = bridge.interrupt_member().await.unwrap();
+
+        assert!(ack.ok);
     }
 
     #[tokio::test]

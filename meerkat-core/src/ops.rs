@@ -113,7 +113,9 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             ToolError::NotFound { .. } => Self::NotFound,
             ToolError::Unavailable { .. } => Self::Unavailable,
             ToolError::InvalidArguments { .. } => Self::InvalidArguments,
-            ToolError::ExecutionFailed { .. } => Self::ExecutionFailed,
+            ToolError::ExecutionFailed { .. } | ToolError::ExecutionFailedWithData { .. } => {
+                Self::ExecutionFailed
+            }
             ToolError::Timeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
             ToolError::Other(_) => Self::Other,

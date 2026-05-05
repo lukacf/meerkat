@@ -500,10 +500,17 @@ impl MeerkatMcpState {
     async fn cleanup_archived_session_runtime(&self, session_id: &meerkat::SessionId) {
         self.clear_surface_bindings(session_id).await;
         #[cfg(feature = "mob")]
-        let _ = self
+        if let Err(error) = self
             .mob_state
             .destroy_bridge_session_mobs(&session_id.to_string())
-            .await;
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "archived-session mob cleanup incomplete"
+            );
+        }
     }
 
     async fn clear_surface_bindings_if_new(
@@ -1612,9 +1619,7 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_archive" => {
             let input: MeerkatSessionIdInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_archive(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_archive(state, input).await
         }
         "meerkat_mcp_add" => {
             let input: MeerkatMcpAddInput = serde_json::from_value(arguments.clone())
@@ -2158,13 +2163,17 @@ struct McpArchiveCleanup {
 }
 
 impl McpArchiveCleanup {
-    async fn run(&self, session_id: &meerkat::SessionId) {
+    async fn run(&self, session_id: &meerkat::SessionId) -> Result<(), SessionError> {
         self.ingress.clear_session(session_id).await;
         #[cfg(feature = "mob")]
-        let _ = self
+        if let Err(error) = self
             .mob_state
             .destroy_bridge_session_mobs(&session_id.to_string())
-            .await;
+            .await
+        {
+            return Err(error.into_session_error("mob cleanup during archive incomplete"));
+        }
+        Ok(())
     }
 }
 
@@ -2192,6 +2201,11 @@ async fn archive_session_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        #[cfg(feature = "mob")]
+        let had_cleanup_anchor = cleanup
+            .mob_state
+            .has_bridge_session_scoped_mobs(&session_id.to_string())
+            .await;
         let result = archive_with_mcp_machine_authority(
             service.as_ref(),
             runtime_adapter.as_ref(),
@@ -2199,8 +2213,17 @@ async fn archive_session_with_runtime_cleanup(
         )
         .await;
         if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            cleanup.run(&session_id).await;
+            if let Err(error) = cleanup.run(&session_id).await {
+                let _ = result_tx.send(Err(error));
+                return;
+            }
         }
+        #[cfg(feature = "mob")]
+        let result = if had_cleanup_anchor && matches!(result, Err(SessionError::NotFound { .. })) {
+            Ok(())
+        } else {
+            result
+        };
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {
@@ -2213,16 +2236,25 @@ async fn archive_session_with_runtime_cleanup(
 async fn handle_meerkat_archive(
     state: &MeerkatMcpState,
     input: MeerkatSessionIdInput,
-) -> Result<Value, String> {
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+) -> Result<Value, ToolCallError> {
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
     archive_session_with_runtime_cleanup(state, session_id.clone())
         .await
-        .map_err(|e| format!("Failed to archive session: {e}"))?;
+        .map_err(archive_session_error_to_tool_error)?;
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "archived": true
     })))
+}
+
+fn archive_session_error_to_tool_error(error: SessionError) -> ToolCallError {
+    match error {
+        SessionError::FailedWithData { message, data } => {
+            ToolCallError::internal_with_data(format!("Failed to archive session: {message}"), data)
+        }
+        other => ToolCallError::internal(format!("Failed to archive session: {other}")),
+    }
 }
 
 async fn handle_meerkat_mcp_add(
@@ -3902,6 +3934,116 @@ mod tests {
         let session_id = session.id().to_string();
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    #[cfg(feature = "mob")]
+    struct McpFailClearEventStore {
+        inner: meerkat_mob::store::InMemoryMobEventStore,
+        fail_clear: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    impl McpFailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
+                fail_clear: AtomicBool::new(true),
+            }
+        }
+
+        fn allow_clear(&self) {
+            self.fail_clear.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl meerkat_mob::store::MobEventStore for McpFailClearEventStore {
+        async fn append(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<meerkat_mob::NewMobEvent>,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
+        {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
+            if !self.fail_clear.load(Ordering::SeqCst) {
+                return self.inner.clear().await;
+            }
+            Err(meerkat_mob::store::MobStoreError::Internal(
+                "forced MCP archive mob destroy clear failure".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    async fn insert_mcp_archive_partial_destroy_mob(
+        state: &MeerkatMcpState,
+        owner_session_id: &str,
+    ) -> (meerkat_mob::MobId, Arc<McpFailClearEventStore>) {
+        let mob_id = meerkat_mob::MobId::from("mcp-session-archive-partial-destroy");
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let events = Arc::new(McpFailClearEventStore::new());
+        let storage = meerkat_mob::MobStorage::with_events(events.clone());
+        let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_session_service(state.mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create archive-owned mob with failing event clear");
+        state
+            .mob_state
+            .mob_insert_handle(mob_id.clone(), handle)
+            .await;
+        (mob_id, events)
     }
 
     fn seed_active_external_surface(
@@ -5888,6 +6030,82 @@ mod tests {
         .expect("archive call should succeed");
         let archived_payload = unwrap_payload(archived);
         assert_eq!(archived_payload["archived"], true);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mcp_archive_surfaces_incomplete_mob_cleanup_data() {
+        let (state, session_id) = state_with_persisted_session().await;
+        let (mob_id, events) = insert_mcp_archive_partial_destroy_mob(&state, &session_id).await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect_err("partial mob cleanup should fail meerkat_archive");
+
+        assert_eq!(err.code, -32603);
+        let data = err.data.expect("typed incomplete cleanup data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(data.get("retryable").and_then(Value::as_bool), Some(true));
+        assert!(
+            data.get("destroy_report")
+                .and_then(|report| report.get("errors"))
+                .and_then(Value::as_array)
+                .is_some_and(|errors| !errors.is_empty()),
+            "archive error should carry the incomplete destroy report: {data}"
+        );
+        assert!(
+            state.mob_state.handle_for(&mob_id).await.is_ok(),
+            "incomplete MCP archive cleanup must retain the mob retry anchor"
+        );
+
+        let retry_err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect_err("retry should still report retained partial mob cleanup");
+
+        assert_eq!(retry_err.code, -32603);
+        let retry_data = retry_err.data.expect("typed retry incomplete cleanup data");
+        assert_eq!(
+            retry_data.get("code").and_then(Value::as_str),
+            Some("mob_destroy_incomplete"),
+            "MCP archive retry must not collapse to not found while cleanup authority remains"
+        );
+        assert_eq!(
+            retry_data.get("retryable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            state.mob_state.handle_for(&mob_id).await.is_ok(),
+            "incomplete MCP archive retry must still retain the mob retry anchor"
+        );
+
+        events.allow_clear();
+        let retry_success = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("retry should report success after retained mob cleanup completes");
+        let retry_payload = unwrap_payload(retry_success);
+        assert_eq!(
+            retry_payload["archived"], true,
+            "MCP archive retry should report success after cleanup completes despite owner session NotFound"
+        );
+        assert!(
+            state.mob_state.handle_for(&mob_id).await.is_err(),
+            "successful MCP archive retry should remove the mob retry anchor"
+        );
     }
 
     #[test]

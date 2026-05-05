@@ -49,6 +49,24 @@ fn is_transport_internal(message: &str) -> bool {
 }
 
 #[cfg(feature = "mob")]
+fn mob_destroy_cleanup_error_response(
+    id: Option<crate::protocol::RpcId>,
+    destroy_error: meerkat_mob_mcp::MobMcpDestroyError,
+) -> RpcResponse {
+    match destroy_error {
+        meerkat_mob_mcp::MobMcpDestroyError::Incomplete { report } => RpcResponse::error_with_data(
+            id,
+            error::INTERNAL_ERROR,
+            meerkat_mob_mcp::MobMcpDestroyError::incomplete_message(&report),
+            meerkat_mob_mcp::MobMcpDestroyError::incomplete_error_data(&report),
+        ),
+        meerkat_mob_mcp::MobMcpDestroyError::Mob(error) => {
+            RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string())
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
 fn compose_rpc_mob_external_tools(
     callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
     configured_tools: Option<Arc<dyn AgentToolDispatcher>>,
@@ -1852,14 +1870,42 @@ impl MethodRouter {
                 Ok(()) => {
                     // Clean up session-owned mobs (implicit + explicit).
                     #[cfg(feature = "mob")]
-                    let _ = self
+                    if let Err(error) = self
                         .mob_state
                         .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await;
+                        .await
+                    {
+                        return mob_destroy_cleanup_error_response(id, error);
+                    }
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))
                 }
-                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                Err(rpc_err) => {
+                    #[cfg(feature = "mob")]
+                    {
+                        let retained_cleanup = self
+                            .mob_state
+                            .has_bridge_session_scoped_mobs(&session_id.to_string())
+                            .await;
+                        if rpc_err.code == error::SESSION_NOT_FOUND && retained_cleanup {
+                            return match self
+                                .mob_state
+                                .destroy_bridge_session_mobs(&session_id.to_string())
+                                .await
+                            {
+                                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                                Err(error) => mob_destroy_cleanup_error_response(id, error),
+                            };
+                        }
+                    }
+
+                    match rpc_err.data {
+                        Some(data) => {
+                            RpcResponse::error_with_data(id, rpc_err.code, rpc_err.message, data)
+                        }
+                        None => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                    }
+                }
             },
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => match self
@@ -1868,13 +1914,46 @@ impl MethodRouter {
                 .await
             {
                 Ok(()) => RpcResponse::success(id, json!({"archived": true})),
-                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                Err(err) => {
+                    if self
+                        .mob_state
+                        .has_bridge_session_scoped_mobs(&session_id.to_string())
+                        .await
+                    {
+                        return match self
+                            .mob_state
+                            .destroy_bridge_session_mobs(&session_id.to_string())
+                            .await
+                        {
+                            Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                            Err(error) => mob_destroy_cleanup_error_response(id, error),
+                        };
+                    }
+                    RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string())
+                }
             },
-            None => RpcResponse::error(
-                id,
-                error::SESSION_NOT_FOUND,
-                format!("Session not found: {session_id}"),
-            ),
+            None => {
+                #[cfg(feature = "mob")]
+                if self
+                    .mob_state
+                    .has_bridge_session_scoped_mobs(&session_id.to_string())
+                    .await
+                {
+                    return match self
+                        .mob_state
+                        .destroy_bridge_session_mobs(&session_id.to_string())
+                        .await
+                    {
+                        Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                        Err(error) => mob_destroy_cleanup_error_response(id, error),
+                    };
+                }
+                RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                )
+            }
         }
     }
 
@@ -2660,6 +2739,7 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2715,6 +2795,78 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    struct RouterFailClearEventStore {
+        inner: meerkat_mob::store::InMemoryMobEventStore,
+        fail_clear: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    impl RouterFailClearEventStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
+                fail_clear: AtomicBool::new(true),
+            }
+        }
+
+        fn allow_clear(&self) {
+            self.fail_clear.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl meerkat_mob::store::MobEventStore for RouterFailClearEventStore {
+        async fn append(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<meerkat_mob::NewMobEvent>,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn poll(
+            &self,
+            after_cursor: u64,
+            limit: usize,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.poll(after_cursor, limit).await
+        }
+
+        async fn replay_all(
+            &self,
+        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.replay_all().await
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
+            self.inner.latest_cursor().await
+        }
+
+        fn subscribe(
+            &self,
+        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
+        {
+            self.inner.subscribe()
+        }
+
+        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
+            if self.fail_clear.load(Ordering::Relaxed) {
+                return Err(meerkat_mob::store::MobStoreError::Internal(
+                    "forced router archive mob destroy clear failure".to_string(),
+                ));
+            }
+            self.inner.clear().await
         }
     }
 
@@ -3505,6 +3657,43 @@ args = [{}]
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new_with_mob_state(runtime, config_store, sink, mob_state);
         (router, notif_rx)
+    }
+
+    #[cfg(feature = "mob")]
+    async fn insert_router_archive_partial_destroy_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &str,
+    ) -> (meerkat_mob::MobId, Arc<RouterFailClearEventStore>) {
+        let mob_id = meerkat_mob::MobId::from("router-session-archive-partial-destroy");
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles = profiles;
+        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let events = Arc::new(RouterFailClearEventStore::new());
+        let storage = meerkat_mob::MobStorage::with_events(events.clone());
+        let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create archive-owned mob with failing event clear");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        (mob_id, events)
     }
 
     async fn test_router_with_registry(
@@ -7347,6 +7536,98 @@ args = [{}]
             .iter()
             .any(|s| s["session_id"].as_str() == Some(&session_id));
         assert!(!found, "Archived session should not appear in list");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_archive_surfaces_incomplete_mob_cleanup_data() {
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let (router, _notif_rx) = test_router_with_mob_state(mob_state.clone()).await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({"prompt": "Hello"}),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+        let (mob_id, fail_clear_events) =
+            insert_router_archive_partial_destroy_mob(&mob_state, &session_id).await;
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&archive_resp), error::INTERNAL_ERROR);
+        let error = archive_resp
+            .error
+            .expect("partial mob cleanup should fail session/archive");
+        let data = error.data.expect("typed incomplete cleanup data");
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            data.get("destroy_report")
+                .and_then(|report| report.get("errors"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|errors| !errors.is_empty()),
+            "archive error should carry the incomplete destroy report: {data}"
+        );
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_ok(),
+            "incomplete session/archive cleanup must retain the mob retry anchor"
+        );
+
+        let retry_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&retry_resp), error::INTERNAL_ERROR);
+        let retry_data = retry_resp
+            .error
+            .expect("retry should still report retained cleanup state")
+            .data
+            .expect("typed retry incomplete cleanup data");
+        assert_eq!(
+            retry_data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete"),
+            "retry must not collapse to SESSION_NOT_FOUND while cleanup authority remains"
+        );
+        assert!(
+            mob_state.has_bridge_session_scoped_mobs(&session_id).await,
+            "retained partial cleanup must stay indexed to the archived owner session"
+        );
+
+        fail_clear_events.allow_clear();
+        let complete_retry_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            complete_retry_resp.error.is_none(),
+            "retry after event store recovery should complete cleanup: {complete_retry_resp:?}"
+        );
+        assert!(
+            mob_state.handle_for(&mob_id).await.is_err(),
+            "successful archive retry must remove the mob retry anchor"
+        );
     }
 
     #[tokio::test]

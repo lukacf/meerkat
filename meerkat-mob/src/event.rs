@@ -243,6 +243,14 @@ pub enum MobEventKind {
     },
     /// Mob reached terminal completed state.
     MobCompleted,
+    /// Mob destroy was admitted and is retaining authority until cleanup finishes.
+    MobDestroying,
+    /// Destroy finished member/runtime cleanup and is finalizing durable storage.
+    ///
+    /// This marker is a crash-recovery fence: if runtime metadata was scrubbed
+    /// but the event log was not yet cleared, resume must not recreate
+    /// supervisor authority as though the mob were still live.
+    MobDestroyStorageFinalizing,
     /// Mob was reset to initial running state (all members retired, events cleared).
     MobReset,
     // ---------------------------------------------------------------
@@ -680,6 +688,16 @@ mod tests {
     #[test]
     fn test_mob_completed_roundtrip() {
         roundtrip(&MobEventKind::MobCompleted);
+    }
+
+    #[test]
+    fn test_mob_destroying_roundtrip() {
+        roundtrip(&MobEventKind::MobDestroying);
+    }
+
+    #[test]
+    fn test_mob_destroy_storage_finalizing_roundtrip() {
+        roundtrip(&MobEventKind::MobDestroyStorageFinalizing);
     }
 
     #[test]

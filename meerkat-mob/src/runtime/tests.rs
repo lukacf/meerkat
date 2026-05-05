@@ -792,6 +792,10 @@ impl MockSessionService {
             .insert(session_id.clone());
     }
 
+    async fn clear_archive_failure(&self, session_id: &SessionId) {
+        self.archive_fail_sessions.write().await.remove(session_id);
+    }
+
     async fn set_archive_failure_for_comms_name(&self, comms_name: &str) {
         self.archive_fail_comms_names
             .write()
@@ -1680,6 +1684,7 @@ struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
     event_tx: tokio::sync::broadcast::Sender<MobEvent>,
     fail_on_kind: RwLock<HashSet<&'static str>>,
+    fail_clear: AtomicBool,
     poll_calls: AtomicU64,
     replay_calls: AtomicU64,
 }
@@ -1691,6 +1696,7 @@ impl FaultInjectedMobEventStore {
             events: RwLock::new(Vec::new()),
             event_tx,
             fail_on_kind: RwLock::new(HashSet::new()),
+            fail_clear: AtomicBool::new(false),
             poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
         }
@@ -1698,6 +1704,14 @@ impl FaultInjectedMobEventStore {
 
     async fn fail_appends_for(&self, kind: &'static str) {
         self.fail_on_kind.write().await.insert(kind);
+    }
+
+    fn fail_clear(&self) {
+        self.fail_clear.store(true, Ordering::Relaxed);
+    }
+
+    fn allow_clear(&self) {
+        self.fail_clear.store(false, Ordering::Relaxed);
     }
 
     fn replay_calls(&self) -> u64 {
@@ -1712,6 +1726,8 @@ impl FaultInjectedMobEventStore {
         match kind {
             MobEventKind::MobCreated { .. } => "MobCreated",
             MobEventKind::MobCompleted => "MobCompleted",
+            MobEventKind::MobDestroying => "MobDestroying",
+            MobEventKind::MobDestroyStorageFinalizing => "MobDestroyStorageFinalizing",
             MobEventKind::MobReset => "MobReset",
             MobEventKind::MemberSpawned(..) => "MemberSpawned",
             MobEventKind::MemberRetired { .. } => "MemberRetired",
@@ -1802,6 +1818,11 @@ impl MobEventStore for FaultInjectedMobEventStore {
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
+        if self.fail_clear.load(Ordering::Relaxed) {
+            return Err(MobStoreError::Internal(
+                "fault-injected clear failure".to_string(),
+            ));
+        }
         self.events.write().await.clear();
         Ok(())
     }
@@ -5301,6 +5322,652 @@ async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy(
         .await
         .expect("destroy should close detach ack before final destroy");
     assert_eq!(handle.status().await.unwrap(), MobState::Destroyed);
+}
+
+#[tokio::test]
+async fn test_destroy_remote_orphan_retains_events_and_metadata_for_retry() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "destroy-remote-orphan-retains-authority",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+    drop(external);
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("unreachable external member should make destroy incomplete");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report
+            .orphaned_remote_members
+            .contains(&MeerkatId::from("w-ext")),
+        "incomplete destroy should report the unreachable external member as orphaned: {report:?}"
+    );
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "remote orphan must fail before metadata/events are removed: {report:?}"
+    );
+
+    let replayed = events.replay_all().await.expect("replay retained events");
+    assert!(
+        replayed
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroying)),
+        "remote orphan must persist destroy admission so resume cannot reopen the mob"
+    );
+    assert!(
+        replayed.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberSpawned(spawned)
+                    if spawned.agent_identity == MeerkatId::from("w-ext")
+            )
+        }),
+        "remote orphan must leave the member-spawn event available for retry/recovery"
+    );
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor metadata after incomplete destroy")
+            .is_some(),
+        "remote orphan must retain supervisor authority for a later cleanup attempt"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_event_clear_failure_restores_runtime_metadata_for_retry() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-clear-restores-metadata");
+    let mob_id = definition.id.clone();
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let storage =
+        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone());
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("destroy-retry-worker"),
+            None,
+        )
+        .await
+        .expect("spawn worker before partial destroy");
+    let bridge_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("destroy-retry-worker"))
+        .await
+        .expect("worker bridge session");
+
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load initial supervisor metadata")
+            .is_some(),
+        "test should start with supervisor metadata"
+    );
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("overlay-retry-anchor"),
+                generation: crate::ids::Generation::INITIAL,
+                normalized_member_ref: None,
+                bootstrap_token: Some("restore-me".to_string().into()),
+                status: ExternalBindingOverlayStatus::Failed {
+                    reason: "test overlay must be restored".to_string(),
+                },
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("insert overlay before partial destroy");
+    events.fail_clear();
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("event clear failure should make destroy incomplete");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "metadata scrub must be rolled back when final event clear fails: {report:?}"
+    );
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load restored supervisor metadata")
+            .is_some(),
+        "incomplete destroy must restore supervisor metadata for retry"
+    );
+    assert!(
+        runtime_metadata
+            .list_external_binding_overlays(&mob_id)
+            .await
+            .expect("list restored overlays")
+            .iter()
+            .any(|overlay| overlay.agent_identity == AgentIdentity::from("overlay-retry-anchor")),
+        "incomplete destroy must restore external binding overlays for retry"
+    );
+    let replayed_after_partial = events
+        .replay_all()
+        .await
+        .expect("events remain after failed clear");
+    assert!(
+        replayed_after_partial
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroying)),
+        "partial destroy must persist destroy admission across restart"
+    );
+    assert!(
+        replayed_after_partial.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberRetired {
+                    agent_identity,
+                    ..
+                } if agent_identity == &AgentIdentity::from("destroy-retry-worker")
+            )
+        }),
+        "successful member cleanup during partial destroy must persist a retire marker"
+    );
+    assert!(
+        !replayed_after_partial.is_empty(),
+        "failed event clear should leave event authority available"
+    );
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after partial destroy"),
+        "member cleanup should have archived the bridge session before later partial failure"
+    );
+    let supervisor_before_rotate = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load supervisor before rejected rotate")
+        .expect("supervisor metadata retained before rejected rotate");
+    let rotate_error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("partial destroy must close supervisor rotation authority");
+    assert!(
+        matches!(
+            rotate_error,
+            MobError::InvalidTransition {
+                from: MobState::Destroyed,
+                to: MobState::Destroyed,
+            }
+        ),
+        "post-destroy supervisor rotation should be rejected fail-closed: {rotate_error:?}"
+    );
+    assert_eq!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor after rejected rotate"),
+        Some(supervisor_before_rotate),
+        "rejected rotate must not mutate retained supervisor authority"
+    );
+
+    drop(handle);
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume retained partial destroy storage");
+    assert_eq!(
+        resumed.status().await.unwrap(),
+        MobState::Destroyed,
+        "resume after partial destroy must keep destroy authority terminal"
+    );
+    assert!(
+        resumed.list_members_including_retiring().await.is_empty(),
+        "resume after partial destroy must not resurrect already-cleaned members"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "resume must not recreate the archived bridge session for a durably retired member"
+    );
+
+    events.allow_clear();
+    let retry_report = resumed
+        .destroy()
+        .await
+        .expect("resumed retry should complete after event store recovers");
+    assert!(retry_report.metadata_scrubbed);
+    assert!(retry_report.events_cleared);
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load metadata after retry")
+            .is_none(),
+        "complete retry should scrub supervisor metadata"
+    );
+    assert!(
+        runtime_metadata
+            .list_external_binding_overlays(&mob_id)
+            .await
+            .expect("list overlays after retry")
+            .is_empty(),
+        "complete retry should scrub external binding overlays"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("events after complete retry")
+            .is_empty(),
+        "complete retry should clear events"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_destroy_storage_finalizing_without_metadata_does_not_recreate_authority() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-finalizing-no-metadata");
+    let mob_id = definition.id.clone();
+    let events = Arc::new(InMemoryMobEventStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    events
+        .append(NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(definition),
+            },
+        })
+        .await
+        .expect("append created event");
+    events
+        .append(NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobDestroying,
+        })
+        .await
+        .expect("append destroy marker");
+    events
+        .append(NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobDestroyStorageFinalizing,
+        })
+        .await
+        .expect("append storage-finalizing marker");
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume storage-finalizing destroy without supervisor metadata");
+    assert_eq!(
+        resumed.status().await.unwrap(),
+        MobState::Destroyed,
+        "storage-finalizing marker must keep resumed mob terminal"
+    );
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor after resume")
+            .is_none(),
+        "resume must not mint replacement persisted supervisor authority after finalizing scrub"
+    );
+
+    let report = resumed
+        .destroy()
+        .await
+        .expect("retry should finish final event clear without supervisor metadata");
+    assert!(report.metadata_scrubbed);
+    assert!(report.events_cleared);
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor after final clear")
+            .is_none(),
+        "complete retry must leave supervisor metadata absent"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("events after finalizing retry")
+            .is_empty(),
+        "complete retry should clear finalizing event anchor"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_marker_append_failure_precedes_cleanup_side_effects() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-marker-first");
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let storage = MobStorage::with_events(events.clone());
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let bridge_session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("marker-first-worker"),
+            None,
+        )
+        .await
+        .expect("spawn worker before marker failure")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed worker");
+    events.fail_appends_for("MobDestroying").await;
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("destroy marker append failure should fail closed");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("destroy marker append failed")),
+        "report should identify marker append failure: {report:?}"
+    );
+    let replayed = events.replay_all().await.expect("replay events");
+    assert!(
+        replayed
+            .iter()
+            .all(|event| !matches!(event.kind, MobEventKind::MemberRetired { .. })),
+        "destroy must not retire members before the durable destroy marker is written"
+    );
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after marker failure"),
+        "destroy must not archive member sessions before the durable destroy marker is written"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor_and_closes_authority()
+ {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-retire-admission-fail");
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, service) = create_test_mob_with_events(definition, events.clone()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    let adapter = service.enable_runtime_adapter();
+    let worker = AgentIdentity::from("destroy-stop-loop-worker");
+    let bridge_session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from(worker.as_str()),
+            None,
+        )
+        .await
+        .expect("spawn autonomous worker before partial destroy")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed worker");
+
+    adapter.unregister_session(&bridge_session_id).await;
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("missing runtime adapter registration should make destroy incomplete");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains("destroy retire admission failed")
+                && error.contains("is not registered with this MeerkatMachine")
+        }),
+        "destroy should surface the failed retire admission: {report:?}"
+    );
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "local cleanup failure must retain metadata/events for retry: {report:?}"
+    );
+    assert_eq!(
+        handle.status().await.unwrap(),
+        MobState::Destroyed,
+        "durable destroy admission should close live authority after partial cleanup"
+    );
+    let stop_err = handle
+        .stop()
+        .await
+        .expect_err("destroy-admitted mob must reject non-destroy mutation");
+    assert!(
+        matches!(stop_err, MobError::InvalidTransition { .. }),
+        "partial destroy should fail closed for live mutation commands: {stop_err:?}"
+    );
+    assert!(
+        handle
+            .list_members_including_retiring()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == worker),
+        "failed StopHostLoop must retain the member roster anchor for retry"
+    );
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after partial destroy"),
+        "failed StopHostLoop must not archive the bridge session"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay retained events")
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroying)),
+        "partial destroy must retain the durable destroy marker"
+    );
+
+    let retry_err = handle
+        .destroy()
+        .await
+        .expect_err("retry should report the retained retire-admission failure");
+    let retry_report = match retry_err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy retry, got {other:?}"),
+    };
+    assert!(
+        retry_report.errors.iter().any(|error| {
+            error.contains("destroy retire admission failed")
+                && error.contains("is not registered with this MeerkatMachine")
+        }),
+        "retry should preserve the remaining partial destroy state: {retry_report:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_autonomous_archive_failure_retry_reaches_archive_after_runtime_stopped() {
+    let definition = with_unique_mob_id(sample_definition(), "destroy-autonomous-archive-retry");
+    let (handle, service) = create_test_mob(definition).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    let worker = AgentIdentity::from("destroy-autonomous-archive-worker");
+    let bridge_session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from(worker.as_str()),
+            None,
+        )
+        .await
+        .expect("spawn autonomous worker before partial destroy")
+        .bridge_session_id()
+        .cloned()
+        .expect("autonomous worker bridge session");
+    service.set_archive_failure(&bridge_session_id).await;
+
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("archive failure should make destroy incomplete");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains("ArchiveSession") && error.contains("mock archive failure")
+        }),
+        "destroy should surface the failed archive step: {report:?}"
+    );
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "archive failure must retain metadata/events for retry: {report:?}"
+    );
+    assert_eq!(
+        handle.status().await.unwrap(),
+        MobState::Destroyed,
+        "partial destroy should close live authority"
+    );
+    assert!(
+        handle
+            .list_members_including_retiring()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == worker),
+        "archive failure must retain the member roster anchor for retry"
+    );
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after archive failure"),
+        "failed archive must leave the bridge session available for retry"
+    );
+
+    service.clear_archive_failure(&bridge_session_id).await;
+    let retry_report = handle
+        .destroy()
+        .await
+        .expect("retry should reach ArchiveSession after runtime was already stopped");
+    assert!(retry_report.metadata_scrubbed);
+    assert!(retry_report.events_cleared);
+    assert!(retry_report.namespace_cleaned);
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check worker session after successful retry"),
+        "successful retry must archive the retained bridge session"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_prefers_destroying_marker_over_completed_marker() {
+    let definition = with_unique_mob_id(sample_definition(), "destroying-over-completed");
+    let mob_id = definition.id.clone();
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let storage =
+        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone());
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.complete().await.expect("complete empty mob");
+    events.fail_clear();
+    let err = handle
+        .destroy()
+        .await
+        .expect_err("event clear failure should leave partial destroy");
+    assert!(
+        matches!(
+            err,
+            crate::runtime::handle::MobDestroyError::Incomplete { .. }
+        ),
+        "expected incomplete destroy after failed event clear"
+    );
+    let replayed = events.replay_all().await.expect("replay retained events");
+    assert!(
+        replayed
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobCompleted)),
+        "test should retain a completed marker before destroy"
+    );
+    assert!(
+        replayed
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobDestroying)),
+        "partial destroy should retain the destroy marker"
+    );
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume retained completed-then-destroying storage");
+    assert_eq!(
+        resumed.status().await.unwrap(),
+        MobState::Destroyed,
+        "MobDestroying must dominate earlier MobCompleted during resume"
+    );
+    assert_eq!(resumed.definition().id, mob_id);
+    let _ = resumed.shutdown().await;
 }
 
 #[tokio::test]

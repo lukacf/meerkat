@@ -2163,8 +2163,12 @@ struct McpArchiveCleanup {
 }
 
 impl McpArchiveCleanup {
-    async fn run(&self, session_id: &meerkat::SessionId) -> Result<(), SessionError> {
+    async fn clear_surface_session(&self, session_id: &meerkat::SessionId) {
         self.ingress.clear_session(session_id).await;
+    }
+
+    async fn run(&self, session_id: &meerkat::SessionId) -> Result<(), SessionError> {
+        self.clear_surface_session(session_id).await;
         #[cfg(feature = "mob")]
         if let Err(error) = self
             .mob_state
@@ -2201,6 +2205,27 @@ async fn archive_session_with_runtime_cleanup(
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        #[cfg(feature = "mob")]
+        match cleanup
+            .mob_state
+            .archive_mob_owned_bridge_session_with_cleanup(
+                &session_id,
+                "mob cleanup during mob-owned archive incomplete",
+            )
+            .await
+        {
+            Ok(true) => {
+                cleanup.clear_surface_session(&session_id).await;
+                let _ = result_tx.send(Ok(()));
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let _ = result_tx.send(Err(error));
+                return;
+            }
+        }
+
         #[cfg(feature = "mob")]
         let had_cleanup_anchor = cleanup
             .mob_state
@@ -4044,6 +4069,52 @@ mod tests {
             .mob_insert_handle(mob_id.clone(), handle)
             .await;
         (mob_id, events)
+    }
+
+    #[cfg(feature = "mob")]
+    async fn insert_mcp_archive_live_member(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+    ) -> (meerkat_mob::MobId, meerkat::SessionId) {
+        let mob_id = meerkat_mob::MobId::from("mcp-session-archive-live-member");
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::ToolConfig::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create live MCP archive mob");
+        let identity = meerkat_mob::AgentIdentity::from("worker-1");
+        handle
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::new(
+                meerkat_mob::ProfileName::from("worker"),
+                identity.clone(),
+            ))
+            .await
+            .expect("spawn live MCP mob member");
+        let bridge_session_id = handle
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("turn-driven worker should have a bridge session");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        (mob_id, bridge_session_id)
     }
 
     fn seed_active_external_surface(
@@ -6105,6 +6176,83 @@ mod tests {
         assert!(
             state.mob_state.handle_for(&mob_id).await.is_err(),
             "successful MCP archive retry should remove the mob retry anchor"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mcp_archive_does_not_mask_mob_member_archive_failure_with_child_cleanup() {
+        let (mut state, _session_id) = state_with_persisted_session().await;
+        let (mob_state, archive_failures) =
+            meerkat_mob_mcp::MobMcpState::new_in_memory_with_archive_failure_control();
+        state.mob_state = mob_state.clone();
+        let (_parent_mob_id, member_session_id) = insert_mcp_archive_live_member(&mob_state).await;
+        archive_failures
+            .fail_archive(
+                member_session_id.clone(),
+                "forced MCP mob archive failure after retire event",
+            )
+            .await;
+        let member_session_key = member_session_id.to_string();
+        let (child_mob_id, child_events) =
+            insert_mcp_archive_partial_destroy_mob(&state, &member_session_key).await;
+        child_events.allow_clear();
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": member_session_key }),
+        ))
+        .await
+        .expect_err("failed parent mob member archive must fail meerkat_archive");
+
+        assert_eq!(err.code, -32603);
+        assert!(
+            err.message
+                .contains("forced MCP mob archive failure after retire event"),
+            "MCP archive should surface the parent bridge-session archive failure: {err:?}"
+        );
+        assert!(
+            state
+                .mob_state
+                .session_service()
+                .has_live_session(&member_session_id)
+                .await
+                .expect("check failed parent bridge session"),
+            "failed ArchiveSession must retain the parent bridge session retry anchor"
+        );
+        assert!(
+            state.mob_state.handle_for(&child_mob_id).await.is_ok(),
+            "child cleanup must not be run as a success fallback while parent archive failed"
+        );
+
+        archive_failures
+            .clear_archive_failure(&member_session_id)
+            .await;
+        let retry_success = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": member_session_key }),
+        ))
+        .await
+        .expect("retry should complete after parent archive failure clears");
+        let retry_payload = unwrap_payload(retry_success);
+        assert_eq!(
+            retry_payload["archived"], true,
+            "MCP archive retry should report success after parent archive and child cleanup complete"
+        );
+        assert!(
+            !state
+                .mob_state
+                .session_service()
+                .has_live_session(&member_session_id)
+                .await
+                .expect("check retried parent bridge session"),
+            "successful retry must archive the parent bridge session"
+        );
+        assert!(
+            state.mob_state.handle_for(&child_mob_id).await.is_err(),
+            "successful retry must remove the child cleanup retry anchor"
         );
     }
 

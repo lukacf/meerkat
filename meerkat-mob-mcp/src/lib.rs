@@ -150,6 +150,28 @@ fn destroy_report_summary(report: &meerkat_mob::MobDestroyReport) -> String {
 }
 
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
+const BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY: &str =
+    "bridge session not found in any live mob authority:";
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct InMemoryArchiveFailureControl {
+    failures: RwLock<HashMap<SessionId, String>>,
+}
+
+impl InMemoryArchiveFailureControl {
+    pub async fn fail_archive(&self, id: SessionId, reason: impl Into<String>) {
+        self.failures.write().await.insert(id, reason.into());
+    }
+
+    pub async fn clear_archive_failure(&self, id: &SessionId) {
+        self.failures.write().await.remove(id);
+    }
+
+    async fn failure_for(&self, id: &SessionId) -> Option<String> {
+        self.failures.read().await.get(id).cloned()
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KickoffMemberSnapshot {
@@ -741,6 +763,64 @@ impl MobMcpState {
     }
 
     #[doc(hidden)]
+    pub fn is_missing_bridge_session_retire_error(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::Internal(message)
+                if message.starts_with(BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY)
+        )
+    }
+
+    #[doc(hidden)]
+    pub async fn archive_mob_owned_bridge_session_with_cleanup(
+        &self,
+        bridge_session_id: &SessionId,
+        cleanup_context: &'static str,
+    ) -> Result<bool, SessionError> {
+        let bridge_session_key = bridge_session_id.to_string();
+        let mob_owned = self.owns_live_bridge_session(bridge_session_id).await
+            || self
+                .owns_service_reported_bridge_session(bridge_session_id)
+                .await
+            || self.owns_persisted_bridge_session(bridge_session_id).await;
+        if !mob_owned {
+            return Ok(false);
+        }
+
+        match self
+            .retire_member_by_bridge_session_id(bridge_session_id)
+            .await
+        {
+            Ok(()) => {
+                self.destroy_bridge_session_mobs(&bridge_session_key)
+                    .await
+                    .map_err(|error| error.into_session_error(cleanup_context))?;
+                Ok(true)
+            }
+            Err(error) if Self::is_missing_bridge_session_retire_error(&error) => {
+                if self
+                    .has_bridge_session_scoped_mobs(&bridge_session_key)
+                    .await
+                {
+                    self.destroy_bridge_session_mobs(&bridge_session_key)
+                        .await
+                        .map_err(|error| error.into_session_error(cleanup_context))?;
+                    Ok(true)
+                } else {
+                    Err(SessionError::NotFound {
+                        id: bridge_session_id.clone(),
+                    })
+                }
+            }
+            Err(error) => Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to archive mob-owned bridge session '{bridge_session_id}': {error}"
+                )),
+            )),
+        }
+    }
+
+    #[doc(hidden)]
     pub async fn retire_member_by_bridge_session_id(
         &self,
         bridge_session_id: &SessionId,
@@ -759,7 +839,11 @@ impl MobMcpState {
             }
         }
         let Some((mob_id, identity)) = resolved else {
-            if self.owns_persisted_bridge_session(bridge_session_id).await {
+            if self
+                .owns_service_reported_bridge_session(bridge_session_id)
+                .await
+                || self.owns_persisted_bridge_session(bridge_session_id).await
+            {
                 return self
                     .session_service()
                     .archive(bridge_session_id)
@@ -771,7 +855,7 @@ impl MobMcpState {
                     });
             }
             return Err(MobError::Internal(format!(
-                "bridge session not found in any live mob authority: {bridge_session_id}"
+                "{BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY} {bridge_session_id}"
             )));
         };
         self.mob_retire(&mob_id, identity).await
@@ -789,6 +873,32 @@ impl MobMcpState {
         for mob_id in mob_ids {
             if let Ok(handle) = self.handle_for(&mob_id).await
                 && handle.roster().await.has_bridge_session(bridge_session_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[doc(hidden)]
+    pub async fn owns_service_reported_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> bool {
+        if !self
+            .session_service()
+            .has_live_session(bridge_session_id)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            if self
+                .session_service()
+                .session_belongs_to_mob(bridge_session_id, &mob_id)
+                .await
             {
                 return true;
             }
@@ -1752,10 +1862,15 @@ struct LocalSessionService {
         RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
     counter: std::sync::atomic::AtomicU64,
     archive_delay_ms: std::sync::atomic::AtomicU64,
+    archive_failures: Arc<InMemoryArchiveFailureControl>,
 }
 
 impl LocalSessionService {
     fn new() -> Self {
+        Self::new_with_archive_failures(Arc::new(InMemoryArchiveFailureControl::default()))
+    }
+
+    fn new_with_archive_failures(archive_failures: Arc<InMemoryArchiveFailureControl>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             archived_views: RwLock::new(HashMap::new()),
@@ -1763,6 +1878,7 @@ impl LocalSessionService {
             event_txs: RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
             archive_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            archive_failures,
         }
     }
 
@@ -1911,6 +2027,10 @@ impl SessionService for LocalSessionService {
         Ok(())
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         if !self.sessions.read().await.contains_key(id) {
             return self
@@ -1959,6 +2079,9 @@ impl SessionService for LocalSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        if let Some(reason) = self.archive_failures.failure_for(id).await {
+            return Err(SessionError::Unsupported(reason));
+        }
         let archive_delay_ms = self
             .archive_delay_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -2140,6 +2263,16 @@ impl MobMcpState {
         let session_service = Arc::new(LocalSessionService::new());
         session_service.set_archive_delay_ms(delay_ms);
         Arc::new(Self::new(session_service))
+    }
+
+    #[doc(hidden)]
+    pub fn new_in_memory_with_archive_failure_control()
+    -> (Arc<Self>, Arc<InMemoryArchiveFailureControl>) {
+        let failures = Arc::new(InMemoryArchiveFailureControl::default());
+        let session_service = Arc::new(LocalSessionService::new_with_archive_failures(
+            failures.clone(),
+        ));
+        (Arc::new(Self::new(session_service)), failures)
     }
 }
 
@@ -5718,6 +5851,104 @@ mod tests {
         assert!(
             !svc.session_exists(&bridge_session_id).await,
             "successful archive helper retry must archive the worker bridge session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_session_with_mob_cleanup_runs_member_retire_then_child_cleanup() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+        let parent_mob_id = state
+            .mob_create_definition(explicit_definition("archive-helper-live-parent"))
+            .await
+            .expect("create parent mob");
+        let parent_identity = AgentIdentity::from("worker-1");
+        state
+            .mob_spawn(
+                &parent_mob_id,
+                ProfileName::from("worker"),
+                parent_identity.clone(),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn parent worker");
+        let member_session_id = state
+            .handle_for(&parent_mob_id)
+            .await
+            .expect("parent mob handle")
+            .resolve_bridge_session_id(&parent_identity)
+            .await
+            .expect("parent member bridge session");
+
+        let mut child_definition = explicit_definition("archive-helper-live-member-child");
+        child_definition.mark_owner_bridge_session_indexed(&member_session_id.to_string());
+        let child_mob_id = state
+            .mob_create_definition(child_definition)
+            .await
+            .expect("create child mob owned by parent member session");
+        let child_identity = AgentIdentity::from("child-worker-1");
+        state
+            .mob_spawn(
+                &child_mob_id,
+                ProfileName::from("worker"),
+                child_identity.clone(),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn child worker");
+        let child_bridge_session_id = state
+            .handle_for(&child_mob_id)
+            .await
+            .expect("child mob handle")
+            .resolve_bridge_session_id(&child_identity)
+            .await
+            .expect("child worker bridge session");
+        svc.fail_archive(
+            child_bridge_session_id.clone(),
+            "forced archive-helper live-member child cleanup failure",
+        )
+        .await;
+
+        let err = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &member_session_id,
+        )
+        .await
+        .expect_err("archive helper must fail closed on child cleanup after member retire");
+        let SessionError::FailedWithData { data, .. } = err else {
+            panic!("expected typed incomplete child cleanup error, got {err:?}");
+        };
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert!(
+            !svc.session_exists(&member_session_id).await,
+            "successful parent retire must archive the mob member bridge session before child cleanup"
+        );
+        assert!(
+            state.handle_for(&child_mob_id).await.is_ok(),
+            "incomplete child cleanup must retain the child mob retry anchor"
+        );
+
+        svc.clear_archive_failure(&child_bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &member_session_id,
+        )
+        .await
+        .expect("retry should complete retained child cleanup after parent member retire");
+        assert!(
+            state.handle_for(&child_mob_id).await.is_err(),
+            "successful retry must remove the child mob retry anchor"
+        );
+        assert!(
+            !svc.session_exists(&child_bridge_session_id).await,
+            "successful retry must archive the child worker bridge session"
         );
     }
 

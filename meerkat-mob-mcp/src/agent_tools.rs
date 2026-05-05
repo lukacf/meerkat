@@ -1910,19 +1910,36 @@ where
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let had_cleanup_anchor = mob_state
-            .has_bridge_session_scoped_mobs(&session_id.to_string())
-            .await;
-        let mut result = service.archive(&session_id).await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. }))
-            && let Err(error) = mob_state
-                .destroy_bridge_session_mobs(&session_id.to_string())
-                .await
+        let session_key = session_id.to_string();
+        let result = match mob_state
+            .archive_mob_owned_bridge_session_with_cleanup(
+                &session_id,
+                "mob cleanup during archive incomplete",
+            )
+            .await
         {
-            result = Err(error.into_session_error("mob cleanup during archive incomplete"));
-        } else if had_cleanup_anchor && matches!(result, Err(SessionError::NotFound { .. })) {
-            result = Ok(());
-        }
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let had_cleanup_anchor =
+                    mob_state.has_bridge_session_scoped_mobs(&session_key).await;
+                match service.archive(&session_id).await {
+                    Ok(()) => mob_state
+                        .destroy_bridge_session_mobs(&session_key)
+                        .await
+                        .map_err(|error| {
+                            error.into_session_error("mob cleanup during archive incomplete")
+                        }),
+                    Err(SessionError::NotFound { .. }) if had_cleanup_anchor => mob_state
+                        .destroy_bridge_session_mobs(&session_key)
+                        .await
+                        .map_err(|error| {
+                            error.into_session_error("mob cleanup during archive incomplete")
+                        }),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {

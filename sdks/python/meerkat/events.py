@@ -369,24 +369,6 @@ class HookDenied(Event):
     payload: Any = None
 
 
-@dataclass(frozen=True, slots=True)
-class HookRewriteApplied(Event):
-    """A hook rewrote part of the request or response."""
-
-    hook_id: HookId = ""
-    point: str = ""
-    patch: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class HookPatchPublished(Event):
-    """A hook patch envelope was published."""
-
-    hook_id: HookId = ""
-    point: str = ""
-    envelope: dict[str, Any] = field(default_factory=dict)
-
-
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
@@ -616,8 +598,6 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "hook_completed": HookCompleted,
     "hook_failed": HookFailed,
     "hook_denied": HookDenied,
-    "hook_rewrite_applied": HookRewriteApplied,
-    "hook_patch_published": HookPatchPublished,
     "skills_resolved": SkillsResolved,
     "skill_resolution_failed": SkillResolutionFailed,
     "interaction_complete": InteractionComplete,
@@ -1023,8 +1003,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "hook_completed": ("hook_id", "point", "duration_ms"),
         "hook_failed": ("hook_id", "point", "error"),
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
-        "hook_rewrite_applied": ("hook_id", "point", "patch"),
-        "hook_patch_published": ("hook_id", "point", "envelope"),
         "skills_resolved": ("skills", "injection_bytes"),
         "skill_resolution_failed": ("reference", "error"),
         "interaction_complete": ("interaction_id", "result"),

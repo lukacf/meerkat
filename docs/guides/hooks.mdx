@@ -1,10 +1,10 @@
 ---
 title: "Hooks"
-description: "Typed extension points within the agent loop for observation, guardrails, and content rewriting"
+description: "Typed extension points within the agent loop for observation and guardrails"
 icon: "anchor"
 ---
 
-Hooks let you run custom logic at defined points in the agent lifecycle -- before/after tool execution, LLM calls, or at turn boundaries. Use them for approval workflows, audit logging, content filtering, or input rewriting.
+Hooks let you run custom logic at defined points in the agent lifecycle -- before/after tool execution, LLM calls, or at turn boundaries. Use them for approval workflows, audit logging, content filtering, or typed denials.
 
 <Note>
 This page is the task-first guide. For the low-level type and payload inventory, see [Hooks reference](/reference/hooks-reference).
@@ -16,7 +16,7 @@ Use this guide when you want to:
 
 - add approval gates
 - log or audit agent behavior
-- rewrite tool inputs or outputs
+- block unsafe tool inputs or outputs
 - choose between in-process, command, and HTTP hook runtimes
 
 ## Hook points
@@ -34,40 +34,34 @@ Eight extension points are available:
 | `RunCompleted` | post | After a successful run completes |
 | `RunFailed` | post | After a run fails with an error |
 
-Classification is determined by the `is_pre()` and `is_post()` methods on `HookPoint`. Pre-points block loop progression in foreground mode; post-points publish results asynchronously in background mode.
+Classification is determined by the `is_pre()` and `is_post()` methods on `HookPoint`. Foreground hooks block loop progression; background hooks run asynchronously for observation.
 
 ## Capabilities
 
-| HookCapability | Purpose | Default failure policy |
-|----------------|---------|----------------------|
-| `Observe` | Read-only logging and metrics | `FailOpen` |
-| `Guardrail` | Can issue `Deny` decisions to block execution | `FailClosed` |
-| `Rewrite` | Can return `HookPatch` values to mutate data | `FailClosed` |
-
-Default failure policies can be overridden per-hook via the `failure_policy` field.
+| HookCapability | Purpose |
+|----------------|---------|
+| `Observe` | Read-only logging and metrics |
+| `Guardrail` | Can issue `Deny` decisions to block execution |
+| `Rewrite` | Retired compatibility label; semantic patch authority is removed |
 
 ## Execution modes
 
 | HookExecutionMode | Behavior |
 |-------------------|----------|
-| `Foreground` | Blocks loop progression. Decision and patches are applied synchronously. |
-| `Background` | Runs asynchronously. Patches are published via `HookPatchEnvelope`. |
+| `Foreground` | Blocks loop progression. `Allow` / `Deny` decisions are handled synchronously. |
+| `Background` | Runs asynchronously for observation. |
 
 <Warning>
 **Pre-point background hooks must be observe-only.** A background hook on a `is_pre()` point with any capability other than `Observe` is rejected with `HookEngineError::InvalidConfiguration`.
 </Warning>
 
-<Warning>
-**Background hooks must use `FailOpen` policy.** A background hook with an effective policy of `FailClosed` is rejected with `HookEngineError::InvalidConfiguration`.
-</Warning>
-
-Background hooks on post-points publish patches via `HookPatchEnvelope` (containing `revision`, `hook_id`, `point`, `patch`, `published_at`). These envelopes are drained and included in the `HookExecutionReport` on subsequent `execute()` calls.
+Semantic patch publication is retired. Legacy non-empty patch payloads fail closed during runtime response deserialization.
 
 ## How to add a hook
 
 <Steps>
   <Step title="Choose hook point and capability">
-    Decide which `HookPoint` to fire at (e.g., `PreToolExecution` for tool guardrails) and which `HookCapability` you need (`Observe`, `Guardrail`, or `Rewrite`).
+    Decide which `HookPoint` to fire at (e.g., `PreToolExecution` for tool guardrails) and whether the hook needs `Observe` or `Guardrail`.
   </Step>
   <Step title="Choose a runtime">
     Pick one of the three runtimes: in-process (Rust closure), command (subprocess), or HTTP (remote endpoint).
@@ -76,7 +70,7 @@ Background hooks on post-points publish patches via `HookPatchEnvelope` (contain
     Add a `[[hooks.entries]]` block to the active realm `config.toml` (or register programmatically via `HooksConfig`).
   </Step>
   <Step title="Implement the handler">
-    Write the handler that receives a `HookInvocation` and returns a `RuntimeHookResponse` with an optional decision and patches.
+    Write the handler that receives a `HookInvocation` and returns a `RuntimeHookResponse` with an optional decision.
   </Step>
   <Step title="Test with overrides">
     Use `HookRunOverrides` to test your hook in isolation through RPC, REST, MCP, or embedded builders before committing the config.
@@ -84,7 +78,7 @@ Background hooks on post-points publish patches via `HookPatchEnvelope` (contain
 </Steps>
 
 <Note>
-The docs below show run-scoped hook overrides conceptually, but the current CLI does not expose `--hooks-override-json` / `--hooks-override-file` in normal builds. For now, use RPC, REST, MCP, or the SDK/embedded surfaces when you want per-run hook overrides.
+The docs below show run-scoped hook overrides conceptually, but the current CLI does not expose run-scoped hook override flags in normal builds. For now, use RPC, REST, MCP, or the SDK/embedded surfaces when you want per-run hook overrides.
 </Note>
 
 ## Runtimes
@@ -135,14 +129,9 @@ The docs below show run-scoped hook overrides conceptually, but the current CLI 
 
 ## Failure policies
 
-| HookFailurePolicy | On timeout | On runtime error |
-|-------------------|-----------|-----------------|
-| `FailOpen` | Logged as error, execution continues | Logged as error, execution continues |
-| `FailClosed` | Emits `Deny` with `HookReasonCode::Timeout` | Emits `Deny` with `HookReasonCode::RuntimeError` |
+`HookFailurePolicy` is retained as a compatibility field on hook configuration. Current hook runtime failures fail closed through typed `HookEngineError` values; they are not converted into warning-only success or hook-local `Deny` decisions by `FailOpen` / `FailClosed`.
 
-The effective policy is resolved by `HookEntryConfig::effective_failure_policy()`:
-- If `failure_policy` is explicitly set on the entry, that value is used.
-- Otherwise, `default_failure_policy(capability)` is applied.
+Background hook failure policy is inert compatibility configuration. Pre-point background hooks are still required to be `Observe`, because they cannot safely block a pre-execution boundary after the loop has moved on.
 
 ## Decisions and patches
 
@@ -170,16 +159,10 @@ pub enum HookDecision {
 | `RuntimeError` | Hook execution failed (system-generated) |
 </Accordion>
 
-<Accordion title="HookPatch variants">
-Each variant is valid only at certain hook points:
+<Accordion title="Retired patch payloads">
+`HookPatch` no longer has valid variants. Older payloads such as `llm_request`, `assistant_text`, `tool_args`, `tool_result`, and `run_result` fail closed during deserialization instead of being ignored or applied.
 
-| HookPatch variant | Fields | Valid at |
-|-------------------|--------|---------|
-| `LlmRequest` | `max_tokens: Option<u32>`, `temperature: Option<f32>`, `provider_params: Option<Value>` | `PreLlmRequest` |
-| `AssistantText` | `text: String` | `PostLlmResponse` |
-| `ToolArgs` | `args: Value` | `PreToolExecution` |
-| `ToolResult` | `content: String`, `is_error: Option<bool>` | `PostToolExecution` |
-| `RunResult` | `text: String` | `RunCompleted` |
+Hooks can observe typed projections and return `Allow` or `Deny`. Canonical provider parameters, assistant text, tool arguments, tool results, and final run text are owned by the runtime and tool execution path.
 </Accordion>
 
 ## Runtime hook response
@@ -188,14 +171,11 @@ All three runtimes return the same `RuntimeHookResponse` structure:
 
 ```json
 {
-  "decision": { "decision": "deny", "hook_id": "my-guard", "reason_code": "policy_violation", "message": "blocked" },
-  "patches": [
-    { "patch_type": "tool_args", "args": { "sanitized": true } }
-  ]
+  "decision": { "decision": "deny", "hook_id": "my-guard", "reason_code": "policy_violation", "message": "blocked" }
 }
 ```
 
-Both `decision` and `patches` are optional. An empty response `{}` is equivalent to "no opinion".
+`decision` is optional. The compatibility `patches` field may be empty, but non-empty legacy semantic patch payloads are rejected.
 
 ## Invocation payload
 
@@ -220,7 +200,7 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 - **`HookToolResult`**: `tool_use_id`, `name`, `content`, `content_blocks`, `is_error`
 </Accordion>
 
-`HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. `HookToolResult.content` remains as a legacy text projection for existing hooks. A `HookPatch::ToolResult` rewrite preserves non-text blocks and replaces only the text projection plus optional `is_error`.
+`HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. `HookToolResult.content` remains as a legacy text projection for existing hooks. Both fields are observational projections and cannot be returned as a rewrite.
 
 ## Priority ordering and deny short-circuiting
 
@@ -262,7 +242,7 @@ point = "pre_tool_execution"
 mode = "foreground"
 capability = "guardrail"
 priority = 10
-# failure_policy = "fail_closed"  # Optional; defaults based on capability
+# failure_policy = "fail_closed"  # Compatibility field; runtime failures remain typed engine errors
 # timeout_ms = 10000              # Optional; overrides default_timeout_ms
 
 [hooks.entries.runtime]
@@ -281,7 +261,7 @@ args = ["hooks/safety_check.py"]
 | `mode` | `HookExecutionMode` | `Foreground` | Foreground or background |
 | `capability` | `HookCapability` | `Observe` | What the hook can do |
 | `priority` | `i32` | `100` | Execution order (lower runs first) |
-| `failure_policy` | `Option<HookFailurePolicy>` | `None` | Override default failure policy |
+| `failure_policy` | `Option<HookFailurePolicy>` | `None` | Compatibility field; runtime failures remain typed engine errors |
 | `timeout_ms` | `Option<u64>` | `None` | Override default timeout |
 | `runtime` | `HookRuntimeConfig` | in_process/noop | Runtime configuration |
 </Accordion>
@@ -305,13 +285,7 @@ Disabled hooks are removed from the effective entry list. Override entries are a
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    # Inline JSON
-    rkat run "prompt" --hooks-override-json '{"disable":["safety-check"]}'
-
-    # From file
-    rkat run "prompt" --hooks-override-file overrides.json
-    ```
+    Run-scoped hook override flags are not currently exposed on the normal `rkat run` surface. Use JSON-RPC, REST, MCP, or SDK/embedded surfaces for per-run hook override testing.
   </Tab>
   <Tab title="RPC / REST / MCP">
     Hook overrides are passed via `HookParams`:
@@ -337,7 +311,6 @@ The hook engine emits `AgentEvent` variants during execution:
 | `HookCompleted` | A hook finishes successfully |
 | `HookFailed` | A hook encounters an error |
 | `HookDenied` | A hook returns a `Deny` decision |
-| `HookPatchPublished` | A background hook publishes a patch envelope |
 
 ## SDK usage
 

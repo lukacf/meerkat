@@ -1,14 +1,14 @@
 //! # 011 — Hooks & Guardrails (Rust)
 //!
-//! Hooks let you intercept and modify the agent loop at 7 defined points.
+//! Hooks let you observe and guard the agent loop at 8 defined points.
 //! Use them for content filtering, audit logging, cost tracking, approval
-//! gates, and prompt rewriting — without touching agent code.
+//! gates, and policy checks — without touching agent code.
 //!
 //! ## What you'll learn
 //! - Defining hooks in configuration (command, HTTP, in-process)
-//! - Hook points: pre_llm_call, post_llm_response, pre_tool_dispatch, etc.
-//! - Hook decisions: Allow, Deny, Rewrite
-//! - Failure policies: Continue, FailOpen, FailClosed
+//! - Hook points: pre_llm_request, post_llm_response, pre_tool_execution, etc.
+//! - Hook decisions: Allow or Deny
+//! - Failure policy compatibility fields and typed hook runtime failures
 //!
 //! ## Run
 //! ```bash
@@ -267,19 +267,21 @@ mode = "foreground"
 capability = "observe"
 
 [hooks.entries.runtime]
-kind = "command"
-config = {{ command = "python", args = ["hooks/audit.py"] }}
+type = "command"
+command = "python"
+args = ["hooks/audit.py"]
 
 # Content filter: block dangerous tool calls
 [[hooks.entries]]
 id = "tool-safety"
-point = "pre_tool_dispatch"
+point = "pre_tool_execution"
 mode = "foreground"
-capability = "gate"
+capability = "guardrail"
 
 [hooks.entries.runtime]
-kind = "http"
-config = {{ url = "http://localhost:8080/filter", method = "POST" }}
+type = "http"
+url = "http://localhost:8080/filter"
+method = "POST"
 
 # Cost tracker: monitor token usage
 [[hooks.entries]]
@@ -289,8 +291,9 @@ mode = "background"
 capability = "observe"
 
 [hooks.entries.runtime]
-kind = "command"
-config = {{ command = "bash", args = ["-c", "echo $HOOK_PAYLOAD >> /tmp/costs.log"] }}
+type = "command"
+command = "bash"
+args = ["-c", "echo $HOOK_PAYLOAD >> /tmp/costs.log"]
 
 # Available hook points:
 #   turn_boundary        - Between agent loop iterations
@@ -303,9 +306,8 @@ config = {{ command = "bash", args = ["-c", "echo $HOOK_PAYLOAD >> /tmp/costs.lo
 
 # Hook capabilities:
 #   observe    - Read-only, cannot modify the flow
-#   gate       - Can Allow/Deny the operation
-#   rewrite    - Can modify request/response payloads
 #   guardrail  - Can deny and short-circuit all remaining hooks
+#   rewrite    - Retired compatibility label; no patch authority
 
 # Hook runtime kinds:
 #   command    - Shell command (receives JSON on stdin, returns JSON on stdout)

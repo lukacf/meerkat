@@ -181,7 +181,7 @@ pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
-    HookRevision, HookToolCall, HookToolResult, apply_tool_result_patch, default_failure_policy,
+    HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
 pub use image_content::{
     MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,

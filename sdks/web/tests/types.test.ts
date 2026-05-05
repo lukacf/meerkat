@@ -322,10 +322,6 @@ function handleEvent(event: AgentEvent): string {
       return event.error;
     case 'hook_denied':
       return `${event.reason_code}:${event.message}`;
-    case 'hook_rewrite_applied':
-      return event.hook_id;
-    case 'hook_patch_published':
-      return event.hook_id;
     case 'text_delta':
       return event.delta;
     case 'text_complete':

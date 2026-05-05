@@ -20,22 +20,25 @@ Meerkat provides 8 hook points in the agent lifecycle:
 
 ## Execution Modes
 
-- **Foreground**: Blocks execution, can modify/deny. Use for policy enforcement.
+- **Foreground**: Blocks execution and can deny. Use for policy enforcement.
 - **Background**: Runs concurrently, fire-and-forget. Use for logging, analytics.
-- **Observe**: Receives events but cannot block. Use for monitoring.
 
 ## Decision Semantics
 
 Hooks return one of:
 - **Allow**: Proceed normally
 - **Deny**: Block the operation with a reason
-- **Rewrite**: Modify the operation (e.g., rewrite tool arguments)
+- **Observe only**: Return no decision and no patches
 
 ## Patch Format
 
-For `PreToolExecution`, hooks can rewrite tool arguments using JSON patches.
+Semantic hook patches are retired. Hooks can observe typed projections and
+deny through the typed decision shape; provider parameters, assistant text,
+tool arguments/results, and final run text remain owned by the runtime/tool/LLM
+authority that produced them.
 
 ## Failure Policy
 
-- **fail-closed**: Hook failure blocks the operation (safer)
-- **fail-open**: Hook failure allows the operation (more resilient)
+`failure_policy` is retained for compatibility. Current hook runtime failures
+fail closed through typed engine errors; they are not converted into
+warning-only success or hook-local denials by `fail_open` / `fail_closed`.

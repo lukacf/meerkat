@@ -64,7 +64,7 @@
 
 2. `docs/guides/hooks.mdx` is missing the current image-content caveat for tool-result hooks.
    - The guide’s supporting-type summary at `docs/guides/hooks.mdx:199-204` documents `HookToolResult` as `tool_use_id`, `name`, `content`, `is_error`, but the current type also includes `has_images`. See `meerkat-core/src/hooks.rs:222-234`.
-   - This matters because hook authors only receive the text projection of tool output; non-text content is signaled separately via `has_images`, and `HookPatch::ToolResult` preserves image blocks instead of replacing the entire result. See `meerkat-core/src/hooks.rs:305-329`.
+   - This matters because hook authors only receive the text projection of tool output; semantic hook patches are now retired, so multimodal tool-result facts remain owned by the tool/runtime path.
    - Without that caveat, users can incorrectly assume a rewrite hook has full fidelity over multimodal tool results.
 
 3. The skills guide/examples still document legacy string refs and CLI behavior that do not match the current preferred API.

@@ -3,6 +3,7 @@ import type {
   AgentErrorReport,
   MobCreateOptions,
   MobDefinition,
+  MobRotateSupervisorResult,
   MobTurnStartOptions,
   PeerCorrelationId,
   RealtimeChannelOpenFrame,
@@ -12,6 +13,7 @@ import type {
   RunFailedEvent,
   SpawnManySpec,
   SpawnSpec,
+  SupervisorRotationReportWire,
   ToolCallRequestedEvent,
 } from "../src/index.js";
 import type {
@@ -117,6 +119,20 @@ const publicMobCreateOptions: MobCreateOptions = { definition: publicMobDefiniti
 
 void publicMobDefinition;
 void publicMobCreateOptions;
+
+const publicSupervisorRotationReport: SupervisorRotationReportWire = {
+  previous_epoch: 1,
+  current_epoch: 2,
+  public_peer_id: "ed25519:supervisor-next",
+};
+
+const publicSupervisorRotationResult: MobRotateSupervisorResult = {
+  mob_id: "mob-1",
+  ok: true,
+  report: publicSupervisorRotationReport,
+};
+
+void publicSupervisorRotationResult;
 
 const publicMobDefinitionWithBadFlow: MobDefinition = {
   id: "mob-bad-flow",

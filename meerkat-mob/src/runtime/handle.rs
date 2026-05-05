@@ -2743,9 +2743,8 @@ impl MobHandle {
     /// incremented epoch) and broadcasts
     /// [`BridgeCommand::AuthorizeSupervisor`](meerkat_contracts::wire::supervisor_bridge::BridgeCommand)
     /// to **every** remote member binding currently on the roster, then
-    /// atomically advances the persisted local authority when the remote
-    /// dispatch succeeds (or partially advances — see below — on partial
-    /// failure).
+    /// advances the persisted local authority only after every remote binding
+    /// has confirmed the next authority.
     ///
     /// There is no per-member scope here, and no scoping parameter is
     /// missing. Per-member [`BridgeBootstrapToken`](meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken)s
@@ -2754,19 +2753,25 @@ impl MobHandle {
     /// current supervisor — they are not a separate supervisor identity.
     /// One supervisor, many bootstrap tokens.
     ///
-    /// # Partial-failure semantics
+    /// # Incomplete-rotation semantics
     ///
-    /// If some remote bindings accept the rotation and others reject it,
-    /// the local authority is advanced to match the partially applied
-    /// next authority rather than reverted (see
-    /// `MobActor::handle_rotate_supervisor` in `actor.rs` for the
-    /// authoritative implementation). Callers observing
-    /// [`MobError::WiringError`] with a message containing
-    /// `"rollback failures"` should treat it as
-    /// "rotation completed then local authority advanced", not
-    /// "fully reverted rotation". This matches the top-level `CLAUDE.md`
-    /// warning: once a remote has rotated forward, rolling it back is
-    /// best-effort.
+    /// If some remote bindings accept the attempted next authority and a later
+    /// remote rejects it, the rotation fails closed: the persisted current
+    /// supervisor authority remains at the pre-rotation epoch and callers
+    /// receive [`MobError::SupervisorRotationIncomplete`]. The attempted
+    /// authority is retained as explicit pending rotation metadata when any
+    /// remote remains bound to it. A retry verifies recorded accepted peers
+    /// with the attempted authority before skipping them, then rotates the
+    /// remaining peers with the still-current supervisor before committing the
+    /// attempted authority. If a pending-accepted peer later rebinds to current
+    /// authority, that stale accepted membership is cleared so retry cannot
+    /// skip a current-bound peer. Rollback failure is reported on the typed
+    /// error rather than treated as permission to advance current local
+    /// authority. If the pending metadata write or stale-accepted clear fails
+    /// after a remote has already accepted the attempt, the actor keeps a
+    /// process-local pending authority override so a same-process retry can
+    /// still reconcile without advancing current authority; restart retry still
+    /// probes durable accepted peers before trusting them.
     ///
     /// # Dogma fit (B4)
     ///
@@ -2781,7 +2786,7 @@ impl MobHandle {
     /// `test_rotate_supervisor_updates_runtime_metadata`,
     /// `test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_stale_epoch`,
     /// `test_rotate_supervisor_bind_fallback_binds_next_authority`, and
-    /// `test_rotate_supervisor_advances_local_authority_when_rollback_fails`.
+    /// `test_rotate_supervisor_fails_closed_when_remote_rollback_fails`.
     pub async fn rotate_supervisor(&self) -> Result<SupervisorRotationReport, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::RotateSupervisor { reply_tx })
             .await?

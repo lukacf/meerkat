@@ -23,7 +23,7 @@ use meerkat_core::skills::SkillRef;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::runtime::MobMemberSnapshot;
 use meerkat_mob::{
-    AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobId,
+    AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobError, MobId,
     MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult,
     ToolConfig,
 };
@@ -34,6 +34,52 @@ use std::sync::Arc;
 
 fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
     RpcResponse::error(id, error::INVALID_PARAMS, message.into())
+}
+
+fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse {
+    match err {
+        MobError::SupervisorRotationIncomplete {
+            previous_epoch,
+            attempted_epoch,
+            attempted_public_peer_id,
+            rotated_peer_count,
+            rollback_succeeded,
+            pending_authority_recorded,
+            pending_authority_process_local,
+            rollback_error,
+            ..
+        } => RpcResponse::error_with_data(
+            id,
+            error::INVALID_PARAMS,
+            err.to_string(),
+            serde_json::json!({
+                "kind": "supervisor_rotation_incomplete",
+                "previous_epoch": previous_epoch,
+                "attempted_epoch": attempted_epoch,
+                "attempted_public_peer_id": attempted_public_peer_id,
+                "rotated_peer_count": rotated_peer_count,
+                "rollback_succeeded": rollback_succeeded,
+                "pending_authority_recorded": pending_authority_recorded,
+                "pending_authority_process_local": pending_authority_process_local,
+                "rollback_error": rollback_error,
+                "retry_authority": if *pending_authority_recorded {
+                    "pending_rotation"
+                } else if *pending_authority_process_local {
+                    "process_local_pending_rotation"
+                } else {
+                    "pre_rotation"
+                },
+                "retry_scope": if *pending_authority_recorded {
+                    "durable"
+                } else if *pending_authority_process_local {
+                    "same_process"
+                } else {
+                    "pre_rotation"
+                },
+            }),
+        ),
+        _ => invalid_params(id, err.to_string()),
+    }
 }
 
 fn mob_runtime_mode_from_wire(mode: WireMobRuntimeMode) -> MobRuntimeMode {
@@ -1377,7 +1423,7 @@ pub async fn handle_rotate_supervisor(
                 }),
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_rotate_supervisor_error(id, &err),
     }
 }
 

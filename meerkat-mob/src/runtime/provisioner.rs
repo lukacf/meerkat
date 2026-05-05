@@ -1498,6 +1498,8 @@ struct ProvisionerBindingPersistence {
     mob_id: crate::MobId,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     roster: Arc<RwLock<super::roster_authority::RosterAuthority>>,
+    pending_supervisor_rotation_fallback:
+        Arc<RwLock<Option<crate::store::SupervisorPendingRotationRecord>>>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1526,11 +1528,15 @@ impl MultiBackendProvisioner {
         mob_id: crate::MobId,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
         roster: Arc<RwLock<super::roster_authority::RosterAuthority>>,
+        pending_supervisor_rotation_fallback: Arc<
+            RwLock<Option<crate::store::SupervisorPendingRotationRecord>>,
+        >,
     ) -> Self {
         self.binding_persistence = Some(ProvisionerBindingPersistence {
             mob_id,
             runtime_metadata,
             roster,
+            pending_supervisor_rotation_fallback,
         });
         self
     }
@@ -1669,11 +1675,75 @@ impl MultiBackendProvisioner {
                     pubkey,
                 )
                 .await?;
+                self.clear_pending_supervisor_acceptance_for_peer_ids(&[
+                    peer_id.to_string(),
+                    bind.peer_id.clone(),
+                ])
+                .await?;
                 return Ok(rebound_peer);
             }
             return Err(Self::bridge_rejection_error(rejection));
         }
         Ok(peer.clone())
+    }
+
+    async fn clear_pending_supervisor_acceptance_for_peer_ids(
+        &self,
+        peer_ids: &[String],
+    ) -> Result<(), MobError> {
+        let Some(persistence) = self.binding_persistence.as_ref() else {
+            return Ok(());
+        };
+        if peer_ids.iter().all(|peer_id| peer_id.is_empty()) {
+            return Ok(());
+        }
+        let Some(mut current) = persistence
+            .runtime_metadata
+            .load_supervisor_authority(&persistence.mob_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        if let Some(fallback) = persistence
+            .pending_supervisor_rotation_fallback
+            .read()
+            .await
+            .clone()
+        {
+            current.apply_process_local_pending_rotation(fallback);
+        }
+        let Some(mut pending) = current.pending_rotation.clone() else {
+            return Ok(());
+        };
+        if !pending.remove_accepted_peer_ids(peer_ids) {
+            return Ok(());
+        }
+        let process_local_pending = pending.clone();
+        current.pending_rotation = if pending.accepted_peer_ids.is_empty() {
+            None
+        } else {
+            Some(pending)
+        };
+        match persistence
+            .runtime_metadata
+            .put_supervisor_authority(&persistence.mob_id, &current)
+            .await
+        {
+            Ok(()) => {
+                *persistence
+                    .pending_supervisor_rotation_fallback
+                    .write()
+                    .await = None;
+                Ok(())
+            }
+            Err(error) => {
+                *persistence
+                    .pending_supervisor_rotation_fallback
+                    .write()
+                    .await = Some(process_local_pending);
+                Err(MobError::from(error))
+            }
+        }
     }
 
     async fn send_bridge_command_typed<R: DeserializeOwned>(

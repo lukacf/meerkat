@@ -43,6 +43,24 @@ pub enum MobError {
     #[error("wiring error: {0}")]
     WiringError(String),
 
+    /// Supervisor rotation reached one or more remote members but did not
+    /// complete, so local supervisor authority stayed at the pre-rotation
+    /// epoch.
+    #[error(
+        "supervisor rotation incomplete: failed after {rotated_peer_count} remote peer(s) accepted attempted epoch {attempted_epoch}; local authority remains at epoch {previous_epoch}; rollback_succeeded={rollback_succeeded}; pending_authority_recorded={pending_authority_recorded}; pending_authority_process_local={pending_authority_process_local}; failure: {reason}"
+    )]
+    SupervisorRotationIncomplete {
+        previous_epoch: u64,
+        attempted_epoch: u64,
+        attempted_public_peer_id: String,
+        rotated_peer_count: usize,
+        rollback_succeeded: bool,
+        pending_authority_recorded: bool,
+        pending_authority_process_local: bool,
+        rollback_error: Option<String>,
+        reason: String,
+    },
+
     /// A supervisor bridge command was rejected by the remote member.
     #[error("bridge command rejected ({cause:?}): {reason}")]
     BridgeCommandRejected {
@@ -273,6 +291,7 @@ impl MobError {
             Self::NotExternallyAddressable(_) => MobSpawnManyFailureCause::NotExternallyAddressable,
             Self::InvalidTransition { .. } => MobSpawnManyFailureCause::InvalidTransition,
             Self::WiringError(_) => MobSpawnManyFailureCause::WiringError,
+            Self::SupervisorRotationIncomplete { .. } => MobSpawnManyFailureCause::WiringError,
             Self::BridgeCommandRejected { .. } => MobSpawnManyFailureCause::BridgeCommandRejected,
             Self::MemberRestoreFailed { .. } => MobSpawnManyFailureCause::MemberRestoreFailed,
             Self::KickoffWaitTimedOut { .. } => MobSpawnManyFailureCause::KickoffWaitTimedOut,
@@ -434,6 +453,17 @@ mod tests {
                 to: MobState::Running,
             },
             MobError::WiringError("w".to_string()),
+            MobError::SupervisorRotationIncomplete {
+                previous_epoch: 1,
+                attempted_epoch: 2,
+                attempted_public_peer_id: "peer-next".to_string(),
+                rotated_peer_count: 1,
+                rollback_succeeded: false,
+                pending_authority_recorded: true,
+                pending_authority_process_local: false,
+                rollback_error: Some("rollback failed".to_string()),
+                reason: "remote failed".to_string(),
+            },
             MobError::BridgeCommandRejected {
                 cause: BridgeRejectionCause::NotBound,
                 reason: "bind required".to_string(),

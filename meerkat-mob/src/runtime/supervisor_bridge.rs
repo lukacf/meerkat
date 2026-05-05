@@ -156,6 +156,34 @@ impl MobSupervisorBridge {
         .await
     }
 
+    pub(crate) async fn send_bridge_command_as_authority(
+        &self,
+        authority: &SupervisorAuthorityRecord,
+        recipient: &TrustedPeerDescriptor,
+        command: &super::bridge_protocol::BridgeCommand,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, MobError> {
+        let _request_guard = self.request_lock.lock().await;
+        let probe_participant_name = format!(
+            "{}/pending-supervisor-probe/{}",
+            self.participant_name,
+            uuid::Uuid::new_v4()
+        );
+        let runtime = Self::build_runtime(&probe_participant_name, authority)?;
+        runtime
+            .add_trusted_peer(recipient.clone())
+            .await
+            .map_err(MobError::from)?;
+        self.request_json_with_runtime(
+            &runtime,
+            recipient,
+            super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
+            command,
+            timeout,
+        )
+        .await
+    }
+
     pub(crate) async fn trust_recipient(
         &self,
         recipient: &TrustedPeerDescriptor,
@@ -176,6 +204,18 @@ impl MobSupervisorBridge {
     ) -> Result<serde_json::Value, MobError> {
         let _request_guard = self.request_lock.lock().await;
         let runtime = self.runtime().await;
+        self.request_json_with_runtime(&runtime, recipient, intent, payload, timeout)
+            .await
+    }
+
+    async fn request_json_with_runtime<T: serde::Serialize>(
+        &self,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        recipient: &TrustedPeerDescriptor,
+        intent: &str,
+        payload: &T,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, MobError> {
         let to = PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let params = serde_json::to_value(payload).map_err(|error| {
             MobError::Internal(format!("serialize supervisor payload: {error}"))

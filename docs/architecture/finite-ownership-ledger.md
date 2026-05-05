@@ -181,7 +181,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/actor.rs` | `handle_respawn` | `enum-dispatch` | `closed` | `respawn helper contract + PendingSpawnLineage + RosterAuthority` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_submit_work` | `enum-dispatch` | `closed` | `MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_cancel_all_work` | `enum-dispatch` | `closed` | `MobMachine DSL CancelAllWork legality + SessionBackend runtime bridge` |
-| `meerkat-mob/src/runtime/actor.rs` | `handle_rotate_supervisor` | `enum-dispatch` | `closed` | `Supervisor-bridge rotation protocol + local authority advance after partial-rotation` |
+| `meerkat-mob/src/runtime/actor.rs` | `handle_rotate_supervisor` | `enum-dispatch` | `closed` | `Supervisor-bridge rotation protocol + fail-closed incomplete rotation on partial remote failure` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_task_create` | `enum-dispatch` | `closed` | `MobTaskBoardService event + projection contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_task_update` | `enum-dispatch` | `closed` | `MobTaskBoardService event + projection contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_run_flow` | `enum-dispatch` | `closed` | `MobOrchestratorAuthority + MobLifecycleAuthority` |

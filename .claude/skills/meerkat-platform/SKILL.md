@@ -501,7 +501,16 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 
-**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store and committed as `AssistantBlock::Image`; surfaces read `image_id`/`blob_ref` from history and fetch bytes via `blob/get` or SDK `get_blob` / `getBlob`.
+**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; user-facing surfaces fetch the resulting blob id via `rkat blob get`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
+
+**Image generation via CLI:** There is no direct image-generation CLI command and no `rkat rpc` subcommand. Ask the assistant through a session, allow the image tool, and fetch the resulting blob:
+
+```bash
+rkat run --allow-tool generate_image "Use generate_image to create a square PNG of a cozy tabby cat by a sunlit window. Return the blob id."
+rkat blob get <BLOB-ID> --output cat.png
+```
+
+Use `rkat blob get <BLOB-ID> --json` to inspect the blob payload. If the answer does not include a blob id, resume the session and ask for the blob id.
 
 **Provider capabilities:**
 | Provider | `vision` | `image_tool_results` | `inline_video` |

@@ -30,9 +30,18 @@ pub const MEERKAT_PLATFORM_SKILL_EXTENSIONS: &[(&str, &str)] = &[
 
 const HELP_SYSTEM_PROMPT: &str = r"You are Meerkat's dedicated help surface.
 
-Use the preloaded `meerkat-platform` skill as the canonical source for Meerkat CLI, REST, JSON-RPC, MCP, SDK, auth, skills, hooks, scheduling, realtime, and mob answers.
+Use the preloaded `meerkat-platform` skill and its loaded references as the only authority for Meerkat CLI, REST, JSON-RPC, MCP, SDK, auth, skills, hooks, scheduling, realtime, mob, tools, and image-generation answers.
 
-Answer with the exact command, request, or tool call first when one is appropriate. Keep explanations short and operational. If the request is ambiguous, state the missing choice and give the safest concrete next command or API shape.
+Grounding rules:
+- Do not invent commands, binaries, flags, endpoints, request fields, Rust types, or SDK methods.
+- Command spelling matters. Use only documented CLI commands from the embedded context, such as `rkat session`, `rkat blob`, `rkat mcp`, and binaries such as `rkat-rpc`. Never create plausible aliases such as `rkat sessions`, `rkat rpc`, or `rkat image` unless the embedded context documents them.
+- If the embedded context does not document an exact command or API shape, say that plainly and point to the nearest documented `rkat <command> --help`, binary, or API surface.
+- When the user asks for “via rkat”, “CLI”, or “short”, answer only with CLI commands and keep the reply minimal.
+- For workflows that are assistant-mediated, say that the user asks through `rkat run`; do not imply the user can invoke the internal tool directly.
+
+Answer with the exact documented command, request, or tool call first when one is appropriate. Keep explanations short and operational. If the request is ambiguous, state the missing choice and give only a documented next command or API shape.
+
+Avoid internal implementation details unless the user asks for internals. Do not mention Rust enum names, transcript internals, or provider-owned request fields in ordinary user help.
 
 When a request uses relative time, calculate from the current UTC timestamp in the prompt. Do not invent stale example dates.
 
@@ -152,6 +161,34 @@ mod tests {
             !MEERKAT_PLATFORM_API_REFERENCE.contains("rkat models [--json]"),
             "rkat models has no --json flag"
         );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("rkat run --allow-tool generate_image"),
+            "help skill must teach image generation as an assistant-mediated rkat run workflow"
+        );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("rkat blob get <BLOB-ID> --output"),
+            "help skill must teach the actual blob download CLI"
+        );
+        assert!(
+            !MEERKAT_PLATFORM_SKILL_BODY.contains("rkat rpc blob/get"),
+            "there is no top-level rkat rpc command"
+        );
+        assert!(
+            !MEERKAT_PLATFORM_SKILL_BODY.contains("rkat sessions show"),
+            "the CLI command is singular rkat session, not rkat sessions"
+        );
+    }
+
+    #[test]
+    fn help_system_prompt_requires_documented_surface_grounding() {
+        let prompt = help_system_prompt();
+        assert!(prompt.contains("Do not invent commands"));
+        assert!(prompt.contains("Use only documented CLI commands"));
+        assert!(prompt.contains("If the embedded context does not document an exact command"));
+        assert!(prompt.contains("rkat <command> --help"));
+        assert!(prompt.contains("rkat sessions"));
+        assert!(prompt.contains("rkat rpc"));
+        assert!(prompt.contains("Avoid internal implementation details"));
     }
 
     #[test]

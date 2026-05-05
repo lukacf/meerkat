@@ -146,9 +146,11 @@ mod tests {
         assert!(MEERKAT_PLATFORM_SKILL_BODY.contains("Meerkat Platform Guide"));
         assert!(MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("Meerkat CLI Reference"));
         assert!(MEERKAT_PLATFORM_API_REFERENCE.contains("JSON-RPC"));
-        assert!(MEERKAT_PLATFORM_SKILL_EXTENSIONS
-            .iter()
-            .any(|(path, _)| *path == "references/api_reference.md"));
+        assert!(
+            MEERKAT_PLATFORM_SKILL_EXTENSIONS
+                .iter()
+                .any(|(path, _)| *path == "references/api_reference.md")
+        );
     }
 
     #[test]

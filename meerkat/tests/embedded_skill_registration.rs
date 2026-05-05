@@ -28,3 +28,24 @@ async fn base_crate_registers_mob_communication_for_cross_surface_resume() {
         "How to communicate with peers in a collaborative mob"
     );
 }
+
+#[tokio::test]
+async fn base_crate_registers_cli_reference_for_help_surface() {
+    let _ = meerkat::SESSION_VERSION;
+    let source = EmbeddedSkillSource::new();
+    let key =
+        SkillKey::builtin(SkillName::parse("meerkat-cli-reference").expect("valid skill name"));
+    let skill = source
+        .load(&key)
+        .await
+        .expect("meerkat-cli-reference should be registered from the base crate");
+
+    assert_eq!(skill.descriptor.key, key);
+    assert_eq!(skill.descriptor.name, "meerkat-cli-reference");
+    assert!(skill.body.contains("There is no `--tools all`"));
+    assert!(
+        skill
+            .body
+            .contains("rkat blob get <BLOB-ID> --output fox.png")
+    );
+}

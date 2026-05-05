@@ -6,8 +6,8 @@ This is the detailed reference for Meerkat mobs across Rust SDK, CLI, MCP, REST,
 
 - Mobs are an optional extension for multi-agent orchestration.
 - Base Meerkat workflows remain session/turn centered.
-- On CLI, primary mob UX is tool-driven through `run`/`resume`.
-- Direct `rkat mob ...` is the explicit operational surface.
+- On CLI, primary mob UX is tool-driven through `run`/`run --resume` with `--tools full` or config `tools.mob_enabled=true`.
+- Direct `rkat mob ...` is the helper/artifact operational surface. Lifecycle creation, wiring, and member management use agent `mob_*` tools or RPC `mob/*`.
 
 ## Runtime model
 
@@ -229,8 +229,8 @@ let build = SessionBuildOptions {
 
 | Surface | Mob access | Current behavior |
 |---|---|---|
-| CLI `run` / `resume` | `mob_*` tools in prompt-driven runs | Primary CLI mob UX |
-| CLI `rkat mob ...` | direct command lifecycle | Secondary explicit operational surface |
+| CLI `run` / `run --resume` | `mob_*` tools in prompt-driven runs when mob tools are enabled | Primary CLI mob UX |
+| CLI `rkat mob ...` | helper/artifact commands | Secondary operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
 | RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; `mob/tools` / `mob/call` are escape hatches |
 | REST | session HTTP endpoints | compact mob lifecycle via `/mob/tools` + `/mob/call` plus SSE observe |
@@ -258,18 +258,19 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 ### CLI tool-driven (primary)
 
 ```bash
-rkat run "Create a mob with one lead and three workers, wire lead to all workers, and report status."
-rkat run --resume <session_id> "Retire worker-2 and add worker-4, then summarize."
+rkat run --tools full "Create a mob with one lead and three workers, wire lead to all workers, and report status."
+rkat run --tools full --resume <session_id> "Retire worker-2 and add worker-4, then summarize."
 ```
 
 ### CLI direct commands (explicit operational)
 
 ```bash
 rkat mob spawn-helper team-mob "Join as lead-1" --profile lead --agent-identity lead-1
-rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --profile worker
-rkat mob member-status team-mob lead-1
-rkat mob respawn team-mob worker-1 --message "restart"
-rkat mob run-flow team-mob --flow triage
+rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --profile worker --json
+rkat mob member-status team-mob lead-1 --json
+rkat mob force-cancel team-mob worker-1
+rkat mob respawn team-mob worker-1 --initial-message "restart"
+rkat mob run-flow team-mob --flow triage --stream
 ```
 
 ### CLI artifact + web deployment

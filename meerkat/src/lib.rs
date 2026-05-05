@@ -305,6 +305,19 @@ inventory::submit! {
     }
 }
 
+#[cfg(feature = "skills")]
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: help::MEERKAT_CLI_REFERENCE_SKILL_NAME,
+        name: "Meerkat CLI Reference",
+        description: "Exact rkat CLI command contract for Meerkat help answers",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &[],
+        body: help::MEERKAT_CLI_REFERENCE_SKILL_BODY,
+        extensions: &[],
+    }
+}
+
 // Re-export builtin tools infrastructure
 #[cfg(feature = "comms")]
 pub use meerkat_tools::CommsToolSurface;

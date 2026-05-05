@@ -7,8 +7,11 @@ use thiserror::Error;
 pub use meerkat_contracts::{HelpExecutionMode, HelpRequest, HelpResponse};
 
 pub const MEERKAT_PLATFORM_SKILL_NAME: &str = "meerkat-platform";
+pub const MEERKAT_CLI_REFERENCE_SKILL_NAME: &str = "meerkat-cli-reference";
 pub const MEERKAT_PLATFORM_SKILL_BODY: &str =
     include_str!("../../.claude/skills/meerkat-platform/SKILL.md");
+pub const MEERKAT_CLI_REFERENCE_SKILL_BODY: &str =
+    include_str!("../../.claude/skills/meerkat-cli-reference/SKILL.md");
 pub const MEERKAT_PLATFORM_API_REFERENCE: &str =
     include_str!("../../.claude/skills/meerkat-platform/references/api_reference.md");
 pub const MEERKAT_PLATFORM_MOBS_REFERENCE: &str =
@@ -30,7 +33,9 @@ pub const MEERKAT_PLATFORM_SKILL_EXTENSIONS: &[(&str, &str)] = &[
 
 const HELP_SYSTEM_PROMPT: &str = r"You are Meerkat's dedicated help surface.
 
-Use the preloaded `meerkat-platform` skill and its loaded references as the only authority for Meerkat CLI, REST, JSON-RPC, MCP, SDK, auth, skills, hooks, scheduling, realtime, mob, tools, and image-generation answers.
+Use the preloaded `meerkat-platform` and `meerkat-cli-reference` skills as the only authority for Meerkat CLI, REST, JSON-RPC, MCP, SDK, auth, skills, hooks, scheduling, realtime, mob, tools, and image-generation answers.
+
+For `rkat` command names, flags, examples, and negative CLI facts, prefer the `meerkat-cli-reference` skill over broader platform prose.
 
 Grounding rules:
 - Do not invent commands, binaries, flags, endpoints, request fields, Rust types, or SDK methods.
@@ -65,8 +70,23 @@ pub fn platform_skill_key() -> SkillKey {
     )
 }
 
+#[allow(clippy::expect_used)]
+pub fn cli_reference_skill_key() -> SkillKey {
+    SkillKey::builtin(
+        SkillName::parse(MEERKAT_CLI_REFERENCE_SKILL_NAME)
+            .expect("embedded Meerkat CLI reference skill name must be valid"),
+    )
+}
+
 pub fn platform_preload_skills() -> Vec<SkillKey> {
-    vec![platform_skill_key()]
+    vec![platform_skill_key(), cli_reference_skill_key()]
+}
+
+pub fn platform_preload_skill_names() -> Vec<String> {
+    vec![
+        MEERKAT_PLATFORM_SKILL_NAME.to_string(),
+        MEERKAT_CLI_REFERENCE_SKILL_NAME.to_string(),
+    ]
 }
 
 pub fn validate_help_request(request: &HelpRequest) -> Result<(), HelpRequestError> {
@@ -127,6 +147,7 @@ mod tests {
     #[test]
     fn platform_skill_is_compile_embedded() {
         assert!(MEERKAT_PLATFORM_SKILL_BODY.contains("Meerkat Platform Guide"));
+        assert!(MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("Meerkat CLI Reference"));
         assert!(MEERKAT_PLATFORM_API_REFERENCE.contains("JSON-RPC"));
         assert!(
             MEERKAT_PLATFORM_SKILL_EXTENSIONS
@@ -177,6 +198,22 @@ mod tests {
             !MEERKAT_PLATFORM_SKILL_BODY.contains("rkat sessions show"),
             "the CLI command is singular rkat session, not rkat sessions"
         );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("-t, --tools <safe|workspace|full|none>"),
+            "CLI reference must pin the actual tool preset values"
+        );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("rkat blob get <BLOB-ID> --output fox.png"),
+            "CLI reference must pin the actual blob download command"
+        );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("There is no `rkat sessions`"),
+            "CLI reference must explicitly block the plural session hallucination"
+        );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("There is no `--tools all`"),
+            "CLI reference must explicitly block the invalid tools preset"
+        );
     }
 
     #[test]
@@ -184,6 +221,7 @@ mod tests {
         let prompt = help_system_prompt();
         assert!(prompt.contains("Do not invent commands"));
         assert!(prompt.contains("Use only documented CLI commands"));
+        assert!(prompt.contains("meerkat-cli-reference"));
         assert!(prompt.contains("If the embedded context does not document an exact command"));
         assert!(prompt.contains("rkat <command> --help"));
         assert!(prompt.contains("rkat sessions"));
@@ -196,6 +234,19 @@ mod tests {
         let key = platform_skill_key();
         assert_eq!(key.source_uuid, meerkat_core::skills::SourceUuid::builtin());
         assert_eq!(key.skill_name.as_str(), MEERKAT_PLATFORM_SKILL_NAME);
+    }
+
+    #[test]
+    fn help_preloads_platform_and_cli_reference_skills() {
+        let keys = platform_preload_skills();
+        assert_eq!(keys, vec![platform_skill_key(), cli_reference_skill_key()]);
+        assert_eq!(
+            platform_preload_skill_names(),
+            vec![
+                MEERKAT_PLATFORM_SKILL_NAME.to_string(),
+                MEERKAT_CLI_REFERENCE_SKILL_NAME.to_string(),
+            ]
+        );
     }
 
     #[test]

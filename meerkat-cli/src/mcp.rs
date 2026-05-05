@@ -1,6 +1,6 @@
 //! MCP server management CLI commands
 //!
-//! Provides `rkat mcp add|remove|reload|list|get` commands for managing MCP server configuration.
+//! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
     McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
@@ -68,6 +68,10 @@ pub fn build_server_config(
     command: Vec<String>,
     env: Vec<String>,
 ) -> anyhow::Result<McpServerConfig> {
+    if url.is_some() && !command.is_empty() {
+        anyhow::bail!("Provide either --url or a stdio command after --, not both");
+    }
+
     let server = match (transport, url, command.is_empty()) {
         // Explicit stdio transport
         (Some(McpTransportKind::Stdio), _, false) => {
@@ -811,6 +815,26 @@ command = "cmd"
                 .unwrap_err()
                 .to_string()
                 .contains("Invalid environment variable")
+        );
+    }
+
+    #[test]
+    fn test_build_server_config_rejects_url_and_stdio_command() {
+        let result = build_server_config(
+            "mixed".to_string(),
+            None,
+            Some("https://mcp.example.com".to_string()),
+            Vec::new(),
+            vec!["npx".to_string(), "-y".to_string(), "server".to_string()],
+            Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("either --url or a stdio command")
         );
     }
 

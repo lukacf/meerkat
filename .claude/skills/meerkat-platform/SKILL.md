@@ -29,7 +29,7 @@ Default persistent backend:
 
 Default realm behavior:
 
-- CLI (`run/resume/sessions`): workspace-derived stable realm.
+- CLI (`run`, `run --resume`, `session`): workspace-derived stable realm.
 - RPC/REST/MCP/SDK: new opaque realm unless explicitly provided.
 
 Use explicit realm to share:
@@ -72,7 +72,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 
 ## MCP server config (CLI)
 
-Use `rkat mcp ...` to manage local MCP server configuration. This writes config; new `rkat run` and `rkat resume` sessions load configured MCP servers and expose their tools to the agent.
+Use `rkat mcp ...` to manage local MCP server configuration. This writes config; new `rkat run` and `rkat run --resume` sessions load configured MCP servers and expose their tools to the agent.
 
 Config locations:
 
@@ -84,8 +84,8 @@ Command forms:
 ```bash
 rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
 rkat mcp remove <NAME> [--scope project|user|local]
-rkat mcp list [--scope project|user|local|all] [--json]
-rkat mcp get <NAME> [--scope project|user|local|all] [--json]
+rkat mcp list [--scope project|user|local] [--json]
+rkat mcp get <NAME> [--scope project|user|local] [--json]
 ```
 
 Examples:
@@ -100,7 +100,7 @@ rkat mcp add linear --transport http --url https://mcp.example.com
 # User-wide server with environment passed to the stdio process
 rkat mcp add github --scope user -e GITHUB_TOKEN=ghp_... -- npx -y @modelcontextprotocol/server-github
 
-rkat mcp list --scope all
+rkat mcp list
 rkat mcp get filesystem --scope project
 ```
 
@@ -112,7 +112,7 @@ Notes:
 
 ## Mob behavior (current contract)
 
-- CLI `run`/`resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration.
+- CLI `run`/`run --resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration when mob tools are enabled, for example with `--tools full` or config `tools.mob_enabled=true`.
 - CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
@@ -128,6 +128,7 @@ Realtime is a delivery mode of the session's LLM, not a separate subsystem. Enab
 
 | Surface | Enable | Observe status | Open audio channel |
 |---------|--------|----------------|--------------------|
+| CLI | Start or resume a session/member on a realtime-capable model | `rkat realtime status session <SESSION-ID>` / `rkat realtime status member <MOB-ID> <AGENT-IDENTITY>` | `rkat realtime open-info session <SESSION-ID>` / `... member <MOB-ID> <AGENT-IDENTITY>` |
 | JSON-RPC | `session/create` with `model: "gpt-realtime-1.5"` | `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
 | REST | `POST /sessions` `{ "model": "gpt-realtime-1.5" }` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
 | MCP (public) | host sets model via composition | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
@@ -147,23 +148,24 @@ User-facing guide: `docs/guides/realtime.mdx`. Internal authority/reconfigure fl
 
 ### Mob lifecycle (standard/default usage)
 
-Primary CLI usage is tool-driven through `run`/`resume`:
+Primary CLI usage is tool-driven through `run`/`run --resume` with mob tools enabled:
 
 ```bash
-rkat run "create a mob with a lead and workers, then wire and report status"
-rkat run --resume <session_id> "retire worker-2 and add worker-4"
+rkat run --tools full "create a mob with a lead and workers, then wire and report status"
+rkat run --tools full --resume <session_id> "retire worker-2 and add worker-4"
 ```
 
 Where needed, the current helper-oriented CLI mob surface is:
 
 ```bash
-rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>]
-rkat mob fork-helper <mob_id> <source_member> <prompt> [--agent-identity <id>] [--profile <profile>]
-rkat mob member-status <mob_id> <agent_identity>
-rkat mob respawn <mob_id> <agent_identity> [--message <msg>]
-rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>]
+rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>] [--json]
+rkat mob fork-helper <mob_id> <source_member> <prompt> [--agent-identity <id>] [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
+rkat mob member-status <mob_id> <agent_identity> [--json]
+rkat mob force-cancel <mob_id> <agent_identity>
+rkat mob respawn <mob_id> <agent_identity> [--initial-message <msg>]
+rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>] [-s|--stream] [--no-stream]
 rkat mob flow-status <mob_id> <run_id>
-rkat mob wait-kickoff <mob_id> [--member <agent_identity>...]
+rkat mob wait-kickoff <mob_id> [--member <agent_identity>...] [--timeout-ms N] [--json]
 ```
 
 ### Mobpack + web build quick paths
@@ -316,7 +318,7 @@ rkat --realm team-alpha run "Create a todo app" --tools workspace --stream -v
 rkat help "How do I add an MCP server?"
 rkat run --resume "keep going"           # resume most recent session
 rkat run --resume 019c8b99 "continue"    # resume by short prefix
-rkat --realm team-alpha run --resume sid_abc123 "Now add error handling"
+rkat --realm team-alpha run --resume 019c8b99 "Now add error handling"
 # Batch context: pipe finite content as context
 cat document.txt | rkat run "Summarize this document"
 git diff | rkat run "Review these changes" --tools safe
@@ -395,7 +397,7 @@ For detailed surface schemas and examples, also load:
 
 ## Configuration
 
-Config APIs return a realm-scoped envelope:
+Programmatic config APIs return a realm-scoped envelope:
 
 - `config`
 - `generation`
@@ -404,19 +406,26 @@ Config APIs return a realm-scoped envelope:
 - `backend`
 - `resolved_paths`
 
+CLI config behavior differs: `rkat config get` defaults to raw TOML,
+`rkat config get --format json` prints raw config JSON, and
+`rkat config get --format json --with-generation` prints an envelope without
+`resolved_paths`. `rkat config set` and `rkat config patch` print
+`generation=N` after writes. CLI `set <FILE>` imports a file into the active
+realm config; raw merge patch uses `rkat config patch --json '{...}'`.
+
 `config/set` and `config/patch` support `expected_generation` for CAS.
 
 ## Auth
 
 Every session resolves credentials through realm-scoped bindings. Two onramps:
 
-**Quick start — env keys**: set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (or `RKAT_*` variants). Meerkat synthesizes a default realm + binding. No config edits.
+**Quick start — env keys**: Meerkat resolves API keys from provider-specific env vars. Anthropic: `RKAT_ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY`. OpenAI: `RKAT_OPENAI_API_KEY`, then `OPENAI_API_KEY`. Gemini: `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, `RKAT_GOOGLE_API_KEY`, then `GOOGLE_API_KEY`. Meerkat synthesizes a default realm + binding. No config edits.
 
-**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config, then run `rkat auth login <provider>` and pass `--auth-binding <realm>:<binding>` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding.
+**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config and pass `--auth-binding <realm>:<binding>[:profile]` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding. CLI `rkat auth login <provider>` is a convenience bootstrap for fixed `dev:*` bindings: interactive OAuth writes `dev:anthropic_oauth`, `dev:openai_oauth`, or `dev:google_oauth`; non-interactive api-key login writes `dev:default_<provider>`.
 
 ```bash
 rkat auth login anthropic                                            # OAuth (PKCE S256)
-rkat run --auth-binding prod:claude "ship the release notes"
+rkat run --auth-binding dev:anthropic_oauth "ship the release notes"
 ```
 
 Supported auth methods:
@@ -451,7 +460,7 @@ meerkat = { version = "0.6.0", features = [
 
 Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`.
 
-Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include everything. Custom binary builds:
+Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include the normal shipping surfaces. The default `rkat` feature set does not include `memory-store`; memory capabilities appear only in binaries built with the memory-store feature. Custom binary builds:
 
 ```bash
 cargo install rkat --no-default-features --features "anthropic,openai,session-store,mcp"
@@ -459,16 +468,21 @@ cargo install rkat --no-default-features --features "anthropic,openai,session-st
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
 
+### CLI utility commands
+
+- `rkat capabilities` prints pretty JSON `CapabilitiesResponse`; there is no `--json` or `--format` flag.
+- `rkat doctor` has no command-specific flags. Output is tab-delimited `ok|warn <area> <message>`. Config/MCP/self-hosted hard issues exit 1; missing provider env vars and missing `wasm-pack` are warnings.
+
 ### Model catalog
 
-The curated model catalog (canonical: `meerkat_core::model_profile`; `meerkat-models` is now a thin compatibility shim) is queryable from all surfaces:
+The model catalog (canonical: `meerkat_core::model_profile`; `meerkat-models` is now a thin compatibility shim) is queryable from all surfaces:
 
 - CLI: `rkat models`
 - RPC: `models/catalog`
 - REST: `GET /models/catalog`
 - MCP: `meerkat_models_catalog`
 
-Returns `ModelsCatalogResponse` with providers, default models, and per-model profiles (capabilities, parameter schemas).
+`rkat models` prints pretty JSON by default and has no `--json` flag. It returns the effective runtime model registry for the active realm: built-in catalog entries plus configured `self_hosted` aliases, providers, default models, and per-model profiles.
 
 ### Mid-session model hot-swap
 
@@ -501,7 +515,7 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 
-**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; user-facing surfaces fetch the resulting blob id via `rkat blob get`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
+**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; user-facing surfaces fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
 
 **Image generation via CLI:** There is no direct image-generation CLI command and no `rkat rpc` subcommand. Ask the assistant through a session, allow the image tool, and fetch the resulting blob:
 
@@ -544,7 +558,7 @@ Canonical skill identity is `SkillKey { source_uuid, skill_name }`. `preload_ski
 **Skill introspection** surfaces:
 
 - CLI: `rkat skill list [--json]`, `rkat skill inspect <skill-name> --source-uuid <uuid> [--json]`
-- CLI config: `rkat skill add <PATH_OR_ID> [--name <NAME>]`, `rkat skill remove <NAME_OR_ID_OR_PATH>`, `rkat skill get <NAME_OR_ID_OR_PATH> [--json]`
+- CLI config: `rkat skill add <PATH> [--name <NAME>]`, `rkat skill remove <NAME_OR_SOURCE_UUID_OR_PATH>`, `rkat skill get <NAME_OR_SOURCE_UUID_OR_PATH> [--json]`
 - RPC: `skills/list`
 - REST: `GET /skills`
 - MCP: `meerkat_skills` tool (`action: "list"` or `"inspect"` with typed `skill_key` and optional `source` UUID)
@@ -586,7 +600,7 @@ Tool visibility can change during a session without restarting the agent. All ch
 
 - **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
 - **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
-- **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat resume` sessions load that config.
+- **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat run --resume` sessions load that config.
 - **Live MCP mutation** — JSON-RPC `mcp/add`, `mcp/remove`, `mcp/reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, and SDK helpers stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
 - **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A `[MCP_PENDING]` system notice is injected while servers are still connecting.
   - Per-server timeout: `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s)

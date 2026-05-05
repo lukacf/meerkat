@@ -497,6 +497,10 @@ fn is_root_passthrough_flag(arg: &str) -> bool {
     matches!(arg, "-h" | "--help" | "-V" | "--version")
 }
 
+fn is_root_flag_without_value(arg: &str) -> bool {
+    matches!(arg, "--isolated")
+}
+
 /// Inject `run` as the default subcommand when the first positional argument
 /// is not a known command, while preserving top-level help/version handling.
 fn normalize_cli_args(
@@ -533,7 +537,9 @@ fn normalize_cli_args(
             if is_root_passthrough_flag(arg_str) {
                 return args;
             }
-            if is_root_flag_with_value(arg_str) {
+            if is_root_flag_without_value(arg_str) {
+                i += 1;
+            } else if is_root_flag_with_value(arg_str) {
                 i += 2; // skip flag and its value
             } else {
                 break;
@@ -1340,7 +1346,7 @@ enum Commands {
 
     #[cfg(feature = "mcp")]
     #[command(
-        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list --scope all\n  rkat mcp get filesystem --scope project"
+        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list\n  rkat mcp get filesystem --scope project"
     )]
     /// MCP server management
     Mcp {
@@ -1367,7 +1373,7 @@ enum Commands {
     },
 
     #[command(
-        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch '{\"agent\":{\"model\":\"gpt-5.4\"}}'"
+        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch --json '{\"agent\":{\"model\":\"gpt-5.4\"}}'"
     )]
     /// Config management
     Config {
@@ -1388,8 +1394,9 @@ enum Commands {
     /// delete, and check status of realm-scoped auth profiles.
     /// `login` runs the interactive OAuth flow by default, or writes an
     /// inline api_key when `--non-interactive --secret <S>` is passed.
-    /// Env-var auth (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY)
-    /// continues to work as a fallback for callers that haven't migrated.
+    /// Env-var auth (`RKAT_*` provider keys, ANTHROPIC_API_KEY,
+    /// OPENAI_API_KEY, GEMINI_API_KEY / GOOGLE_API_KEY) continues to work
+    /// as a fallback for callers that haven't migrated.
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
@@ -1652,7 +1659,7 @@ enum BlobCommands {
         /// Blob ID to fetch.
         blob_id: String,
         /// Write raw bytes to a file instead of stdout.
-        #[arg(long)]
+        #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
         /// Print the blob payload as JSON instead of raw bytes.
         #[arg(long)]
@@ -2294,7 +2301,7 @@ async fn handle_help_command(
         Vec::new(),
         None,
         None,
-        vec![meerkat::help::MEERKAT_PLATFORM_SKILL_NAME.to_string()],
+        meerkat::help::platform_preload_skill_names(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -5111,20 +5118,32 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         println!("warn\tconfig\tmissing config at {}", config_path.display());
     }
 
-    let provider_keys = [
-        ("anthropic", "ANTHROPIC_API_KEY"),
-        ("openai", "OPENAI_API_KEY"),
-        ("gemini", "GEMINI_API_KEY"),
+    let provider_keys: [(&str, &[&str]); 3] = [
+        (
+            "anthropic",
+            &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+        ),
+        ("openai", &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]),
+        (
+            "gemini",
+            &[
+                "RKAT_GEMINI_API_KEY",
+                "GEMINI_API_KEY",
+                "RKAT_GOOGLE_API_KEY",
+                "GOOGLE_API_KEY",
+            ],
+        ),
     ];
-    for (provider, env_key) in provider_keys {
-        if std::env::var(env_key)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
+    for (provider, env_keys) in provider_keys {
+        if let Some(env_key) = env_keys.iter().find(|env_key| {
+            std::env::var(env_key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+        }) {
             println!("ok\tprovider\t{provider} via {env_key}");
         } else {
-            println!("warn\tprovider\t{provider} missing {env_key}");
+            println!("warn\tprovider\t{provider} missing {}", env_keys.join("/"));
         }
     }
 
@@ -13247,6 +13266,15 @@ default_model = "gemma"
         let args = normalize_cli_args(["rkat", "--realm", "test", "hello"].map(Into::into));
         assert_eq!(args[3], std::ffi::OsString::from("run"));
         assert_eq!(args[4], std::ffi::OsString::from("hello"));
+
+        let args = normalize_cli_args(["rkat", "--isolated", "doctor"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "--isolated", "doctor"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
 
         let args = normalize_cli_args(["rkat", "--resume", "last", "hello"].map(Into::into));
         assert_eq!(

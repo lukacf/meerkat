@@ -415,6 +415,10 @@ pub enum TurnExecutionInput {
         run_id: RunId,
         error: String,
     },
+    ExtractionFailed {
+        run_id: RunId,
+        error: String,
+    },
     ExtractionStart {
         run_id: RunId,
     },

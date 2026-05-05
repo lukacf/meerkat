@@ -760,6 +760,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExtractionValidationFailedExhausted`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ExtractionFailedTerminal`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
 - `RecoverableFailure`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

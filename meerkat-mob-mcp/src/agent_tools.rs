@@ -2489,6 +2489,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
@@ -2510,6 +2511,7 @@ mod tests {
                 tool_calls: 0,
                 terminal_cause_kind: None,
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
             })

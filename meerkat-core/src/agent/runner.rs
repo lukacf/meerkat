@@ -715,9 +715,10 @@ where
         Ok(())
     }
 
-    async fn emit_run_completed_event(
+    pub(super) async fn emit_run_completed_event(
         &self,
         result: &RunResult,
+        extraction_required: bool,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let _ = crate::event_tap::tap_emit(
@@ -727,8 +728,45 @@ where
                 session_id: self.session.id().clone(),
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
+                extraction_required,
                 usage: result.usage.clone(),
                 terminal_cause_kind: result.terminal_cause_kind,
+            },
+        )
+        .await;
+    }
+
+    pub(super) async fn emit_extraction_succeeded_event(
+        &self,
+        structured_output: serde_json::Value,
+        schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx,
+            AgentEvent::ExtractionSucceeded {
+                session_id: self.session.id().clone(),
+                structured_output,
+                schema_warnings,
+            },
+        )
+        .await;
+    }
+
+    pub(super) async fn emit_extraction_failed_event(
+        &self,
+        error: &crate::types::ExtractionError,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx,
+            AgentEvent::ExtractionFailed {
+                session_id: self.session.id().clone(),
+                last_output: error.last_output.clone(),
+                attempts: error.attempts,
+                reason: error.reason.clone(),
             },
         )
         .await;
@@ -863,6 +901,7 @@ where
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
+        self.run_completed_event_emitted = false;
 
         // Apply canonical per-turn skill references staged by the surface.
         // Skill refs are text-only so they operate on the text projection.
@@ -917,8 +956,11 @@ where
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
-                self.emit_run_completed_event(&result, event_tx.as_ref())
-                    .await;
+                if !self.run_completed_event_emitted {
+                    self.emit_run_completed_event(&result, false, event_tx.as_ref())
+                        .await;
+                    self.run_completed_event_emitted = true;
+                }
                 self.checkpoint_current_session().await;
                 self.clear_runtime_execution_kind();
                 Ok(result)
@@ -962,6 +1004,7 @@ where
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
+        self.run_completed_event_emitted = false;
 
         self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
@@ -986,8 +1029,11 @@ where
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
-                self.emit_run_completed_event(&result, event_tx.as_ref())
-                    .await;
+                if !self.run_completed_event_emitted {
+                    self.emit_run_completed_event(&result, false, event_tx.as_ref())
+                        .await;
+                    self.run_completed_event_emitted = true;
+                }
                 self.checkpoint_current_session().await;
                 self.clear_runtime_execution_kind();
                 Ok(result)

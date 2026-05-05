@@ -94,6 +94,26 @@ class RunCompleted(Event):
     usage: Usage = field(default_factory=Usage)
     terminal_cause_kind: TurnTerminalCauseKind | None = None
     structured_output: Any = None
+    extraction_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionSucceeded(Event):
+    """Structured-output extraction succeeded after a completed main run."""
+
+    session_id: str = ""
+    structured_output: Any = None
+    schema_warnings: list[Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionFailed(Event):
+    """Structured-output extraction failed after a completed main run."""
+
+    session_id: str = ""
+    last_output: str = ""
+    attempts: int = 0
+    reason: str = ""
 
 
 TurnTerminalOutcome = Literal[
@@ -581,6 +601,8 @@ _BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
 _EVENT_MAP: dict[str, type[Event]] = {
     "run_started": RunStarted,
     "run_completed": RunCompleted,
+    "extraction_succeeded": ExtractionSucceeded,
+    "extraction_failed": ExtractionFailed,
     "run_failed": RunFailed,
     "turn_started": TurnStarted,
     "text_delta": TextDelta,
@@ -974,18 +996,21 @@ _NUMBER_FIELDS = {
     "limit",
     "percent",
     "attempt",
+    "attempts",
     "max_attempts",
     "delay_ms",
     "injection_bytes",
 }
 
-_BOOL_FIELDS = {"is_error"}
+_BOOL_FIELDS = {"is_error", "extraction_required"}
 
 
 def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     required: dict[str, tuple[str, ...]] = {
         "run_started": ("session_id", "prompt"),
         "run_completed": ("session_id", "result", "usage"),
+        "extraction_succeeded": ("session_id", "structured_output"),
+        "extraction_failed": ("session_id", "last_output", "attempts", "reason"),
         "run_failed": ("session_id", "error_class", "error"),
         "turn_started": ("turn_number",),
         "text_delta": ("delta",),

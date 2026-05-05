@@ -26,7 +26,7 @@
  * ```
  */
 
-import type { ContentBlock, ContentInput, SkillKey } from "./types.js";
+import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -117,8 +117,24 @@ export interface RunCompletedEvent {
   readonly sessionId: string;
   readonly result: string;
   readonly structuredOutput?: unknown;
+  readonly extractionRequired?: boolean;
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
+}
+
+export interface ExtractionSucceededEvent {
+  readonly type: "extraction_succeeded";
+  readonly sessionId: string;
+  readonly structuredOutput: unknown;
+  readonly schemaWarnings?: readonly SchemaWarning[];
+}
+
+export interface ExtractionFailedEvent {
+  readonly type: "extraction_failed";
+  readonly sessionId: string;
+  readonly lastOutput: string;
+  readonly attempts: number;
+  readonly reason: string;
 }
 
 export type TurnTerminalOutcome =
@@ -484,6 +500,8 @@ export interface MalformedEvent {
 export type AgentEvent =
   | RunStartedEvent
   | RunCompletedEvent
+  | ExtractionSucceededEvent
+  | ExtractionFailedEvent
   | RunFailedEvent
   | TurnStartedEvent
   | TextDeltaEvent
@@ -541,6 +559,14 @@ export function isToolCallRequested(event: StreamEvent): event is ToolCallReques
 
 export function isRunCompleted(event: StreamEvent): event is RunCompletedEvent {
   return event.type === "run_completed";
+}
+
+export function isExtractionSucceeded(event: StreamEvent): event is ExtractionSucceededEvent {
+  return event.type === "extraction_succeeded";
+}
+
+export function isExtractionFailed(event: StreamEvent): event is ExtractionFailedEvent {
+  return event.type === "extraction_failed";
 }
 
 export function isRunFailed(event: StreamEvent): event is RunFailedEvent {
@@ -1021,8 +1047,34 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         sessionId: requireStringField(raw, "session_id"),
         result: requireStringField(raw, "result"),
         ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
+        ...(raw.extraction_required !== undefined ? { extractionRequired: Boolean(raw.extraction_required) } : {}),
         usage: parseUsage(raw.usage),
         ...terminalCauseKindField(raw),
+      };
+    case "extraction_succeeded": {
+      const rawWarnings = Array.isArray(raw.schema_warnings) ? raw.schema_warnings : undefined;
+      const schemaWarnings = rawWarnings?.map((warning) => {
+        const record = isPlainRecord(warning) ? warning : {};
+        return {
+          provider: String(record.provider ?? ""),
+          path: String(record.path ?? ""),
+          message: String(record.message ?? ""),
+        };
+      });
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        structuredOutput: raw.structured_output,
+        ...(schemaWarnings ? { schemaWarnings } : {}),
+      };
+    }
+    case "extraction_failed":
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        lastOutput: requireStringField(raw, "last_output"),
+        attempts: requireNumberField(raw, "attempts"),
+        reason: requireStringField(raw, "reason"),
       };
     case "run_failed":
       return {

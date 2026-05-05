@@ -640,6 +640,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    usage: Optional[WireUsage] = None\n"
     types_content += "    terminal_cause_kind: Optional[str] = None\n"
     types_content += "    structured_output: Optional[Any] = None\n"
+    types_content += "    extraction_error: Optional[dict[str, Any]] = None\n"
     types_content += "    schema_warnings: Optional[list[Any]] = None\n"
     types_content += "    skill_diagnostics: Optional[dict] = None\n\n\n"
 
@@ -1038,6 +1039,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  usage: WireUsage;\n"
     types_content += "  terminal_cause_kind?: string;\n"
     types_content += "  structured_output?: unknown;\n"
+    types_content += "  extraction_error?: { last_output: string; attempts: number; reason: string };\n"
     types_content += "  schema_warnings?: Array<{ provider: string; path: string; message: string }>;\n"
     types_content += "}\n\n"
 

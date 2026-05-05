@@ -4517,6 +4517,10 @@ pub mod inputs {
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExtractionFailed {
+        pub error: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverableFailure {
         pub failure_kind: LlmRetryFailureKind,
         pub retry_attempt: u64,
@@ -5102,6 +5106,7 @@ pub enum Input {
     ExtractionStart(inputs::ExtractionStart),
     ExtractionValidationPassed(inputs::ExtractionValidationPassed),
     ExtractionValidationFailed(inputs::ExtractionValidationFailed),
+    ExtractionFailed(inputs::ExtractionFailed),
     RecoverableFailure(inputs::RecoverableFailure),
     FatalFailure(inputs::FatalFailure),
     RetryRequested(inputs::RetryRequested),
@@ -5299,6 +5304,7 @@ impl Input {
             Self::ExtractionStart(_) => InputKind::ExtractionStart,
             Self::ExtractionValidationPassed(_) => InputKind::ExtractionValidationPassed,
             Self::ExtractionValidationFailed(_) => InputKind::ExtractionValidationFailed,
+            Self::ExtractionFailed(_) => InputKind::ExtractionFailed,
             Self::RecoverableFailure(_) => InputKind::RecoverableFailure,
             Self::FatalFailure(_) => InputKind::FatalFailure,
             Self::RetryRequested(_) => InputKind::RetryRequested,
@@ -5503,6 +5509,7 @@ pub enum InputKind {
     ExtractionStart,
     ExtractionValidationPassed,
     ExtractionValidationFailed,
+    ExtractionFailed,
     RecoverableFailure,
     FatalFailure,
     RetryRequested,
@@ -6403,6 +6410,7 @@ pub enum TransitionId {
     ExtractionValidationPassed,
     ExtractionValidationFailedRetry,
     ExtractionValidationFailedExhausted,
+    ExtractionFailedTerminal,
     RecoverableFailure,
     FatalFailure,
     RetryRequested,

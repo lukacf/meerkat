@@ -736,6 +736,37 @@
         ],
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "SchemaWarning": {
+        "description": "Warnings emitted during schema lowering.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "path",
+          "message"
+        ],
+        "type": "object"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -1312,6 +1343,11 @@
       {
         "description": "Agent run completed successfully",
         "properties": {
+          "extraction_required": {
+            "default": false,
+            "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
+            "type": "boolean"
+          },
           "result": {
             "type": "string"
           },
@@ -1344,6 +1380,65 @@
           "session_id",
           "result",
           "usage"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Structured-output extraction succeeded after a completed main run.",
+        "properties": {
+          "schema_warnings": {
+            "items": {
+              "$ref": "#/$defs/SchemaWarning"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "structured_output": true,
+          "type": {
+            "const": "extraction_succeeded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "structured_output"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Structured-output extraction failed after a completed main run.",
+        "properties": {
+          "attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_output": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "extraction_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "last_output",
+          "attempts",
+          "reason"
         ],
         "type": "object"
       },
@@ -2525,6 +2620,11 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "extraction_required": {
+                "default": false,
+                "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
+                "type": "boolean"
+              },
               "result": {
                 "type": "string"
               },
@@ -2557,6 +2657,65 @@
               "session_id",
               "result",
               "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction succeeded after a completed main run.",
+            "properties": {
+              "schema_warnings": {
+                "items": {
+                  "$ref": "#/$defs/SchemaWarning"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "structured_output": true,
+              "type": {
+                "const": "extraction_succeeded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "structured_output"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction failed after a completed main run.",
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_output": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "extraction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "last_output",
+              "attempts",
+              "reason"
             ],
             "type": "object"
           },
@@ -3699,6 +3858,37 @@
         ],
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "SchemaWarning": {
+        "description": "Warnings emitted during schema lowering.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "path",
+          "message"
+        ],
+        "type": "object"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -4320,6 +4510,8 @@
     "known_event_types": [
       "run_started",
       "run_completed",
+      "extraction_succeeded",
+      "extraction_failed",
       "run_failed",
       "hook_started",
       "hook_completed",

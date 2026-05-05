@@ -33,6 +33,7 @@ class WireRunResult:
     usage: Optional[WireUsage] = None
     terminal_cause_kind: Optional[str] = None
     structured_output: Optional[Any] = None
+    extraction_error: Optional[dict[str, Any]] = None
     schema_warnings: Optional[list[Any]] = None
     skill_diagnostics: Optional[dict] = None
 
@@ -1201,6 +1202,7 @@ request/response terminal-flow fixtures."""
 class CommsChecksumTokenResult:
     """Typed result for a checksum-token peer response."""
     request_intent: CommsChecksumTokenResultIntent
+    request_subject: str
     token: str
 
 

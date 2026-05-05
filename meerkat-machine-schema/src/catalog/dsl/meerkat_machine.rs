@@ -1977,6 +1977,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             ExtractionStart,
             ExtractionValidationPassed,
             ExtractionValidationFailed { error: String },
+            ExtractionFailed { error: String },
             RecoverableFailure {
                 failure_kind: Enum<LlmRetryFailureKind>,
                 retry_attempt: u64,
@@ -5617,15 +5618,35 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
                 self.extraction_attempts = self.extraction_attempts + 1;
-                self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
-                self.terminal_cause_kind = Some(TurnTerminalCauseKind::StructuredOutputValidationFailed);
+                self.turn_phase = TurnPhase::Completed;
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
+                self.terminal_cause_kind = None;
             }
             to Running
-            emit TurnRunFailed {
+            emit TurnRunCompleted {
                 run_id: self.current_run_id.get("value"),
-                terminal_cause_kind: TurnTerminalCauseKind::StructuredOutputValidationFailed,
-                error: "ExtractionExhausted"
+                outcome: TurnTerminalOutcome::Completed
+            }
+        }
+
+        transition ExtractionFailedTerminal {
+            on input ExtractionFailed { error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_extracting_calling_or_draining" {
+                self.turn_phase == TurnPhase::Extracting
+                || self.turn_phase == TurnPhase::CallingLlm
+                || self.turn_phase == TurnPhase::DrainingBoundary
+            }
+            update {
+                self.extraction_attempts = self.extraction_attempts + 1;
+                self.turn_phase = TurnPhase::Completed;
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
+                self.terminal_cause_kind = None;
+            }
+            to Running
+            emit TurnRunCompleted {
+                run_id: self.current_run_id.get("value"),
+                outcome: TurnTerminalOutcome::Completed
             }
         }
 

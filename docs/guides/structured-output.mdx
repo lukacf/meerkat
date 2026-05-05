@@ -36,7 +36,7 @@ When `output_schema` is configured on an agent, the execution flow is:
     `RunResult.structured_output` contains the parsed `serde_json::Value`.
   </Step>
   <Step title="On failure">
-    Retries up to `structured_output_retries` times with error feedback, then returns `AgentError::StructuredOutputValidationFailed`.
+    Retries validation failures up to `structured_output_retries` times with error feedback, then returns the completed main run with `RunResult.extraction_error`.
   </Step>
 </Steps>
 
@@ -200,22 +200,26 @@ If Meerkat is built without the `jsonschema` feature, structured output still pa
 ### On success
 
 Returns `RunResult` with:
-- `text`: the last assistant text from the extraction turn
+- `text`: the committed main-turn assistant output
 - `structured_output`: `Some(parsed_value)` -- the validated JSON
 - `schema_warnings`: any warnings from schema compilation
 - `turns`: includes extraction attempts in the count
 
-### On failure (exhausted retries)
+### On failure
 
-Returns `AgentError::StructuredOutputValidationFailed`:
+Returns `Ok(RunResult)` for the completed main run with `structured_output: None` and `extraction_error: Some(error)`:
 
 ```rust
-AgentError::StructuredOutputValidationFailed {
-    attempts: u32,        // Total attempts made
-    reason: String,       // Last validation error
-    last_output: String,  // Last raw LLM output
+pub struct ExtractionError {
+    last_output: String,  // Main-turn output extraction attempted to transform
+    attempts: u32,        // Extraction attempts made before failure
+    reason: String,       // Extraction failure reason
 }
 ```
+
+Extraction failure can come from validation exhaustion, provider errors, hook or
+budget denial, schema compilation failure, or tool-call-shaped output during the
+post-main-turn extraction phase.
 
 ## Provider schema compilation
 
@@ -322,17 +326,18 @@ When structured output extraction succeeds, the `RunResult` contains:
 
 ```rust
 pub struct RunResult {
-    pub text: String,                              // Raw extraction text
+    pub text: String,                              // Main-turn assistant output
     pub session_id: SessionId,
     pub usage: Usage,
     pub turns: u32,                                // Includes extraction attempts
     pub tool_calls: u32,
     pub structured_output: Option<Value>,           // Validated JSON value
+    pub extraction_error: Option<ExtractionError>,   // Extraction failure details
     pub schema_warnings: Option<Vec<SchemaWarning>>, // Compilation warnings
 }
 ```
 
-The `structured_output` field is `Some(value)` when extraction succeeds and `None` when no schema was configured. The `text` field contains the raw JSON string from the last extraction response.
+The `structured_output` field is `Some(value)` when extraction succeeds and `None` when no schema was configured or extraction failed. The `text` field remains the committed main-turn assistant output.
 
 ## SDK usage
 

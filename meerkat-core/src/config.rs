@@ -758,8 +758,9 @@ pub struct AgentConfig {
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
-    /// the agentic work, forcing the LLM to output validated JSON. The final
-    /// response text becomes the schema-only JSON string.
+    /// the agentic work, forcing the LLM to output validated JSON. The main
+    /// response text remains the committed agentic output; extraction populates
+    /// structured output on success or extraction error details on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<OutputSchema>,
     /// Maximum retries for structured output validation failures.

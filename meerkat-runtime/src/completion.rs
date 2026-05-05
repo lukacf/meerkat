@@ -22,7 +22,7 @@ use crate::tokio::sync::oneshot;
 #[derive(Debug)]
 pub enum CompletionOutcome {
     /// The input was successfully consumed and produced a result.
-    Completed(RunResult),
+    Completed(Box<RunResult>),
     /// The input was consumed but produced no RunResult (e.g. context-append ops).
     CompletedWithoutResult,
     /// The input reached a callback boundary and requires external tool
@@ -156,7 +156,7 @@ impl CompletionRegistry {
     pub(crate) fn resolve_completed(&mut self, input_id: &InputId, result: RunResult) {
         if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
-                let _ = tx.send(CompletionOutcome::Completed(result.clone()));
+                let _ = tx.send(CompletionOutcome::Completed(Box::new(result.clone())));
             }
         }
     }
@@ -288,6 +288,7 @@ mod tests {
             tool_calls: 0,
             terminal_cause_kind: None,
             structured_output: None,
+            extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
         }

@@ -138,6 +138,14 @@ export interface LlmRetrySchedule {
   plan: LlmRetryPlan;
 }
 
+export type Provider = "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+
+export interface SchemaWarning {
+  message: string;
+  path: string;
+  provider: Provider;
+}
+
 export type SessionId = string;
 
 export interface SkillKey {
@@ -253,12 +261,28 @@ export interface RunStartedEvent {
 }
 
 export interface RunCompletedEvent {
+  extraction_required?: boolean;
   result: string;
   session_id: SessionId;
   structured_output?: unknown;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_completed";
   usage: Usage;
+}
+
+export interface ExtractionSucceededEvent {
+  schema_warnings?: SchemaWarning[] | null;
+  session_id: SessionId;
+  structured_output: unknown;
+  type: "extraction_succeeded";
+}
+
+export interface ExtractionFailedEvent {
+  attempts: number;
+  last_output: string;
+  reason: string;
+  session_id: SessionId;
+  type: "extraction_failed";
 }
 
 export interface RunFailedEvent {
@@ -460,6 +484,8 @@ export interface BackgroundJobCompletedEvent {
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
+  "extraction_succeeded",
+  "extraction_failed",
   "run_failed",
   "hook_started",
   "hook_completed",
@@ -496,6 +522,8 @@ export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
 export type AgentEvent =
   RunStartedEvent |
   RunCompletedEvent |
+  ExtractionSucceededEvent |
+  ExtractionFailedEvent |
   RunFailedEvent |
   HookStartedEvent |
   HookCompletedEvent |

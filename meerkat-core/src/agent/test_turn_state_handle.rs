@@ -155,7 +155,7 @@ impl LocalState {
         use TurnExecutionInput::{
             AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
             BudgetLimitExceeded, CancelAfterBoundary, CancelNow, CancellationObserved,
-            EnterExtraction, ExtractionStart, ExtractionValidationFailed,
+            EnterExtraction, ExtractionFailed, ExtractionStart, ExtractionValidationFailed,
             ExtractionValidationPassed, FatalFailure, ForceCancelNoRun, LlmReturnedTerminal,
             LlmReturnedToolCalls, OpsBarrierSatisfied, PrimitiveApplied, RecoverableFailure,
             RegisterPendingOps, RetryRequested, StartConversationRun, StartImmediateAppend,
@@ -353,15 +353,24 @@ impl LocalState {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
                 }
-                fields.extraction_attempts += 1;
                 if fields.extraction_attempts < fields.max_extraction_retries {
+                    fields.extraction_attempts += 1;
                     CallingLlm
                 } else {
-                    fields.terminal_outcome = TurnTerminalOutcome::StructuredOutputValidationFailed;
-                    fields.terminal_cause_kind =
-                        Some(TurnTerminalCauseKind::StructuredOutputValidationFailed);
-                    Failed
+                    fields.extraction_attempts += 1;
+                    fields.terminal_outcome = TurnTerminalOutcome::Completed;
+                    fields.terminal_cause_kind = None;
+                    Completed
                 }
+            }
+            (Extracting | CallingLlm | DrainingBoundary, ExtractionFailed { run_id, .. }) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(invalid(phase, &input));
+                }
+                fields.extraction_attempts += 1;
+                fields.terminal_outcome = TurnTerminalOutcome::Completed;
+                fields.terminal_cause_kind = None;
+                Completed
             }
             (
                 CallingLlm | WaitingForOps | DrainingBoundary,
@@ -863,6 +872,12 @@ impl TurnStateHandle for TestTurnStateHandle {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "extraction_validation_failed")?;
         guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
+    }
+
+    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
+        let mut guard = self.lock_state()?;
+        let run_id = active_run_or_err(&guard, "extraction_failed")?;
+        guard.apply(TurnExecutionInput::ExtractionFailed { run_id, error })
     }
 
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {

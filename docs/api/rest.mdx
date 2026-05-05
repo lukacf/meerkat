@@ -408,7 +408,7 @@ History is returned oldest-to-newest and reflects the last committed session sna
   ```json Response
   {
     "session_id": "01936f8a-7b2c-7000-8000-000000000002",
-    "text": "{\"country\":\"France\",\"capital\":\"Paris\"}",
+    "text": "The capital of France is Paris.",
     "turns": 1,
     "tool_calls": 0,
     "usage": {
@@ -431,9 +431,9 @@ History is returned oldest-to-newest and reflects the last committed session sna
   ```
   </CodeGroup>
 
-  When `output_schema` is provided, the `text` field contains the schema-only JSON
-  string produced by the extraction turn (no extra prose). The `structured_output`
-  field contains the parsed JSON value for convenience.
+  When `output_schema` is provided, the `text` field remains the committed
+  main-turn assistant output. The extraction turn runs afterward and populates
+  `structured_output` on success or `extraction_error` on failure.
 
   `output_schema` may be provided as a wrapper object (shown above) or as a raw
   JSON Schema object. The wrapper enables explicit `compat`/`format` settings.

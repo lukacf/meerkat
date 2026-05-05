@@ -221,6 +221,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExtractionStart`
 - `ExtractionValidationPassed`
 - `ExtractionValidationFailed`(error: String)
+- `ExtractionFailed`(error: String)
 - `RecoverableFailure`(failure_kind: LlmRetryFailureKind, retry_attempt: u64, max_retries: u64, selected_delay_ms: u64, error: String)
 - `FatalFailure`(terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RetryRequested`(retry_attempt: u64)
@@ -2412,7 +2413,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_extracting`
   - `retries_exhausted`
-- Emits: `TurnRunFailed`
+- Emits: `TurnRunCompleted`
+- To: `Running`
+
+### `ExtractionFailedTerminal`
+- From: `Running`
+- On: `ExtractionFailed`(error)
+- Guards:
+  - `turn_extracting_calling_or_draining`
+- Emits: `TurnRunCompleted`
 - To: `Running`
 
 ### `RecoverableFailure`

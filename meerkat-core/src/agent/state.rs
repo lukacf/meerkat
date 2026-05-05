@@ -86,6 +86,7 @@ fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
         | TurnExecutionInput::EnterExtraction { run_id, .. }
         | TurnExecutionInput::ExtractionValidationPassed { run_id }
         | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
+        | TurnExecutionInput::ExtractionFailed { run_id, .. }
         | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
         TurnExecutionInput::ForceCancelNoRun => None,
     }
@@ -323,10 +324,13 @@ where
     }
 
     fn turn_in_extraction_flow(&self) -> Result<bool, AgentError> {
-        Ok(self
-            .runtime_turn_authority_snapshot()?
-            .max_extraction_retries
-            > 0)
+        let snapshot = self.runtime_turn_authority_snapshot()?;
+        Ok(matches!(snapshot.turn_phase, TurnPhase::Extracting)
+            || (self.extraction_state.primary_output().is_some()
+                && matches!(
+                    snapshot.turn_phase,
+                    TurnPhase::CallingLlm | TurnPhase::DrainingBoundary
+                )))
     }
 
     fn turn_terminal_outcome(&self) -> Result<TurnTerminalOutcome, AgentError> {
@@ -690,6 +694,9 @@ where
             TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
                 handle.extraction_validation_failed(error.clone())
             }
+            TurnExecutionInput::ExtractionFailed { error, .. } => {
+                handle.extraction_failed(error.clone())
+            }
             TurnExecutionInput::ExtractionStart { .. } => handle.extraction_start(),
             TurnExecutionInput::ForceCancelNoRun => handle.force_cancel_no_run(),
         };
@@ -1040,6 +1047,50 @@ where
         Ok(())
     }
 
+    async fn complete_extraction_failed(
+        &mut self,
+        run_id: &RunId,
+        turn_count: u32,
+        tool_call_count: u32,
+        reason: String,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<RunResult, AgentError> {
+        let transition = self.apply_turn_input(TurnExecutionInput::ExtractionFailed {
+            run_id: run_id.clone(),
+            error: reason.clone(),
+        })?;
+        self.execute_turn_effects(&transition, turn_count, event_tx)
+            .await;
+
+        let extraction_error = crate::types::ExtractionError {
+            last_output: self
+                .extraction_state
+                .primary_output()
+                .unwrap_or_default()
+                .to_string(),
+            attempts: self.turn_extraction_attempts()?,
+            reason,
+        };
+        let result = RunResult {
+            text: extraction_error.last_output.clone(),
+            session_id: self.session.id().clone(),
+            usage: self.session.total_usage(),
+            turns: turn_count + 1,
+            tool_calls: tool_call_count,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: Some(extraction_error.clone()),
+            schema_warnings: self.extraction_state.take_schema_warnings(),
+            skill_diagnostics: self.collect_skill_diagnostics().await,
+        };
+        if let Err(e) = self.store.save(&self.session).await {
+            tracing::warn!("Failed to save session: {}", e);
+        }
+        self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
+            .await;
+        Ok(result)
+    }
+
     async fn execute_turn_hooks(
         &mut self,
         invocation: HookInvocation,
@@ -1085,6 +1136,7 @@ where
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
+        self.extraction_state.reset();
 
         // --- Authority lifecycle: start a conversation run ---
         let run_id = self
@@ -1129,7 +1181,7 @@ where
             self.observe_cancel_after_boundary_request(&run_id)?;
 
             // Check turn limit
-            if turn_count >= max_turns {
+            if !self.turn_in_extraction_flow()? && turn_count >= max_turns {
                 self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
                     run_id: run_id.clone(),
                 })?;
@@ -1138,6 +1190,17 @@ where
 
             if let Some(exceeded) = self.budget.observe().exceeded() {
                 emit_event!(budget_warning_event(exceeded));
+                if self.turn_in_extraction_flow()? {
+                    return self
+                        .complete_extraction_failed(
+                            &run_id,
+                            turn_count,
+                            tool_call_count,
+                            format!("extraction budget exceeded: {exceeded:?}"),
+                            &event_tx,
+                        )
+                        .await;
+                }
                 self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                     run_id: run_id.clone(),
                     exceeded,
@@ -1538,10 +1601,13 @@ where
                         }
                     };
 
-                    // Emit turn start
-                    emit_event!(AgentEvent::TurnStarted {
-                        turn_number: turn_count,
-                    });
+                    let in_extraction = self.turn_in_extraction_flow()?;
+
+                    if !in_extraction {
+                        emit_event!(AgentEvent::TurnStarted {
+                            turn_number: turn_count,
+                        });
+                    }
 
                     let effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
@@ -1550,42 +1616,67 @@ where
                         self.config.provider_params.as_ref(),
                     );
 
+                    let pre_llm_invocation = HookInvocation {
+                        point: HookPoint::PreLlmRequest,
+                        session_id: self.session.id().clone(),
+                        turn_number: Some(turn_count),
+                        prompt_input: None,
+                        prompt: None,
+                        error_report: None,
+                        error_class: None,
+                        error: None,
+                        llm_request: Some(HookLlmRequest {
+                            max_tokens: effective_max_tokens,
+                            temperature: effective_temperature,
+                            provider_params: effective_provider_params.clone(),
+                            message_count: self.session.messages().len(),
+                        }),
+                        llm_response: None,
+                        tool_call: None,
+                        tool_result: None,
+                    };
                     // Pre-LLM hooks may observe or deny the turn.
-                    let pre_llm_report = self
-                        .execute_turn_hooks(
-                            HookInvocation {
-                                point: HookPoint::PreLlmRequest,
-                                session_id: self.session.id().clone(),
-                                turn_number: Some(turn_count),
-                                prompt_input: None,
-                                prompt: None,
-                                error_report: None,
-                                error_class: None,
-                                error: None,
-                                llm_request: Some(HookLlmRequest {
-                                    max_tokens: effective_max_tokens,
-                                    temperature: effective_temperature,
-                                    provider_params: effective_provider_params.clone(),
-                                    message_count: self.session.messages().len(),
-                                }),
-                                llm_response: None,
-                                tool_call: None,
-                                tool_result: None,
-                            },
-                            &run_id,
-                            turn_count,
-                            &event_tx,
-                        )
-                        .await?;
+                    let pre_llm_report = if in_extraction {
+                        match self
+                            .execute_hooks(pre_llm_invocation, event_tx.as_ref())
+                            .await
+                        {
+                            Ok(report) => report,
+                            Err(error) => {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        error.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else {
+                        self.execute_turn_hooks(pre_llm_invocation, &run_id, turn_count, &event_tx)
+                            .await?
+                    };
 
                     if let Some(error) = pre_llm_report.denial_error(HookPoint::PreLlmRequest) {
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
+                        }
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
                     }
 
                     // In extraction mode, override tools/temperature/params
-                    let in_extraction = self.turn_in_extraction_flow()?;
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
@@ -1641,6 +1732,17 @@ where
                     {
                         Ok(r) => r,
                         Err(e) => {
+                            if in_extraction {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        e.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
                             if let Some(exceeded) = BudgetExceeded::from_agent_error(&e) {
                                 emit_event!(budget_warning_event(exceeded));
                                 self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
@@ -1676,6 +1778,17 @@ where
                     self.session.record_usage(result.usage.clone());
                     if let Some(exceeded) = self.budget.observe().exceeded() {
                         emit_event!(budget_warning_event(exceeded));
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    format!("extraction budget exceeded: {exceeded:?}"),
+                                    &event_tx,
+                                )
+                                .await;
+                        }
                         self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                             run_id: run_id.clone(),
                             exceeded,
@@ -1687,43 +1800,69 @@ where
                     let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let assistant_text = assistant_msg.to_string();
 
-                    let post_llm_report = self
-                        .execute_turn_hooks(
-                            HookInvocation {
-                                point: HookPoint::PostLlmResponse,
-                                session_id: self.session.id().clone(),
-                                turn_number: Some(turn_count),
-                                prompt_input: None,
-                                prompt: None,
-                                error_report: None,
-                                error_class: None,
-                                error: None,
-                                llm_request: None,
-                                llm_response: Some(HookLlmResponse {
-                                    assistant_text: assistant_text.clone(),
-                                    tool_call_names: assistant_msg
-                                        .tool_calls()
-                                        .map(|call| call.name.to_string())
-                                        .collect(),
-                                    stop_reason: Some(stop_reason),
-                                    usage: Some(usage.clone()),
-                                }),
-                                tool_call: None,
-                                tool_result: None,
-                            },
-                            &run_id,
-                            turn_count,
-                            &event_tx,
-                        )
-                        .await?;
+                    let post_llm_invocation = HookInvocation {
+                        point: HookPoint::PostLlmResponse,
+                        session_id: self.session.id().clone(),
+                        turn_number: Some(turn_count),
+                        prompt_input: None,
+                        prompt: None,
+                        error_report: None,
+                        error_class: None,
+                        error: None,
+                        llm_request: None,
+                        llm_response: Some(HookLlmResponse {
+                            assistant_text: assistant_text.clone(),
+                            tool_call_names: assistant_msg
+                                .tool_calls()
+                                .map(|call| call.name.to_string())
+                                .collect(),
+                            stop_reason: Some(stop_reason),
+                            usage: Some(usage.clone()),
+                        }),
+                        tool_call: None,
+                        tool_result: None,
+                    };
+                    let post_llm_report = if in_extraction {
+                        match self
+                            .execute_hooks(post_llm_invocation, event_tx.as_ref())
+                            .await
+                        {
+                            Ok(report) => report,
+                            Err(error) => {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        error.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else {
+                        self.execute_turn_hooks(post_llm_invocation, &run_id, turn_count, &event_tx)
+                            .await?
+                    };
 
                     if let Some(error) = post_llm_report.denial_error(HookPoint::PostLlmResponse) {
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
+                        }
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
                     }
 
-                    if !assistant_text.is_empty() {
+                    if !in_extraction && !assistant_text.is_empty() {
                         emit_event!(AgentEvent::TextComplete {
                             content: assistant_text.clone(),
                         });
@@ -1733,6 +1872,31 @@ where
 
                     // Check if we have tool calls
                     if assistant_msg.has_tool_calls() {
+                        if in_extraction {
+                            let tool_call_names = assistant_msg
+                                .tool_calls()
+                                .map(|tc| tc.name.to_string())
+                                .collect::<Vec<_>>();
+                            let reason = if tool_call_names.is_empty() {
+                                "structured output extraction returned tool calls instead of JSON"
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "structured output extraction returned tool calls instead of JSON: {}",
+                                    tool_call_names.join(", ")
+                                )
+                            };
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    reason,
+                                    &event_tx,
+                                )
+                                .await;
+                        }
+
                         let tool_calls: Vec<(ToolCallOwned, ToolCallArguments)> =
                             match assistant_msg
                                 .tool_calls()
@@ -2058,12 +2222,17 @@ where
                             .drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await
                         {
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                                .await?;
-                            return Err(error);
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
                         }
                         self.observe_cancel_after_boundary_request(&run_id)?;
-                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                         // Authority: DrainingBoundary -> Extracting for validation
                         self.apply_turn_input(TurnExecutionInput::EnterExtraction {
@@ -2071,21 +2240,50 @@ where
                             max_retries: self.config.structured_output_retries,
                         })?;
 
-                        let output_schema =
-                            self.config.output_schema.as_ref().ok_or_else(|| {
-                                AgentError::InternalError(
-                                    "extraction flow without output_schema".into(),
+                        let Some(output_schema) = self.config.output_schema.as_ref() else {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    "extraction flow without output_schema".to_string(),
+                                    &event_tx,
                                 )
-                            })?;
-                        let compiled = self
-                            .client
-                            .compile_schema(output_schema)
-                            .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
+                                .await;
+                        };
+                        let compiled = match self.client.compile_schema(output_schema) {
+                            Ok(compiled) => compiled,
+                            Err(error) => {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        error.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
+                        };
                         let validation = super::extraction::validate_response_text(
                             &assistant_text,
                             output_schema,
                             &compiled.schema,
-                        )?;
+                        );
+                        let validation = match validation {
+                            Ok(validation) => validation,
+                            Err(error) => {
+                                return self
+                                    .complete_extraction_failed(
+                                        &run_id,
+                                        turn_count,
+                                        tool_call_count,
+                                        error.to_string(),
+                                        &event_tx,
+                                    )
+                                    .await;
+                            }
+                        };
 
                         match validation {
                             super::extraction::ExtractionValidation::Failed {
@@ -2109,43 +2307,65 @@ where
                                     continue;
                                 }
 
-                                // Authority decided retries exhausted
+                                // Authority decided retries exhausted. The
+                                // main run already completed; extraction is a
+                                // post-run outcome and must not terminalize the
+                                // run as failed.
+                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                let extraction_error = crate::types::ExtractionError {
+                                    last_output: self
+                                        .extraction_state
+                                        .primary_output()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    attempts: self.turn_extraction_attempts()?,
+                                    reason: error,
+                                };
+                                let result = RunResult {
+                                    text: extraction_error.last_output.clone(),
+                                    session_id: self.session.id().clone(),
+                                    usage: self.session.total_usage(),
+                                    turns: turn_count + 1,
+                                    tool_calls: tool_call_count,
+                                    terminal_cause_kind: None,
+                                    structured_output: None,
+                                    extraction_error: Some(extraction_error.clone()),
+                                    schema_warnings: self.extraction_state.take_schema_warnings(),
+                                    skill_diagnostics: self.collect_skill_diagnostics().await,
+                                };
                                 if let Err(e) = self.store.save(&self.session).await {
                                     tracing::warn!("Failed to save session: {}", e);
                                 }
-                                return Err(AgentError::StructuredOutputValidationFailed {
-                                    attempts: self.turn_extraction_attempts()?,
-                                    reason: error,
-                                    last_output: self
-                                        .session
-                                        .last_assistant_text()
-                                        .unwrap_or_default(),
-                                });
+                                self.emit_extraction_failed_event(
+                                    &extraction_error,
+                                    event_tx.as_ref(),
+                                )
+                                .await;
+                                return Ok(result);
                             }
                             super::extraction::ExtractionValidation::Passed(normalized) => {
                                 self.extraction_state.record_success(normalized);
                             }
                         }
 
-                        let mut result = RunResult {
-                            text: self.session.last_assistant_text().unwrap_or_default(),
+                        let structured_output = self.extraction_state.take_result();
+                        let schema_warnings = self.extraction_state.take_schema_warnings();
+                        let result = RunResult {
+                            text: self
+                                .extraction_state
+                                .primary_output()
+                                .unwrap_or_default()
+                                .to_string(),
                             session_id: self.session.id().clone(),
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
                             terminal_cause_kind: None,
-                            structured_output: self.extraction_state.take_result(),
-                            schema_warnings: self.extraction_state.take_schema_warnings(),
-                            skill_diagnostics: None,
+                            structured_output,
+                            extraction_error: None,
+                            schema_warnings,
+                            skill_diagnostics: self.collect_skill_diagnostics().await,
                         };
-                        self.run_completed_hooks_before_terminal(
-                            &mut result,
-                            &run_id,
-                            turn_count,
-                            &event_tx,
-                        )
-                        .await?;
-
                         // Validation passed — complete via authority
                         let t = self.apply_turn_input(
                             TurnExecutionInput::ExtractionValidationPassed {
@@ -2155,6 +2375,14 @@ where
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         if let Err(e) = self.store.save(&self.session).await {
                             tracing::warn!("Failed to save session: {}", e);
+                        }
+                        if let Some(structured_output) = result.structured_output.clone() {
+                            self.emit_extraction_succeeded_event(
+                                structured_output,
+                                result.schema_warnings.clone(),
+                                event_tx.as_ref(),
+                            )
+                            .await;
                         }
                         return Ok(result);
                     } else {
@@ -2176,21 +2404,56 @@ where
                         self.observe_cancel_after_boundary_request(&run_id)?;
 
                         // Check if we need to perform extraction turn for structured output
-                        if let Some(output_schema) = self.config.output_schema.as_ref()
+                        if let Some(output_schema) = self.config.output_schema.clone()
                             && !self.turn_in_extraction_flow()?
                         {
-                            // The model turn is complete, but the run is not
-                            // complete until the extraction turn validates.
                             emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
-                            // Enter extraction mode via authority
+                            // The main agentic turn has committed. Extraction
+                            // is a separate post-run validation phase.
                             self.extraction_state.reset();
+                            self.extraction_state.set_primary_output(final_text.clone());
 
-                            // Compile schema and capture warnings
-                            let compiled = self
-                                .client
-                                .compile_schema(output_schema)
-                                .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
+                            let mut result = RunResult {
+                                text: final_text.clone(),
+                                session_id: self.session.id().clone(),
+                                usage: self.session.total_usage(),
+                                turns: turn_count + 1,
+                                tool_calls: tool_call_count,
+                                terminal_cause_kind: None,
+                                structured_output: None,
+                                extraction_error: None,
+                                schema_warnings: None,
+                                skill_diagnostics: None,
+                            };
+                            self.run_completed_hooks_before_terminal(
+                                &mut result,
+                                &run_id,
+                                turn_count,
+                                &event_tx,
+                            )
+                            .await?;
+                            self.emit_run_completed_event(&result, true, event_tx.as_ref())
+                                .await;
+                            self.run_completed_event_emitted = true;
+
+                            // Compile schema and capture warnings. Once the
+                            // main run is complete, schema setup failure is an
+                            // extraction failure, not a run failure.
+                            let compiled = match self.client.compile_schema(&output_schema) {
+                                Ok(compiled) => compiled,
+                                Err(error) => {
+                                    return self
+                                        .complete_extraction_failed(
+                                            &run_id,
+                                            turn_count,
+                                            tool_call_count,
+                                            error.to_string(),
+                                            &event_tx,
+                                        )
+                                        .await;
+                                }
+                            };
                             self.extraction_state
                                 .set_schema_warnings(compiled.warnings.clone());
 
@@ -2222,6 +2485,7 @@ where
                             tool_calls: tool_call_count,
                             terminal_cause_kind: None,
                             structured_output: None,
+                            extraction_error: None,
                             schema_warnings: None,
                             skill_diagnostics: self.collect_skill_diagnostics().await,
                         };
@@ -2348,6 +2612,7 @@ where
                 tool_calls,
                 terminal_cause_kind: public_terminal_cause_kind(cause_kind),
                 structured_output: None,
+                extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: self.collect_skill_diagnostics().await,
             }),
@@ -6491,6 +6756,42 @@ mod tests {
         }
     }
 
+    struct FailingExtractionClient {
+        call_count: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for FailingExtractionClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut call_count = self.call_count.lock().unwrap();
+            *call_count += 1;
+            if *call_count == 1 {
+                Ok(text_response("main answer"))
+            } else {
+                Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::AuthError,
+                    "extraction auth failed",
+                ))
+            }
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     fn text_response(text: &str) -> super::LlmStreamResult {
         super::LlmStreamResult::new(
             vec![AssistantBlock::Text {
@@ -6498,6 +6799,19 @@ mod tests {
                 meta: None,
             }],
             StopReason::EndTurn,
+            Usage::default(),
+        )
+    }
+
+    fn tool_call_response(name: &str) -> super::LlmStreamResult {
+        super::LlmStreamResult::new(
+            vec![AssistantBlock::ToolUse {
+                id: "call-extraction-tool".to_string(),
+                name: name.into(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
             Usage::default(),
         )
     }
@@ -6539,6 +6853,453 @@ mod tests {
             client.calls_made(),
             2,
             "expect 1 agentic + 1 extraction call"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_turn_does_not_emit_normal_text_or_turn_completion() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("extraction should succeed");
+        assert_eq!(result.text, "main answer");
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"answer": "42"}))
+        );
+
+        let mut text_complete_payloads = Vec::new();
+        let mut turn_completed_count = 0;
+        let mut run_completed_count = 0;
+        let mut extraction_succeeded_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::TextComplete { content } => {
+                    text_complete_payloads.push(content);
+                }
+                crate::event::AgentEvent::TurnCompleted { .. } => {
+                    turn_completed_count += 1;
+                }
+                crate::event::AgentEvent::RunCompleted {
+                    extraction_required,
+                    ..
+                } => {
+                    assert!(extraction_required);
+                    run_completed_count += 1;
+                }
+                crate::event::AgentEvent::ExtractionSucceeded { .. } => {
+                    extraction_succeeded_count += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            text_complete_payloads,
+            vec!["main answer".to_string()],
+            "extraction JSON must not leak as TextComplete"
+        );
+        assert_eq!(
+            turn_completed_count, 1,
+            "only the main turn should emit TurnCompleted"
+        );
+        assert_eq!(run_completed_count, 1);
+        assert_eq!(extraction_succeeded_count, 1);
+    }
+
+    #[tokio::test]
+    async fn extraction_llm_failure_emits_extraction_failed_without_run_failed() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(FailingExtractionClient {
+            call_count: Mutex::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("extraction LLM failure should not fail the completed main run");
+
+        assert_eq!(result.text, "main answer");
+        assert!(result.structured_output.is_none());
+        let extraction_error = result
+            .extraction_error
+            .expect("extraction error should be returned");
+        assert!(
+            extraction_error.reason.contains("extraction auth failed"),
+            "reason should preserve extraction LLM failure: {}",
+            extraction_error.reason
+        );
+
+        let mut saw_run_completed = false;
+        let mut saw_run_failed = false;
+        let mut saw_extraction_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted {
+                    extraction_required,
+                    ..
+                } => {
+                    assert!(extraction_required);
+                    saw_run_completed = true;
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    saw_run_failed = true;
+                }
+                crate::event::AgentEvent::ExtractionFailed { reason, .. } => {
+                    assert!(reason.contains("extraction auth failed"));
+                    saw_extraction_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_completed);
+        assert!(saw_extraction_failed);
+        assert!(
+            !saw_run_failed,
+            "extraction failure must not re-fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_tool_call_response_emits_extraction_failed_without_tool_semantics() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            tool_call_response("lookup_answer"),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("extraction tool calls should not fail the completed main run");
+
+        assert_eq!(result.text, "main answer");
+        assert!(result.structured_output.is_none());
+        let extraction_error = result
+            .extraction_error
+            .expect("extraction tool call should become extraction_error");
+        assert!(
+            extraction_error.reason.contains("returned tool calls"),
+            "reason should describe extraction tool-call output: {}",
+            extraction_error.reason
+        );
+
+        let mut saw_run_completed = false;
+        let mut saw_run_failed = false;
+        let mut saw_extraction_failed = false;
+        let mut saw_tool_call_requested = false;
+        let mut saw_tool_execution_started = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted {
+                    extraction_required,
+                    ..
+                } => {
+                    assert!(extraction_required);
+                    saw_run_completed = true;
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    saw_run_failed = true;
+                }
+                crate::event::AgentEvent::ExtractionFailed { reason, .. } => {
+                    assert!(reason.contains("returned tool calls"));
+                    saw_extraction_failed = true;
+                }
+                crate::event::AgentEvent::ToolCallRequested { .. } => {
+                    saw_tool_call_requested = true;
+                }
+                crate::event::AgentEvent::ToolExecutionStarted { .. } => {
+                    saw_tool_execution_started = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_completed);
+        assert!(saw_extraction_failed);
+        assert!(
+            !saw_run_failed,
+            "extraction failure must not re-fail the run"
+        );
+        assert!(
+            !saw_tool_call_requested,
+            "extraction tool calls must not emit normal tool-call events"
+        );
+        assert!(
+            !saw_tool_execution_started,
+            "extraction tool calls must not dispatch tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_boundary_denial_emits_extraction_failed_without_run_failed() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DenySecondBoundary {
+            calls: AtomicUsize,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenySecondBoundary {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::TurnBoundary {
+                    return Ok(HookExecutionReport::empty());
+                }
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 1 {
+                    return Ok(HookExecutionReport::empty());
+                }
+
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-extraction-boundary"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny extraction boundary".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .with_hook_engine(Arc::new(DenySecondBoundary {
+                calls: AtomicUsize::new(0),
+            }))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("extraction boundary denial should not fail completed main run");
+
+        assert_eq!(result.text, "main answer");
+        let extraction_error = result
+            .extraction_error
+            .expect("extraction boundary denial should become extraction_error");
+        assert!(extraction_error.reason.contains("deny extraction boundary"));
+
+        let mut saw_run_completed = false;
+        let mut saw_run_failed = false;
+        let mut saw_extraction_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted {
+                    extraction_required,
+                    ..
+                } => {
+                    assert!(extraction_required);
+                    saw_run_completed = true;
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    saw_run_failed = true;
+                }
+                crate::event::AgentEvent::ExtractionFailed { reason, .. } => {
+                    assert!(reason.contains("deny extraction boundary"));
+                    saw_extraction_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_completed);
+        assert!(saw_extraction_failed);
+        assert!(
+            !saw_run_failed,
+            "extraction denial must not re-fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_zero_retries_still_runs_extraction_phase() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            text_response("not json"),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .structured_output_retries(0)
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("zero retries should still perform one extraction attempt");
+
+        assert_eq!(client.calls_made(), 2);
+        assert_eq!(result.text, "main answer");
+        assert!(result.structured_output.is_none());
+        assert!(
+            result.extraction_error.is_some(),
+            "invalid zero-retry extraction should surface extraction_error"
+        );
+
+        let mut text_complete_payloads = Vec::new();
+        let mut saw_extraction_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::TextComplete { content } => {
+                    text_complete_payloads.push(content);
+                }
+                crate::event::AgentEvent::ExtractionFailed { .. } => {
+                    saw_extraction_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            text_complete_payloads,
+            vec!["main answer".to_string()],
+            "zero-retry extraction must not leak extraction output as TextComplete"
+        );
+        assert!(saw_extraction_failed);
+    }
+
+    #[tokio::test]
+    async fn extraction_does_not_consume_agentic_max_turn_budget() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect("max_turns should not block post-run extraction");
+
+        assert_eq!(result.text, "main answer");
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::json!({"answer": "42"}))
+        );
+        assert!(result.extraction_error.is_none());
+
+        let mut saw_run_completed = false;
+        let mut saw_extraction_succeeded = false;
+        let mut saw_run_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted {
+                    extraction_required,
+                    ..
+                } => {
+                    assert!(extraction_required);
+                    saw_run_completed = true;
+                }
+                crate::event::AgentEvent::ExtractionSucceeded { .. } => {
+                    saw_extraction_succeeded = true;
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    saw_run_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_completed);
+        assert!(saw_extraction_succeeded);
+        assert!(
+            !saw_run_failed,
+            "extraction must not trip agentic max_turns after RunCompleted"
         );
     }
 
@@ -6587,7 +7348,8 @@ mod tests {
     }
 
     /// Exhaust path: LLM returns invalid JSON on every extraction attempt,
-    /// exceeding max retries. Should return StructuredOutputValidationFailed.
+    /// exceeding max retries. The main run should remain successful while the
+    /// result carries extraction_error.
     #[tokio::test]
     async fn extraction_exhaust_returns_validation_error() {
         let schema = crate::types::OutputSchema::new(serde_json::json!({
@@ -6600,13 +7362,14 @@ mod tests {
         .unwrap();
 
         // Call 0: agentic turn
-        // Call 1: extraction attempt 1 — invalid (authority: attempts 0→1 on entry, 1<2 → retry, 1→2)
-        // Call 2: extraction attempt 2 — invalid (authority: attempts=2, 2<2 false → exhaust)
-        // Error reports attempts = max_retries + 1 = 3
+        // Call 1: extraction attempt 1 — invalid (authority: attempts 0 < retries 2 → retry)
+        // Call 2: extraction retry 1 — invalid (authority: attempts 1 < retries 2 → retry)
+        // Call 3: extraction retry 2 — invalid (authority: attempts 2 < retries 2 false → exhaust)
         let client = Arc::new(ScriptedExtractionClient::new(vec![
             text_response("Computing count"),
             text_response("bad json 1"),
             text_response("bad json 2"),
+            text_response("bad json 3"),
         ]));
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
@@ -6615,29 +7378,31 @@ mod tests {
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
-        let result = agent.run("Count items".to_string().into()).await;
+        let result = agent
+            .run("Count items".to_string().into())
+            .await
+            .expect("extraction exhaust should not fail the completed main run");
 
-        match result {
-            Err(AgentError::StructuredOutputValidationFailed {
-                attempts, reason, ..
-            }) => {
-                assert_eq!(
-                    attempts, 2,
-                    "should report validation failure count (== max_retries)"
-                );
-                assert!(
-                    reason.contains("Invalid JSON"),
-                    "reason should mention JSON parse failure, got: {reason}"
-                );
-            }
-            Ok(_) => panic!("expected StructuredOutputValidationFailed, got Ok"),
-            Err(e) => panic!("expected StructuredOutputValidationFailed, got: {e:?}"),
-        }
+        assert_eq!(result.text, "Computing count");
+        assert!(result.structured_output.is_none());
+        let extraction_error = result
+            .extraction_error
+            .expect("extraction_error should describe exhausted validation");
+        assert_eq!(
+            extraction_error.attempts, 3,
+            "should report validation failure count (initial attempt + retries)"
+        );
+        assert_eq!(extraction_error.last_output, "Computing count");
+        assert!(
+            extraction_error.reason.contains("Invalid JSON"),
+            "reason should mention JSON parse failure, got: {}",
+            extraction_error.reason
+        );
 
         assert_eq!(
             client.calls_made(),
-            3,
-            "expect 1 agentic + 2 extraction attempts"
+            4,
+            "expect 1 agentic + 3 extraction attempts"
         );
     }
 }

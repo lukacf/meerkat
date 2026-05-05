@@ -16,14 +16,24 @@ pub const DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid J
 
 #[derive(Debug, Default)]
 pub(crate) struct ExtractionState {
+    primary_output: Option<String>,
     result: Option<Value>,
     schema_warnings: Option<Vec<SchemaWarning>>,
 }
 
 impl ExtractionState {
     pub(super) fn reset(&mut self) {
+        self.primary_output = None;
         self.result = None;
         self.schema_warnings = None;
+    }
+
+    pub(super) fn set_primary_output(&mut self, output: String) {
+        self.primary_output = Some(output);
+    }
+
+    pub(super) fn primary_output(&self) -> Option<&str> {
+        self.primary_output.as_deref()
     }
 
     pub(super) fn set_schema_warnings(&mut self, warnings: Vec<SchemaWarning>) {

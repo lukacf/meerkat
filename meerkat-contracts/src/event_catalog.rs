@@ -6,6 +6,8 @@
 pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "run_started",
     "run_completed",
+    "extraction_succeeded",
+    "extraction_failed",
     "run_failed",
     "hook_started",
     "hook_completed",

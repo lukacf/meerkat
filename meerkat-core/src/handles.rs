@@ -632,6 +632,8 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
 
+    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError>;
+
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 
     fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError>;

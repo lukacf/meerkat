@@ -2689,6 +2689,20 @@ export class MeerkatClient {
         message: String(w.message ?? ""),
       }),
     );
+    const rawExtractionError = data.extraction_error;
+    const extractionError =
+      rawExtractionError && typeof rawExtractionError === "object"
+        ? {
+            lastOutput: String((rawExtractionError as Record<string, unknown>).last_output ?? ""),
+            attempts: MeerkatClient.requireNumberField(
+              rawExtractionError as Record<string, unknown>,
+              "attempts",
+              context,
+              "extraction_error.attempts",
+            ),
+            reason: String((rawExtractionError as Record<string, unknown>).reason ?? ""),
+          }
+        : undefined;
 
     return {
       sessionId: String(data.session_id ?? ""),
@@ -2702,6 +2716,7 @@ export class MeerkatClient {
           ? (data.terminal_cause_kind as RunResult["terminalCauseKind"])
           : undefined,
       structuredOutput: data.structured_output,
+      extractionError,
       schemaWarnings,
       skillDiagnostics: MeerkatClient.parseSkillDiagnostics(data.skill_diagnostics),
     };

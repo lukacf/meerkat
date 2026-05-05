@@ -871,6 +871,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     ExtractionLifecycle => [
         EnterExtraction,
+        ExtractionFailed,
         ExtractionStart,
         ExtractionValidationFailed,
         ExtractionValidationPassed,

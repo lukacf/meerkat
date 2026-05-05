@@ -89,6 +89,7 @@ from .types import (
     Capability,
     ConfigEnvelope,
     DeletedMobProfile,
+    ExtractionError,
     ExternalEventOutcome,
     ContentBlock,
     ContentInput,
@@ -2850,6 +2851,19 @@ class MeerkatClient:
                 )
                 for w in raw_warnings
             ]
+        raw_extraction_error = data.get("extraction_error")
+        extraction_error = None
+        if isinstance(raw_extraction_error, dict):
+            extraction_error = ExtractionError(
+                last_output=str(raw_extraction_error.get("last_output", "")),
+                attempts=MeerkatClient._require_number_field(
+                    raw_extraction_error,
+                    "attempts",
+                    context,
+                    "extraction_error.attempts",
+                ),
+                reason=str(raw_extraction_error.get("reason", "")),
+            )
         return RunResult(
             session_id=data.get("session_id", ""),
             text=data.get("text", ""),
@@ -2861,6 +2875,7 @@ class MeerkatClient:
             else None,
             session_ref=data.get("session_ref"),
             structured_output=data.get("structured_output"),
+            extraction_error=extraction_error,
             schema_warnings=schema_warnings,
             skill_diagnostics=MeerkatClient._parse_skill_diagnostics(
                 data.get("skill_diagnostics")

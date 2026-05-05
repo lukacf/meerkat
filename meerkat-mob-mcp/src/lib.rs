@@ -701,12 +701,13 @@ impl MobMcpState {
         match managed.handle.destroy().await {
             Ok(report) => {
                 let removed = self.mobs.write().await.remove(mob_id);
-                Self::maybe_remove_storage_file(
-                    removed
-                        .as_ref()
-                        .and_then(|managed| managed.storage_path.as_deref()),
-                )
-                .await;
+                let storage_path = removed
+                    .as_ref()
+                    .and_then(|managed| managed.storage_path.clone())
+                    .or_else(|| managed.storage_path.clone());
+                drop(removed);
+                drop(managed);
+                Self::maybe_remove_storage_file(storage_path.as_deref()).await;
                 Ok(report)
             }
             Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {

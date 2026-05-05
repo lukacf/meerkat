@@ -95,6 +95,7 @@ from .types import (
     ModelsCatalogResponse,
     MobEventsResult,
     MobProfile,
+    HelpExecutionMode,
     PeerCorrelationId,
     PeerId,
     ScheduleListResult,
@@ -772,6 +773,32 @@ class MeerkatClient:
             session_id=raw.get("session_id", ""),
             session_ref=raw.get("session_ref"),
         )
+
+    async def ask_help(
+        self,
+        question: str,
+        *,
+        prompt: str | None = None,
+        execution_mode: HelpExecutionMode = "explain_only",
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+    ) -> RunResult:
+        """Ask Meerkat usage help through the dedicated ``help/ask`` RPC."""
+        params: dict[str, Any] = {
+            "question": question,
+            "execution_mode": execution_mode,
+        }
+        if prompt is not None:
+            params["prompt"] = prompt
+        if model is not None:
+            params["model"] = model
+        if provider is not None:
+            params["provider"] = provider
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        raw = await self._request("help/ask", params)
+        return self._parse_run_result(raw)
 
     # -- Session queries ---------------------------------------------------
 

@@ -1740,6 +1740,15 @@ describe("Parity wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
+      if (method === "help/ask") {
+        return {
+          session_id: "help-1",
+          text: "rkat mcp add ...",
+          turns: 1,
+          tool_calls: 0,
+          usage: { input_tokens: 10, output_tokens: 20 },
+        };
+      }
       if (method === "models/catalog") {
         return {
           contract_version: { major: 0, minor: 5, patch: 1 },
@@ -1755,16 +1764,36 @@ describe("Parity wrappers", () => {
       return { status: "accepted" };
     };
 
+    const help = await client.askHelp("How do I add an MCP server?", {
+      prompt: "Write a game",
+      executionMode: "plan_execution",
+      model: "claude-sonnet-4-6",
+      provider: "anthropic",
+      maxTokens: 512,
+    });
     const external = await client.sendExternalEvent("s1", "test", { type: "webhook" });
     const catalog = await client.getModelsCatalog();
 
+    assert.equal(help.text, "rkat mcp add ...");
     assert.equal(external.status, "accepted");
     assert.equal(catalog.providers[0].defaultModelId, "claude-sonnet-4-6");
     assert.deepEqual(catalog.contractVersion, { major: 0, minor: 5, patch: 1 });
-    assert.deepEqual(calls.map((c) => c.method), ["session/external_event", "models/catalog"]);
-    assert.equal(calls[0].params.session_id, "s1");
-    assert.equal(calls[0].params.kind, "generic_json");
-    assert.equal(calls[0].params.event_type, "test");
+    assert.deepEqual(calls.map((c) => c.method), [
+      "help/ask",
+      "session/external_event",
+      "models/catalog",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      question: "How do I add an MCP server?",
+      prompt: "Write a game",
+      execution_mode: "plan_execution",
+      model: "claude-sonnet-4-6",
+      provider: "anthropic",
+      max_tokens: 512,
+    });
+    assert.equal(calls[1].params.session_id, "s1");
+    assert.equal(calls[1].params.kind, "generic_json");
+    assert.equal(calls[1].params.event_type, "test");
   });
 
   it("adds wrappers for schedule APIs", async () => {

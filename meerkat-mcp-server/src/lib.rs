@@ -1344,11 +1344,6 @@ const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 fn base_tools_list() -> Vec<Value> {
     vec![
         json!({
-            "name": "meerkat_help",
-            "description": "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
-            "inputSchema": meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>()
-        }),
-        json!({
             "name": "meerkat_run",
             "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
@@ -1357,6 +1352,11 @@ fn base_tools_list() -> Vec<Value> {
             "name": "meerkat_resume",
             "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
+        }),
+        json!({
+            "name": "meerkat_help",
+            "description": "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
+            "inputSchema": meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>()
         }),
         json!({
             "name": "meerkat_config",

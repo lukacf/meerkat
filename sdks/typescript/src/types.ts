@@ -154,6 +154,20 @@ export interface RunResult {
   readonly skillDiagnostics?: SkillRuntimeDiagnostics;
 }
 
+export type HelpExecutionMode = "explain_only" | "plan_execution";
+
+export interface HelpOptions {
+  readonly prompt?: string;
+  readonly executionMode?: HelpExecutionMode;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly maxTokens?: number;
+}
+
+export interface HelpRequest extends HelpOptions {
+  readonly question: string;
+}
+
 /** Session metadata shape used by `listSessions()` and `readSession()`. */
 export interface SessionInfo {
   readonly sessionId: string;

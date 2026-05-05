@@ -1901,6 +1901,14 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
 
     async def fake_request(method, params):
         calls.append((method, params))
+        if method == "help/ask":
+            return {
+                "session_id": "help-1",
+                "text": "rkat mcp add ...",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+            }
         if method == "models/catalog":
             return {
                 "contract_version": {"major": 0, "minor": 5, "patch": 1},
@@ -1915,6 +1923,16 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         return {"ok": True}
 
     client._request = fake_request  # type: ignore[method-assign]
+
+    help_result = await client.ask_help(
+        "How do I add an MCP server?",
+        prompt="Write a game",
+        execution_mode="plan_execution",
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        max_tokens=512,
+    )
+    assert help_result.text == "rkat mcp add ..."
 
     models = await client.get_models_catalog()
     assert models["contract_version"] == {"major": 0, "minor": 5, "patch": 1}
@@ -1932,6 +1950,7 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
     await client.call_schedule_tool({"name": "meerkat_schedule_list"})
 
     assert [method for method, _ in calls] == [
+        "help/ask",
         "models/catalog",
         "schedule/create",
         "schedule/get",
@@ -1944,7 +1963,15 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         "schedule/tools",
         "schedule/call",
     ]
-    assert calls[3][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
+    assert calls[0][1] == {
+        "question": "How do I add an MCP server?",
+        "execution_mode": "plan_execution",
+        "prompt": "Write a game",
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "max_tokens": 512,
+    }
+    assert calls[4][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
 
 
 @pytest.mark.asyncio

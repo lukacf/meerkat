@@ -8,7 +8,7 @@ prefixed generated types which are now an internal implementation detail.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, NewType, TypedDict, Union
+from typing import Any, Literal, NewType, NotRequired, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
@@ -249,6 +249,18 @@ class RunResult:
     structured_output: Any = None
     schema_warnings: list[SchemaWarning] | None = None
     skill_diagnostics: SkillRuntimeDiagnostics | None = None
+
+
+HelpExecutionMode = Literal["explain_only", "plan_execution"]
+
+
+class HelpRequest(TypedDict):
+    question: str
+    prompt: NotRequired[str]
+    execution_mode: NotRequired[HelpExecutionMode]
+    model: NotRequired[str]
+    provider: NotRequired[str]
+    max_tokens: NotRequired[int]
 
 
 @dataclass(frozen=True, slots=True)

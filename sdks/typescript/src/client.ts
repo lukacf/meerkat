@@ -83,6 +83,7 @@ import type {
   ContentBlock,
   CreateScheduleRequest,
   EventSourceIdentity,
+  HelpOptions,
   ModelsCatalog,
   MobEventsOptions,
   MobEventsResult,
@@ -627,6 +628,19 @@ export class MeerkatClient {
       String(raw.session_id ?? ""),
       raw.session_ref != null ? String(raw.session_ref) : undefined,
     );
+  }
+
+  async askHelp(question: string, options?: HelpOptions): Promise<RunResult> {
+    const params: Record<string, unknown> = { question };
+    if (options?.prompt !== undefined) params.prompt = options.prompt;
+    if (options?.executionMode !== undefined) {
+      params.execution_mode = options.executionMode;
+    }
+    if (options?.model !== undefined) params.model = options.model;
+    if (options?.provider !== undefined) params.provider = options.provider;
+    if (options?.maxTokens !== undefined) params.max_tokens = options.maxTokens;
+    const raw = await this.request("help/ask", params);
+    return MeerkatClient.parseRunResult(raw);
   }
 
   // -- Session queries ----------------------------------------------------

@@ -8,14 +8,11 @@ pub use meerkat_contracts::{HelpExecutionMode, HelpRequest, HelpResponse};
 
 pub const MEERKAT_PLATFORM_SKILL_NAME: &str = "meerkat-platform";
 pub const MEERKAT_CLI_REFERENCE_SKILL_NAME: &str = "meerkat-cli-reference";
-pub const MEERKAT_PLATFORM_SKILL_BODY: &str =
-    include_str!("help_content/platform_skill.md");
+pub const MEERKAT_PLATFORM_SKILL_BODY: &str = include_str!("help_content/platform_skill.md");
 pub const MEERKAT_CLI_REFERENCE_SKILL_BODY: &str =
     include_str!("help_content/cli_reference_skill.md");
-pub const MEERKAT_PLATFORM_API_REFERENCE: &str =
-    include_str!("help_content/api_reference.md");
-pub const MEERKAT_PLATFORM_MOBS_REFERENCE: &str =
-    include_str!("help_content/mobs.md");
+pub const MEERKAT_PLATFORM_API_REFERENCE: &str = include_str!("help_content/api_reference.md");
+pub const MEERKAT_PLATFORM_MOBS_REFERENCE: &str = include_str!("help_content/mobs.md");
 pub const MEERKAT_PLATFORM_MIGRATION_REFERENCE: &str =
     include_str!("help_content/migration_0_5.md");
 
@@ -149,11 +146,9 @@ mod tests {
         assert!(MEERKAT_PLATFORM_SKILL_BODY.contains("Meerkat Platform Guide"));
         assert!(MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("Meerkat CLI Reference"));
         assert!(MEERKAT_PLATFORM_API_REFERENCE.contains("JSON-RPC"));
-        assert!(
-            MEERKAT_PLATFORM_SKILL_EXTENSIONS
-                .iter()
-                .any(|(path, _)| *path == "references/api_reference.md")
-        );
+        assert!(MEERKAT_PLATFORM_SKILL_EXTENSIONS
+            .iter()
+            .any(|(path, _)| *path == "references/api_reference.md"));
     }
 
     #[test]

@@ -20,7 +20,29 @@ http_archive(
 
 http_archive(
     name = "node_darwin_arm64",
-    build_file_content = 'filegroup(name = "node", srcs = glob(["**/*"]), visibility = ["//visibility:public"])',
+    build_file_content = '''
+filegroup(
+    name = "node",
+    srcs = glob(["**/*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "npm_runtime",
+    srcs = glob(["lib/node_modules/npm/**"]) + [
+        "bin/node",
+        "bin/npm",
+        "bin/npx",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "bin/node",
+    "lib/node_modules/npm/bin/npm-cli.js",
+    "lib/node_modules/npm/bin/npx-cli.js",
+], visibility = ["//visibility:public"])
+''',
     sha256 = "db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000",
     strip_prefix = "node-v22.22.2-darwin-arm64",
     urls = ["https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.gz"],
@@ -28,7 +50,10 @@ http_archive(
 
 http_archive(
     name = "python_darwin_arm64",
-    build_file_content = 'filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])',
+    build_file_content = '''
+filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
+''',
     sha256 = "6f304f4ec30854611f23316578302235fb517cd970519ecdd11a8c4db87fd843",
     urls = ["https://github.com/astral-sh/python-build-standalone/releases/download/20260414/cpython-3.14.4%2B20260414-aarch64-apple-darwin-install_only_stripped.tar.gz"],
 )

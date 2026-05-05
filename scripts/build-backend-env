@@ -55,7 +55,7 @@ meerkat_discover_local_secrets_env() {
 
 meerkat_secret_env_key_allowed() {
   case "$1" in
-    ANTHROPIC_*|OPENAI_*|GEMINI_*|GOOGLE_*|RKAT_*|SMOKE_*|CLAUDE_CODE_OAUTH_TOKEN|BUILDBUDDY_API_KEY)
+    ANTHROPIC_*|OPENAI_*|GEMINI_*|GOOGLE_*|MEERKAT_E2E_*|RKAT_*|SMOKE_*|CLAUDE_CODE_OAUTH_TOKEN|BUILDBUDDY_API_KEY)
       return 0
       ;;
     *)

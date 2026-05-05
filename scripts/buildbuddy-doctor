@@ -443,7 +443,7 @@ if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&
   grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-ci-lane &&
-  grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-ci-lane &&
+  grep -Fq 'e2e-smoke-remote-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'machine-authority-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'rmat-audit-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'seam-inventory-rbe' scripts/buildbuddy-ci-lane &&

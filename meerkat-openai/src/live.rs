@@ -745,6 +745,16 @@ fn openai_output_audio_transcript_key(item_id: &str, content_index: u32) -> Stri
     format!("{item_id}:{content_index}")
 }
 
+fn openai_realtime_synthetic_text_item_id() -> String {
+    let suffix: String = meerkat_core::time_compat::new_uuid_v7()
+        .to_string()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .collect();
+    format!("mk_text_{suffix}")
+}
+
 fn openai_realtime_item_transcript_identity(
     item: &Item,
 ) -> Option<(String, RealtimeTranscriptRole)> {
@@ -1702,8 +1712,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
             }
             RealtimeInputChunk::TextChunk(chunk) => {
                 let text = chunk.text;
-                let synthetic_item_id =
-                    format!("meerkat_text_{}", meerkat_core::time_compat::new_uuid_v7());
+                let synthetic_item_id = openai_realtime_synthetic_text_item_id();
                 self.raw_mut()?
                     .send_raw(ClientEvent::ConversationItemCreate {
                         event_id: None,
@@ -2283,6 +2292,16 @@ mod tests {
     use tokio::sync::Mutex;
 
     type FakeEventQueue = Arc<Mutex<VecDeque<Result<Option<ServerEvent>, LlmError>>>>;
+
+    #[test]
+    fn synthetic_text_item_ids_fit_openai_realtime_limit() {
+        let id = openai_realtime_synthetic_text_item_id();
+        assert!(
+            id.len() <= 32,
+            "OpenAI Realtime item.id must be at most 32 bytes: {id}"
+        );
+        assert!(id.starts_with("mk_text_"));
+    }
 
     struct FakeOpenAiLiveSession {
         seen: Arc<Mutex<Vec<ClientEvent>>>,

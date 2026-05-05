@@ -22,6 +22,7 @@ Common commands:
   e2e-fast-rbe             Bazel-native fast e2e lane.
   e2e-live-rbe             Bazel-native live e2e lane.
   e2e-smoke-rbe            Build the Bazel-native smoke e2e foundation.
+  e2e-smoke-remote-rbe     Run e2e-smoke fully on BuildBuddy macOS RBE.
   e2e-auth-rbe             Bazel-native release-grade auth smoke lane.
   machine-authority-rbe    Bazel-native machine authority lane.
   rmat-audit-rbe           Bazel-native RMAT + ownership audit lane.
@@ -115,6 +116,7 @@ e2e_test_env=(
   --test_env=RKAT_GEMINI_API_KEY
   --test_env=GOOGLE_API_KEY
   --test_env=GOOGLE_APPLICATION_CREDENTIALS
+  --test_env=GOOGLE_APPLICATION_CREDENTIALS_JSON
   --test_env=MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON
   --test_env=MEERKAT_E2E_AUTH_ANTHROPIC_MODEL
   --test_env=MEERKAT_E2E_AUTH_GEMINI_MODEL
@@ -122,6 +124,9 @@ e2e_test_env=(
   --test_env=PATH
   --test_env=HOME
   --test_env=CARGO_HOME
+  --test_env=TEST
+  --test_env=SCENARIO
+  --test_env=SUITE
   --test_env=MEERKAT_CLEAN_E2E_SCENARIO_TARGETS
   --test_env=MEERKAT_STRICT_E2E_PREREQS=1
 )
@@ -283,6 +288,19 @@ case "${command}" in
     default_target="@wasm_pack_darwin_arm64//:wasm-pack //tests/integration:e2e_smoke_lane_test //tests/integration:e2e_artifacts_bin //meerkat-cli:rkat //meerkat-cli:cli_mobpack_live_smoke_test //meerkat-cli:live_smoke_cli_test //meerkat-mcp-server:rkat_mcp_bin //meerkat-mob:smoke_mob_flow_runtime_test //meerkat-mob:smoke_mob_pictionary_test //meerkat-mob:smoke_mob_resume_test //meerkat-rest:rkat_rest_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:live_smoke_rpc_test //tests/integration:smoke_shared_realm_test"
     extra_args+=(
       --remote_download_outputs=toplevel
+      --color=no
+      --curses=no
+    )
+    ;;
+  e2e-smoke-remote-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//:e2e_smoke_remote_test"
+    extra_args+=(
+      "${e2e_test_env[@]}"
+      --nocache_test_results
+      --test_output=errors
+      --test_summary=terse
       --color=no
       --curses=no
     )

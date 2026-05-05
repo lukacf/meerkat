@@ -171,6 +171,22 @@ impl SupervisorAuthorityRecord {
         &mut self,
         pending: SupervisorPendingRotationRecord,
     ) -> bool {
+        if !pending.accepted_peer_ids.is_empty()
+            && pending.epoch <= self.epoch
+            && pending.public_peer_id != self.public_peer_id
+        {
+            return match self.pending_rotation.as_ref() {
+                Some(durable) if durable.same_attempted_authority(&pending) => {
+                    self.pending_rotation = Some(pending);
+                    true
+                }
+                None => {
+                    self.pending_rotation = Some(pending);
+                    true
+                }
+                Some(_) => false,
+            };
+        }
         if self.epoch.checked_add(1) != Some(pending.epoch) {
             return false;
         }

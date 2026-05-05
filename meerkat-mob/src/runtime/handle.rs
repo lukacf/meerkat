@@ -3048,7 +3048,7 @@ impl MobHandle {
     /// | member teardown      | `retire_all_members` (idempotent, all-or-retry)    | `destroy_all_members_for_destroy` (force-fallback, atomic)  |
     /// | return               | `Result<(), MobError>` — clean or retry            | [`Result<MobDestroyReport, MobDestroyError>`]               |
     /// | partial outcomes     | retire-idempotent → reissuing reset retries safely | structured report carries force-destroyed / orphaned / errs |
-    /// | event marker         | `MobCreated` + `MobReset` (new epoch, replayable)  | `MobDestroyed` (terminal)                                   |
+    /// | event marker         | `MobCreated` + `MobReset` (new epoch, replayable)  | `MobDestroying` until successful storage clear              |
     /// | handle usable after? | yes                                                | no                                                          ||
     ///
     /// The `()` return is not hiding partial-state information: retire

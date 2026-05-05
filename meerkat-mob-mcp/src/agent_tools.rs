@@ -283,6 +283,22 @@ impl AgentMobToolSurface {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
 
+    fn map_destroy_error(call: ToolCallView<'_>, error: crate::MobMcpDestroyError) -> ToolError {
+        match error {
+            crate::MobMcpDestroyError::Incomplete { report } => {
+                ToolError::execution_failed_with_data(
+                    format!(
+                        "tool '{}' failed: mob destroy incomplete: {}",
+                        call.name,
+                        crate::destroy_report_summary(&report)
+                    ),
+                    crate::MobMcpDestroyError::incomplete_error_data(&report),
+                )
+            }
+            crate::MobMcpDestroyError::Mob(error) => Self::map_mob_error(call, error),
+        }
+    }
+
     fn authority_context_snapshot(&self) -> MobToolAuthorityContext {
         self.effective_authority
             .read()
@@ -758,7 +774,7 @@ impl AgentMobToolSurface {
             .state
             .mob_destroy(&mob_id)
             .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
+            .map_err(|e| Self::map_destroy_error(call, e))?;
 
         if let Some(handle) = audit_handle.as_ref() {
             self.record_successful_operator_action(handle, call.name)
@@ -1879,7 +1895,7 @@ struct ProfileDeleteArgs {
 
 // ─── Mob cleanup helper ─────────────────────────────────────────────────
 
-/// Archive a session and clean up any mobs it owns (best-effort).
+/// Archive a session and clean up any mobs it owns.
 ///
 /// Single-function cleanup path used by CLI delete_session.
 pub async fn archive_session_with_mob_cleanup<S>(
@@ -1894,12 +1910,36 @@ where
     let result_session_id = session_id.clone();
     let (result_tx, result_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let result = service.archive(&session_id).await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            let _ = mob_state
-                .destroy_bridge_session_mobs(&session_id.to_string())
-                .await;
-        }
+        let session_key = session_id.to_string();
+        let result = match mob_state
+            .archive_mob_owned_bridge_session_with_cleanup(
+                &session_id,
+                "mob cleanup during archive incomplete",
+            )
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let had_cleanup_anchor =
+                    mob_state.has_bridge_session_scoped_mobs(&session_key).await;
+                match service.archive(&session_id).await {
+                    Ok(()) => mob_state
+                        .destroy_bridge_session_mobs(&session_key)
+                        .await
+                        .map_err(|error| {
+                            error.into_session_error("mob cleanup during archive incomplete")
+                        }),
+                    Err(SessionError::NotFound { .. }) if had_cleanup_anchor => mob_state
+                        .destroy_bridge_session_mobs(&session_key)
+                        .await
+                        .map_err(|error| {
+                            error.into_session_error("mob cleanup during archive incomplete")
+                        }),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {
@@ -1944,6 +1984,36 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    #[test]
+    fn test_agent_surface_destroy_error_preserves_incomplete_error_data() {
+        let raw = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "mob_destroy",
+            args: &raw,
+        };
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.errors.push("worker: archive failed".to_string());
+
+        let error = AgentMobToolSurface::map_destroy_error(
+            call,
+            crate::MobMcpDestroyError::Incomplete { report },
+        );
+        let data = error
+            .structured_data()
+            .expect("incomplete destroy should include structured data");
+
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some("mob_destroy_incomplete")
+        );
+        assert_eq!(
+            data.get("retryable").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(data.get("destroy_report").is_some());
+    }
 
     fn canonical_agent_wire_peer_arg() -> WirePeerArg {
         serde_json::from_value(serde_json::json!({

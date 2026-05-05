@@ -546,7 +546,14 @@ pub async fn handle_public_tools_call(
             let destroy_report = state
                 .mob_lifecycle_action(&mob_id, input.action)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?
+                .map_err(|err| match err {
+                    crate::MobMcpDestroyError::Incomplete { report } => {
+                        McpToolError::destroy_incomplete(&report)
+                    }
+                    crate::MobMcpDestroyError::Mob(err) => {
+                        McpToolError::invalid_params(err.to_string())
+                    }
+                })?
                 .map(|report| {
                     serde_json::to_value(&report).map_err(|err| {
                         McpToolError::internal(format!("destroy report serialize: {err}"))

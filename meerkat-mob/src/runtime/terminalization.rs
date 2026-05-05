@@ -130,7 +130,7 @@ impl FlowTerminalizationAuthority {
             })
             .await
         {
-            Ok(Some(_)) | Ok(None) => Ok(TerminalizationOutcome::Noop),
+            Ok(Some(_) | None) => Ok(TerminalizationOutcome::Noop),
             Err(append_error) => {
                 self.record_terminal_event_append_failure(
                     &run_id,

@@ -229,7 +229,24 @@ export class RealtimeChannel {
     });
   }
 
-  async connect(): Promise<RealtimeConnection> {
-    return this.connectWithOpenInfo(await this.openInfo());
+  async connect(options?: {
+    waitForAttachment?: boolean;
+    attachmentTimeoutMs?: number;
+  }): Promise<RealtimeConnection> {
+    const conn = await this.connectWithOpenInfo(await this.openInfo());
+    const wait = options?.waitForAttachment ?? true;
+    if (wait) {
+      const deadline = Date.now() + (options?.attachmentTimeoutMs ?? 30_000);
+      while (Date.now() < deadline) {
+        try {
+          const st = await this.status();
+          if (st.status.state === "ready") break;
+        } catch {
+          // status may fail transiently during attachment
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    return conn;
   }
 }

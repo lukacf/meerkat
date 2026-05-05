@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -226,5 +227,29 @@ class RealtimeChannel:
             turning_mode=self.turning_mode,
         )
 
-    async def connect(self) -> RealtimeConnection:
-        return await self.connect_with_open_info(await self.open_info())
+    async def connect(
+        self,
+        *,
+        wait_for_attachment: bool = True,
+        attachment_timeout_secs: float = 30.0,
+    ) -> RealtimeConnection:
+        """Connect the realtime channel.
+
+        When *wait_for_attachment* is True (the default), polls the channel
+        status until the runtime reports the transport is bound — ``state``
+        reaches ``"ready"``.  Without this, input sent immediately after
+        connect may be lost when the runtime hasn't finished binding the
+        transport (e.g. after a member respawn).
+        """
+        conn = await self.connect_with_open_info(await self.open_info())
+        if wait_for_attachment:
+            deadline = asyncio.get_running_loop().time() + attachment_timeout_secs
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    st = await self.status()
+                    if st.status.state == "ready":
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
+        return conn

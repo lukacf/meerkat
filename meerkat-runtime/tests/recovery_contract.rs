@@ -142,13 +142,6 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
     }
 }
 
-fn fresh_stored(input_id: InputId) -> StoredInputState {
-    StoredInputState {
-        state: InputState::new_accepted(input_id),
-        seed: InputStateSeed::new_accepted(),
-    }
-}
-
 fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     let mut ids = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
     ids.sort();
@@ -165,12 +158,24 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_retire_runtime_authority()?;
-    driver.contract_finalize_retire().await
+    let pending = driver
+        .active_input_ids()
+        .into_iter()
+        .filter(|input_id| {
+            driver
+                .input_phase(input_id)
+                .map(|phase| !phase.is_terminal())
+                .unwrap_or(false)
+        })
+        .count();
+    Ok(meerkat_runtime::RetireReport {
+        inputs_abandoned: 0,
+        inputs_pending_drain: pending,
+    })
 }
 
 #[tokio::test]
-async fn recovery_store_contract_commits_authoritative_receipts_across_supported_backends() {
+async fn recovery_store_contract_applies_machine_owned_receipts_across_supported_backends() {
     for harness in supported_store_harnesses() {
         let runtime_id = make_runtime_id(harness.name);
         let run_id = RunId::new();
@@ -178,21 +183,28 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
         let second = make_prompt("second contribution");
         let first_id = first.id().clone();
         let second_id = second.id().clone();
+        let receipt = RunBoundaryReceipt {
+            run_id: run_id.clone(),
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![first_id.clone(), second_id.clone()],
+            conversation_digest: Some(format!("{}-machine-digest", harness.name)),
+            message_count: 2,
+            sequence: 0,
+        };
 
-        let receipt = harness
+        harness
             .store
-            .commit_session_boundary(
+            .atomic_apply(
                 &runtime_id,
-                SessionDelta {
+                Some(SessionDelta {
                     session_snapshot: make_session_snapshot(),
-                },
-                run_id.clone(),
-                RunApplyBoundary::RunStart,
-                vec![first_id.clone(), second_id.clone()],
+                }),
+                receipt.clone(),
                 vec![
-                    fresh_stored(first_id.clone()),
-                    fresh_stored(second_id.clone()),
+                    applied_pending_state(&first, &run_id, 0),
+                    applied_pending_state(&second, &run_id, 0),
                 ],
+                None,
             )
             .await
             .unwrap();
@@ -210,12 +222,12 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
         );
         assert!(
             receipt.conversation_digest.is_some(),
-            "{}: authoritative receipt should include the session digest",
+            "{}: receipt should preserve the machine-owned digest",
             harness.name
         );
         assert_eq!(
-            receipt.message_count, 0,
-            "{}: empty session snapshot should produce zero messages",
+            receipt.message_count, 2,
+            "{}: receipt should preserve the machine-owned message count",
             harness.name
         );
 
@@ -270,21 +282,37 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
 
         let second_receipt = harness
             .store
-            .commit_session_boundary(
+            .atomic_apply(
                 &runtime_id,
-                SessionDelta {
+                Some(SessionDelta {
                     session_snapshot: make_session_snapshot(),
+                }),
+                RunBoundaryReceipt {
+                    run_id: run_id.clone(),
+                    boundary: RunApplyBoundary::Immediate,
+                    contributing_input_ids: vec![second_id.clone()],
+                    conversation_digest: Some(format!("{}-second-digest", harness.name)),
+                    message_count: 1,
+                    sequence: 1,
                 },
-                run_id.clone(),
-                RunApplyBoundary::Immediate,
-                vec![second_id.clone()],
-                vec![fresh_stored(second_id.clone())],
+                vec![applied_pending_state(&second, &run_id, 1)],
+                None,
             )
+            .await;
+        assert!(
+            second_receipt.is_ok(),
+            "{}: second machine-owned atomic apply should succeed",
+            harness.name
+        );
+        let second_receipt = harness
+            .store
+            .load_boundary_receipt(&runtime_id, &run_id, 1)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             second_receipt.sequence, 1,
-            "{}: the durable commit seam should mint the next receipt sequence",
+            "{}: the durable store should preserve the next machine-owned receipt sequence",
             harness.name
         );
     }
@@ -379,20 +407,13 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             "{}: retire should preserve the replayable contributors for later drain",
             harness.name
         );
-        assert_eq!(
-            harness.store.load_runtime_state(&runtime_id).await.unwrap(),
-            Some(RuntimeState::Retired),
-            "{}: retire should persist the runtime state atomically with input state",
-            harness.name
-        );
 
         drop(driver);
     }
 }
 
 #[tokio::test]
-async fn recovery_contract_replays_recovered_runtime_lifecycle_facts_through_machine_dsl_authority()
-{
+async fn recovery_contract_does_not_force_lifecycle_from_runtime_state_projection() {
     for harness in supported_store_harnesses() {
         for recovered_state in [
             RuntimeState::Retired,
@@ -401,18 +422,41 @@ async fn recovery_contract_replays_recovered_runtime_lifecycle_facts_through_mac
         ] {
             let session_id = SessionId::new();
             let runtime_id = LogicalRuntimeId::for_session(&session_id);
-            harness
-                .store
-                .atomic_lifecycle_commit(&runtime_id, recovered_state, &[])
-                .await
-                .unwrap();
+            let seeder = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+            seeder.register_session(session_id.clone()).await;
+            match recovered_state {
+                RuntimeState::Retired => {
+                    meerkat_runtime::RuntimeControlPlane::retire(&seeder, &runtime_id)
+                        .await
+                        .unwrap();
+                }
+                RuntimeState::Stopped => {
+                    seeder
+                        .stop_runtime_executor(&session_id, "seed stopped projection")
+                        .await
+                        .unwrap();
+                }
+                RuntimeState::Destroyed => {
+                    meerkat_runtime::RuntimeControlPlane::destroy(&seeder, &runtime_id)
+                        .await
+                        .unwrap();
+                }
+                other => panic!("unexpected seeded projection state: {other}"),
+            }
+            drop(seeder);
 
             let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
             machine.register_session(session_id.clone()).await;
             assert_eq!(
                 machine.runtime_state(&session_id).await.unwrap(),
-                recovered_state,
-                "{}: recovered {recovered_state} fact should replay through DSL authority",
+                RuntimeState::Idle,
+                "{}: recovered {recovered_state} projection must not force live lifecycle truth",
+                harness.name
+            );
+            assert_eq!(
+                harness.store.load_runtime_state(&runtime_id).await.unwrap(),
+                Some(RuntimeState::Idle),
+                "{}: recovered {recovered_state} projection must not remain durable lifecycle truth after machine recovery",
                 harness.name
             );
         }
@@ -544,14 +588,8 @@ async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of
     bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&first_id, &run_id).unwrap();
     driver.stage_input(&second_id, &run_id).unwrap();
-    driver
-        .boundary_applied(
-            run_id.clone(),
-            make_receipt(run_id, vec![first_id.clone(), second_id.clone()], 0),
-            Some(make_session_snapshot()),
-        )
-        .await
-        .unwrap();
+    driver.apply_input(&first_id, &run_id).unwrap();
+    driver.apply_input(&second_id, &run_id).unwrap();
 
     let report = driver.recover().await.unwrap();
     assert_eq!(

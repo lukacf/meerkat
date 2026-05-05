@@ -64,6 +64,25 @@ fn seed_mob_authority(
     authority
 }
 
+#[cfg(feature = "runtime-adapter")]
+fn canonical_runtime_adapter_for_session_service(
+    session_service: &Arc<dyn MobSessionService>,
+    runtime_adapter: RuntimeAdapterOption,
+) -> Result<RuntimeAdapterOption, MobError> {
+    let service_adapter = session_service.runtime_adapter();
+    match (runtime_adapter, service_adapter) {
+        (Some(adapter), Some(service_adapter))
+            if !adapter.shares_runtime_persistence_with(&service_adapter) =>
+        {
+            Err(MobError::Internal(
+                "explicit mob runtime adapter does not share the session service runtime persistence authority".to_string(),
+            ))
+        }
+        (Some(adapter), _) => Ok(Some(adapter)),
+        (None, service_adapter) => Ok(service_adapter),
+    }
+}
+
 /// Seed the DSL authority's membership-tracking fields from a reconstructed
 /// shell roster on resume paths.
 ///
@@ -661,6 +680,8 @@ impl MobBuilder {
                     .to_string(),
             ));
         }
+        let runtime_adapter =
+            canonical_runtime_adapter_for_session_service(&session_service, runtime_adapter)?;
 
         // §8: AutonomousHost profiles require a runtime adapter. Validate at
         // build time so Option<adapter> on the trait doesn't hide an ownership
@@ -774,6 +795,8 @@ impl MobBuilder {
                     .to_string(),
             ));
         }
+        let runtime_adapter =
+            canonical_runtime_adapter_for_session_service(&session_service, runtime_adapter)?;
         // §8 check deferred until after definition recovery — the definition
         // comes from the event log, so we can't check profiles before replay.
         let all_events = storage.events.replay_all().await?;

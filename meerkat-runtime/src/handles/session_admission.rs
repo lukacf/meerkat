@@ -90,22 +90,24 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         )
     }
 
-    fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::Commit {
-                input_id: mm_dsl::InputId::from_domain(input_id),
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            "SessionAdmissionHandle::commit",
-        )
+    fn commit(&self, _input_id: &InputId, _run_id: &RunId) -> Result<(), DslTransitionError> {
+        // Runtime-backed commit terminalization is owned by
+        // MeerkatMachineCommand::Commit and its durable receipt path. The
+        // handle remains an observation-only compatibility hook.
+        Ok(())
     }
+}
 
-    fn recycle(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::Recycle,
-            "SessionAdmissionHandle::recycle",
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn commit_effect_is_observation_only() {
+        let handle = RuntimeSessionAdmissionHandle::ephemeral();
+        handle
+            .commit(&InputId(Uuid::from_u128(1)), &RunId(Uuid::from_u128(2)))
+            .expect("runtime-backed admission commit is observation-only");
     }
 }

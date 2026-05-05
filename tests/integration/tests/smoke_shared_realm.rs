@@ -6159,7 +6159,7 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             )
             .into());
         }
-        let _operator_async_peer_result = operator_async_peer_response_run["payload"]["result"]
+        let operator_async_peer_result = operator_async_peer_response_run["payload"]["result"]
             .as_str()
             .map(normalize_semantic_text)
             .ok_or_else(|| {
@@ -6204,12 +6204,40 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             .await?;
         let reopen_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(reopen_info_value)?;
-        let reconnect = channel.connect(&reopen_info).await?;
+        let reconnect = match channel.connect(&reopen_info).await {
+            Ok(reconnect) => reconnect,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                let message = if rpc_stderr.trim().is_empty() {
+                    format!("realtime channel reconnect failed: {error}")
+                } else {
+                    format!(
+                        "realtime channel reconnect failed: {error}\nrpc stderr:\n{}",
+                        rpc_stderr.trim()
+                    )
+                };
+                return Err(message.into());
+            }
+        };
         let (new_sender, new_receiver) = reconnect.split();
         sender = new_sender;
         receiver = new_receiver;
         let _reopen_ready_capture =
-            collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await?;
+            match collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                    let message = if rpc_stderr.trim().is_empty() {
+                        format!("realtime channel reconnect readiness failed: {error}")
+                    } else {
+                        format!(
+                            "realtime channel reconnect readiness failed: {error}\nrpc stderr:\n{}",
+                            rpc_stderr.trim()
+                        )
+                    };
+                    return Err(message.into());
+                }
+            };
         let _rebound_ready = wait_for_pump_member_status(
             &mut pump,
             &mut rpc,
@@ -6489,8 +6517,16 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
                 &turn6_capture,
             )
             .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
+            let stderr_path = std::env::temp_dir().join("s71-turn6-rpc-stderr.log");
+            let _ = tokio::fs::write(&stderr_path, rpc_stderr.as_bytes()).await;
             return Err(format!(
-                "turn 6 recall emitted unexpected semantic output text `{turn6_output_text}`: {turn6_capture:?}"
+                "turn 6 recall emitted unexpected semantic output text `{turn6_output_text}`: {turn6_capture:?}; \
+                 expected_checksum_token={expected_checksum_token_normalized}; \
+                 operator_async_peer_result={operator_async_peer_result}; \
+                 turn5_history={turn5_history}; \
+                 rpc stderr dumped to {}",
+                stderr_path.display()
             )
             .into());
         }

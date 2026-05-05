@@ -238,10 +238,11 @@ async fn setup_mob()
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
 
-    // Use an explicit MeerkatMachine override so this e2e exercises the
-    // canonical mob-runtime adapter path. AutonomousHost drains and runtime-backed
-    // turns must both use this same adapter instance.
-    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    // Use the session service's persistent MeerkatMachine so autonomous-host
+    // drains and runtime-backed turns share the durable runtime-store authority.
+    let runtime_adapter = mob_service
+        .runtime_adapter()
+        .expect("persistent pictionary smoke service should expose a runtime adapter");
 
     let handle = MobBuilder::new(pictionary_definition(), MobStorage::in_memory())
         .with_session_service(mob_service.clone())

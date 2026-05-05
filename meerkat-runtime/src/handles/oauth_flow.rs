@@ -1801,20 +1801,6 @@ mod tests {
             Ok(())
         }
 
-        async fn commit_session_boundary(
-            &self,
-            _runtime_id: &LogicalRuntimeId,
-            _session_delta: SessionDelta,
-            _run_id: RunId,
-            _boundary: RunApplyBoundary,
-            _contributing_input_ids: Vec<InputId>,
-            _input_updates: Vec<StoredInputState>,
-        ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
-            Err(RuntimeStoreError::Unsupported(
-                "commit_session_boundary".to_string(),
-            ))
-        }
-
         async fn commit_session_snapshot(
             &self,
             _runtime_id: &LogicalRuntimeId,
@@ -1885,16 +1871,6 @@ mod tests {
             ))
         }
 
-        async fn persist_runtime_state(
-            &self,
-            _runtime_id: &LogicalRuntimeId,
-            _state: RuntimeState,
-        ) -> Result<(), RuntimeStoreError> {
-            Err(RuntimeStoreError::Unsupported(
-                "persist_runtime_state".to_string(),
-            ))
-        }
-
         async fn load_runtime_state(
             &self,
             _runtime_id: &LogicalRuntimeId,
@@ -1904,14 +1880,14 @@ mod tests {
             ))
         }
 
-        async fn atomic_lifecycle_commit(
+        async fn commit_machine_lifecycle(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _runtime_state: RuntimeState,
+            _commit: crate::store::MachineLifecycleCommit,
             _input_states: &[StoredInputState],
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
-                "atomic_lifecycle_commit".to_string(),
+                "commit_machine_lifecycle".to_string(),
             ))
         }
     }

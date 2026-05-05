@@ -2058,19 +2058,7 @@ async fn handle_meerkat_interrupt(
                 state: meerkat_runtime::RuntimeState::Destroyed,
             }
             | meerkat_runtime::RuntimeDriverError::Destroyed,
-        ) => {
-            if let Some(runtime_state) = state
-                .service
-                .persisted_runtime_state(&session_id)
-                .await
-                .map_err(|e| format!("Failed to interrupt session: {e}"))?
-                && persisted_runtime_state_blocks_interrupt_noop(runtime_state)
-            {
-                return Err(format!(
-                    "Failed to interrupt session: runtime is not interruptible while {runtime_state}"
-                ));
-            }
-        }
+        ) => {}
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
             return Err(format!(
                 "Failed to interrupt session: runtime is not interruptible while {state}"
@@ -2088,13 +2076,6 @@ fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
     matches!(
         state,
         meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
-    )
-}
-
-fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
-    matches!(
-        state,
-        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
     )
 }
 
@@ -6378,19 +6359,10 @@ mod tests {
         assert!(!interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Stopped
         ));
-        assert!(persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Retired
-        ));
-        assert!(persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Stopped
-        ));
-        assert!(!persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Idle
-        ));
     }
 
     #[tokio::test]
-    async fn test_mcp_interrupt_rejects_cold_persisted_stopped_runtime() {
+    async fn test_mcp_interrupt_ignores_cold_persisted_stopped_projection_when_session_exists() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
@@ -6421,23 +6393,30 @@ mod tests {
             })
             .await
             .expect("runtime-backed MCP service should create deferred session");
-        runtime_store
-            .persist_runtime_state(
-                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
-                meerkat_runtime::RuntimeState::Stopped,
-            )
+        state
+            .runtime_adapter
+            .register_session(created.session_id.clone())
+            .await;
+        state
+            .runtime_adapter
+            .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
+        state
+            .runtime_adapter
+            .unregister_session(&created.session_id)
+            .await;
 
-        let err = Box::pin(handle_tools_call(
+        let payload = Box::pin(handle_tools_call(
             &state,
             "meerkat_interrupt",
             &json!({ "session_id": created.session_id }),
         ))
         .await
-        .expect_err("persisted stopped runtime must reject cold interrupt no-op");
+        .expect("persisted stopped projection must not reject cold interrupt no-op");
 
-        assert!(err.message.contains("stopped"));
+        let payload = unwrap_payload(payload);
+        assert_eq!(payload["interrupted"], true);
     }
 
     #[tokio::test]

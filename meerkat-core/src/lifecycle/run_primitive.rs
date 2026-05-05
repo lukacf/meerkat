@@ -1986,7 +1986,7 @@ mod tests {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
             context_appends: vec![ConversationContextAppend {
-                key: "peer_response_terminal:analyst-rt:req-123".into(),
+                key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
                 content: CoreRenderable::Text {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
                 },

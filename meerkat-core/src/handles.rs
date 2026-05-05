@@ -235,7 +235,7 @@ pub enum PeerResponseTerminalFactError {
     EmptyTransportIdentity,
     #[error("route identity cannot be empty")]
     EmptyRouteIdentity,
-    #[error("route identity cannot contain control characters")]
+    #[error("route identity must be a canonical peer UUID")]
     InvalidRouteIdentity,
     #[error("display identity is required")]
     MissingDisplayIdentity,
@@ -284,7 +284,9 @@ impl PeerResponseTerminalRouteIdentity {
         if raw.chars().any(char::is_control) {
             return Err(PeerResponseTerminalFactError::InvalidRouteIdentity);
         }
-        Ok(Self(raw))
+        let peer_id = crate::comms::PeerId::parse(raw.trim())
+            .map_err(|_| PeerResponseTerminalFactError::InvalidRouteIdentity)?;
+        Ok(Self(peer_id.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -964,11 +966,9 @@ pub trait SessionAdmissionHandle: Send + Sync {
     /// Fire the `Prepare { session_id, run_id }` input — bound for the session this handle was prepared for.
     fn prepare(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
 
-    /// Fire the `Commit { input_id, run_id }` input.
+    /// Observe a commit request. Runtime-backed implementations keep commit
+    /// terminalization on the machine-owned durable path.
     fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError>;
-
-    /// Fire the `Recycle` input — session transitions into the recycle path.
-    fn recycle(&self) -> Result<(), DslTransitionError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1881,10 +1881,10 @@ mod tests {
         ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
         PeerConversationProjection, PeerResponseProgressProjectionPhase,
         PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
-        PeerResponseTerminalFact, PeerResponseTerminalProjectionStatus,
-        PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
-        PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
-        peer_response_terminal_context_key,
+        PeerResponseTerminalFact, PeerResponseTerminalFactError,
+        PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
+        PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
+        PeerResponseTerminalTransportIdentity, peer_response_terminal_context_key,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
 
@@ -1924,8 +1924,9 @@ mod tests {
 
     #[test]
     fn peer_terminal_projection_owns_prompt_and_context_key() {
+        let route_id = "550e8400-e29b-41d4-a716-446655440000";
         let route_identity =
-            PeerResponseTerminalRouteIdentity::parse("analyst-rt").expect("route identity");
+            PeerResponseTerminalRouteIdentity::parse(route_id).expect("route identity");
         let correlation_id =
             PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
                 .expect("correlation id");
@@ -1952,7 +1953,9 @@ mod tests {
 
         assert_eq!(
             projection.context_key().as_deref(),
-            Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1")
+            Some(
+                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+            )
         );
         assert_eq!(
             projection.prompt_text(),
@@ -1978,14 +1981,23 @@ mod tests {
 
     #[test]
     fn peer_terminal_context_key_helper_stays_canonical() {
+        let route_id = "550e8400-e29b-41d4-a716-446655440000";
         let route_identity =
-            PeerResponseTerminalRouteIdentity::parse("peer-a").expect("route identity");
+            PeerResponseTerminalRouteIdentity::parse(route_id).expect("route identity");
         let correlation_id =
             PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
                 .expect("correlation id");
         assert_eq!(
             peer_response_terminal_context_key(&route_identity, correlation_id),
-            "peer_response_terminal:peer-a:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+            "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
         );
+    }
+
+    #[test]
+    fn peer_terminal_route_identity_rejects_display_name_alias() {
+        assert!(matches!(
+            PeerResponseTerminalRouteIdentity::parse("analyst-rt"),
+            Err(PeerResponseTerminalFactError::InvalidRouteIdentity)
+        ));
     }
 }

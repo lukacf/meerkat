@@ -282,6 +282,52 @@ impl SessionAgent for FactoryAgent {
         self.agent.sync_system_context_state_to_session();
     }
 
+    fn sync_session_from_durable_snapshot(
+        &mut self,
+        session: Session,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if session.id() != self.agent.session().id() {
+            return Err(meerkat_core::error::AgentError::InternalError(format!(
+                "durable snapshot session id {} does not match live session {}",
+                session.id(),
+                self.agent.session().id()
+            )));
+        }
+
+        let system_context_state = session.system_context_state().unwrap_or_default();
+        let visibility_state = session
+            .tool_visibility_state()
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to decode durable tool visibility state during live session sync: {err}"
+                ))
+            })?
+            .unwrap_or_default();
+        self.agent
+            .tool_scope()
+            .set_visibility_state(visibility_state)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to synchronize live tool visibility state from durable session: {err}"
+                ))
+            })?;
+        *self.agent.session_mut() = session;
+
+        let state_handle = self.agent.system_context_state();
+        match state_handle.lock() {
+            Ok(mut guard) => {
+                *guard = system_context_state;
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while synchronizing durable session"
+                );
+                *poisoned.into_inner() = system_context_state;
+            }
+        }
+        Ok(())
+    }
+
     fn cancel(&mut self) {
         self.agent.cancel();
     }
@@ -355,6 +401,21 @@ impl SessionAgent for FactoryAgent {
         self.agent
             .session_mut()
             .append_system_context_blocks(appends);
+        let state = self
+            .agent
+            .session()
+            .system_context_state()
+            .unwrap_or_default();
+        let state_handle = self.agent.system_context_state();
+        match state_handle.lock() {
+            Ok(mut guard) => {
+                *guard = state;
+            }
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while applying runtime context");
+                *poisoned.into_inner() = state;
+            }
+        }
     }
 
     fn append_external_user_content(

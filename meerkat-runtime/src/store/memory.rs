@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use indexmap::IndexMap;
-use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
@@ -16,8 +15,8 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, RuntimeStore, RuntimeStoreError, SessionDelta,
-    authoritative_receipt,
+    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
+    SessionDelta,
 };
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::StoredInputState;
@@ -102,56 +101,6 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let next = update(snapshot.as_deref())?;
         *snapshot = Some(next);
         Ok(())
-    }
-
-    async fn commit_session_boundary(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        run_id: RunId,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<StoredInputState>,
-    ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
-        let mut inner = self.inner.lock().await;
-        let rid = runtime_id.0.clone();
-        let sequence = inner
-            .receipts
-            .keys()
-            .filter(|key| key.runtime_id == rid && key.run_id == run_id)
-            .map(|key| key.sequence)
-            .max()
-            .map(|seq| seq + 1)
-            .unwrap_or(0);
-        let receipt = authoritative_receipt(
-            Some(&session_delta),
-            run_id,
-            boundary,
-            contributing_input_ids,
-            sequence,
-        )?;
-        let mut input_updates = input_updates;
-        for bundle in &mut input_updates {
-            bundle.seed.last_run_id = Some(receipt.run_id.clone());
-            bundle.seed.last_boundary_sequence = Some(receipt.sequence);
-        }
-
-        inner
-            .sessions
-            .insert(rid.clone(), session_delta.session_snapshot);
-        let key = ReceiptKey {
-            runtime_id: rid.clone(),
-            run_id: receipt.run_id.clone(),
-            sequence: receipt.sequence,
-        };
-        inner.receipts.insert(key, receipt.clone());
-
-        let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_updates {
-            states.insert(bundle.state.input_id.clone(), bundle);
-        }
-
-        Ok(receipt)
     }
 
     async fn commit_session_snapshot(
@@ -278,16 +227,6 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(state)
     }
 
-    async fn persist_runtime_state(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        state: RuntimeState,
-    ) -> Result<(), RuntimeStoreError> {
-        let mut inner = self.inner.lock().await;
-        inner.runtime_states.insert(runtime_id.0.clone(), state);
-        Ok(())
-    }
-
     async fn load_runtime_state(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -296,17 +235,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(inner.runtime_states.get(&runtime_id.0).copied())
     }
 
-    async fn atomic_lifecycle_commit(
+    async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-        runtime_state: RuntimeState,
+        commit: MachineLifecycleCommit,
         input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
 
         // Single lock acquisition — atomic for in-memory
-        inner.runtime_states.insert(rid.clone(), runtime_state);
+        inner
+            .runtime_states
+            .insert(rid.clone(), commit.runtime_state());
         let states = inner.input_states.entry(rid).or_default();
         for bundle in input_states {
             states.insert(bundle.state.input_id.clone(), bundle.clone());
@@ -515,29 +456,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_session_boundary_returns_authoritative_receipt() {
+    async fn atomic_apply_persists_machine_owned_receipt() {
         let store = InMemoryRuntimeStore::new();
         let rid = LogicalRuntimeId::new("test");
         let run_id = RunId::new();
         let input_id = InputId::new();
         let session = meerkat_core::Session::new();
         let snapshot = serde_json::to_vec(&session).unwrap();
+        let receipt = RunBoundaryReceipt {
+            run_id: run_id.clone(),
+            boundary: RunApplyBoundary::Immediate,
+            contributing_input_ids: vec![input_id.clone()],
+            conversation_digest: Some("machine-owned-digest".to_string()),
+            message_count: 42,
+            sequence: 7,
+        };
 
-        let receipt = store
-            .commit_session_boundary(
+        store
+            .atomic_apply(
                 &rid,
-                SessionDelta {
+                Some(SessionDelta {
                     session_snapshot: snapshot,
-                },
-                run_id.clone(),
-                RunApplyBoundary::Immediate,
-                vec![input_id.clone()],
+                }),
+                receipt.clone(),
                 vec![StoredInputState::new_accepted(input_id)],
+                None,
             )
             .await
             .unwrap();
 
-        assert_eq!(receipt.sequence, 0);
         assert_eq!(receipt.run_id, run_id);
         assert!(receipt.conversation_digest.is_some());
         let loaded = store

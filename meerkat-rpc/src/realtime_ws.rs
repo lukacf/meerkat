@@ -40,7 +40,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
-use crate::session_runtime::SessionRuntime;
+use crate::{error, protocol::RpcError, session_runtime::SessionRuntime};
 
 /// Canonical websocket path for realtime channels hosted by `rkat-rpc`.
 pub const REALTIME_WS_PATH: &str = "/realtime/ws";
@@ -2616,7 +2616,7 @@ async fn send_protocol_error(
 }
 
 async fn bind_realtime_target(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     accepted: &AcceptedRealtimeOpen,
     session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
 ) -> Result<BindRealtimeTargetOutput, RealtimeChannelErrorFrame> {
@@ -2802,15 +2802,34 @@ struct BindRealtimeTargetOutput {
 }
 
 async fn open_product_session_bridge(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     session_id: &SessionId,
     turning_mode: meerkat_contracts::RealtimeTurningMode,
     session_factory: Arc<dyn RealtimeSessionFactory>,
 ) -> Result<(RealtimeChannelStatus, RealtimeProductSessionBridge), RealtimeChannelErrorFrame> {
+    runtime
+        .ensure_runtime_executor(session_id)
+        .await
+        .map_err(|err| rpc_error_frame(err, "runtime executor"))?;
     let open_config = runtime
         .realtime_session_open_config(session_id, turning_mode)
         .await
         .map_err(session_error_frame)?;
+    if std::env::var_os("RKAT_REALTIME_PROJECTION_DIAG").is_some() {
+        let context_text = open_config
+            .runtime_system_context
+            .iter()
+            .map(|append| append.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        eprintln!(
+            "[realtime-projection-diag] open session_id={session_id} seed_messages={} runtime_context={} has_peer_terminal={} has_birch={}",
+            open_config.seed_messages.len(),
+            open_config.runtime_system_context.len(),
+            context_text.contains("PEER_RESPONSE_TERMINAL"),
+            context_text.contains("birch seventeen")
+        );
+    }
     let authority = match runtime
         .runtime_adapter()
         .apply_capability_driven_realtime_transport(session_id)
@@ -2897,7 +2916,7 @@ async fn cleanup_realtime_binding(
 }
 
 async fn reconcile_product_session_binding(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     binding: Option<&RealtimeSocketBinding>,
     turning_mode: meerkat_contracts::RealtimeTurningMode,
     session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
@@ -3126,7 +3145,7 @@ async fn emit_status_update(
 }
 
 async fn attempt_realtime_reconnect(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     binding: Option<&RealtimeSocketBinding>,
     turning_mode: meerkat_contracts::RealtimeTurningMode,
     session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
@@ -3804,10 +3823,20 @@ async fn append_realtime_transcript_event(
         "realtime product session is not wired to a session target",
     )
     .await?;
+    let event_for_diag = format!("{event:?}");
     runtime
         .append_realtime_transcript_event(&session_id, event)
         .await
-        .map_err(session_error_frame)
+        .map_err(|err| {
+            if matches!(err, meerkat_core::service::SessionError::NotFound { .. }) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    event = %event_for_diag,
+                    "temporary LUC-441 diagnostic: realtime transcript append returned NotFound"
+                );
+            }
+            session_error_frame(err)
+        })
 }
 
 async fn resolve_primary_session_id(
@@ -3847,13 +3876,52 @@ async fn wait_for_runtime_turn_quiescence(
             Ok(active_inputs) => active_inputs,
             Err(error) => return Err(runtime_error_frame(error, "input")),
         };
+        if !active_inputs.is_empty()
+            && matches!(
+                state,
+                meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
+            )
+        {
+            let _ = runtime
+                .runtime_adapter()
+                .wake_runtime_if_active_inputs(session_id)
+                .await;
+        }
         if matches!(state, meerkat_runtime::RuntimeState::Running) || !active_inputs.is_empty() {
             waited = true;
             if tokio::time::Instant::now() >= deadline {
+                let mut active_descriptions = Vec::new();
+                for input_id in &active_inputs {
+                    match runtime
+                        .runtime_adapter()
+                        .input_state(session_id, input_id)
+                        .await
+                    {
+                        Ok(Some(input_state)) => active_descriptions.push(format!(
+                            "{input_id}:phase={:?}:terminal={:?}:kind={}:semantics={:?}:policy={:?}",
+                            input_state.seed.phase,
+                            input_state.seed.terminal_outcome,
+                            input_state
+                                .state
+                                .persisted_input
+                                .as_ref()
+                                .map(|input| format!("{:?}", input.kind()))
+                                .unwrap_or_else(|| "<missing>".to_string()),
+                            input_state.state.runtime_semantics,
+                            input_state.state.policy,
+                        )),
+                        Ok(None) => active_descriptions.push(format!("{input_id}:missing")),
+                        Err(error) => {
+                            active_descriptions.push(format!("{input_id}:state_error={error}"))
+                        }
+                    }
+                }
                 return Err(RealtimeChannelErrorFrame {
                     code: RealtimeErrorCode::InvalidTarget,
-                    message: "realtime runtime work did not quiesce before accepting new input"
-                        .to_string(),
+                    message: format!(
+                        "realtime runtime work did not quiesce before accepting new input (runtime_state={state:?}, active_inputs=[{}])",
+                        active_descriptions.join(", ")
+                    ),
                     details: None,
                 });
             }
@@ -3865,7 +3933,7 @@ async fn wait_for_runtime_turn_quiescence(
 }
 
 async fn refresh_product_session_projection(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     binding: Option<&RealtimeSocketBinding>,
     turning_mode: meerkat_contracts::RealtimeTurningMode,
     session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
@@ -3883,10 +3951,37 @@ async fn refresh_product_session_projection(
         "realtime product session is not wired to a session target",
     )
     .await?;
+    runtime
+        .ensure_runtime_executor(&session_id)
+        .await
+        .map_err(|err| rpc_error_frame(err, "runtime executor"))?;
     let open_config = runtime
         .realtime_session_open_config(&session_id, turning_mode)
         .await
-        .map_err(session_error_frame)?;
+        .map_err(|err| {
+            if matches!(err, meerkat_core::service::SessionError::NotFound { .. }) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "temporary LUC-441 diagnostic: realtime projection refresh open_config returned NotFound"
+                );
+            }
+            session_error_frame(err)
+        })?;
+    if std::env::var_os("RKAT_REALTIME_PROJECTION_DIAG").is_some() {
+        let context_text = open_config
+            .runtime_system_context
+            .iter()
+            .map(|append| append.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        eprintln!(
+            "[realtime-projection-diag] refresh session_id={session_id} seed_messages={} runtime_context={} has_peer_terminal={} has_birch={}",
+            open_config.seed_messages.len(),
+            open_config.runtime_system_context.len(),
+            context_text.contains("PEER_RESPONSE_TERMINAL"),
+            context_text.contains("birch seventeen")
+        );
+    }
     // Reconstruction, not patching:
     // OpenAI's realtime SessionUpdate can refresh instructions and tools, but
     // it does not rebuild the provider's accumulated conversation state from
@@ -4046,7 +4141,7 @@ impl meerkat_core::handles::RealtimeProjectionFreshnessObserver for RealtimeSock
 }
 
 /// Resolve the session's realtime DSL handles (context-refresh +
-/// product-turn lifecycle) for this socket by re-preparing bindings via
+/// product-turn lifecycle) for this socket by preparing local resources via
 /// the runtime adapter.
 ///
 /// Returns `None` when the socket has no bound session yet — the
@@ -4067,12 +4162,12 @@ async fn resolve_session_realtime_handles(
     )
     .await
     .ok()?;
-    // `prepare_bindings` re-binds the session's DSL authority to a fresh
-    // runtime epoch; the returned bindings expose the canonical handles
-    // shared by every other consumer of this session's DSL authority.
+    // Realtime projection refresh only needs handles into the session's shared
+    // DSL authority. It must not claim or re-emit the authoritative runtime
+    // binding for mob-owned bridge sessions.
     let bindings = runtime
         .runtime_adapter()
-        .prepare_bindings(session_id)
+        .prepare_local_session_bindings(session_id)
         .await
         .ok()?;
     Some((
@@ -4256,6 +4351,22 @@ fn session_error_frame(err: meerkat_core::service::SessionError) -> RealtimeChan
     }
 }
 
+fn rpc_error_frame(err: RpcError, action: &str) -> RealtimeChannelErrorFrame {
+    if err.code == error::SESSION_NOT_FOUND {
+        RealtimeChannelErrorFrame {
+            code: RealtimeErrorCode::InvalidTarget,
+            message: format!("realtime {action} target is unavailable"),
+            details: None,
+        }
+    } else {
+        RealtimeChannelErrorFrame {
+            code: RealtimeErrorCode::RuntimeInternal,
+            message: err.message,
+            details: None,
+        }
+    }
+}
+
 fn realtime_client_error_frame(
     err: meerkat_client::LlmError,
     action: &str,
@@ -4332,7 +4443,7 @@ mod tests {
         AcceptedRealtimeOpen, RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion,
         RealtimeReconnectRetryPlanner, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
         RealtimeWsHost, bind_realtime_target, product_turn_completion_disposition,
-        product_turn_completion_is_logically_terminal,
+        product_turn_completion_is_logically_terminal, resolve_session_realtime_handles,
     };
     use tokio::time::Instant;
 
@@ -4693,6 +4804,39 @@ mod tests {
             .expect("current typed protocol version must open");
 
         assert_eq!(accepted.protocol_version, RealtimeProtocolVersion::CURRENT);
+    }
+
+    #[tokio::test]
+    async fn realtime_handle_refresh_uses_local_resources_for_existing_authoritative_binding() {
+        use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
+
+        let runtime = test_session_runtime();
+        let session_id = SessionId::new();
+        let adapter = runtime.runtime_adapter();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .apply_routed_meerkat_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("operator-rt:0".into()),
+                    fence_token: mm_dsl::FenceToken(23),
+                    generation: mm_dsl::Generation(0),
+                    session_id: mm_dsl::SessionId(session_id.to_string()),
+                },
+            )
+            .await
+            .expect("mob-owned binding applies");
+
+        let handles = resolve_session_realtime_handles(
+            &runtime,
+            Some(&RealtimeSocketBinding::SessionPrimary { session_id }),
+        )
+        .await;
+
+        assert!(
+            handles.is_some(),
+            "handle refresh must not attempt a conflicting session-owned runtime binding"
+        );
     }
 
     #[tokio::test]
@@ -5065,7 +5209,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_open_status_for_observer_uses_machine_owned_attempts() {
-        let runtime = test_session_runtime();
+        let runtime = Arc::new(test_session_runtime());
         let session_id = register_ready_realtime_session(&runtime).await;
         let adapter = runtime.runtime_adapter();
         adapter
@@ -5110,7 +5254,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_open_status_for_primary_without_factory_uses_machine_owned_exhaustion() {
-        let runtime = test_session_runtime();
+        let runtime = Arc::new(test_session_runtime());
         let session_id = register_ready_realtime_session(&runtime).await;
         let adapter = runtime.runtime_adapter();
         adapter

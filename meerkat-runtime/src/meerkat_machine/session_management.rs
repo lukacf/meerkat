@@ -81,63 +81,15 @@ fn spawn_ops_lifecycle_persistence_worker(
 }
 
 impl MeerkatMachine {
-    fn replay_recovered_runtime_phase_through_dsl_authority(
-        session_id: &SessionId,
-        dsl_authority: &Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>,
-        recovered_phase: RuntimeState,
-    ) -> Result<(), RuntimeDriverError> {
-        // Cold-restart: when `recover()` realizes a stored terminal runtime
-        // state on the driver, replay that fact through the DSL authority
-        // before publishing or attaching the session entry. The shell
-        // projection remains a persistence witness; it never directly seeds
-        // `authority.state`.
-        let authority_phase = {
-            let authority = dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            super::dsl_authority::runtime_phase_from_authority(&authority)
-        };
-        if recovered_phase == RuntimeState::Idle || recovered_phase == authority_phase {
-            return Ok(());
-        }
-
-        let input = match recovered_phase {
-            RuntimeState::Retired => Some(super::dsl::MeerkatMachineInput::Retire {
-                session_id: super::dsl::SessionId::from_domain(session_id),
-            }),
-            RuntimeState::Stopped => Some(super::dsl::MeerkatMachineInput::StopRuntimeExecutor {
-                reason: "recovered stopped runtime".to_string(),
-            }),
-            RuntimeState::Destroyed => Some(super::dsl::MeerkatMachineInput::Destroy {
-                session_id: super::dsl::SessionId::from_domain(session_id),
-            }),
-            RuntimeState::Attached | RuntimeState::Running | RuntimeState::Initializing => None,
-            RuntimeState::Idle => None,
-        };
-        let Some(input) = input else {
-            return Ok(());
-        };
-
-        let mut authority = dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Err(err) = super::dsl::MeerkatMachineMutator::apply(&mut *authority, input) {
-            return Err(RuntimeDriverError::RecoveryCorruption {
-                reason: format!(
-                    "store corruption: recovered '{recovered_phase}' runtime state for session '{session_id}' cannot be replayed through DSL authority: {}",
-                    super::dsl_authority::map_error(err, "RecoverRuntimeState(Session)")
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    pub(super) async fn register_session_inner(&self, session_id: SessionId) -> bool {
+    pub(super) async fn register_session_inner(
+        &self,
+        session_id: SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get_mut(&session_id) {
                 existing.clear_dead_attachment();
-                return false;
+                return Ok(false);
             }
         }
 
@@ -156,15 +108,7 @@ impl MeerkatMachine {
         let mut entry = self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
-            return false;
-        }
-        if let Err(err) = Self::replay_recovered_runtime_phase_through_dsl_authority(
-            &session_id,
-            &dsl_authority,
-            entry.as_driver().runtime_state(),
-        ) {
-            tracing::error!(%session_id, error = %err, "failed to replay recovered runtime phase through DSL authority");
-            return false;
+            return Err(err);
         }
         let control_projection = entry.control_projection_handle();
 
@@ -198,10 +142,10 @@ impl MeerkatMachine {
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
             existing.clear_dead_attachment();
-            false
+            Ok(false)
         } else {
             sessions.insert(session_id, session_entry);
-            true
+            Ok(true)
         }
     }
 
@@ -347,104 +291,91 @@ impl MeerkatMachine {
             })
         };
 
-        let (driver, completions, ops_lifecycle) = if let Some((
-            has_attachment,
-            driver,
-            completions,
-            ops_lifecycle,
-        )) = existing
-        {
-            if has_attachment {
-                return;
-            }
-            (driver, completions, ops_lifecycle)
-        } else {
-            let dsl_authority = Arc::new(std::sync::Mutex::new(
-                super::dsl::MeerkatMachineAuthority::from_state(
-                    super::dsl_authority::project_state(
-                        &session_id,
-                        RuntimeState::Idle,
-                        None,
-                        None,
-                        None,
-                        std::collections::BTreeSet::new(),
-                        None,
-                    ),
-                ),
-            ));
-            let runtime_id = Self::logical_runtime_id(&session_id);
-            let mut recovered_entry =
-                self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
-            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-                tracing::error!(
-                    %session_id,
-                    error = %err,
-                    "failed to recover runtime driver during registration"
-                );
-                return;
-            }
-            if let Err(err) = Self::replay_recovered_runtime_phase_through_dsl_authority(
-                &session_id,
-                &dsl_authority,
-                recovered_entry.as_driver().runtime_state(),
-            ) {
-                tracing::error!(%session_id, error = %err, "failed to replay recovered runtime phase through DSL authority");
-                return;
-            }
-
-            // Recover ops state OUTSIDE the sessions lock to avoid blocking
-            // other adapter operations behind potentially slow disk I/O.
-            let (recovered_ops, recovered_epoch, recovered_cursors) = self
-                .recover_or_create_ops_state(&session_id, &runtime_id)
-                .await;
-
-            // Double-check under the lock — another task may have inserted
-            // the entry while we were rebuilding runtime state.
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&session_id) {
-                entry.clear_dead_attachment();
-                if entry.has_attachment_or_attaching() {
+        let (driver, completions, ops_lifecycle) =
+            if let Some((has_attachment, driver, completions, ops_lifecycle)) = existing {
+                if has_attachment {
                     return;
                 }
-                entry.phase = RegistrationPhase::Attaching;
-                (
-                    entry.driver.clone(),
-                    entry.completions.clone(),
-                    entry.ops_lifecycle.clone(),
-                )
+                (driver, completions, ops_lifecycle)
             } else {
-                let control_projection = recovered_entry.control_projection_handle();
-                let driver = Arc::new(Mutex::new(recovered_entry));
-                let completions =
-                    Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
-                // Bind the DSL authority before the entry is inserted — any
-                // subsequent staging trait call must see the bound authority.
-                tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
-                sessions.insert(
-                    session_id.clone(),
-                    RuntimeSessionEntry {
-                        runtime_id,
-                        mutation_gate: Arc::new(Mutex::new(())),
-                        control_projection,
-                        driver: driver.clone(),
-                        ops_lifecycle: recovered_ops.clone(),
-                        epoch_id: recovered_epoch,
-                        cursor_state: recovered_cursors,
-                        completions: completions.clone(),
-                        tool_visibility_owner,
-                        current_llm_identity: None,
-                        current_capability_surface: None,
-                        capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
-                        phase: RegistrationPhase::Queuing,
-                        provisional_interrupt_handle: None,
-                        dsl_authority,
-                        drain_slot: CommsDrainSlot::new(),
-                    },
-                );
-                (driver, completions, recovered_ops)
-            }
-        };
+                let dsl_authority = Arc::new(std::sync::Mutex::new(
+                    super::dsl::MeerkatMachineAuthority::from_state(
+                        super::dsl_authority::project_state(
+                            &session_id,
+                            RuntimeState::Idle,
+                            None,
+                            None,
+                            None,
+                            std::collections::BTreeSet::new(),
+                            None,
+                        ),
+                    ),
+                ));
+                let runtime_id = Self::logical_runtime_id(&session_id);
+                let mut recovered_entry =
+                    self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
+                if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to recover runtime driver during registration"
+                    );
+                    return;
+                }
+                // Recover ops state OUTSIDE the sessions lock to avoid blocking
+                // other adapter operations behind potentially slow disk I/O.
+                let (recovered_ops, recovered_epoch, recovered_cursors) = self
+                    .recover_or_create_ops_state(&session_id, &runtime_id)
+                    .await;
+
+                // Double-check under the lock — another task may have inserted
+                // the entry while we were rebuilding runtime state.
+                let mut sessions = self.sessions.write().await;
+                if let Some(entry) = sessions.get_mut(&session_id) {
+                    entry.clear_dead_attachment();
+                    if entry.has_attachment_or_attaching() {
+                        return;
+                    }
+                    entry.phase = RegistrationPhase::Attaching;
+                    (
+                        entry.driver.clone(),
+                        entry.completions.clone(),
+                        entry.ops_lifecycle.clone(),
+                    )
+                } else {
+                    let control_projection = recovered_entry.control_projection_handle();
+                    let driver = Arc::new(Mutex::new(recovered_entry));
+                    let completions =
+                        Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
+                    let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
+                    // Bind the DSL authority before the entry is inserted — any
+                    // subsequent staging trait call must see the bound authority.
+                    tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+                    sessions.insert(
+                        session_id.clone(),
+                        RuntimeSessionEntry {
+                            runtime_id,
+                            mutation_gate: Arc::new(Mutex::new(())),
+                            control_projection,
+                            driver: driver.clone(),
+                            ops_lifecycle: recovered_ops.clone(),
+                            epoch_id: recovered_epoch,
+                            cursor_state: recovered_cursors,
+                            completions: completions.clone(),
+                            tool_visibility_owner,
+                            current_llm_identity: None,
+                            current_capability_surface: None,
+                            capability_surface_status:
+                                SessionLlmCapabilitySurfaceStatus::Unresolved,
+                            phase: RegistrationPhase::Queuing,
+                            provisional_interrupt_handle: None,
+                            dsl_authority,
+                            drain_slot: CommsDrainSlot::new(),
+                        },
+                    );
+                    (driver, completions, recovered_ops)
+                }
+            };
 
         // Stage the DSL EnsureSessionWithExecutor transition BEFORE mutating
         // the driver, so a DSL rejection never leaves shell and DSL disagreeing.
@@ -720,6 +651,47 @@ impl MeerkatMachine {
                 false
             }
             Err(_) => false,
+        }
+    }
+
+    /// Wake the attached runtime loop when machine-owned input truth already
+    /// contains active work. This does not mutate lifecycle state; it only
+    /// replays the mechanical wake effect for callers that observe queued work
+    /// at a boundary where user input must wait for canonical runtime work to
+    /// drain.
+    pub async fn wake_runtime_if_active_inputs(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let (driver, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.wake_sender())
+        };
+
+        let has_active_inputs = {
+            let driver = driver.lock().await;
+            !driver.as_driver().active_input_ids().is_empty()
+        };
+        if !has_active_inputs {
+            return Ok(false);
+        }
+
+        let Some(wake_tx) = wake_tx else {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle,
+            });
+        };
+
+        match wake_tx.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(true),
+            Err(mpsc::error::TrySendError::Closed(())) => Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle,
+            }),
         }
     }
 

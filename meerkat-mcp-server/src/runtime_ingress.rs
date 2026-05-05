@@ -992,7 +992,10 @@ impl CoreExecutorBoundaryHandle for McpSessionRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1012,7 +1015,10 @@ impl CoreExecutorInterruptHandle for McpSessionRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .service
-            .interrupt(&self.session_id)
+            .interrupt_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1349,7 +1355,10 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1464,7 +1473,8 @@ mod tests {
             boundary: RunApplyBoundary::Immediate,
             appends: Vec::new(),
             context_appends: vec![ConversationContextAppend {
-                key: "peer_response_terminal:analyst-rt:req-invalid".to_string(),
+                key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-invalid"
+                    .to_string(),
                 content: CoreRenderable::Text {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] invalid".to_string(),
                 },

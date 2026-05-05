@@ -326,6 +326,18 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
+    fn handle_for_phase(phase: mm_dsl::MeerkatPhase) -> RuntimePeerCommsHandle {
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: phase,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            ..Default::default()
+        };
+        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
+            state,
+        )));
+        RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)))
+    }
+
     #[test]
     fn runtime_peer_comms_handle_classifies_from_dsl_silent_intents() {
         let state = mm_dsl::MeerkatMachineState {
@@ -417,6 +429,117 @@ mod tests {
             })
             .expect("machine should classify lifecycle event fallback");
         assert_eq!(empty_param.lifecycle_peer.as_deref(), Some("orchestrator"));
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_classifies_idle_lifecycle_without_opening_peer_work() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Idle);
+
+        let retired_notice = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "lifecycle-retired".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: meerkat_core::comms::PeerLifecycleKind::PeerRetired,
+                    params: serde_json::json!({ "peer": "worker-1" }),
+                },
+            })
+            .expect("idle live session should classify mob lifecycle notices");
+        assert_eq!(
+            retired_notice.classification.class,
+            meerkat_core::PeerInputClass::PeerLifecycleRetired
+        );
+        assert_eq!(
+            retired_notice.classification.lifecycle_kind,
+            Some(meerkat_core::comms::PeerLifecycleKind::PeerRetired)
+        );
+        assert_eq!(retired_notice.lifecycle_peer.as_deref(), Some("worker-1"));
+        assert_eq!(retired_notice.request_id, None);
+
+        let added_request = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-added".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "mob.peer_added".to_string(),
+                    params: serde_json::json!({ "peer": "worker-2" }),
+                },
+            })
+            .expect("idle live session should classify lifecycle requests");
+        assert_eq!(
+            added_request.classification.class,
+            meerkat_core::PeerInputClass::PeerLifecycleAdded
+        );
+        assert_eq!(added_request.lifecycle_peer.as_deref(), Some("worker-2"));
+        assert_eq!(added_request.request_id.as_deref(), Some("request-added"));
+
+        let work_admission = handle.classify_external_envelope(PeerIngressEnvelopeFacts {
+            item_id: "message-1".to_string(),
+            from_peer: "peer-1".to_string(),
+            from_peer_id: meerkat_core::comms::PeerId::new(),
+            kind: meerkat_core::PeerIngressEnvelopeKind::Message {
+                body: "wake up".to_string(),
+            },
+        });
+        assert!(
+            work_admission.is_err(),
+            "idle lifecycle admission must not reopen normal peer work ingress"
+        );
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_drains_terminal_cleanup_without_reopening_topology_adds() {
+        for phase in [mm_dsl::MeerkatPhase::Retired, mm_dsl::MeerkatPhase::Stopped] {
+            let handle = handle_for_phase(phase);
+
+            let retired_notice = handle
+                .classify_external_envelope(PeerIngressEnvelopeFacts {
+                    item_id: "lifecycle-retired".to_string(),
+                    from_peer: "orchestrator".to_string(),
+                    from_peer_id: meerkat_core::comms::PeerId::new(),
+                    kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                        kind: meerkat_core::comms::PeerLifecycleKind::PeerRetired,
+                        params: serde_json::json!({ "peer": "worker-1" }),
+                    },
+                })
+                .expect("terminal sessions should drain peer-retired cleanup notices");
+            assert_eq!(
+                retired_notice.classification.class,
+                meerkat_core::PeerInputClass::PeerLifecycleRetired
+            );
+
+            let unwired_request = handle
+                .classify_external_envelope(PeerIngressEnvelopeFacts {
+                    item_id: "request-unwired".to_string(),
+                    from_peer: "orchestrator".to_string(),
+                    from_peer_id: meerkat_core::comms::PeerId::new(),
+                    kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                        intent: "mob.peer_unwired".to_string(),
+                        params: serde_json::json!({ "peer": "worker-2" }),
+                    },
+                })
+                .expect("terminal sessions should drain peer-unwired cleanup requests");
+            assert_eq!(
+                unwired_request.classification.class,
+                meerkat_core::PeerInputClass::PeerLifecycleUnwired
+            );
+
+            let added_notice = handle.classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "lifecycle-added".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                    params: serde_json::json!({ "peer": "worker-3" }),
+                },
+            });
+            assert!(
+                added_notice.is_err(),
+                "terminal cleanup admission must not accept new peer topology"
+            );
+        }
     }
 
     #[test]

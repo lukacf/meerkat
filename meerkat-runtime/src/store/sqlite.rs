@@ -14,8 +14,8 @@ mod inner {
     use crate::input_state::StoredInputState;
     use crate::runtime_state::RuntimeState;
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, RuntimeStore, RuntimeStoreError, SessionDelta,
-        authoritative_receipt,
+        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
+        SessionDelta,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -73,25 +73,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
     }
 
     const AUTH_OAUTH_FLOW_STATE_ID: &str = "auth_oauth_flow_state";
-
-    fn next_receipt_sequence(
-        tx: &Transaction<'_>,
-        runtime_id: &LogicalRuntimeId,
-        run_id: &RunId,
-    ) -> Result<u64, RuntimeStoreError> {
-        let next: i64 = tx
-            .query_row(
-                r"
-                SELECT COALESCE(MAX(sequence), -1) + 1
-                FROM runtime_boundary_receipts
-                WHERE runtime_id = ?1 AND run_id = ?2
-                ",
-                params![runtime_id_text(runtime_id), run_id.0.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-        u64::try_from(next).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
-    }
 
     fn upsert_runtime_snapshot(
         tx: &Transaction<'_>,
@@ -268,52 +249,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             tx.commit()
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             Ok(())
-        }
-
-        async fn commit_session_boundary(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
-            run_id: RunId,
-            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-            contributing_input_ids: Vec<InputId>,
-            input_updates: Vec<StoredInputState>,
-        ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            let session_snapshot_bytes = session_delta.session_snapshot.clone();
-            tokio::task::spawn_blocking(move || {
-                let session_snapshot = serde_json::from_slice::<meerkat_core::Session>(
-                    &session_delta.session_snapshot,
-                )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let sequence = next_receipt_sequence(&tx, &runtime_id, &run_id)?;
-                let receipt = authoritative_receipt(
-                    Some(&session_delta),
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    sequence,
-                )?;
-                let mut input_updates = input_updates;
-                for bundle in &mut input_updates {
-                    bundle.seed.last_run_id = Some(receipt.run_id.clone());
-                    bundle.seed.last_boundary_sequence = Some(receipt.sequence);
-                }
-
-                write_session_snapshot_in_txn(&tx, &session_snapshot)
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_snapshot_bytes)?;
-                insert_receipt(&tx, &runtime_id, &receipt)?;
-                upsert_input_states(&tx, &runtime_id, &input_updates)?;
-                tx.commit()
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                Ok(receipt)
-            })
-            .await
-            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
         async fn commit_session_snapshot(
@@ -532,25 +467,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
-        async fn persist_runtime_state(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            state: RuntimeState,
-        ) -> Result<(), RuntimeStoreError> {
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                upsert_runtime_state(&tx, &runtime_id, &state)?;
-                tx.commit()
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                Ok(())
-            })
-            .await
-            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
-        }
-
         async fn load_runtime_state(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -576,14 +492,15 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
-        async fn atomic_lifecycle_commit(
+        async fn commit_machine_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
-            runtime_state: RuntimeState,
+            commit: MachineLifecycleCommit,
             input_states: &[StoredInputState],
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let runtime_state = commit.runtime_state();
             let input_states = input_states.to_vec();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
@@ -693,25 +610,31 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         }
 
         #[tokio::test]
-        async fn commit_session_boundary_roundtrip() {
+        async fn atomic_apply_roundtrip() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let session = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
-            let receipt = store
-                .commit_session_boundary(
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: Some("machine-owned-digest".to_string()),
+                message_count: 42,
+                sequence: 5,
+            };
+            store
+                .atomic_apply(
                     &runtime_id,
-                    SessionDelta {
+                    Some(SessionDelta {
                         session_snapshot: session.clone(),
-                    },
-                    RunId(uuid::Uuid::new_v4()),
-                    RunApplyBoundary::RunStart,
-                    vec![],
+                    }),
+                    receipt.clone(),
                     vec![input_state()],
+                    None,
                 )
                 .await
                 .unwrap();
 
-            assert_eq!(receipt.sequence, 0);
             assert!(
                 store
                     .load_session_snapshot(&runtime_id)
@@ -844,12 +767,16 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         }
 
         #[tokio::test]
-        async fn atomic_lifecycle_commit_persists_both_parts() {
+        async fn commit_machine_lifecycle_persists_both_parts() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let runtime_state = RuntimeState::Stopped;
             store
-                .atomic_lifecycle_commit(&runtime_id, runtime_state, &[input_state()])
+                .commit_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleCommit::new(runtime_state),
+                    &[input_state()],
+                )
                 .await
                 .unwrap();
 

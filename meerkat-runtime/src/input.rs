@@ -653,14 +653,6 @@ fn peer_canonical_id(peer: &PeerInput) -> Option<String> {
     Some(peer_id.clone())
 }
 
-fn peer_display_id(peer: &PeerInput) -> Option<String> {
-    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
-        return None;
-    };
-
-    peer_display_label(peer).or_else(|| Some(peer_id.clone()))
-}
-
 fn peer_display_label(peer: &PeerInput) -> Option<String> {
     let InputOrigin::Peer {
         display_identity, ..
@@ -674,10 +666,6 @@ fn peer_display_label(peer: &PeerInput) -> Option<String> {
         .map(|label| label.trim())
         .filter(|label| !label.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn peer_display_projection_from_peer_input(peer: &PeerInput) -> Option<PeerConversationProjection> {
-    peer_projection_from_peer_input_with_id(peer, peer_display_id(peer)?.as_str())
 }
 
 /// Rendered prompt-text projection for a peer input.
@@ -853,7 +841,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
     let projection = match input {
-        Input::Peer(peer) => peer_display_projection_from_peer_input(peer)?,
+        Input::Peer(peer) => peer_projection_from_peer_input(peer)?,
         _ => return None,
     };
 

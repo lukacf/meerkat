@@ -589,16 +589,37 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeRequestPeerAddedAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerAddedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestPeerAddedRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerRetiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerRetiredRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerRetiredStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerUnwiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerUnwiredRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerUnwiredStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
@@ -628,16 +649,37 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeRequestActionableRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleAddedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeLifecycleAddedAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeLifecycleAddedRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleRetiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleRetiredRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleRetiredStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeLifecycleRetiredAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeLifecycleRetiredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleUnwiredIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleUnwiredRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleUnwiredStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeLifecycleUnwiredAttached`

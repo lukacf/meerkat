@@ -32,7 +32,6 @@ use meerkat_mob::MobSessionService;
 /// and calls `start_turn`, forwarding events to the RPC notification sink.
 pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
-    session_service: Arc<dyn SessionService>,
     session_id: SessionId,
 }
 
@@ -69,10 +68,8 @@ impl SessionRuntimeExecutor {
     /// current sink from the runtime at apply time so reconnected TCP clients
     /// always get events routed to the live transport.
     pub fn new(runtime: Arc<SessionRuntime>, session_id: SessionId) -> Self {
-        let session_service = runtime.core_session_service();
         Self {
             runtime,
-            session_service,
             session_id,
         }
     }
@@ -87,22 +84,26 @@ struct SessionRuntimeBoundaryHandle {
 impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.runtime
-            .interrupt_yielding(&self.session_id)
+            .cancel_after_boundary_live_with_machine_authority(&self.session_id)
             .await
-            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
 
 struct SessionRuntimeInterruptHandle {
-    session_service: Arc<dyn SessionService>,
+    runtime: Arc<SessionRuntime>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
 impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .interrupt(&self.session_id)
+        self.runtime
+            .interrupt_live_with_machine_authority(&self.session_id)
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -115,6 +116,7 @@ impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
 #[cfg(feature = "mob")]
 struct MobRpcRuntimeBoundaryHandle {
     session_service: Arc<dyn MobSessionService>,
+    runtime: Option<Arc<SessionRuntime>>,
     session_id: SessionId,
 }
 
@@ -122,20 +124,41 @@ struct MobRpcRuntimeBoundaryHandle {
 #[async_trait::async_trait]
 impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .cancel_after_boundary(&self.session_id)
-            .await
-            .or_else(|err| match err {
-                SessionError::NotRunning { .. } => Ok(()),
-                err => Err(err),
-            })
-            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+        if let Some(runtime) = self.runtime.as_ref() {
+            return runtime
+                .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        if let Some(adapter) = self.session_service.runtime_adapter() {
+            return self
+                .session_service
+                .cancel_after_boundary_with_machine_authority(
+                    &self.session_id,
+                    adapter.session_control_authority(),
+                )
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        Err(CoreExecutorError::control_failed_runtime(format!(
+            "mob runtime boundary cancel for session {} has no MeerkatMachine authority",
+            self.session_id
+        )))
     }
 }
 
 #[cfg(feature = "mob")]
 struct MobRpcRuntimeInterruptHandle {
     session_service: Arc<dyn MobSessionService>,
+    runtime: Option<Arc<SessionRuntime>>,
     session_id: SessionId,
 }
 
@@ -143,14 +166,34 @@ struct MobRpcRuntimeInterruptHandle {
 #[async_trait::async_trait]
 impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .interrupt(&self.session_id)
-            .await
-            .or_else(|err| match err {
-                SessionError::NotRunning { .. } => Ok(()),
-                err => Err(err),
-            })
-            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+        if let Some(runtime) = self.runtime.as_ref() {
+            return runtime
+                .interrupt_live_with_machine_authority(&self.session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        if let Some(adapter) = self.session_service.runtime_adapter() {
+            return self
+                .session_service
+                .interrupt_with_machine_authority(
+                    &self.session_id,
+                    adapter.session_control_authority(),
+                )
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        Err(CoreExecutorError::control_failed_runtime(format!(
+            "mob runtime interrupt for session {} has no MeerkatMachine authority",
+            self.session_id
+        )))
     }
 }
 
@@ -219,7 +262,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         Some(Arc::new(SessionRuntimeInterruptHandle {
-            session_service: Arc::clone(&self.session_service),
+            runtime: Arc::clone(&self.runtime),
             session_id: self.session_id.clone(),
         }))
     }
@@ -315,9 +358,13 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.runtime
-            .interrupt_yielding(&self.session_id)
+            .cancel_after_boundary_live_with_machine_authority(&self.session_id)
             .await
-            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -339,6 +386,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(MobRpcRuntimeBoundaryHandle {
             session_service: Arc::clone(&self.session_service),
+            runtime: self.runtime.clone(),
             session_id: self.session_id.clone(),
         }))
     }
@@ -346,6 +394,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         Some(Arc::new(MobRpcRuntimeInterruptHandle {
             session_service: Arc::clone(&self.session_service),
+            runtime: self.runtime.clone(),
             session_id: self.session_id.clone(),
         }))
     }
@@ -368,7 +417,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             let pre_admission = self.runtime.as_ref().and_then(|runtime| {
                 runtime.take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids)
             });
-            if let (Some(runtime), Some(pre_admission)) = (self.runtime.as_ref(), pre_admission) {
+            if let Some(runtime) = self.runtime.as_ref() {
                 return runtime
                     .apply_runtime_context_appends_via_service(
                         &self.session_id,
@@ -376,7 +425,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         pending_system_context_appends_from_primitive(&staged.context_appends),
                         primitive.apply_boundary(),
                         staged.contributing_input_ids.clone(),
-                        Some(pre_admission),
+                        pre_admission,
                     )
                     .await
                     .map_err(|err| {
@@ -477,14 +526,34 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .cancel_after_boundary(&self.session_id)
-            .await
-            .or_else(|err| match err {
-                SessionError::NotRunning { .. } => Ok(()),
-                err => Err(err),
-            })
-            .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
+        if let Some(runtime) = self.runtime.as_ref() {
+            return runtime
+                .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()));
+        }
+        if let Some(adapter) = self.session_service.runtime_adapter() {
+            return self
+                .session_service
+                .cancel_after_boundary_with_machine_authority(
+                    &self.session_id,
+                    adapter.session_control_authority(),
+                )
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()));
+        }
+        Err(CoreExecutorError::control_failed_runtime(format!(
+            "mob runtime boundary cancel for session {} has no MeerkatMachine authority",
+            self.session_id
+        )))
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -622,6 +691,7 @@ mod tests {
             Arc::new(BoundaryCancelSessionService::unsupported());
         let handle = MobRpcRuntimeBoundaryHandle {
             session_service,
+            runtime: None,
             session_id,
         };
 
@@ -633,7 +703,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported: cancel_after_boundary"),
+                .contains("has no MeerkatMachine authority"),
             "unexpected boundary cancel error: {error:?}"
         );
     }
@@ -645,12 +715,19 @@ mod tests {
             Arc::new(BoundaryCancelSessionService::not_running());
         let handle = MobRpcRuntimeBoundaryHandle {
             session_service,
+            runtime: None,
             session_id,
         };
 
-        handle
+        let error = handle
             .cancel_after_boundary("test boundary cancel".to_string())
             .await
-            .expect("not-running boundary cancel remains an idempotent no-op");
+            .expect_err("not-running fallback must not bypass MeerkatMachine authority");
+        assert!(
+            error
+                .to_string()
+                .contains("has no MeerkatMachine authority"),
+            "unexpected boundary cancel error: {error:?}"
+        );
     }
 }

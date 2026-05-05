@@ -367,7 +367,10 @@ impl MeerkatMachine {
                 tracing::error!("prepare_bindings: unexpected command result variant");
                 Err(RuntimeBindingsError::SessionNotFound(session_id))
             }
-            Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
+            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id,
+                err.to_string(),
+            )),
         }
     }
 

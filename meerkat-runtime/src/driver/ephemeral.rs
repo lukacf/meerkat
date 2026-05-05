@@ -1091,20 +1091,6 @@ impl EphemeralRuntimeDriver {
         self.runtime_phase_snapshot().can_process_queue()
     }
 
-    /// Low-level control projection shim for external contract tests.
-    ///
-    /// This does not decide lifecycle legality; it only applies an already
-    /// chosen MeerkatMachine control projection to the concrete driver shell.
-    #[doc(hidden)]
-    pub fn contract_set_control_projection(
-        &mut self,
-        next_phase: RuntimeState,
-        current_run_id: Option<RunId>,
-        pre_run_phase: Option<RuntimeState>,
-    ) {
-        self.set_control_projection(next_phase, current_run_id, pre_run_phase);
-    }
-
     fn contract_session_authority_id(&self) -> mm_dsl::SessionId {
         mm_dsl::SessionId::from(self.runtime_id.to_string())
     }
@@ -1132,13 +1118,6 @@ impl EphemeralRuntimeDriver {
         )?;
         self.sync_control_projection_from_dsl_authority();
         Ok(session_id)
-    }
-
-    /// Contract helper for external tests that need a registered DSL session
-    /// before replaying lifecycle inputs through canonical authority.
-    #[doc(hidden)]
-    pub fn contract_register_session_authority(&mut self) -> Result<(), RuntimeDriverError> {
-        self.ensure_contract_session_authority().map(|_| ())
     }
 
     /// Contract helper for external tests that need to start a run through the
@@ -1194,87 +1173,6 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    /// Contract helper for external tests that complete a run through DSL
-    /// authority after shell-side input consumption has been realized.
-    #[doc(hidden)]
-    pub fn contract_commit_run_authority(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::Commit {
-                input_id: mm_dsl::InputId::from_domain(input_id),
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            "ContractCommitRun",
-        )?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
-    /// Contract helper for external tests that roll back a run through DSL
-    /// authority after shell-side contributor replay has been realized.
-    #[doc(hidden)]
-    pub fn contract_rollback_run_authority(
-        &mut self,
-        run_id: &RunId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::RollbackRun {
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            "ContractRollbackRun",
-        )?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
-    /// Contract helper for external tests that need the runtime retired via
-    /// canonical DSL authority before invoking shell cleanup assertions.
-    #[doc(hidden)]
-    pub fn contract_retire_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
-        let session_id = self.ensure_contract_session_authority()?;
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::Retire { session_id },
-            "ContractRetire",
-        )?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
-    /// Contract helper for external tests that need reset lifecycle authority
-    /// replayed through the DSL before invoking shell cleanup assertions.
-    #[doc(hidden)]
-    pub fn contract_reset_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
-        self.dsl_apply(mm_dsl::MeerkatMachineInput::Reset, "ContractReset")?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
-    /// Contract helper for external tests that need destroyed lifecycle
-    /// authority replayed through the DSL after shell cleanup assertions.
-    #[doc(hidden)]
-    pub fn contract_destroy_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
-        let session_id = self.ensure_contract_session_authority()?;
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::Destroy { session_id },
-            "ContractDestroy",
-        )?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
-    /// Contract helper for external tests that need stopped lifecycle authority
-    /// replayed through the DSL before invoking shell cleanup assertions.
-    #[doc(hidden)]
-    pub fn contract_stop_runtime_authority(&mut self) -> Result<(), RuntimeDriverError> {
-        self.apply_stop_runtime_executor_authority()?;
-        self.apply_runtime_executor_exited_authority()?;
-        self.sync_control_projection_from_dsl_authority();
-        Ok(())
-    }
-
     fn set_phase(&mut self, next_phase: RuntimeState) -> RuntimeState {
         let mut control = self.write_control_projection();
         let from_phase = control.phase;
@@ -1326,7 +1224,7 @@ impl EphemeralRuntimeDriver {
     /// durable lifecycle facts through DSL inputs instead of calling this.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn contract_force_runtime_authority(
+    pub(crate) fn contract_force_runtime_authority(
         &mut self,
         next_phase: RuntimeState,
         current_run_id: Option<RunId>,
@@ -1357,16 +1255,6 @@ impl EphemeralRuntimeDriver {
         )
     }
 
-    pub(crate) fn apply_stop_runtime_executor_authority(
-        &mut self,
-    ) -> Result<(), RuntimeDriverError> {
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::StopRuntimeExecutor {
-                reason: "runtime executor stopped".to_string(),
-            },
-            "StopRuntimeExecutor",
-        )
-    }
     /// Drain and return the accumulated post-admission signal.
     ///
     /// Returns the strongest signal seen since the last drain and resets to `None`.
@@ -1667,7 +1555,7 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    pub fn consume_inputs(
+    pub(crate) fn consume_inputs(
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
@@ -1814,14 +1702,6 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    /// Low-level retire realization shim for external contract tests.
-    ///
-    /// Callers are responsible for setting the control projection first.
-    #[doc(hidden)]
-    pub fn contract_finalize_retire(&mut self) -> RetireReport {
-        self.finalize_retire()
-    }
-
     pub(crate) fn reset_cleanup(&mut self) -> ResetReport {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
         self.queue.drain();
@@ -1835,14 +1715,6 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    /// Low-level reset realization shim for external contract tests.
-    ///
-    /// Callers are responsible for setting the post-reset control projection.
-    #[doc(hidden)]
-    pub fn contract_reset_cleanup(&mut self) -> ResetReport {
-        self.reset_cleanup()
-    }
-
     pub(crate) fn destroy_cleanup(&mut self) -> usize {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
         self.queue.drain();
@@ -1852,14 +1724,6 @@ impl EphemeralRuntimeDriver {
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
         abandoned
-    }
-
-    /// Low-level destroy realization shim for external contract tests.
-    ///
-    /// Callers are responsible for setting the destroyed control projection.
-    #[doc(hidden)]
-    pub fn contract_destroy_cleanup(&mut self) -> usize {
-        self.destroy_cleanup()
     }
 
     pub(crate) fn stop_runtime_cleanup(&mut self) {
@@ -1873,19 +1737,11 @@ impl EphemeralRuntimeDriver {
         self.stop_runtime_cleanup();
     }
 
-    /// Low-level stop realization shim for external contract tests.
-    ///
-    /// Callers are responsible for setting the stopped control projection.
-    #[doc(hidden)]
-    pub fn contract_finalize_stop_runtime(&mut self) {
-        self.finalize_stop_runtime();
-    }
-
     pub fn recover_ephemeral(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
         crate::meerkat_machine::machine_recover_ephemeral_driver(self)
     }
 
-    pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+    pub(crate) fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
         let transferred = self
             .ledger
             .iter()
@@ -2192,7 +2048,7 @@ impl EphemeralRuntimeDriver {
         count
     }
 
-    pub fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
+    pub(crate) fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
         let abandoned = self.abandon_all_non_terminal(reason);
         self.queue.drain();
         self.steer_queue.drain();
@@ -2200,14 +2056,6 @@ impl EphemeralRuntimeDriver {
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
         abandoned
-    }
-
-    pub async fn run_completed(
-        &mut self,
-        run_id: RunId,
-        consumed_input_ids: Vec<InputId>,
-    ) -> Result<(), RuntimeDriverError> {
-        self.machine_realize_run_completed(&run_id, &consumed_input_ids)
     }
 
     /// Machine-owned realization for a validated run-completion transition.
@@ -2221,17 +2069,6 @@ impl EphemeralRuntimeDriver {
         consumed_input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
         self.consume_inputs(consumed_input_ids, run_id)
-    }
-
-    pub async fn run_failed(
-        &mut self,
-        run_id: RunId,
-        contributing_input_ids: Vec<InputId>,
-        replay_plan: ReplayQueuedContributorsPlan,
-        _failure: meerkat_core::lifecycle::CoreApplyFailureCause,
-        _recoverable: bool,
-    ) -> Result<(), RuntimeDriverError> {
-        self.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
     }
 
     /// Machine-owned realization for a validated failed-run replay plan.
@@ -2256,15 +2093,6 @@ impl EphemeralRuntimeDriver {
         // transitions and re-inserts surviving contributors into the correct
         // lane — no separate lane seeding is needed here.
         self.rollback_staged(contributing_input_ids)
-    }
-
-    pub async fn boundary_applied(
-        &mut self,
-        run_id: RunId,
-        receipt: RunBoundaryReceipt,
-        _session_snapshot: Option<Vec<u8>>,
-    ) -> Result<(), RuntimeDriverError> {
-        self.machine_realize_boundary_applied(&run_id, &receipt)
     }
 
     /// Machine-owned realization for a validated boundary-application step.

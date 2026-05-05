@@ -7,7 +7,6 @@ use meerkat_core::lifecycle::core_executor::{
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
-use meerkat_core::service::SessionService;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
@@ -256,6 +255,7 @@ pub async fn install_prepared_runtime_interrupt_handle(
             session_id,
             Arc::new(PersistentRuntimeInterruptHandle {
                 service: Arc::clone(service),
+                adapter: Arc::clone(adapter),
                 session_id: session_id.clone(),
             }),
         )
@@ -291,6 +291,7 @@ pub struct PersistentRuntimeExecutor {
 
 struct PersistentRuntimeBoundaryHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 }
 
@@ -298,7 +299,10 @@ struct PersistentRuntimeBoundaryHandle {
 impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.adapter.session_control_authority(),
+            )
             .await
             .or_else(|error| match error {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -310,6 +314,7 @@ impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
 
 struct PersistentRuntimeInterruptHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 }
 
@@ -317,7 +322,10 @@ struct PersistentRuntimeInterruptHandle {
 impl CoreExecutorInterruptHandle for PersistentRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
-            .interrupt(&self.session_id)
+            .interrupt_with_machine_authority(
+                &self.session_id,
+                self.adapter.session_control_authority(),
+            )
             .await
             .or_else(|error| match error {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -397,6 +405,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(PersistentRuntimeBoundaryHandle {
             service: Arc::clone(&self.service),
+            adapter: Arc::clone(&self.adapter),
             session_id: self.session_id.clone(),
         }))
     }
@@ -404,6 +413,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         Some(Arc::new(PersistentRuntimeInterruptHandle {
             service: Arc::clone(&self.service),
+            adapter: Arc::clone(&self.adapter),
             session_id: self.session_id.clone(),
         }))
     }
@@ -525,7 +535,10 @@ impl CoreExecutor for PersistentRuntimeExecutor {
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.adapter.session_control_authority(),
+            )
             .await
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
@@ -558,6 +571,7 @@ fn ensure_materialized_session_id_matches(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::service::SessionService;
 
     #[cfg(all(
         feature = "openai",

@@ -1602,13 +1602,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `realtime_projection_frontier_ms` holds the monotonic
             // watermark — the `baseline_ms` while `Clean`, or the pending
             // advance's `new_at_ms` while `StaleDeferred` / `StaleImmediate`.
-            // Transitions are driven by four inputs:
+            // Transitions are driven by five inputs:
             //   * `RealtimeProjectionAdvanceObserved { advanced_at_ms }` —
             //     fired on every `SessionContextAdvanced` observer tick;
             //     routes to `StaleDeferred` if the product turn is live,
             //     `StaleImmediate` otherwise.
             //   * `RealtimeProjectionRefreshed { observed_ms }` — fired
-            //     after a successful provider-session refresh drain.
+            //     after a successful provider-session refresh drain; this is
+            //     the only non-reset path allowed to clear stale.
+            //   * `RealtimeProjectionBaselineObserved { observed_ms }` —
+            //     fired after provider-owned transcript/progress mutations
+            //     that the current provider session already knows about. It
+            //     advances a clean frontier but must not clear a pending
+            //     external stale advance.
             //   * `RealtimeProjectionReset { baseline_ms }` — fired on
             //     product-session close / error / reconnect to re-seed the
             //     `Clean` baseline.
@@ -4178,13 +4184,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit IngressAccepted
         }
 
-        // 27. Peer-ingress classification: Attached/Running self-loops.
+        // 27. Peer-ingress classification.
         //
         // Comms supplies only parsed transport facts. The DSL owns the
         // semantic classification result emitted on `PeerIngressClassified`:
         // peer input class, auth exemption, lifecycle subject, silent routing,
         // and response terminality. The legacy `EnqueueClassifiedEntry` effect
         // remains as the coarse queue signal for existing machine audits.
+        //
+        // Peer lifecycle notices are mob topology control-plane mechanics, so
+        // live idle members may still classify them without admitting normal
+        // peer work while no run is active. Retired/stopped members may drain
+        // only peer-retired and peer-unwired cleanup notices during teardown.
         transition ClassifyExternalEnvelopeMessageAttached {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
@@ -4240,6 +4251,36 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerAddedIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_added"
+            }
+            update {}
+            to Idle
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
@@ -4317,6 +4358,96 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        transition ClassifyExternalEnvelopeRequestPeerRetiredIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_retired"
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerRetiredRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_retired"
+            }
+            update {}
+            to Retired
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerRetiredStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_retired"
+            }
+            update {}
+            to Stopped
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeRequestPeerRetiredRunning {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
@@ -4360,6 +4491,96 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerUnwiredIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_unwired"
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerUnwiredRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_unwired"
+            }
+            update {}
+            to Retired
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerUnwiredStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_unwired"
+            }
+            update {}
+            to Stopped
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
@@ -4619,6 +4840,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        transition ClassifyExternalEnvelopeLifecycleAddedIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeLifecycleAddedAttached {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
@@ -4679,6 +4930,96 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        transition ClassifyExternalEnvelopeLifecycleRetiredIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleRetiredRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
+            }
+            update {}
+            to Retired
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleRetiredStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
+            }
+            update {}
+            to Stopped
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeLifecycleRetiredAttached {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
@@ -4728,6 +5069,96 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleUnwiredIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleUnwiredRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
+            }
+            update {}
+            to Retired
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleUnwiredStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
+            }
+            update {}
+            to Stopped
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
                 lifecycle_peer: Some(if lifecycle_peer_param.is_some()
                     && lifecycle_peer_param.get("value") != ""
                 {
@@ -8374,19 +8805,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // After a successful provider-session refresh drain (or at an
-        // own-turn commit that advanced the session-context watermark to
-        // `observed_ms`). Returns to `Clean` ONLY when `observed_ms`
-        // matches or exceeds the current frontier. If a concurrent
-        // external advance (e.g. a peer_response_terminal landing while
-        // our own turn was committing) already pushed the frontier above
-        // `observed_ms` via a `RealtimeProjectionAdvanceObserved` tick,
-        // the refresh is guard-rejected so the stale state at the higher
-        // frontier is preserved — the external advance still owes a
-        // refresh, and clobbering it here would drop the tick the next
-        // drain site depends on. This is the DSL-owned successor of the
-        // shell-side "preserve newer concurrent external advance" dance
-        // #299 introduced on the pre-U-C W2-E freshness state.
+        // After a successful provider-session refresh drain. Returns to
+        // `Clean` ONLY when `observed_ms` matches or exceeds the current
+        // frontier. If a concurrent external advance (e.g. a
+        // peer_response_terminal landing while our own turn was committing)
+        // already pushed the frontier above `observed_ms` via a
+        // `RealtimeProjectionAdvanceObserved` tick, the refresh is
+        // guard-rejected so the stale state at the higher frontier is
+        // preserved — the external advance still owes a refresh, and
+        // clobbering it here would drop the tick the next drain site depends
+        // on. This is the DSL-owned successor of the shell-side "preserve
+        // newer concurrent external advance" dance #299 introduced on the
+        // pre-U-C W2-E freshness state.
         transition RealtimeProjectionRefreshed {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input RealtimeProjectionRefreshed { observed_ms }
@@ -8402,6 +8832,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if observed_ms > self.realtime_projection_frontier_ms {
                     self.realtime_projection_frontier_ms = observed_ms;
                 }
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::Clean,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        // Provider-owned realtime events can advance canonical session
+        // context for data the currently-open provider session already knows
+        // about (e.g. its own transcript/progress). That may raise the global
+        // session-context watermark past a pending external runtime-context
+        // advance. This input advances the clean baseline when there is no
+        // pending stale work, but it deliberately refuses to clear
+        // `StaleDeferred` / `StaleImmediate`; only an actual provider-session
+        // refresh drain may do that.
+        transition RealtimeProjectionBaselineObservedClean {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionBaselineObserved { observed_ms }
+            guard "clean" {
+                self.realtime_projection_freshness == RealtimeProjectionFreshness::Clean
+            }
+            guard "monotonic" { observed_ms > self.realtime_projection_frontier_ms }
+            update {
+                self.realtime_projection_frontier_ms = observed_ms;
             }
             to Idle
             emit RealtimeProjectionFreshnessChanged {

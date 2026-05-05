@@ -25,6 +25,7 @@ use oai_rt_rs::protocol::models::{
     Role, SessionUpdate, SessionUpdateConfig, Tool, TurnDetection, Voice,
 };
 use oai_rt_rs::{ClientEvent, Error as OpenAiLiveError, RealtimeClient, ServerEvent};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -286,18 +287,63 @@ fn openai_realtime_runtime_system_context_text(append: &PendingSystemContextAppe
 fn openai_realtime_authoritative_system_context(
     runtime_system_context: &[PendingSystemContextAppend],
 ) -> Option<String> {
-    let lines = runtime_system_context
+    let summaries = runtime_system_context
+        .iter()
+        .filter_map(openai_realtime_terminal_peer_response_summary)
+        .collect::<Vec<_>>();
+    let raw_lines = runtime_system_context
         .iter()
         .map(|append| append.text.trim())
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    (!lines.is_empty()).then(|| {
-        format!(
-            "Authoritative Meerkat runtime facts for this live-session reconstruction. Treat these facts as ground truth even if earlier conversation text conflicts:\n- {}",
-            lines.join("\n- ")
-        )
-    })
+    if summaries.is_empty() && raw_lines.is_empty() {
+        return None;
+    }
+
+    let mut text = String::from(
+        "Authoritative Meerkat runtime facts for this live-session reconstruction. Treat these facts as ground truth even if earlier conversation text conflicts.",
+    );
+    if !summaries.is_empty() {
+        text.push_str(
+            "\n\nResolved terminal peer-response facts. Use these resolved facts directly; if a matching fact exists, do not answer that you are still waiting for the peer response. When multiple facts match the same request_intent and request_subject, the later bullet wins:\n- ",
+        );
+        text.push_str(&summaries.join("\n- "));
+    }
+    if !raw_lines.is_empty() {
+        text.push_str("\n\nRaw runtime facts:\n- ");
+        text.push_str(&raw_lines.join("\n- "));
+    }
+    Some(text)
+}
+
+fn openai_realtime_terminal_peer_response_summary(
+    append: &PendingSystemContextAppend,
+) -> Option<String> {
+    if !append
+        .text
+        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+    {
+        return None;
+    }
+    let (_, result_text) = append.text.split_once("Result:")?;
+    let mut deserializer = serde_json::Deserializer::from_str(result_text.trim());
+    let result = serde_json::Value::deserialize(&mut deserializer).ok()?;
+    let intent = result.get("request_intent").and_then(|value| value.as_str())?;
+    let subject = result
+        .get("request_subject")
+        .and_then(|value| value.as_str());
+    let token = result.get("token").and_then(|value| value.as_str());
+    let source = append.source.as_deref().unwrap_or("runtime_system_context");
+
+    let mut fields = vec![format!("source `{source}`"), format!("request_intent `{intent}`")];
+    if let Some(subject) = subject {
+        fields.push(format!("request_subject `{subject}`"));
+    }
+    if let Some(token) = token {
+        fields.push(format!("token `{token}`"));
+    }
+    Some(fields.join(", "))
 }
 
 fn openai_realtime_history_events(
@@ -364,10 +410,9 @@ fn openai_realtime_history_events(
     //   structure instead of only a prose recap
     // - runtime-owned async context (for example terminal peer responses
     //   accepted into session system context) is replayed as explicit system
-    //   message items in-order, not hidden only inside the root instruction
-    //   blob. This keeps rebuilds closer to the Meerkat-owned semantic shape:
-    //   prompt/config in the root session update, authoritative late-arriving
-    //   facts as their own replayable context items.
+    //   message items after dialogue so late-arriving runtime facts remain
+    //   the last provider-visible reconstruction items, not stale prelude
+    //   that later "waiting" dialogue can override.
     let runtime_items = runtime_system_context.iter().filter_map(|append| {
         let text = openai_realtime_runtime_system_context_text(append);
         let text = text.trim();
@@ -383,12 +428,10 @@ fn openai_realtime_history_events(
         })
     });
 
-    let projected = runtime_items
-        .chain(
-            seed_messages
-                .iter()
-                .filter_map(canonical_projection_history_item),
-        )
+    let projected = seed_messages
+        .iter()
+        .filter_map(canonical_projection_history_item)
+        .chain(runtime_items)
         .collect::<Vec<_>>();
     // Dogma note:
     // reconstruction fidelity belongs to canonical Meerkat session history, not
@@ -694,18 +737,16 @@ fn openai_realtime_instructions(
     if let Some(authoritative_context) =
         openai_realtime_authoritative_system_context(runtime_system_context)
     {
-        // Put the freshest runtime-owned facts first. These are the pieces most
-        // likely to change between reconnects/reconstructions, and they must
-        // override older transcript scaffolding when the provider rebuilds an
-        // otherwise stateful live session from text projection.
+        // Put the freshest runtime-owned facts before the root prompt and do
+        // not also duplicate stale dialogue recap into the instructions field.
+        // Canonical dialogue is already replayed as conversation items; the
+        // instructions channel should carry the machine-owned runtime override
+        // clearly enough to beat older assistant "waiting" utterances.
         let mut instructions = Vec::new();
         if let Some(pin) = language_pin {
             instructions.push(pin);
         }
         instructions.push(authoritative_context);
-        if let Some(history) = openai_realtime_history_context(seed_messages) {
-            instructions.push(history);
-        }
         instructions.extend(
             seed_messages
                 .iter()
@@ -1052,6 +1093,10 @@ impl OpenAiRealtimeSession {
         previous_item_id.filter(|item_id| !self.projected_seed_item_ids.contains(item_id))
     }
 
+    fn is_projected_seed_item(&self, item_id: &str) -> bool {
+        self.projected_seed_item_ids.contains(item_id)
+    }
+
     fn note_previous_for_item(&mut self, item_id: &str, previous_item_id: Option<String>) {
         let entry = self
             .item_previous
@@ -1314,14 +1359,23 @@ impl OpenAiRealtimeSession {
                 item,
                 ..
             } => {
-                if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item) {
+                if let Some(item_id) = openai_realtime_item_id(&item)
+                    && self.is_projected_seed_item(item_id)
+                {
+                    self.note_previous_for_item(item_id, previous_item_id);
+                    None
+                } else if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item)
+                {
                     Some(self.observe_transcript_item(item_id, previous_item_id, role, None))
                 } else {
                     openai_realtime_skipped_item_id(&item)
                         .map(|item_id| self.observe_skipped_item(item_id, previous_item_id))
                 }
             }
-            ServerEvent::InputAudioTranscriptionDelta { delta, .. } => {
+            ServerEvent::InputAudioTranscriptionDelta { item_id, delta, .. } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 Some(RealtimeSessionEvent::InputTranscriptPartial { text: delta })
             }
             ServerEvent::InputAudioTranscriptionCompleted {
@@ -1329,12 +1383,17 @@ impl OpenAiRealtimeSession {
                 content_index,
                 transcript,
                 ..
-            } => Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
-                previous_item_id: self.previous_item_id_for(&item_id),
-                item_id,
-                content_index,
-                text: transcript,
-            }),
+            } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
+                Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                    previous_item_id: self.previous_item_id_for(&item_id),
+                    item_id,
+                    content_index,
+                    text: transcript,
+                })
+            }
             ServerEvent::InputAudioBufferSpeechStarted { .. } => {
                 if self.response_output_active && !self.response_interrupt_emitted {
                     let response_id = self.active_response_id.clone();
@@ -1353,6 +1412,9 @@ impl OpenAiRealtimeSession {
                 item_id,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 self.note_previous_for_item(&item_id, previous_item_id);
                 self.awaiting_provider_response_after_commit =
                     self.turning_mode == RealtimeTurningMode::ProviderManaged;
@@ -1481,6 +1543,11 @@ impl OpenAiRealtimeSession {
             | ServerEvent::ResponseOutputItemDone {
                 response_id, item, ..
             } => {
+                if let Some(item_id) = openai_realtime_item_id(&item)
+                    && self.is_projected_seed_item(item_id)
+                {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 if let Some(item_id) = openai_realtime_item_id(&item) {
                     self.note_response_for_item(&response_id, item_id);
@@ -1526,6 +1593,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 if self.should_suppress_mcp_echoed_text(&delta) {
                     None
@@ -1550,6 +1620,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 Some(self.note_output_audio_transcript_delta(
                     response_id,
@@ -1567,6 +1640,9 @@ impl OpenAiRealtimeSession {
                 transcript,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 self.note_output_audio_transcript_done(
                     response_id,
@@ -1582,6 +1658,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 self.mark_response_output_active();
                 self.note_response_for_item(&response_id, &item_id);
@@ -1617,6 +1696,9 @@ impl OpenAiRealtimeSession {
                 audio_end_ms,
                 ..
             } => {
+                if self.is_projected_seed_item(&item_id) {
+                    return Ok(None);
+                }
                 // Honor the server-side truncation cursor over any stale
                 // client-reported one: the canonical session must reflect
                 // what OpenAI considers heard, not what the client guessed.
@@ -2731,6 +2813,92 @@ mod tests {
     }
 
     #[test]
+    fn instructions_resolve_terminal_peer_response_facts() {
+        let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
+            "You are the realtime operator.".to_string(),
+        ))];
+        let runtime_system_context = vec![PendingSystemContextAppend {
+            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {
+  \"request_intent\": \"checksum_token\",
+  \"request_subject\": \"alpha beta gamma\",
+  \"token\": \"birch seventeen\"
+}."
+            .to_string(),
+            source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+            idempotency_key: Some("req-123".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+        }];
+
+        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
+            .expect("terminal peer response should produce instructions");
+
+        assert!(
+            instructions.contains("Resolved terminal peer-response facts"),
+            "expected terminal peer response summary section: {instructions}"
+        );
+        assert!(
+            instructions.contains("request_intent `checksum_token`"),
+            "expected request intent summary: {instructions}"
+        );
+        assert!(
+            instructions.contains("request_subject `alpha beta gamma`"),
+            "expected request subject summary: {instructions}"
+        );
+        assert!(
+            instructions.contains("token `birch seventeen`"),
+            "expected token summary: {instructions}"
+        );
+        assert!(
+            instructions.contains("do not answer that you are still waiting"),
+            "expected waiting-state override guidance: {instructions}"
+        );
+        assert!(
+            instructions.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"),
+            "expected raw terminal runtime fact to remain visible: {instructions}"
+        );
+    }
+
+    #[test]
+    fn instructions_put_runtime_terminal_facts_before_stale_waiting_dialogue() {
+        let seed_messages = vec![
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the realtime operator.".to_string(),
+            )),
+            Message::Assistant(meerkat_core::AssistantMessage {
+                content: "Waiting for analyst token.".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }),
+        ];
+        let runtime_system_context = vec![PendingSystemContextAppend {
+            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+            source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+            idempotency_key: Some("req-123".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+        }];
+
+        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
+            .expect("terminal peer response should produce instructions");
+
+        let runtime_index = instructions
+            .find("Resolved terminal peer-response facts")
+            .expect("runtime terminal facts should be present");
+        let root_index = instructions
+            .find("You are the realtime operator.")
+            .expect("root system prompt should be present");
+        assert!(
+            runtime_index < root_index,
+            "runtime facts should precede root prompt in realtime instructions: {instructions}"
+        );
+        assert!(
+            !instructions.contains("Waiting for analyst token."),
+            "stale assistant waiting dialogue should only be replayed as dialogue items, not duplicated in instructions: {instructions}"
+        );
+    }
+
+    #[test]
     fn instructions_include_dialogue_recap_for_text_first_reconstruction() {
         let seed_messages = vec![
             Message::System(meerkat_core::SystemMessage::new(
@@ -2837,23 +3005,6 @@ mod tests {
                 if matches!(
                     item.as_ref(),
                     Item::Message {
-                        role: Role::System,
-                        content,
-                        ..
-                    } if matches!(
-                        content.as_slice(),
-                        [ContentPart::InputText { text }]
-                            if text.contains("peer_response_terminal:analyst-rt:req-123")
-                                && text.contains("birch seventeen")
-                    )
-                )
-        ));
-        assert!(matches!(
-            &events[1],
-            ClientEvent::ConversationItemCreate { item, .. }
-                if matches!(
-                    item.as_ref(),
-                    Item::Message {
                         role: Role::User,
                         content,
                         ..
@@ -2864,7 +3015,7 @@ mod tests {
                 )
         ));
         assert!(matches!(
-            &events[2],
+            &events[1],
             ClientEvent::ConversationItemCreate { item, .. }
                 if matches!(
                     item.as_ref(),
@@ -2879,7 +3030,7 @@ mod tests {
                 )
         ));
         assert!(matches!(
-            &events[3],
+            &events[2],
             ClientEvent::ConversationItemCreate { item, .. }
                 if matches!(
                     item.as_ref(),
@@ -2890,6 +3041,23 @@ mod tests {
                     } if matches!(
                         content.as_slice(),
                         [ContentPart::OutputText { text }] if text == "silver harbor"
+                    )
+                )
+        ));
+        assert!(matches!(
+            &events[3],
+            ClientEvent::ConversationItemCreate { item, .. }
+                if matches!(
+                    item.as_ref(),
+                    Item::Message {
+                        role: Role::System,
+                        content,
+                        ..
+                    } if matches!(
+                        content.as_slice(),
+                        [ContentPart::InputText { text }]
+                            if text.contains("peer_response_terminal:analyst-rt:req-123")
+                                && text.contains("birch seventeen")
                     )
                 )
         ));
@@ -3598,6 +3766,18 @@ mod tests {
                 next_events: Arc::new(Mutex::new(VecDeque::from(vec![
                     Ok(Some(ServerEvent::ConversationItemCreated {
                         event_id: "evt_seed_user".to_string(),
+                        previous_item_id: None,
+                        item: Item::Message {
+                            id: Some("item_seed_user".to_string()),
+                            status: None,
+                            role: Role::User,
+                            content: vec![ContentPart::InputText {
+                                text: "remember amber lantern".to_string(),
+                            }],
+                        },
+                    })),
+                    Ok(Some(ServerEvent::ConversationItemDone {
+                        event_id: "evt_seed_user_done".to_string(),
                         previous_item_id: None,
                         item: Item::Message {
                             id: Some("item_seed_user".to_string()),

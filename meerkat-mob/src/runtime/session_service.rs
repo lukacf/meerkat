@@ -125,6 +125,30 @@ pub trait MobSessionService:
         None
     }
 
+    /// Apply a live hard cancel after `MeerkatMachine` accepts the cancel command.
+    #[cfg(feature = "runtime-adapter")]
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(format!(
+            "interrupt for runtime-backed mob session {session_id} must be implemented by the machine-owned session service"
+        )))
+    }
+
+    /// Apply a live cooperative boundary cancel after `MeerkatMachine` accepts the command.
+    #[cfg(feature = "runtime-adapter")]
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(format!(
+            "cancel_after_boundary for runtime-backed mob session {session_id} must be implemented by the machine-owned session service"
+        )))
+    }
+
     async fn execution_snapshot(
         &self,
         _session_id: &SessionId,
@@ -295,6 +319,24 @@ where
         ))
     }
 
+    #[cfg(feature = "runtime-adapter")]
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        meerkat_core::service::SessionService::interrupt(self, session_id).await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        meerkat_core::service::SessionService::cancel_after_boundary(self, session_id).await
+    }
+
     async fn execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -455,6 +497,30 @@ where
     ) -> Result<Option<Session>, SessionError> {
         let session = self.load_authoritative_session(session_id).await?;
         Ok(session.filter(|session| !session_metadata_marks_archived(session)))
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::interrupt_with_machine_authority(
+            self, session_id, authority,
+        )
+        .await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::cancel_after_boundary_with_machine_authority(
+            self, session_id, authority,
+        )
+        .await
     }
 
     async fn execution_snapshot(

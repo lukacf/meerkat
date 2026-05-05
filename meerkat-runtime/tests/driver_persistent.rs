@@ -1,21 +1,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use meerkat_core::BlobStore;
-use meerkat_core::lifecycle::{
-    InputId, RunId, run_primitive::RunApplyBoundary, run_receipt::RunBoundaryReceipt,
-};
+use meerkat_core::lifecycle::{InputId, RunId, run_receipt::RunBoundaryReceipt};
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
 use meerkat_runtime::input_state::{InputStateSeed, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
     InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput, RuntimeDriver,
-    RuntimeDriverError, RuntimeState, RuntimeStore, SessionDelta,
+    RuntimeState, RuntimeStore, SessionDelta,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -53,10 +52,11 @@ struct FailPersistInputStore {
     inner: Arc<InMemoryRuntimeStore>,
     fail_persist_input_state: AtomicBool,
     fail_atomic_apply: AtomicBool,
-    fail_atomic_lifecycle_commit: AtomicBool,
+    fail_commit_machine_lifecycle: AtomicBool,
     fail_load_input_states_for: Option<LogicalRuntimeId>,
     fail_load_boundary_receipt_for: Option<LogicalRuntimeId>,
     fail_load_runtime_state_for: Option<LogicalRuntimeId>,
+    runtime_state_overrides: Mutex<HashMap<LogicalRuntimeId, RuntimeState>>,
 }
 
 impl FailPersistInputStore {
@@ -65,34 +65,37 @@ impl FailPersistInputStore {
             inner,
             fail_persist_input_state: AtomicBool::new(true),
             fail_atomic_apply: AtomicBool::new(false),
-            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_load_input_states_for: None,
             fail_load_boundary_receipt_for: None,
             fail_load_runtime_state_for: None,
+            runtime_state_overrides: Mutex::new(HashMap::new()),
         }
     }
 
-    fn fail_atomic_apply_once(inner: Arc<InMemoryRuntimeStore>) -> Self {
-        Self {
-            inner,
-            fail_persist_input_state: AtomicBool::new(false),
-            fail_atomic_apply: AtomicBool::new(true),
-            fail_atomic_lifecycle_commit: AtomicBool::new(false),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: None,
-        }
-    }
-
-    fn fail_atomic_lifecycle_commit_once(inner: Arc<InMemoryRuntimeStore>) -> Self {
+    fn passthrough(inner: Arc<InMemoryRuntimeStore>) -> Self {
         Self {
             inner,
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
-            fail_atomic_lifecycle_commit: AtomicBool::new(true),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_load_input_states_for: None,
             fail_load_boundary_receipt_for: None,
             fail_load_runtime_state_for: None,
+            runtime_state_overrides: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn fail_commit_machine_lifecycle_once(inner: Arc<InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_persist_input_state: AtomicBool::new(false),
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(true),
+            fail_load_input_states_for: None,
+            fail_load_boundary_receipt_for: None,
+            fail_load_runtime_state_for: None,
+            runtime_state_overrides: Mutex::new(HashMap::new()),
         }
     }
 
@@ -104,10 +107,11 @@ impl FailPersistInputStore {
             inner,
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
-            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_load_input_states_for: Some(runtime_id),
             fail_load_boundary_receipt_for: None,
             fail_load_runtime_state_for: None,
+            runtime_state_overrides: Mutex::new(HashMap::new()),
         }
     }
 
@@ -119,10 +123,11 @@ impl FailPersistInputStore {
             inner,
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
-            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_load_input_states_for: None,
             fail_load_boundary_receipt_for: Some(runtime_id),
             fail_load_runtime_state_for: None,
+            runtime_state_overrides: Mutex::new(HashMap::new()),
         }
     }
 
@@ -134,37 +139,28 @@ impl FailPersistInputStore {
             inner,
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
-            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_load_input_states_for: None,
             fail_load_boundary_receipt_for: None,
             fail_load_runtime_state_for: Some(runtime_id),
+            runtime_state_overrides: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn seed_runtime_state_projection(
+        &self,
+        runtime_id: LogicalRuntimeId,
+        runtime_state: RuntimeState,
+    ) {
+        self.runtime_state_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(runtime_id, runtime_state);
     }
 }
 
 #[async_trait]
 impl RuntimeStore for FailPersistInputStore {
-    async fn commit_session_boundary(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        run_id: RunId,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<StoredInputState>,
-    ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
-        self.inner
-            .commit_session_boundary(
-                runtime_id,
-                session_delta,
-                run_id,
-                boundary,
-                contributing_input_ids,
-                input_updates,
-            )
-            .await
-    }
-
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -255,14 +251,6 @@ impl RuntimeStore for FailPersistInputStore {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
-    async fn persist_runtime_state(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        state: RuntimeState,
-    ) -> Result<(), RuntimeStoreError> {
-        self.inner.persist_runtime_state(runtime_id, state).await
-    }
-
     async fn load_runtime_state(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -272,25 +260,38 @@ impl RuntimeStore for FailPersistInputStore {
                 "synthetic legacy runtime-state load failure".into(),
             ));
         }
+        if let Some(runtime_state) = self
+            .runtime_state_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(runtime_id)
+            .copied()
+        {
+            return Ok(Some(runtime_state));
+        }
         self.inner.load_runtime_state(runtime_id).await
     }
 
-    async fn atomic_lifecycle_commit(
+    async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-        runtime_state: RuntimeState,
+        commit: meerkat_runtime::store::MachineLifecycleCommit,
         input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
         if self
-            .fail_atomic_lifecycle_commit
+            .fail_commit_machine_lifecycle
             .swap(false, Ordering::SeqCst)
         {
             return Err(RuntimeStoreError::WriteFailed(
-                "synthetic atomic_lifecycle_commit failure".into(),
+                "synthetic commit_machine_lifecycle failure".into(),
             ));
         }
+        self.runtime_state_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(runtime_id);
         self.inner
-            .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+            .commit_machine_lifecycle(runtime_id, commit, input_states)
             .await
     }
 
@@ -354,27 +355,6 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
         ]),
         turn_metadata: None,
     })
-}
-
-fn bind_running(driver: &mut PersistentRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    assert_eq!(driver.runtime_state(), pre_run_phase);
-    driver.contract_begin_run_authority(run_id).unwrap();
-    assert_eq!(driver.runtime_state(), RuntimeState::Running);
-    assert_eq!(driver.inner_ref().pre_run_phase(), Some(pre_run_phase));
-}
-
-async fn retire_runtime(
-    driver: &mut PersistentRuntimeDriver,
-) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_retire_runtime_authority()?;
-    driver.contract_finalize_retire().await
-}
-
-async fn reset_runtime(
-    driver: &mut PersistentRuntimeDriver,
-) -> Result<meerkat_runtime::ResetReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_reset_runtime_authority()?;
-    driver.contract_finalize_reset().await
 }
 
 #[tokio::test]
@@ -553,90 +533,6 @@ async fn recover_filters_ephemeral_inputs() {
 }
 
 #[tokio::test]
-async fn boundary_applied_persists_atomically() {
-    use meerkat_core::lifecycle::RunId;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-
-    // Accept and manually process an input
-    let input = make_prompt("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    // Fire BoundaryApplied — this should persist atomically
-    let receipt = RunBoundaryReceipt {
-        run_id: run_id.clone(),
-        boundary: RunApplyBoundary::RunStart,
-        contributing_input_ids: vec![input_id.clone()],
-        conversation_digest: None,
-        message_count: 1,
-        sequence: 0,
-    };
-    driver
-        .boundary_applied(
-            run_id.clone(),
-            receipt.clone(),
-            Some(b"session-data".to_vec()),
-        )
-        .await
-        .unwrap();
-
-    // Verify the receipt was persisted via atomic_apply
-    let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
-    assert!(
-        loaded.is_some(),
-        "BoundaryApplied should persist the receipt via atomic_apply"
-    );
-}
-
-#[tokio::test]
-async fn boundary_apply_failure_restores_staged_state() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> =
-        Arc::new(FailPersistInputStore::fail_atomic_apply_once(inner.clone()));
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-
-    let input = make_prompt("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    let receipt = RunBoundaryReceipt {
-        run_id: run_id.clone(),
-        boundary: RunApplyBoundary::RunStart,
-        contributing_input_ids: vec![input_id.clone()],
-        conversation_digest: None,
-        message_count: 1,
-        sequence: 0,
-    };
-    let err = driver
-        .boundary_applied(run_id, receipt, Some(b"session-data".to_vec()))
-        .await
-        .expect_err("atomic apply should fail");
-    assert!(
-        err.to_string().contains("synthetic atomic_apply failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Staged),
-        "failed boundary apply must restore the staged lifecycle",
-    );
-}
-
-#[tokio::test]
 async fn durable_runtime_input_externalizes_inline_images_before_ack() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
@@ -729,315 +625,6 @@ async fn durable_accept_failure_restores_canonical_ingress_state() {
 }
 
 #[tokio::test]
-async fn recycle_failure_restores_canonical_ingress_state() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-
-    let input = make_prompt("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let err = driver
-        .recycle_preserving_work(RuntimeState::Idle)
-        .await
-        .expect_err("recycle persist should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Queued),
-        "failed recycle must restore the queued lifecycle",
-    );
-    assert_eq!(
-        driver.dequeue_next().map(|(id, _)| id),
-        Some(input_id),
-        "failed recycle must restore the queue projection",
-    );
-}
-
-#[tokio::test]
-async fn retire_lifecycle_commit_failure_restores_driver_projection() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
-
-    let input = make_prompt("retire rollback");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let err = driver
-        .contract_realize_retire_lifecycle()
-        .await
-        .expect_err("retire lifecycle commit should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Idle,
-        "failed retire must restore the pre-commit runtime projection",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Queued),
-        "failed retire must leave pending input lifecycle unchanged",
-    );
-    assert_ne!(
-        inner.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Retired),
-        "failed retire must not write retired durable state",
-    );
-}
-
-#[tokio::test]
-async fn reset_lifecycle_commit_failure_restores_cleanup_projection() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
-
-    let input = make_prompt("reset rollback");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let err = driver
-        .contract_realize_reset_lifecycle()
-        .await
-        .expect_err("reset lifecycle commit should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Queued),
-        "failed reset must restore abandoned input state",
-    );
-    assert_eq!(
-        driver.dequeue_next().map(|(id, _)| id),
-        Some(input_id.clone()),
-        "failed reset must restore queued work",
-    );
-    let stored = inner
-        .load_input_state(&rid, &input_id)
-        .await
-        .unwrap()
-        .expect("accepted input should remain durable");
-    assert_eq!(
-        stored.seed.phase,
-        meerkat_runtime::input_state::InputLifecycleState::Queued,
-        "failed reset must not persist abandoned input state",
-    );
-}
-
-#[tokio::test]
-async fn stop_lifecycle_commit_failure_restores_running_projection() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-
-    let input = make_prompt("stop rollback");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    let err = driver
-        .contract_realize_stop_lifecycle()
-        .await
-        .expect_err("stop lifecycle commit should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Running,
-        "failed stop must restore running projection",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Staged),
-        "failed stop must restore staged work",
-    );
-    assert_eq!(
-        driver.inner_ref().current_run_id(),
-        Some(run_id),
-        "failed stop must restore active run identity",
-    );
-}
-
-#[tokio::test]
-async fn runtime_executor_exit_commit_failure_restores_running_projection() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
-
-    let input = make_prompt("executor exit rollback");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    let err = driver
-        .contract_finalize_runtime_executor_exit()
-        .await
-        .expect_err("executor-exit lifecycle commit should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Running,
-        "failed executor-exit terminalization must restore running truth",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Staged),
-        "failed executor-exit terminalization must restore staged work",
-    );
-    assert_eq!(
-        driver.inner_ref().current_run_id(),
-        Some(run_id),
-        "failed executor-exit terminalization must restore active run identity",
-    );
-    assert_eq!(
-        inner.load_runtime_state(&rid).await.unwrap(),
-        None,
-        "failed executor-exit terminalization must not persist stopped truth",
-    );
-}
-
-#[tokio::test]
-async fn destroy_lifecycle_commit_failure_restores_cleanup_projection() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
-    );
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
-
-    let input = make_prompt("destroy rollback");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let err = driver
-        .contract_destroy()
-        .await
-        .expect_err("destroy lifecycle commit should fail");
-    assert!(
-        err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
-        "unexpected error: {err}",
-    );
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Idle,
-        "failed destroy must restore pre-destroy projection",
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(meerkat_runtime::input_state::InputLifecycleState::Queued),
-        "failed destroy must restore abandoned input state",
-    );
-    assert_ne!(
-        inner.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "failed destroy must not write destroyed durable state",
-    );
-}
-
-#[tokio::test]
-async fn direct_destroy_persists_destroyed_runtime_state() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(
-        rid.clone(),
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    );
-
-    let report = driver
-        .destroy()
-        .await
-        .expect("direct persistent destroy should succeed");
-
-    assert_eq!(report.inputs_abandoned, 0);
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Destroyed,
-        "direct persistent destroy should advance the shared DSL authority",
-    );
-    assert_eq!(
-        store.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "direct persistent destroy should persist destroyed runtime truth",
-    );
-}
-
-#[tokio::test]
-async fn direct_destroy_rejects_when_dsl_guard_rejects_destroyed_state() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(
-        rid.clone(),
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    );
-
-    driver
-        .destroy()
-        .await
-        .expect("first destroy should reach destroyed");
-
-    let error = driver
-        .destroy()
-        .await
-        .expect_err("destroy from destroyed must surface the DSL rejection");
-    assert!(
-        error.to_string().contains("DSL authority (Destroy)"),
-        "unexpected error: {error}",
-    );
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Destroyed,
-        "failed destroy must preserve existing destroyed authority",
-    );
-    assert_eq!(
-        store.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "failed destroy must not rewrite durable state away from destroyed",
-    );
-}
-
-#[tokio::test]
 async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
@@ -1052,7 +639,7 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         .unwrap();
 
     let store: Arc<dyn RuntimeStore> = Arc::new(
-        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
+        FailPersistInputStore::fail_commit_machine_lifecycle_once(inner.clone()),
     );
     let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
 
@@ -1062,7 +649,7 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         .expect_err("recovery lifecycle commit should fail");
     assert!(
         err.to_string()
-            .contains("synthetic atomic_lifecycle_commit failure"),
+            .contains("synthetic commit_machine_lifecycle failure"),
         "unexpected error: {err}",
     );
     assert!(
@@ -1082,56 +669,6 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         stored.seed.phase,
         meerkat_runtime::input_state::InputLifecycleState::Accepted,
         "failed recovery must not rewrite durable input lifecycle",
-    );
-}
-
-#[tokio::test]
-async fn retire_preserves_inputs_for_drain() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-
-    let input = make_prompt("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let report = retire_runtime(&mut driver).await.unwrap();
-    assert_eq!(report.inputs_abandoned, 0);
-    assert_eq!(report.inputs_pending_drain, 1);
-
-    // Input is still queued, not abandoned
-    let stored = store
-        .load_input_state(&rid, &input_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        stored.seed.phase,
-        meerkat_runtime::input_state::InputLifecycleState::Queued
-    );
-}
-
-#[tokio::test]
-async fn reset_persists_abandoned_inputs() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-
-    let input = make_prompt("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let report = reset_runtime(&mut driver).await.unwrap();
-    assert_eq!(report.inputs_abandoned, 1);
-
-    let stored = store
-        .load_input_state(&rid, &input_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        stored.seed.phase,
-        meerkat_runtime::input_state::InputLifecycleState::Abandoned
     );
 }
 
@@ -1679,43 +1216,67 @@ async fn recover_ignores_legacy_runtime_state_load_error_after_canonical_miss() 
 }
 
 #[tokio::test]
-async fn driver_persistent_recovery_without_session_authority_fails_closed_for_recovered_retire() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
+async fn driver_persistent_recovery_persists_machine_lifecycle_truth_not_terminal_projection() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store = Arc::new(FailPersistInputStore::passthrough(inner));
     let rid = LogicalRuntimeId::new("test");
+    store.seed_runtime_state_projection(rid.clone(), RuntimeState::Destroyed);
+
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
+    let report = driver.recover().await.unwrap();
+
+    assert_eq!(report.inputs_recovered, 0);
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Idle,
+        "recovery must not realize destroyed lifecycle truth from a runtime-state projection",
+    );
+    assert_eq!(
+        store.load_runtime_state(&rid).await.unwrap(),
+        Some(RuntimeState::Idle),
+        "recovery durable projection must be rewritten from machine truth, not the loaded terminal projection",
+    );
+}
+
+#[tokio::test]
+async fn driver_persistent_recovery_fails_closed_for_terminal_projection_with_active_inputs() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store = Arc::new(FailPersistInputStore::passthrough(inner.clone()));
+    let rid = LogicalRuntimeId::new("test");
+    let input = make_prompt("terminal projection conflict");
+    let input_id = input.id().clone();
+    let mut state = InputState::new_accepted(input_id.clone());
+    state.persisted_input = Some(input);
+    state.durability = Some(InputDurability::Durable);
     store
-        .atomic_lifecycle_commit(&rid, RuntimeState::Retired, &[])
+        .persist_input_state(&rid, &stored_accepted(state))
         .await
         .unwrap();
+    store.seed_runtime_state_projection(rid.clone(), RuntimeState::Destroyed);
 
     let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
     let error = driver
         .recover()
         .await
-        .expect_err("recovered Retired without DSL session authority must fail closed");
-
-    let RuntimeDriverError::RecoveryCorruption { reason } = error else {
-        panic!("expected recovery corruption error, got {error}");
-    };
+        .expect_err("terminal runtime-state projection with active inputs must fail closed");
     assert!(
-        reason.contains("recovered 'retired' runtime state"),
-        "unexpected error: {reason}",
-    );
-    assert!(
-        reason.contains("missing DSL session authority"),
-        "unexpected error: {reason}",
+        error
+            .to_string()
+            .contains("runtime-state projection 'destroyed' conflicts with 1 active inputs"),
+        "unexpected error: {error}",
     );
     assert_eq!(
         driver.runtime_state(),
         RuntimeState::Idle,
-        "failed recovery must roll back the live runtime projection",
+        "failed recovery must not force destroyed state from the store projection",
     );
     assert!(
-        driver.active_input_ids().is_empty(),
-        "failed recovery must not leave recovered driver rows live",
+        driver.input_state(&input_id).is_none(),
+        "failed recovery must roll back active inputs after detecting the projection conflict",
     );
     assert_eq!(
         store.load_runtime_state(&rid).await.unwrap(),
-        Some(RuntimeState::Retired),
-        "failed recovery must not repair or overwrite durable lifecycle truth from the shell",
+        Some(RuntimeState::Destroyed),
+        "failed recovery must not repair or overwrite durable lifecycle projection rows",
     );
 }

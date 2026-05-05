@@ -141,6 +141,12 @@ struct RecoveredCreateRequest {
     runtime_was_registered: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RecoveryRuntimeBindingMode {
+    Authoritative,
+    LocalResources,
+}
+
 #[derive(Clone)]
 struct PendingSessionEventStreams {
     events: broadcast::Sender<EventEnvelope<AgentEvent>>,
@@ -1282,11 +1288,15 @@ impl SessionService for RpcMobSessionService {
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.service.interrupt(id).await
+        Err(SessionError::Unsupported(format!(
+            "interrupt for runtime-backed session {id} must route through SessionRuntime::interrupt / MeerkatMachine::hard_cancel_current_run"
+        )))
     }
 
     async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.service.cancel_after_boundary(id).await
+        Err(SessionError::Unsupported(format!(
+            "cancel_after_boundary for runtime-backed session {id} must route through SessionRuntime::interrupt_yielding / MeerkatMachine::cancel_after_boundary"
+        )))
     }
 
     async fn set_session_client(
@@ -1452,6 +1462,26 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
 
     fn runtime_adapter(&self) -> Option<Arc<MeerkatMachine>> {
         Some(Arc::clone(&self.runtime_adapter))
+    }
+
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        self.service
+            .interrupt_with_machine_authority(session_id, authority)
+            .await
+    }
+
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        self.service
+            .cancel_after_boundary_with_machine_authority(session_id, authority)
+            .await
     }
 
     async fn load_persisted_session(
@@ -1631,23 +1661,13 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
 pub(crate) enum InterruptNoopTarget {
     Present,
     Missing,
-    NotInterruptible(RuntimeState),
 }
 
-fn persisted_runtime_state_blocks_interrupt_noop(state: RuntimeState) -> bool {
-    matches!(state, RuntimeState::Retired | RuntimeState::Stopped)
-}
-
-fn interrupt_noop_target_for_presence(
-    present: bool,
-    blocking_runtime_state: Option<RuntimeState>,
-) -> InterruptNoopTarget {
+fn interrupt_noop_target_for_presence(present: bool) -> InterruptNoopTarget {
     if !present {
-        return InterruptNoopTarget::Missing;
-    }
-    match blocking_runtime_state {
-        Some(state) => InterruptNoopTarget::NotInterruptible(state),
-        None => InterruptNoopTarget::Present,
+        InterruptNoopTarget::Missing
+    } else {
+        InterruptNoopTarget::Present
     }
 }
 
@@ -2430,6 +2450,15 @@ impl SessionRuntime {
     }
 
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
+        if self
+            .service
+            .synchronize_live_session_from_durable_authority_if_needed(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+        {
+            return Ok(false);
+        }
+
         let live = match self.service.export_live_session(session_id).await {
             Ok(session) => session,
             Err(SessionError::NotFound { .. }) => {
@@ -3769,6 +3798,30 @@ impl SessionRuntime {
         self.service.clone()
     }
 
+    pub(crate) async fn interrupt_live_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .interrupt_with_machine_authority(
+                session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+    }
+
+    pub(crate) async fn cancel_after_boundary_live_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .cancel_after_boundary_with_machine_authority(
+                session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+    }
+
     fn archive_runtime_cleanup(&self) -> ArchiveRuntimeCleanup {
         ArchiveRuntimeCleanup {
             runtime_adapter: Arc::clone(&self.runtime_adapter),
@@ -3794,13 +3847,81 @@ impl SessionRuntime {
         self.approval_service.clone()
     }
 
+    async fn recover_live_session_for_realtime_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        if self.service.has_live_session(session_id).await? {
+            return Ok(());
+        }
+
+        let session = self
+            .load_persisted_session(session_id)
+            .await
+            .map_err(|err| rpc_error_to_session_error(err, session_id))?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        if session_metadata_marks_archived(&session) {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+
+        let keep_alive = session
+            .session_metadata()
+            .map(|metadata| metadata.keep_alive)
+            .unwrap_or(false);
+        let recovery_overrides = self
+            .recovery_overrides_from_turn(None, keep_alive)
+            .map_err(|err| rpc_error_to_session_error(err, session_id))?;
+        let recovered = self
+            .recovered_create_request_with_runtime_binding_mode(
+                session_id,
+                session,
+                recovery_overrides,
+                RecoveryRuntimeBindingMode::LocalResources,
+            )
+            .await
+            .map_err(|err| rpc_error_to_session_error(err, session_id))?;
+        let runtime_was_registered = recovered.runtime_was_registered;
+        let admission = self.service.reserve_create_session_admission().await?;
+        if let Err(error) = self
+            .service
+            .create_session_with_reserved_admission(recovered.request, admission)
+            .await
+        {
+            self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                .await;
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
     /// Project the owning live session into the provider-backed realtime open seam.
     pub async fn realtime_session_open_config(
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
     ) -> Result<RealtimeSessionOpenConfig, SessionError> {
-        let session = self.service.export_live_session(session_id).await?;
+        self.recover_live_session_for_realtime_open(session_id)
+            .await?;
+        let session = match self
+            .service
+            .export_realtime_open_session_snapshot(session_id)
+            .await
+        {
+            Ok(session) => session,
+            Err(SessionError::NotFound { .. }) => {
+                self.recover_live_session_for_realtime_open(session_id)
+                    .await?;
+                self.service
+                    .export_realtime_open_session_snapshot(session_id)
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
         let llm_identity = self.service.live_session_llm_identity(session_id).await?;
         let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
         Ok(RealtimeSessionOpenConfig::new(
@@ -3885,22 +4006,44 @@ impl SessionRuntime {
         session: Session,
         overrides: SurfaceSessionRecoveryOverrides,
     ) -> Result<RecoveredCreateRequest, RpcError> {
+        self.recovered_create_request_with_runtime_binding_mode(
+            session_id,
+            session,
+            overrides,
+            RecoveryRuntimeBindingMode::Authoritative,
+        )
+        .await
+    }
+
+    async fn recovered_create_request_with_runtime_binding_mode(
+        &self,
+        session_id: &SessionId,
+        session: Session,
+        overrides: SurfaceSessionRecoveryOverrides,
+        binding_mode: RecoveryRuntimeBindingMode,
+    ) -> Result<RecoveredCreateRequest, RpcError> {
         let current_generation = match self.config_runtime() {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let bindings = self
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!(
-                    "failed to prepare runtime bindings for session {session_id}: {e}"
-                ),
-                data: None,
-            })?;
+        let bindings = match binding_mode {
+            RecoveryRuntimeBindingMode::Authoritative => {
+                self.runtime_adapter
+                    .prepare_bindings(session_id.clone())
+                    .await
+            }
+            RecoveryRuntimeBindingMode::LocalResources => {
+                self.runtime_adapter
+                    .prepare_local_session_bindings(session_id.clone())
+                    .await
+            }
+        }
+        .map_err(|e| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("failed to prepare runtime bindings for session {session_id}: {e}"),
+            data: None,
+        })?;
         let agent_llm_client_decorator = {
             self.agent_llm_client_decorator
                 .read()
@@ -4854,7 +4997,7 @@ impl SessionRuntime {
         }
     }
 
-    async fn ensure_runtime_executor(
+    pub(crate) async fn ensure_runtime_executor(
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), RpcError> {
@@ -6708,7 +6851,14 @@ impl SessionRuntime {
         };
 
         if staged_is_promoting {
-            return match self.service.interrupt(session_id).await {
+            return match self
+                .service
+                .interrupt_with_machine_authority(
+                    session_id,
+                    self.runtime_adapter.session_control_authority(),
+                )
+                .await
+            {
                 Ok(()) => Ok(()),
                 Err(SessionError::NotRunning { .. } | SessionError::NotFound { .. }) => {
                     Err(Self::promoting_session_busy_rpc(session_id))
@@ -6725,13 +6875,7 @@ impl SessionRuntime {
             Ok(()) => Ok(()),
             Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Running,
-            }) if staged_is_promoting => match self.service.interrupt(session_id).await {
-                Ok(()) => Ok(()),
-                Err(SessionError::NotRunning { .. }) => {
-                    Err(Self::promoting_session_busy_rpc(session_id))
-                }
-                Err(err) => Err(session_error_to_rpc(err)),
-            },
+            }) if staged_is_promoting => Err(Self::promoting_session_busy_rpc(session_id)),
             Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Idle | RuntimeState::Attached,
             }) if staged_is_promoting => Err(Self::promoting_session_busy_rpc(session_id)),
@@ -6748,15 +6892,6 @@ impl SessionRuntime {
                 match self.interrupt_noop_target(session_id).await? {
                     InterruptNoopTarget::Present => return Ok(()),
                     InterruptNoopTarget::Missing => {}
-                    InterruptNoopTarget::NotInterruptible(state) => {
-                        return Err(RpcError {
-                            code: error::INVALID_REQUEST,
-                            message: format!(
-                                "Session is not interruptible while runtime is {state}"
-                            ),
-                            data: None,
-                        });
-                    }
                 }
                 Err(RpcError {
                     code: error::SESSION_NOT_FOUND,
@@ -6795,13 +6930,6 @@ impl SessionRuntime {
             return Ok(InterruptNoopTarget::Present);
         }
 
-        let blocking_runtime_state = self
-            .service
-            .persisted_runtime_state(session_id)
-            .await
-            .map_err(session_error_to_rpc)?
-            .filter(|state| persisted_runtime_state_blocks_interrupt_noop(*state));
-
         if let Some(session) = self.load_persisted_session(session_id).await? {
             if session_metadata_marks_archived(&session) {
                 return Ok(InterruptNoopTarget::Missing);
@@ -6811,18 +6939,12 @@ impl SessionRuntime {
                 if let Some(mob_state) = self.mob_state() {
                     let owns_mob_session = mob_state.owns_live_bridge_session(session_id).await
                         || mob_state.owns_persisted_bridge_session(session_id).await;
-                    return Ok(interrupt_noop_target_for_presence(
-                        owns_mob_session,
-                        blocking_runtime_state,
-                    ));
+                    return Ok(interrupt_noop_target_for_presence(owns_mob_session));
                 }
                 #[cfg(not(feature = "mob"))]
                 return Ok(InterruptNoopTarget::Missing);
             }
-            return Ok(interrupt_noop_target_for_presence(
-                true,
-                blocking_runtime_state,
-            ));
+            return Ok(interrupt_noop_target_for_presence(true));
         }
 
         #[cfg(feature = "mob")]
@@ -6832,10 +6954,7 @@ impl SessionRuntime {
         {
             match mob_state.session_service().read(session_id).await {
                 Ok(_) => {
-                    return Ok(interrupt_noop_target_for_presence(
-                        true,
-                        blocking_runtime_state,
-                    ));
+                    return Ok(interrupt_noop_target_for_presence(true));
                 }
                 Err(SessionError::NotFound { .. }) => {}
                 Err(err) => return Err(session_error_to_rpc(err)),
@@ -6844,19 +6963,13 @@ impl SessionRuntime {
 
         match self.service.read(session_id).await {
             Ok(_) => {
-                return Ok(interrupt_noop_target_for_presence(
-                    true,
-                    blocking_runtime_state,
-                ));
+                return Ok(interrupt_noop_target_for_presence(true));
             }
             Err(SessionError::NotFound { .. }) => {}
             Err(err) => return Err(session_error_to_rpc(err)),
         }
 
-        Ok(interrupt_noop_target_for_presence(
-            false,
-            blocking_runtime_state,
-        ))
+        Ok(interrupt_noop_target_for_presence(false))
     }
 
     /// Ask a running turn to break out at the next cooperative boundary.
@@ -6875,17 +6988,43 @@ impl SessionRuntime {
         if staged_info.is_some() && !staged_is_materializing {
             return Ok(());
         }
+        if staged_is_materializing {
+            return Err(Self::promoting_session_busy_rpc(session_id));
+        }
 
-        match self.service.cancel_after_boundary(session_id).await {
+        match self.runtime_adapter.cancel_after_boundary(session_id).await {
             Ok(()) => Ok(()),
-            Err(SessionError::NotRunning { .. } | SessionError::NotFound { .. })
+            Err(RuntimeDriverError::NotReady { .. }) | Err(RuntimeDriverError::Destroyed)
                 if staged_is_materializing =>
             {
                 Err(Self::promoting_session_busy_rpc(session_id))
             }
-            Err(SessionError::NotRunning { .. }) => Ok(()),
-            Err(SessionError::Unsupported(_)) => Ok(()),
-            Err(e) => Err(session_error_to_rpc(e)),
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle | RuntimeState::Attached,
+            }) => Ok(()),
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })
+            | Err(RuntimeDriverError::Destroyed) => {
+                match self.interrupt_noop_target(session_id).await? {
+                    InterruptNoopTarget::Present => Ok(()),
+                    InterruptNoopTarget::Missing => Err(RpcError {
+                        code: error::SESSION_NOT_FOUND,
+                        message: format!("Session not found: {session_id}"),
+                        data: None,
+                    }),
+                }
+            }
+            Err(RuntimeDriverError::NotReady { state }) => Err(RpcError {
+                code: error::INVALID_REQUEST,
+                message: format!("Session is not interruptible while runtime is {state}"),
+                data: None,
+            }),
+            Err(e) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("Failed to interrupt session at boundary: {e}"),
+                data: None,
+            }),
         }
     }
 
@@ -8549,6 +8688,46 @@ mod tests {
         }
     }
 
+    struct BlockAfterFirstMockLlmClient {
+        calls: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockAfterFirstMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            let release = Arc::clone(&self.release);
+            Box::pin(async_stream::stream! {
+                if call > 0 {
+                    release.notified().await;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Slow response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                });
+            })
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     struct FailAfterFirstMockLlmClient {
         calls: AtomicUsize,
     }
@@ -8676,6 +8855,23 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
         let client = BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        };
+        (
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(client)),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            calls,
+            release,
+        )
+    }
+
+    fn block_after_first_build_config() -> (AgentBuildConfig, Arc<AtomicUsize>, Arc<Notify>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let client = BlockAfterFirstMockLlmClient {
             calls: Arc::clone(&calls),
             release: Arc::clone(&release),
         };
@@ -9166,6 +9362,72 @@ mod tests {
                     && text.contains("recovered live-missing runtime context")
             }),
             "recovered live session should include context-only append: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_recovers_persisted_live_missing_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist recoverable realtime-open session".into(),
+                initial_event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "test must remove live runtime bindings before realtime-open recovery"
+        );
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime open should recover persisted live session");
+
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "realtime open recovery should recreate runtime bindings"
+        );
+        let projected = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected
+                .iter()
+                .any(|text| text.contains("persist recoverable realtime-open session")),
+            "recovered realtime open should seed from durable transcript: {projected:?}"
         );
     }
 
@@ -9769,7 +10031,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_includes_runtime_owned_terminal_peer_response_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut base_runtime = make_runtime(temp_factory(&temp), 10);
+        let mut base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(base_runtime);
 
@@ -9782,7 +10044,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
                 event_tx,
@@ -9798,16 +10060,16 @@ mod tests {
             .await
             .expect("ensure_runtime_executor");
 
-        runtime
+        let (_outcome, handle) = runtime
             .runtime_adapter()
-            .accept_input(
+            .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
-                            peer_id: "analyst-rt".to_string(),
+                            peer_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                             display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
@@ -9833,6 +10095,9 @@ mod tests {
             )
             .await
             .expect("accept terminal peer response");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
 
         let open_config = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
@@ -9853,7 +10118,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
                     text.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                     ) && text.contains("birch seventeen")
                 }) {
                     break open_config;
@@ -9875,10 +10140,21 @@ mod tests {
         assert!(
             projected.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to include runtime-owned terminal peer response: {projected:?}"
+        );
+        assert!(
+            open_config.runtime_system_context.iter().any(|append| {
+                append.source.as_deref().is_some_and(|source| {
+                    source.contains(
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    )
+                }) && append.text.contains("birch seventeen")
+            }),
+            "expected realtime projection to carry terminal peer response as typed runtime context: {:?}",
+            open_config.runtime_system_context
         );
     }
 
@@ -9895,7 +10171,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
                 event_tx,
@@ -9920,7 +10196,7 @@ mod tests {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
-                            peer_id: "analyst-rt".to_string(),
+                            peer_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                             display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
@@ -9966,7 +10242,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
                     text.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                     ) && text.contains("birch seventeen")
                 }) {
                     break session;
@@ -9988,7 +10264,7 @@ mod tests {
         assert!(
             authoritative_projected.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected authoritative snapshot to include runtime-owned terminal peer response: {authoritative_projected:?}"
@@ -10034,7 +10310,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
                     text.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                     ) && text.contains("birch seventeen")
                 }) {
                     break open_config;
@@ -10056,7 +10332,7 @@ mod tests {
         assert!(
             projected.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected recovered realtime projection to include authoritative terminal peer response: {projected:?}"
@@ -10076,7 +10352,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
                 event_tx,
@@ -10101,7 +10377,7 @@ mod tests {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
-                            peer_id: "analyst-rt".to_string(),
+                            peer_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                             display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
@@ -10150,7 +10426,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
                     text.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                     ) && text.contains("birch seventeen")
                 }) {
                     break session;
@@ -10172,7 +10448,7 @@ mod tests {
         assert!(
             projected.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected accept_input_with_completion to persist runtime-owned terminal peer response: {projected:?}"
@@ -10198,7 +10474,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
                 event_tx,
@@ -10229,7 +10505,7 @@ mod tests {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
-                            peer_id: "analyst-rt".to_string(),
+                            peer_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                             display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
@@ -10266,7 +10542,7 @@ mod tests {
                     AgentEvent::RunStarted { prompt, .. } => {
                         let normalized = prompt.text_content().to_lowercase();
                         if normalized.contains(
-                            "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                            "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                         ) {
                             assert!(
                                 normalized.contains("birch seventeen"),
@@ -10320,7 +10596,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
                 event_tx,
@@ -10484,8 +10760,8 @@ mod tests {
                 RunId::new(),
                 vec![PendingSystemContextAppend {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
-                    source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
-                    idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -10512,10 +10788,475 @@ mod tests {
         assert!(
             projected.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to include runtime context applied via session service: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_seeds_from_durable_authority_when_live_export_fails_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-durable-authority".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "live uncommitted prompt".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let mut durable = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live export should carry recovery metadata before durable override");
+        durable.push(Message::User(meerkat_core::types::UserMessage::text(
+            "durable realtime seed".to_string(),
+        )));
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        let live_export = runtime.service.export_live_session(&session_id).await;
+        assert!(
+            matches!(live_export, Err(SessionError::NotFound { .. })),
+            "public live export should fail closed when durable authority must seed realtime open"
+        );
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+        let seed_user_messages = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            seed_user_messages
+                .iter()
+                .any(|text| text.contains("durable realtime seed")),
+            "realtime open config should seed from durable semantic authority: {seed_user_messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_turn_syncs_durable_authority_without_rebuilding_mob_owned_comms() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("mob-owned-stale-live-runtime-turn".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "first runtime turn".into(),
+                event_tx.clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("initial runtime turn should materialize the live session");
+
+        let comms_runtime = runtime
+            .comms_runtime(&session_id)
+            .await
+            .expect("session comms runtime");
+        let mob_id =
+            meerkat_runtime::meerkat_machine::dsl::MobId::from("mob-owned-stale-live-sync");
+        runtime
+            .runtime_adapter()
+            .maybe_spawn_mob_comms_drain(&session_id, comms_runtime, mob_id)
+            .await;
+
+        let mut durable = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live export should work before durable override");
+        durable.push(Message::User(meerkat_core::types::UserMessage::text(
+            "durable seed preserved across stale live sync".to_string(),
+        )));
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        let result = runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "second runtime turn after durable authority wins".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+        )
+        .await
+        .expect("runtime turn must reuse live mechanics instead of rebuilding comms");
+        assert!(
+            result.text.contains("Hello from mock"),
+            "unexpected runtime turn result: {:?}",
+            result.text
+        );
+
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session should export after durable synchronization");
+        assert!(
+            live.messages().iter().any(|message| matches!(
+                message,
+                Message::User(user)
+                    if user.text_content() == "durable seed preserved across stale live sync"
+            )),
+            "live session should carry durable semantic authority after runtime turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_seeds_runtime_context_from_durable_authority() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-durable-context".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let mut durable = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live export should be authoritative before durable context diverges");
+        durable
+            .set_system_context_state(SessionSystemContextState {
+                applied: vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+                    source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
+                    idempotency_key: Some("req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+                }],
+                ..Default::default()
+            })
+            .expect("set durable system context state");
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        let live_export = runtime.service.export_live_session(&session_id).await;
+        assert!(
+            matches!(live_export, Err(SessionError::NotFound { .. })),
+            "public live export should fail closed when durable runtime context diverges"
+        );
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+        assert!(
+            open_config
+                .runtime_system_context
+                .iter()
+                .any(|append| append.text.contains("birch seventeen")),
+            "realtime open config should seed durable terminal peer context: {:?}",
+            open_config.runtime_system_context
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_transcript_append_syncs_durable_context_without_dropping_live() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-transcript-context-sync".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let mut durable = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live export should be authoritative before durable context diverges");
+        durable
+            .set_system_context_state(SessionSystemContextState {
+                applied: vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Result: {\"token\":\"birch seventeen\"}.".to_string(),
+                    source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
+                    idempotency_key: Some("req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+                }],
+                ..Default::default()
+            })
+            .expect("set durable system context state");
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        runtime
+            .append_realtime_transcript_event(
+                &session_id,
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "item-user-1".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "realtime transcript after context".to_string(),
+                },
+            )
+            .await
+            .expect("realtime transcript append should sync durable context and keep live handle");
+
+        assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live-session status"),
+            "durable context synchronization must not discard the realtime live handle"
+        );
+        let exported = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live export should be authoritative after transcript append persists");
+        let projected_context = realtime_projection_runtime_system_context(&exported);
+        assert!(
+            projected_context
+                .iter()
+                .any(|append| append.text.contains("birch seventeen")),
+            "durable runtime context should survive realtime transcript append: {projected_context:?}"
+        );
+        assert!(
+            exported
+                .messages()
+                .iter()
+                .any(|message| format!("{message:?}").contains("realtime transcript after context")),
+            "realtime transcript append should persist against the synchronized live session: {exported:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_includes_runtime_backed_context_appends() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut runtime = SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-runtime-backed-context".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let output = runtime
+            .service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+                    source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
+                    idempotency_key: Some("req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("apply_runtime_context_appends");
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: output
+                        .session_snapshot
+                        .expect("runtime context output should carry a machine commit snapshot"),
+                },
+            )
+            .await
+            .expect("commit runtime context snapshot");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+        assert!(
+            open_config
+                .runtime_system_context
+                .iter()
+                .any(|append| append.text.contains("birch seventeen")),
+            "runtime-backed realtime open config should include durable context append: {:?}",
+            open_config.runtime_system_context
         );
     }
 
@@ -10598,8 +11339,8 @@ mod tests {
                 RunId::new(),
                 vec![PendingSystemContextAppend {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
-                    source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
-                    idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -10658,7 +11399,7 @@ mod tests {
         assert!(
             system_messages.iter().any(|text| {
                 text.contains(
-                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
                 ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to preserve authoritative token system context: {system_messages:?}"
@@ -12073,23 +12814,19 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_noop_target_for_presence_rejects_terminal_runtime_state() {
+    fn interrupt_noop_target_for_presence_tracks_authoritative_presence_only() {
         assert_eq!(
-            interrupt_noop_target_for_presence(true, Some(RuntimeState::Stopped)),
-            InterruptNoopTarget::NotInterruptible(RuntimeState::Stopped)
-        );
-        assert_eq!(
-            interrupt_noop_target_for_presence(true, None),
+            interrupt_noop_target_for_presence(true),
             InterruptNoopTarget::Present
         );
         assert_eq!(
-            interrupt_noop_target_for_presence(false, Some(RuntimeState::Stopped)),
+            interrupt_noop_target_for_presence(false),
             InterruptNoopTarget::Missing
         );
     }
 
     #[tokio::test]
-    async fn interrupt_on_cold_persisted_stopped_runtime_is_rejected() {
+    async fn interrupt_on_cold_persisted_stopped_projection_is_noop_when_session_exists() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         let build_config = mock_build_config();
@@ -12112,23 +12849,23 @@ mod tests {
             .await
             .expect("service-owned idle session should be created");
         runtime
-            .service
-            .runtime_store()
-            .expect("runtime-backed test should include runtime store")
-            .persist_runtime_state(
-                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
-                RuntimeState::Stopped,
-            )
+            .runtime_adapter
+            .register_session(created.session_id.clone())
+            .await;
+        runtime
+            .runtime_adapter
+            .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
+        runtime
+            .runtime_adapter
+            .unregister_session(&created.session_id)
+            .await;
 
-        let err = runtime
+        runtime
             .interrupt(&created.session_id)
             .await
-            .expect_err("persisted stopped runtime must reject cold interrupt no-op");
-
-        assert_eq!(err.code, error::INVALID_REQUEST);
-        assert!(err.message.contains("stopped"));
+            .expect("persisted stopped projection must not reject cold interrupt no-op");
     }
 
     /// 7. Archiving a session removes it from the runtime.
@@ -14285,6 +15022,87 @@ mod tests {
             .create_session(mock_build_config(), None, None)
             .await
             .expect("completed mob runtime executor apply should release active admission");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_runtime_executor_context_only_recovers_without_pre_admission() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before mob context-only recovery".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "test must remove live runtime bindings before mob context-only recovery"
+        );
+
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-mob-recovered-live-missing".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "mob recovered live-missing runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let mut executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+            runtime.session_service(),
+            Some(Arc::clone(&runtime)),
+            session_id.clone(),
+            crate::router::NotificationSink::noop(),
+        );
+        let output = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("mob runtime executor should recover via SessionRuntime");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "mob context-only recovery should recreate runtime bindings"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -16566,9 +17384,10 @@ mod tests {
     async fn cancelled_materialized_turn_keeps_admission_until_service_turn_stops() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let (build_config, calls, release) = block_after_first_build_config();
 
         let session_id = runtime
-            .create_session(slow_build_config(250), None, None)
+            .create_session(build_config, None, None)
             .await
             .expect("create session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16602,22 +17421,7 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if runtime
-                .session_state(&session_id)
-                .await
-                .map(|info| info.state)
-                == Some(SessionState::Running)
-            {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "session did not enter running state before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        wait_for_llm_calls(&calls, 2, "materialized blocking turn").await;
 
         running_turn.abort();
         assert!(
@@ -16636,6 +17440,7 @@ mod tests {
             "cancelled caller must not release capacity while service turn is still running: {blocked:?}"
         );
 
+        release.notify_waiters();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
         loop {
             match runtime

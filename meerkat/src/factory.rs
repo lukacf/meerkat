@@ -5664,6 +5664,32 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn factory_accepts_local_machine_bindings_for_pre_authoritative_mob_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_local_session_bindings(session.id().clone())
+            .await
+            .expect("local session runtime bindings");
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        assert_eq!(agent.session().id(), bindings.session_id());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn factory_capability_filter_rejects_malformed_canonical_visibility_state() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);

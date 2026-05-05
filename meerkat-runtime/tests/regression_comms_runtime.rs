@@ -388,9 +388,9 @@ async fn response_with_passthrough_message_both_queued() {
 async fn response_after_completed_turn_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
-    // Simulate a completed run by starting and completing
-    let run_id = bind_running(&mut driver);
-    driver.contract_rollback_run_authority(&run_id).unwrap();
+    // The completed host turn leaves the driver idle before the late terminal
+    // response is admitted.
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);

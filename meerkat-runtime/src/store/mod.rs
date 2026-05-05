@@ -1,15 +1,13 @@
 //! RuntimeStore — atomic persistence for runtime state.
 //!
-//! §19: "CoreExecutor::apply MUST durably persist the RunBoundaryReceipt atomically
-//! with the boundary side effects before returning success."
+//! Machine-owned runtime commands durably persist [`RunBoundaryReceipt`] values
+//! atomically with their session and input-state effects.
 
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
 
-use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
-use sha2::{Digest, Sha256};
 
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::StoredInputState;
@@ -53,35 +51,25 @@ pub struct SessionDelta {
     pub session_snapshot: Vec<u8>,
 }
 
-fn authoritative_receipt(
-    session_delta: Option<&SessionDelta>,
-    run_id: RunId,
-    boundary: RunApplyBoundary,
-    contributing_input_ids: Vec<InputId>,
-    sequence: u64,
-) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
-    let (conversation_digest, message_count) = match session_delta {
-        Some(delta) => {
-            let session: meerkat_core::Session = serde_json::from_slice(&delta.session_snapshot)
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-            let encoded_messages = serde_json::to_vec(session.messages())
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-            (
-                Some(format!("{:x}", Sha256::digest(encoded_messages))),
-                session.messages().len(),
-            )
-        }
-        None => (None, 0),
-    };
+/// Machine-owned lifecycle commit token.
+///
+/// This token has no public constructor. RuntimeStore implementors can persist
+/// the selected state, but callers outside the machine/driver commit path
+/// cannot select arbitrary lifecycle truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineLifecycleCommit {
+    runtime_state: RuntimeState,
+}
 
-    Ok(RunBoundaryReceipt {
-        run_id,
-        boundary,
-        contributing_input_ids,
-        conversation_digest,
-        message_count,
-        sequence,
-    })
+impl MachineLifecycleCommit {
+    pub(crate) fn new(runtime_state: RuntimeState) -> Self {
+        Self { runtime_state }
+    }
+
+    /// Runtime state selected by the owning MeerkatMachine transition.
+    pub fn runtime_state(self) -> RuntimeState {
+        self.runtime_state
+    }
 }
 
 /// Atomic persistence interface for runtime state.
@@ -133,20 +121,6 @@ pub trait RuntimeStore: Send + Sync {
             "update_auth_oauth_flow_snapshot".into(),
         ))
     }
-
-    /// Atomically persist session delta + authoritative receipt + input state updates.
-    ///
-    /// The receipt MUST be minted by the durable commit seam itself, not by the
-    /// caller, so returned success carries the exact proof that was stored.
-    async fn commit_session_boundary(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        run_id: RunId,
-        boundary: RunApplyBoundary,
-        contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<StoredInputState>,
-    ) -> Result<RunBoundaryReceipt, RuntimeStoreError>;
 
     /// Atomically persist a session snapshot that is not a run boundary.
     ///
@@ -211,27 +185,21 @@ pub trait RuntimeStore: Send + Sync {
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeStoreError>;
 
-    /// Persist the runtime state itself (for durable retire/stop semantics).
-    async fn persist_runtime_state(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        state: RuntimeState,
-    ) -> Result<(), RuntimeStoreError>;
-
     /// Load the last persisted runtime state, if any.
     async fn load_runtime_state(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeState>, RuntimeStoreError>;
 
-    /// Atomically commit lifecycle state changes (retire/reset/stop/destroy).
+    /// Atomically commit machine-owned lifecycle state changes.
     ///
     /// Writes runtime state + all input state updates in a single atomic
-    /// operation. Used for lifecycle ops that don't produce boundary receipts.
-    async fn atomic_lifecycle_commit(
+    /// operation. `MachineLifecycleCommit` has no public constructor, so this
+    /// cannot be used by compatibility callers to pick runtime truth.
+    async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-        runtime_state: RuntimeState,
+        commit: MachineLifecycleCommit,
         input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError>;
 

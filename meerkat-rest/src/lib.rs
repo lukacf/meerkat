@@ -219,7 +219,10 @@ impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -239,7 +242,10 @@ impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
-            .interrupt(&self.session_id)
+            .interrupt_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1558,7 +1564,10 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -3680,26 +3689,13 @@ fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<Session
 enum InterruptNoopTarget {
     Present,
     Missing,
-    NotInterruptible(meerkat_runtime::RuntimeState),
 }
 
-fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
-    matches!(
-        state,
-        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
-    )
-}
-
-fn interrupt_noop_target_for_presence(
-    present: bool,
-    blocking_runtime_state: Option<meerkat_runtime::RuntimeState>,
-) -> InterruptNoopTarget {
+fn interrupt_noop_target_for_presence(present: bool) -> InterruptNoopTarget {
     if !present {
-        return InterruptNoopTarget::Missing;
-    }
-    match blocking_runtime_state {
-        Some(state) => InterruptNoopTarget::NotInterruptible(state),
-        None => InterruptNoopTarget::Present,
+        InterruptNoopTarget::Missing
+    } else {
+        InterruptNoopTarget::Present
     }
 }
 
@@ -3707,17 +3703,6 @@ async fn interrupt_noop_target(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<InterruptNoopTarget, ApiError> {
-    let blocking_runtime_state = state
-        .session_service
-        .persisted_runtime_state(session_id)
-        .await
-        .map_err(|err| {
-            ApiError::Internal(format!(
-                "Failed to load runtime state before interrupt no-op: {err}"
-            ))
-        })?
-        .filter(|state| persisted_runtime_state_blocks_interrupt_noop(*state));
-
     match state
         .session_service
         .load_authoritative_session(session_id)
@@ -3734,19 +3719,13 @@ async fn interrupt_noop_target(
                         .mob_state
                         .owns_persisted_bridge_session(session_id)
                         .await;
-                return Ok(interrupt_noop_target_for_presence(
-                    owns_mob_session,
-                    blocking_runtime_state,
-                ));
+                return Ok(interrupt_noop_target_for_presence(owns_mob_session));
             }
             #[cfg(not(feature = "mob"))]
             return Ok(InterruptNoopTarget::Missing);
         }
         Ok(Some(_)) => {
-            return Ok(interrupt_noop_target_for_presence(
-                true,
-                blocking_runtime_state,
-            ));
+            return Ok(interrupt_noop_target_for_presence(true));
         }
         Ok(_) => {}
         Err(SessionError::NotFound { .. }) => {}
@@ -3766,10 +3745,7 @@ async fn interrupt_noop_target(
     {
         match state.mob_state.session_service().read(session_id).await {
             Ok(_) => {
-                return Ok(interrupt_noop_target_for_presence(
-                    true,
-                    blocking_runtime_state,
-                ));
+                return Ok(interrupt_noop_target_for_presence(true));
             }
             Err(SessionError::NotFound { .. }) => {}
             Err(err) => {
@@ -3782,10 +3758,7 @@ async fn interrupt_noop_target(
 
     match state.session_service.read(session_id).await {
         Ok(_) => {
-            return Ok(interrupt_noop_target_for_presence(
-                true,
-                blocking_runtime_state,
-            ));
+            return Ok(interrupt_noop_target_for_presence(true));
         }
         Err(SessionError::NotFound { .. }) => {}
         Err(err) => {
@@ -3795,10 +3768,7 @@ async fn interrupt_noop_target(
         }
     }
 
-    Ok(interrupt_noop_target_for_presence(
-        false,
-        blocking_runtime_state,
-    ))
+    Ok(interrupt_noop_target_for_presence(false))
 }
 
 fn resolve_schedule_id(input: &str) -> Result<meerkat::ScheduleId, ApiError> {
@@ -4651,9 +4621,6 @@ async fn interrupt_session(
                 InterruptNoopTarget::Missing => {
                     Err(ApiError::NotFound(format!("Session not found: {id}")))
                 }
-                InterruptNoopTarget::NotInterruptible(state) => Err(ApiError::Conflict(format!(
-                    "Session is not interruptible while runtime is {state}"
-                ))),
             }
         }
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(ApiError::Conflict(
@@ -6379,17 +6346,13 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_noop_target_for_presence_rejects_terminal_runtime_state() {
+    fn interrupt_noop_target_for_presence_tracks_authoritative_presence_only() {
         assert_eq!(
-            interrupt_noop_target_for_presence(true, Some(meerkat_runtime::RuntimeState::Stopped)),
-            InterruptNoopTarget::NotInterruptible(meerkat_runtime::RuntimeState::Stopped)
-        );
-        assert_eq!(
-            interrupt_noop_target_for_presence(true, None),
+            interrupt_noop_target_for_presence(true),
             InterruptNoopTarget::Present
         );
         assert_eq!(
-            interrupt_noop_target_for_presence(false, Some(meerkat_runtime::RuntimeState::Stopped)),
+            interrupt_noop_target_for_presence(false),
             InterruptNoopTarget::Missing
         );
     }
@@ -7796,13 +7759,55 @@ mod tests {
             .session_service
             .runtime_store()
             .expect("REST capacity test state should include runtime store");
+        let persisted_input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "conflicting recovered prompt",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let policy = meerkat_runtime::DefaultPolicyTable::resolve(&persisted_input, true);
+        let mut input_state =
+            meerkat_runtime::InputState::new_accepted(persisted_input.header().id.clone());
+        input_state.runtime_semantics = Some(
+            meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &policy,
+                persisted_input.kind(),
+            ),
+        );
+        input_state.policy = Some(meerkat_runtime::PolicySnapshot {
+            version: policy.policy_version,
+            decision: policy,
+        });
+        input_state.persisted_input = Some(persisted_input);
+        let active_input = meerkat_runtime::input_state::StoredInputState {
+            state: input_state,
+            seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+        };
+        state
+            .runtime_adapter
+            .register_session(target_session_id.clone())
+            .await;
+        state
+            .runtime_adapter
+            .stop_runtime_executor(&target_session_id, "seed stopped projection")
+            .await
+            .expect("persist conflicting stopped runtime projection");
+        state
+            .runtime_adapter
+            .unregister_session(&target_session_id)
+            .await;
         runtime_store
-            .persist_runtime_state(
+            .persist_input_state(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&target_session_id),
-                meerkat_runtime::RuntimeState::Stopped,
+                &active_input,
             )
             .await
-            .expect("persist stopped runtime state");
+            .expect("persist conflicting active input state");
 
         let outcome = Box::pin(continue_session_inner(
             &state,
@@ -7832,11 +7837,13 @@ mod tests {
         match outcome {
             RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message))) => {
                 assert!(
-                    message.contains("stopped"),
-                    "expected stopped-runtime accept failure: {message}"
+                    message.contains(
+                        "runtime-state projection 'stopped' conflicts with 1 active inputs"
+                    ),
+                    "expected terminal projection conflict: {message}"
                 );
             }
-            other => panic!("expected stopped-runtime accept failure, got {other:?}"),
+            other => panic!("expected terminal projection conflict, got {other:?}"),
         }
 
         assert!(
@@ -11907,7 +11914,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_interrupt_cold_persisted_stopped_runtime_returns_conflict() {
+        async fn test_interrupt_cold_persisted_stopped_projection_is_noop_when_session_exists() {
             use axum::body::Body;
             use http_body_util::BodyExt;
             use tower::ServiceExt;
@@ -11940,17 +11947,19 @@ mod tests {
                 })
                 .await
                 .expect("service-owned idle session should be created");
-            let runtime_store = state
-                .session_service
-                .runtime_store()
-                .expect("REST test state should include runtime store");
-            runtime_store
-                .persist_runtime_state(
-                    &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
-                    meerkat_runtime::RuntimeState::Stopped,
-                )
+            state
+                .runtime_adapter
+                .register_session(created.session_id.clone())
+                .await;
+            state
+                .runtime_adapter
+                .stop_runtime_executor(&created.session_id, "seed stopped projection")
                 .await
                 .expect("runtime state should persist");
+            state
+                .runtime_adapter
+                .unregister_session(&created.session_id)
+                .await;
             let app = router(state);
 
             let response = app
@@ -11966,17 +11975,9 @@ mod tests {
 
             let status = response.status();
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(
-                status,
-                StatusCode::CONFLICT,
-                "interrupt response body: {}",
-                String::from_utf8_lossy(&body)
-            );
+            assert_eq!(status, StatusCode::OK);
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert!(
-                payload["error"].as_str().unwrap().contains("stopped"),
-                "unexpected payload: {payload}"
-            );
+            assert_eq!(payload["interrupted"], true);
         }
 
         #[tokio::test]

@@ -1193,7 +1193,7 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
                     display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
@@ -1242,7 +1242,7 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
                     display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
@@ -1353,7 +1353,7 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
                     display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
@@ -1400,7 +1400,9 @@ mod tests {
         assert_eq!(staged.context_appends.len(), 1);
         assert_eq!(
             staged.context_appends[0].key,
-            "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+            format!(
+                "peer_response_terminal:{TEST_PEER_RESPONSE_ROUTE_ID}:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+            )
         );
         match &staged.context_appends[0].content {
             CoreRenderable::Text { text } => {
@@ -1425,7 +1427,7 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
                     display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },

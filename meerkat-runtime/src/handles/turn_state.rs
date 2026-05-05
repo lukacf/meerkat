@@ -30,39 +30,6 @@ impl RuntimeTurnStateHandle {
     pub fn ephemeral() -> Self {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
-
-    fn close_direct_run(
-        &self,
-        run_id: &RunId,
-        terminal_context: &'static str,
-    ) -> Result<(), DslTransitionError> {
-        let state = self.dsl.snapshot_state();
-        let is_bound_running = state.lifecycle_phase == mm_dsl::MeerkatPhase::Running
-            && state
-                .current_run_id
-                .as_ref()
-                .is_some_and(|bound| bound.0 == run_id.to_string())
-            && state.pre_run_phase.is_some();
-        if !is_bound_running {
-            return Ok(());
-        }
-        if state
-            .input_run_associations
-            .values()
-            .any(|bound| bound == &run_id.to_string())
-        {
-            return Ok(());
-        }
-
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::Commit {
-                input_id: mm_dsl::InputId::from(format!("direct-run:{run_id}")),
-                run_id: mm_dsl::RunId::from_domain(run_id),
-            },
-            terminal_context,
-        )
-    }
 }
 
 impl TurnStateHandle for RuntimeTurnStateHandle {
@@ -334,50 +301,28 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RunCompleted {
-                run_id: mm_dsl::RunId::from_domain(&run_id),
-            },
-            "TurnStateHandle::run_completed",
-        )?;
-        self.close_direct_run(&run_id, "TurnStateHandle::run_completed:commit")
+    fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+        // Runtime-backed run terminalization is owned by
+        // MeerkatMachine::Commit after the durable boundary receipt is ready.
+        // Core still emits this effect for standalone/test handles, but this
+        // runtime handle must not provide a second terminal writer.
+        Ok(())
     }
 
     fn run_failed(
         &self,
-        run_id: RunId,
-        reason: TurnFailureReason,
+        _run_id: RunId,
+        _reason: TurnFailureReason,
     ) -> Result<(), DslTransitionError> {
-        let terminal_outcome = self
-            .snapshot()
-            .terminal_outcome
-            .unwrap_or(TurnTerminalOutcome::Failed);
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RunFailed {
-                run_id: mm_dsl::RunId::from_domain(&run_id),
-                runtime_apply_failure_cause: None,
-                runtime_apply_failure_message: None,
-                terminal_outcome: mm_dsl::TurnTerminalOutcome::from(terminal_outcome),
-                terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
-                error: reason.message,
-            },
-            "TurnStateHandle::run_failed",
-        )?;
-        self.close_direct_run(&run_id, "TurnStateHandle::run_failed:commit")
+        // Runtime-backed failure terminalization is owned by
+        // MeerkatMachine::Fail/Commit and its durable terminal receipt path.
+        Ok(())
     }
 
-    fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RunCancelled {
-                run_id: mm_dsl::RunId::from_domain(&run_id),
-            },
-            "TurnStateHandle::run_cancelled",
-        )?;
-        self.close_direct_run(&run_id, "TurnStateHandle::run_cancelled:commit")
+    fn run_cancelled(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+        // Runtime-backed cancellation terminalization is owned by machine
+        // commands that can keep lifecycle and durable state aligned.
+        Ok(())
     }
 
     fn snapshot(&self) -> TurnStateSnapshot {
@@ -660,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn run_failed_unknown_terminal_cause_rejects_before_machine_apply() {
+    fn run_failed_effect_does_not_terminalize_runtime_state() {
         let handle = RuntimeTurnStateHandle::ephemeral();
         let run_id = RunId(Uuid::from_u128(12));
 
@@ -675,31 +620,26 @@ mod tests {
             )
             .unwrap();
 
-        let err = handle
+        handle
             .run_failed(
                 run_id.clone(),
                 unknown_terminal_cause_reason("display text must not classify run failure"),
             )
-            .expect_err("Unknown run failure cause should reject before state mutation");
+            .expect("runtime-backed run_failed effect is observation-only");
 
-        assert!(err.is_guard_rejected(), "expected guard rejection: {err:?}");
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.active_run_id, Some(run_id.clone()));
         assert_eq!(snapshot.turn_phase, TurnPhase::ApplyingPrimitive);
         assert_eq!(snapshot.terminal_cause_kind, None);
 
         handle
-            .run_failed(
-                run_id,
-                specific_terminal_cause_reason(
-                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                    "explicit run failure",
-                ),
-            )
-            .expect("specific run failure cause should remain accepted");
-        assert_eq!(
-            handle.snapshot().terminal_cause_kind,
-            Some(meerkat_core::TurnTerminalCauseKind::FatalFailure)
-        );
+            .run_completed(run_id.clone())
+            .expect("runtime-backed run_completed effect is observation-only");
+        handle
+            .run_cancelled(run_id)
+            .expect("runtime-backed run_cancelled effect is observation-only");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::ApplyingPrimitive);
+        assert_eq!(snapshot.terminal_cause_kind, None);
     }
 }

@@ -68,6 +68,9 @@ pub enum RuntimeBindingsError {
     /// Session was not found after registration (should not happen in practice).
     #[error("session {0} not found in runtime adapter after registration")]
     SessionNotFound(SessionId),
+    /// Machine-owned binding preparation failed before bindings were published.
+    #[error("failed to prepare runtime bindings for session {0}: {1}")]
+    PrepareFailed(SessionId, String),
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +112,13 @@ fn runtime_store_identity(store: &Arc<dyn RuntimeStore>) -> PersistentAuthAuthor
         .unwrap_or_else(|| {
             PersistentAuthAuthorityKey::Process(Arc::as_ptr(store).cast::<()>() as usize)
         })
+}
+
+fn runtime_stores_share_authority(a: &Arc<dyn RuntimeStore>, b: &Arc<dyn RuntimeStore>) -> bool {
+    match (a.auth_authority_key(), b.auth_authority_key()) {
+        (Some(a), Some(b)) => a == b,
+        _ => Arc::ptr_eq(a, b),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -779,6 +789,19 @@ impl MeerkatMachine {
     #[must_use]
     pub fn session_control_authority(&self) -> MachineSessionControlAuthority {
         MachineSessionControlAuthority { _private: () }
+    }
+
+    /// Whether this adapter shares the same runtime persistence authority as
+    /// another adapter. Runtime-backed composition surfaces use this to reject
+    /// mismatched adapters before visible terminal events can outrun the store
+    /// that owns their durable commit.
+    #[must_use]
+    pub fn shares_runtime_persistence_with(&self, other: &Self) -> bool {
+        match (&self.store, &other.store) {
+            (None, None) => true,
+            (Some(a), Some(b)) => runtime_stores_share_authority(a, b),
+            _ => false,
+        }
     }
 
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {

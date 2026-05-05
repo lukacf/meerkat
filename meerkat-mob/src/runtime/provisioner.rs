@@ -42,9 +42,178 @@ use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::time::Duration;
 #[cfg(feature = "runtime-adapter")]
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
+
+#[cfg(feature = "runtime-adapter")]
+struct DeferredTurnEventDelivery {
+    release_tx: oneshot::Sender<DeferredTurnCompletion>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug)]
+enum DeferredTurnCompletion {
+    Completed(meerkat_core::types::RunResult),
+    CompletedWithoutResult,
+    Failed {
+        class: meerkat_core::event::AgentErrorClass,
+        error: String,
+    },
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl DeferredTurnCompletion {
+    fn from_runtime_completion(
+        completion: &meerkat_runtime::completion::CompletionOutcome,
+    ) -> Self {
+        match completion {
+            meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
+                Self::Completed(result.as_ref().clone())
+            }
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                Self::CompletedWithoutResult
+            }
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+                Self::Failed {
+                    class: meerkat_core::event::AgentErrorClass::CallbackPending,
+                    error: format!("callback pending for tool '{tool_name}': {args}"),
+                }
+            }
+            meerkat_runtime::completion::CompletionOutcome::Cancelled => Self::Failed {
+                class: meerkat_core::event::AgentErrorClass::Cancelled,
+                error: "turn cancelled".to_string(),
+            },
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => Self::Failed {
+                class: meerkat_core::event::AgentErrorClass::Internal,
+                error: format!("turn abandoned: {reason}"),
+            },
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                Self::Failed {
+                    class: meerkat_core::event::AgentErrorClass::Terminal,
+                    error: format!("runtime terminated: {reason}"),
+                }
+            }
+        }
+    }
+
+    fn release_dropped() -> Self {
+        Self::Failed {
+            class: meerkat_core::event::AgentErrorClass::Internal,
+            error: "runtime completion release dropped before terminal event delivery".to_string(),
+        }
+    }
+
+    fn synthetic_event(
+        self,
+        session_id: SessionId,
+    ) -> meerkat_core::EventEnvelope<meerkat_core::AgentEvent> {
+        let payload = match self {
+            Self::Completed(result) => meerkat_core::AgentEvent::RunCompleted {
+                session_id: session_id.clone(),
+                result: result.text,
+                structured_output: result.structured_output,
+                usage: result.usage,
+                terminal_cause_kind: result.terminal_cause_kind,
+                extraction_required: false,
+            },
+            Self::CompletedWithoutResult => meerkat_core::AgentEvent::RunCompleted {
+                session_id: session_id.clone(),
+                result: String::new(),
+                structured_output: None,
+                usage: Default::default(),
+                terminal_cause_kind: None,
+                extraction_required: false,
+            },
+            Self::Failed { class, error } => meerkat_core::AgentEvent::RunFailed {
+                session_id: session_id.clone(),
+                error_class: class,
+                error,
+                terminal_cause_kind: None,
+                error_report: None,
+            },
+        };
+        meerkat_core::EventEnvelope::new_session(session_id, 1, None, payload)
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl DeferredTurnEventDelivery {
+    fn release(self, completion: &meerkat_runtime::completion::CompletionOutcome) {
+        let _ = self
+            .release_tx
+            .send(DeferredTurnCompletion::from_runtime_completion(completion));
+    }
+
+    fn release_completed_without_result(self) {
+        let _ = self
+            .release_tx
+            .send(DeferredTurnCompletion::CompletedWithoutResult);
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn event_is_terminal(event: &meerkat_core::EventEnvelope<meerkat_core::AgentEvent>) -> bool {
+    matches!(
+        event.payload,
+        meerkat_core::AgentEvent::RunCompleted { .. } | meerkat_core::AgentEvent::RunFailed { .. }
+    )
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn defer_turn_events_until_machine_completion(
+    session_id: &SessionId,
+    event_tx: Option<TurnEventTx>,
+) -> (Option<TurnEventTx>, Option<DeferredTurnEventDelivery>) {
+    let Some(event_tx) = event_tx else {
+        return (None, None);
+    };
+
+    let (deferred_tx, mut deferred_rx) = mpsc::channel(64);
+    let (release_tx, release_rx) = oneshot::channel();
+    let session_id = session_id.clone();
+    tokio::spawn(async move {
+        let mut release_rx = Box::pin(release_rx);
+        let mut buffered = Vec::new();
+        let mut stream_closed = false;
+        let mut completion = None;
+
+        loop {
+            tokio::select! {
+                event = deferred_rx.recv(), if !stream_closed => {
+                    match event {
+                        Some(event) => buffered.push(event),
+                        None => stream_closed = true,
+                    }
+                }
+                released = &mut release_rx, if completion.is_none() => {
+                    completion = Some(released.unwrap_or_else(|_| DeferredTurnCompletion::release_dropped()));
+                }
+            }
+
+            if stream_closed && completion.is_some() {
+                break;
+            }
+        }
+
+        let mut terminal_forwarded = false;
+        for event in buffered {
+            terminal_forwarded |= event_is_terminal(&event);
+            if event_tx.send(event).await.is_err() {
+                return;
+            }
+        }
+
+        if !terminal_forwarded && let Some(completion) = completion {
+            let _ = event_tx.send(completion.synthetic_event(session_id)).await;
+        }
+    });
+
+    (
+        Some(deferred_tx),
+        Some(DeferredTurnEventDelivery { release_tx }),
+    )
+}
 
 pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
@@ -274,6 +443,8 @@ impl SessionBackend {
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let mut context_input_id = requested_input_id.clone();
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(session_id, event_tx);
 
         // Queue only owner bridge context that cannot be reconstructed from
         // runtime primitives. Bind context by canonical input identity (not by
@@ -281,7 +452,7 @@ impl SessionBackend {
         // of semantic ordering.
         let queued_context = if let Some(ref state) = state {
             state
-                .enqueue_turn_context(requested_input_id.clone(), event_tx)
+                .enqueue_turn_context(requested_input_id.clone(), queued_event_tx)
                 .await
         } else {
             false
@@ -333,6 +504,9 @@ impl SessionBackend {
             {
                 let _ = state.discard_turn_context(&context_input_id).await;
             }
+            if let Some(delivery) = deferred_delivery {
+                delivery.release_completed_without_result();
+            }
             return Ok(());
         };
 
@@ -341,6 +515,9 @@ impl SessionBackend {
             && queued_context
         {
             let _ = state.discard_turn_context(&context_input_id).await;
+        }
+        if let Some(delivery) = deferred_delivery {
+            delivery.release(&completion);
         }
 
         runtime_completion_to_mob_result(session_id, completion)
@@ -361,10 +538,12 @@ impl SessionBackend {
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let mut context_input_id = requested_input_id.clone();
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(session_id, event_tx);
 
         let queued_context = if let Some(ref state) = state {
             state
-                .enqueue_turn_context(requested_input_id.clone(), event_tx)
+                .enqueue_turn_context(requested_input_id.clone(), queued_event_tx)
                 .await
         } else {
             false
@@ -413,6 +592,9 @@ impl SessionBackend {
             {
                 let _ = state.discard_turn_context(&context_input_id).await;
             }
+            if let Some(delivery) = deferred_delivery {
+                delivery.release_completed_without_result();
+            }
             return Ok(());
         };
 
@@ -420,8 +602,16 @@ impl SessionBackend {
             && queued_context
         {
             tokio::spawn(async move {
-                let _ = handle.wait().await;
+                let completion = handle.wait().await;
                 let _ = state.discard_turn_context(&context_input_id).await;
+                if let Some(delivery) = deferred_delivery {
+                    delivery.release(&completion);
+                }
+            });
+        } else if let Some(delivery) = deferred_delivery {
+            tokio::spawn(async move {
+                let completion = handle.wait().await;
+                delivery.release(&completion);
             });
         }
 
@@ -767,6 +957,7 @@ impl MobSessionRuntimeExecutor {
 #[cfg(feature = "runtime-adapter")]
 struct MobSessionRuntimeBoundaryHandle {
     session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Arc<MeerkatMachine>,
     bridge_session_id: SessionId,
 }
 
@@ -776,7 +967,10 @@ struct MobSessionRuntimeBoundaryHandle {
 impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
-            .cancel_after_boundary(&self.bridge_session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.bridge_session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -788,6 +982,7 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
 
 struct MobSessionServiceInterruptHandle {
     session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Arc<MeerkatMachine>,
     bridge_session_id: SessionId,
 }
 
@@ -796,7 +991,10 @@ struct MobSessionServiceInterruptHandle {
 impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
-            .interrupt(&self.bridge_session_id)
+            .interrupt_with_machine_authority(
+                &self.bridge_session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -848,6 +1046,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(MobSessionRuntimeBoundaryHandle {
             session_service: Arc::clone(&self.session_service),
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
             bridge_session_id: self.bridge_session_id.clone(),
         }))
     }
@@ -855,6 +1054,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         Some(Arc::new(MobSessionServiceInterruptHandle {
             session_service: Arc::clone(&self.session_service),
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
             bridge_session_id: self.bridge_session_id.clone(),
         }))
     }
@@ -951,7 +1151,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
-            .cancel_after_boundary(&self.bridge_session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.bridge_session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1014,8 +1217,10 @@ impl MobProvisioner for SessionBackend {
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
             .map(|session| session.id().clone());
-        // Prepare authoritative bindings through the runtime adapter so the
-        // factory receives the session resources it is allowed to consume.
+        // Prepare local session resources for the factory. The authoritative
+        // mob binding is emitted later by the routed
+        // RequestRuntimeBinding -> PrepareBindings path, after MobMachine has
+        // committed the member-owned AgentRuntimeId and fence.
         let pre_registered_bridge_session_id = if let Some(adapter) = &self.runtime_adapter {
             if req.create_session.build.is_none() {
                 req.create_session.build =
@@ -1283,13 +1488,16 @@ impl MobProvisioner for SessionBackend {
                 "runtime-backed hard cancel requested for unregistered runtime session '{session_id}'"
             )));
         }
-        MobSessionServiceInterruptHandle {
-            session_service: Arc::clone(&self.session_service),
-            bridge_session_id: session_id,
-        }
-        .hard_cancel_current_run(reason.to_string())
-        .await
-        .map_err(|error| MobError::Internal(format!("mob session hard cancel failed: {error}")))?;
+        self.session_service
+            .interrupt(&session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|error| {
+                MobError::Internal(format!("mob session hard cancel failed: {error}"))
+            })?;
         Ok(())
     }
 

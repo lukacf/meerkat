@@ -1,15 +1,15 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use chrono::Utc;
-use meerkat_core::lifecycle::{
-    InputId, RunBoundaryReceipt, RunId, run_primitive::RunApplyBoundary,
-};
+use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::types::SessionId;
 use meerkat_runtime::{
     ContinuationInput, EphemeralRuntimeDriver, Input, InputDurability, InputHeader,
     InputLifecycleEvent, InputLifecycleState, InputOrigin, InputVisibility, LogicalRuntimeId,
-    PeerConvention, PeerInput, PostAdmissionSignal, PromptInput, ResponseProgressPhase,
-    ResponseTerminalStatus, RuntimeDriver, RuntimeDriverError, RuntimeEvent, RuntimeState,
-    driver::ephemeral::ReplayQueuedContributorsPlan, post_admission_signal_from_accept_outcome,
+    MeerkatMachine, PeerConvention, PeerInput, PostAdmissionSignal, PromptInput,
+    ResponseProgressPhase, ResponseTerminalStatus, RuntimeControlPlane, RuntimeDriver,
+    RuntimeDriverError, RuntimeEvent, RuntimeState, SessionServiceRuntimeExt,
+    post_admission_signal_from_accept_outcome,
 };
 
 fn make_prompt_input(text: &str) -> Input {
@@ -36,7 +36,7 @@ fn make_peer_terminal(body: &str) -> Input {
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: "peer-1".into(),
+                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 display_identity: Some("Peer 1".into()),
                 runtime_id: None,
             },
@@ -63,7 +63,7 @@ fn make_peer_progress() -> Input {
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: "peer-1".into(),
+                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 display_identity: Some("Peer 1".into()),
                 runtime_id: None,
             },
@@ -114,25 +114,25 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
     assert_eq!(driver.pre_run_phase(), Some(pre_run_phase));
 }
 
-fn retire_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::RetireReport {
-    driver.contract_retire_runtime_authority().unwrap();
-    driver.contract_finalize_retire()
+async fn registered_machine() -> (MeerkatMachine, SessionId, LogicalRuntimeId) {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    machine.register_session(session_id.clone()).await;
+    (machine, session_id, runtime_id)
 }
 
-fn reset_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::ResetReport {
-    driver.contract_reset_runtime_authority().unwrap();
-    driver.contract_reset_cleanup()
-}
-
-fn destroy_runtime(driver: &mut EphemeralRuntimeDriver) -> usize {
-    let abandoned = driver.contract_destroy_cleanup();
-    driver.contract_destroy_runtime_authority().unwrap();
-    abandoned
-}
-
-fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_stop_runtime_authority().unwrap();
-    driver.contract_finalize_stop_runtime();
+async fn accept_on_machine(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    input: Input,
+) -> InputId {
+    let input_id = input.id().clone();
+    let outcome = SessionServiceRuntimeExt::accept_input(machine, session_id, input)
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+    input_id
 }
 
 // WIP: the admission seam now emits `PostAdmissionSignal` via the result
@@ -301,183 +301,92 @@ async fn reject_derived_prompt() {
 }
 
 #[tokio::test]
-async fn retire_preserves_queued_for_drain() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.accept_input(make_prompt_input("a")).await.unwrap();
-    driver.accept_input(make_prompt_input("b")).await.unwrap();
+async fn retire_without_attached_loop_abandons_queued_work() {
+    let (machine, session_id, _runtime_id) = registered_machine().await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("a")).await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("b")).await;
 
-    let report = retire_runtime(&mut driver);
-    assert_eq!(report.inputs_abandoned, 0);
-    assert_eq!(report.inputs_pending_drain, 2);
-    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-    // Queue is still intact for drain
-    assert_eq!(driver.queue().len(), 2);
+    let report = SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_abandoned, 2);
+    assert_eq!(report.inputs_pending_drain, 0);
+    assert_eq!(
+        SessionServiceRuntimeExt::runtime_state(&machine, &session_id)
+            .await
+            .unwrap(),
+        RuntimeState::Retired
+    );
+    assert!(
+        SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn reset_abandons_and_drains() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.accept_input(make_prompt_input("a")).await.unwrap();
+    let (machine, session_id, _runtime_id) = registered_machine().await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("a")).await;
 
-    let report = reset_runtime(&mut driver);
+    let report = SessionServiceRuntimeExt::reset_runtime(&machine, &session_id)
+        .await
+        .unwrap();
     assert_eq!(report.inputs_abandoned, 1);
-    assert!(driver.queue().is_empty());
+    assert!(
+        SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn destroy_transitions_to_terminal() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.accept_input(make_prompt_input("a")).await.unwrap();
+    let (machine, session_id, runtime_id) = registered_machine().await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("a")).await;
 
-    let abandoned = destroy_runtime(&mut driver);
-    assert_eq!(abandoned, 1);
-    assert!(driver.runtime_state().is_terminal());
-}
-
-#[tokio::test]
-async fn on_run_completed_consumes() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    // Accept and manually transition to simulate run
-    let input = make_prompt_input("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-    driver.take_wake_requested();
-
-    // Simulate run start
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-
-    // Stage and apply
-    driver.stage_input(&input_id, &run_id).unwrap();
-    driver.apply_input(&input_id, &run_id).unwrap();
-    driver
-        .boundary_applied(
-            run_id.clone(),
-            RunBoundaryReceipt {
-                run_id: run_id.clone(),
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: vec![input_id.clone()],
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 1,
-            },
-            None,
-        )
+    let report = RuntimeControlPlane::destroy(&machine, &runtime_id)
         .await
         .unwrap();
-
-    // Run completed
-    driver
-        .run_completed(run_id.clone(), vec![input_id.clone()])
-        .await
-        .unwrap();
-    driver
-        .contract_commit_run_authority(&input_id, &run_id)
-        .unwrap();
-
-    // Input should be consumed
-    assert!(driver.input_state(&input_id).is_some());
-    assert_eq!(
-        driver.input_phase(&input_id),
-        Some(InputLifecycleState::Consumed)
-    );
-    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
-}
-
-#[tokio::test]
-async fn on_run_failed_rollbacks() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    let input = make_prompt_input("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    // Run failed
-    driver
-        .run_failed(
-            run_id.clone(),
-            vec![input_id.clone()],
-            ReplayQueuedContributorsPlan {
-                queue_work_ids: vec![input_id.clone()],
-                steer_work_ids: Vec::new(),
-                wake_runtime: true,
-                notice_kind: "RunFailed",
-            },
-            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
-            true,
-        )
-        .await
-        .unwrap();
-    driver.contract_rollback_run_authority(&run_id).unwrap();
-
-    // Input should be rolled back to Queued
-    assert!(driver.input_state(&input_id).is_some());
-    assert_eq!(
-        driver.input_phase(&input_id),
-        Some(InputLifecycleState::Queued)
-    );
-    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
-    assert_queue_projection_alignment(&driver);
-}
-
-#[tokio::test]
-async fn on_run_failed_requests_wake_for_backlog() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    let input1 = make_prompt_input("first");
-    let input1_id = input1.id().clone();
-    let input2 = make_prompt_input("second");
-    driver.accept_input(input1).await.unwrap();
-    driver.accept_input(input2).await.unwrap();
-    let _ = driver.take_wake_requested();
-
-    let run_id = RunId::new();
-    let (dequeued_id, _) = driver.dequeue_next().unwrap();
-    assert_eq!(dequeued_id, input1_id);
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input1_id, &run_id).unwrap();
-
-    driver
-        .run_failed(
-            run_id,
-            vec![input1_id.clone()],
-            ReplayQueuedContributorsPlan {
-                queue_work_ids: vec![input1_id.clone()],
-                steer_work_ids: Vec::new(),
-                wake_runtime: true,
-                notice_kind: "RunFailed",
-            },
-            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
-            true,
-        )
-        .await
-        .unwrap();
-
+    assert_eq!(report.inputs_abandoned, 1);
     assert!(
-        driver.take_wake_requested(),
-        "queued work behind a failed run should request another wake"
+        RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+            .await
+            .unwrap()
+            .is_terminal()
     );
 }
 
 #[tokio::test]
 async fn reset_after_retire_returns_runtime_to_idle() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    retire_runtime(&mut driver);
-    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-
-    let report = reset_runtime(&mut driver);
-    assert_eq!(report.inputs_abandoned, 0);
-    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
-
-    let accepted = driver
-        .accept_input(make_prompt_input("hello"))
+    let (machine, session_id, _runtime_id) = registered_machine().await;
+    SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)
         .await
         .unwrap();
+    assert_eq!(
+        SessionServiceRuntimeExt::runtime_state(&machine, &session_id)
+            .await
+            .unwrap(),
+        RuntimeState::Retired
+    );
+
+    let report = SessionServiceRuntimeExt::reset_runtime(&machine, &session_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(
+        SessionServiceRuntimeExt::runtime_state(&machine, &session_id)
+            .await
+            .unwrap(),
+        RuntimeState::Idle
+    );
+
+    let accepted =
+        SessionServiceRuntimeExt::accept_input(&machine, &session_id, make_prompt_input("hello"))
+            .await
+            .unwrap();
     assert!(
         accepted.is_accepted(),
         "reset runtime should accept new input"
@@ -555,49 +464,15 @@ async fn stage_input_keeps_queue_projection_aligned() {
 }
 
 #[tokio::test]
-async fn rollback_restores_queue_projection_order() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    let first = make_prompt_input("first");
-    let first_id = first.id().clone();
-    let second = make_prompt_input("second");
-    let second_id = second.id().clone();
-    driver.accept_input(first).await.unwrap();
-    driver.accept_input(second).await.unwrap();
-    let _ = driver.take_wake_requested();
-
-    let run_id = RunId::new();
-    let (dequeued_id, _) = driver.dequeue_next().unwrap();
-    assert_eq!(dequeued_id, first_id);
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&first_id, &run_id).unwrap();
-
-    driver
-        .run_failed(
-            run_id,
-            vec![first_id.clone()],
-            ReplayQueuedContributorsPlan {
-                queue_work_ids: vec![first_id.clone()],
-                steer_work_ids: Vec::new(),
-                wake_runtime: true,
-                notice_kind: "RunFailed",
-            },
-            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("rollback"),
-            true,
-        )
+async fn retired_rejects_input() {
+    let (machine, session_id, _runtime_id) = registered_machine().await;
+    SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)
         .await
         .unwrap();
 
-    assert_eq!(driver.queue().input_ids(), vec![first_id, second_id]);
-    assert_queue_projection_alignment(&driver);
-}
-
-#[tokio::test]
-async fn retired_rejects_input() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    retire_runtime(&mut driver);
-
-    let result = driver.accept_input(make_prompt_input("hello")).await;
+    let result =
+        SessionServiceRuntimeExt::accept_input(&machine, &session_id, make_prompt_input("hello"))
+            .await;
     assert!(result.is_err());
 }
 
@@ -653,86 +528,48 @@ async fn progress_peer_staged_boundary() {
 
 #[tokio::test]
 async fn destroy_after_retire_succeeds() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    retire_runtime(&mut driver);
-    let abandoned = destroy_runtime(&mut driver);
-    assert_eq!(abandoned, 0);
-    assert_eq!(driver.runtime_state(), RuntimeState::Destroyed);
+    let (machine, session_id, runtime_id) = registered_machine().await;
+    SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)
+        .await
+        .unwrap();
+    let report = RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(
+        RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+            .await
+            .unwrap(),
+        RuntimeState::Destroyed
+    );
 }
 
 // ---- Phase 1: State machine hardening tests ----
 
 #[tokio::test]
-async fn retired_can_drain_queue_via_run_cycle() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+async fn retired_rejects_new_input_after_machine_retire() {
+    let (machine, session_id, _runtime_id) = registered_machine().await;
 
-    // Accept an input
-    let input = make_prompt_input("drain me");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-    let _ = driver.take_wake_requested();
-
-    // Retire — queue preserved for drain
-    let report = retire_runtime(&mut driver);
-    assert_eq!(report.inputs_abandoned, 0);
-    assert_eq!(report.inputs_pending_drain, 1);
-    assert_eq!(driver.queue().len(), 1);
-
-    // Can still dequeue and process (Retired → Running)
-    let (dequeued_id, _) = driver.dequeue_next().unwrap();
-    assert_eq!(dequeued_id, input_id);
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Retired);
-    assert_eq!(driver.runtime_state(), RuntimeState::Running);
-
-    driver.stage_input(&input_id, &run_id).unwrap();
-    driver.apply_input(&input_id, &run_id).unwrap();
-    driver
-        .boundary_applied(
-            run_id.clone(),
-            RunBoundaryReceipt {
-                run_id: run_id.clone(),
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: vec![input_id.clone()],
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 1,
-            },
-            None,
-        )
+    accept_on_machine(&machine, &session_id, make_prompt_input("existing")).await;
+    SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)
         .await
         .unwrap();
-
-    // Complete run → returns to Retired (not Idle)
-    driver
-        .run_completed(run_id.clone(), vec![input_id.clone()])
-        .await
-        .unwrap();
-    driver
-        .contract_commit_run_authority(&input_id, &run_id)
-        .unwrap();
-
-    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-    assert!(driver.queue().is_empty());
-}
-
-#[tokio::test]
-async fn retired_rejects_new_input_while_draining() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    driver
-        .accept_input(make_prompt_input("existing"))
-        .await
-        .unwrap();
-    retire_runtime(&mut driver);
 
     // New input rejected
-    let result = driver.accept_input(make_prompt_input("rejected")).await;
+    let result = SessionServiceRuntimeExt::accept_input(
+        &machine,
+        &session_id,
+        make_prompt_input("rejected"),
+    )
+    .await;
     assert!(result.is_err());
 
-    // But existing queue is intact
-    assert_eq!(driver.queue().len(), 1);
+    assert!(
+        SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -750,31 +587,60 @@ async fn reset_rejected_while_running() {
 
 #[tokio::test]
 async fn stop_abandons_all_active_inputs() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let (machine, session_id, _runtime_id) = registered_machine().await;
 
     let input = make_prompt_input("stop me");
     let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
+    accept_on_machine(&machine, &session_id, input).await;
 
-    stop_runtime(&mut driver);
+    machine
+        .stop_runtime_executor(&session_id, "driver ephemeral stop contract")
+        .await
+        .unwrap();
 
-    assert_eq!(driver.runtime_state(), RuntimeState::Stopped);
-    assert!(driver.queue().is_empty());
+    assert_eq!(
+        SessionServiceRuntimeExt::runtime_state(&machine, &session_id)
+            .await
+            .unwrap(),
+        RuntimeState::Stopped
+    );
+    assert!(
+        SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    let state = driver.input_state(&input_id).unwrap();
+    let stored = SessionServiceRuntimeExt::input_state(&machine, &session_id, &input_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let state = stored.state;
     assert!(state.is_terminal());
 }
 
 #[tokio::test]
 async fn destroy_with_queued_inputs_abandons_all() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.accept_input(make_prompt_input("a")).await.unwrap();
-    driver.accept_input(make_prompt_input("b")).await.unwrap();
+    let (machine, session_id, runtime_id) = registered_machine().await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("a")).await;
+    accept_on_machine(&machine, &session_id, make_prompt_input("b")).await;
 
-    let abandoned = destroy_runtime(&mut driver);
-    assert_eq!(abandoned, 2);
-    assert!(driver.runtime_state().is_terminal());
-    assert!(driver.active_input_ids().is_empty());
+    let report = RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_abandoned, 2);
+    assert!(
+        RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+            .await
+            .unwrap()
+            .is_terminal()
+    );
+    assert!(
+        SessionServiceRuntimeExt::list_active_inputs(&machine, &session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -789,7 +655,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: "peer-1".into(),
+                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 display_identity: Some("Peer 1".into()),
                 runtime_id: None,
             },
@@ -823,7 +689,7 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: "peer-1".into(),
+                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 display_identity: Some("Peer 1".into()),
                 runtime_id: None,
             },
@@ -879,7 +745,7 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: "peer-1".into(),
+                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 display_identity: Some("Peer 1".into()),
                 runtime_id: None,
             },

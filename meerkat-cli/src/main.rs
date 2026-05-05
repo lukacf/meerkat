@@ -5837,8 +5837,7 @@ struct CliRuntimeExecutor {
     /// Persistent service reference for durable boundary commits.
     /// When `Some`, `apply()` uses `apply_runtime_turn()`.
     #[cfg(feature = "session-store")]
-    persistent_service:
-        Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
+    persistent_service: Option<Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
@@ -5889,6 +5888,9 @@ fn cli_terminal_pre_turn_context_appends(
 
 struct CliRuntimeBoundaryHandle {
     service: Arc<dyn meerkat_core::service::SessionService>,
+    #[cfg(feature = "session-store")]
+    persistent_service: Option<Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     session_id: meerkat_core::types::SessionId,
 }
 
@@ -5898,6 +5900,24 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
         &self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        #[cfg(feature = "session-store")]
+        if let Some(persistent) = self.persistent_service.as_ref() {
+            return persistent
+                .cancel_after_boundary_with_machine_authority(
+                    &self.session_id,
+                    self.runtime_adapter.session_control_authority(),
+                )
+                .await
+                .or_else(|err| match err {
+                    meerkat::SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| {
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                        err.to_string(),
+                    )
+                });
+        }
         self.service
             .cancel_after_boundary(&self.session_id)
             .await
@@ -5915,6 +5935,9 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
 
 struct CliRuntimeInterruptHandle {
     service: Arc<dyn meerkat_core::service::SessionService>,
+    #[cfg(feature = "session-store")]
+    persistent_service: Option<Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     session_id: meerkat_core::types::SessionId,
 }
 
@@ -5924,6 +5947,24 @@ impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for CliRuntimeInterrup
         &self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        #[cfg(feature = "session-store")]
+        if let Some(persistent) = self.persistent_service.as_ref() {
+            return persistent
+                .interrupt_with_machine_authority(
+                    &self.session_id,
+                    self.runtime_adapter.session_control_authority(),
+                )
+                .await
+                .or_else(|err| match err {
+                    meerkat::SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| {
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                        err.to_string(),
+                    )
+                });
+        }
         self.service
             .interrupt(&self.session_id)
             .await
@@ -5946,6 +5987,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
         Some(Arc::new(CliRuntimeBoundaryHandle {
             service: Arc::clone(&self.service),
+            #[cfg(feature = "session-store")]
+            persistent_service: self.persistent_service.clone(),
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
             session_id: self.session_id.clone(),
         }))
     }
@@ -5955,6 +5999,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
         Some(Arc::new(CliRuntimeInterruptHandle {
             service: Arc::clone(&self.service),
+            #[cfg(feature = "session-store")]
+            persistent_service: self.persistent_service.clone(),
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
             session_id: self.session_id.clone(),
         }))
     }
@@ -6044,6 +6091,20 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         &mut self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        #[cfg(feature = "session-store")]
+        if let Some(persistent) = self.persistent_service.as_ref() {
+            return persistent
+                .cancel_after_boundary_with_machine_authority(
+                    &self.session_id,
+                    self.runtime_adapter.session_control_authority(),
+                )
+                .await
+                .map_err(|err| {
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                        err.to_string(),
+                    )
+                });
+        }
         self.service
             .cancel_after_boundary(&self.session_id)
             .await
@@ -6155,7 +6216,9 @@ impl SessionService for RunMobSessionService {
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
         tracing::info!(target: "mob_tools", "RunMobSessionService::interrupt session_id={id}");
-        self.inner.interrupt(id).await
+        Err(meerkat_core::service::SessionError::Unsupported(format!(
+            "interrupt for mob session {id} must route through MeerkatMachine"
+        )))
     }
 
     async fn read(
@@ -6249,6 +6312,32 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
             &self.inner,
         )
+    }
+
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::interrupt_with_machine_authority(
+            &self.inner,
+            session_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_after_boundary_with_machine_authority(
+            &self.inner,
+            session_id,
+            authority,
+        )
+        .await
     }
 
     async fn session_belongs_to_mob(
@@ -8513,7 +8602,9 @@ impl SessionService for MobCliSessionService {
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
-        self.inner.interrupt(id).await
+        Err(meerkat_core::service::SessionError::Unsupported(format!(
+            "interrupt for mob session {id} must route through MeerkatMachine"
+        )))
     }
 
     async fn read(
@@ -8620,6 +8711,32 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
             &self.inner,
         )
+    }
+
+    async fn interrupt_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::interrupt_with_machine_authority(
+            &self.inner,
+            session_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn cancel_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_after_boundary_with_machine_authority(
+            &self.inner,
+            session_id,
+            authority,
+        )
+        .await
     }
 
     async fn session_belongs_to_mob(
@@ -8954,8 +9071,6 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 }
                 | meerkat_runtime::RuntimeDriverError::Destroyed,
             ) => {
-                reject_persisted_runtime_state_for_interrupt_noop(service.as_ref(), &session_id)
-                    .await?;
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",
@@ -8976,31 +9091,6 @@ fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
         state,
         meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
     )
-}
-
-fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
-    matches!(
-        state,
-        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
-    )
-}
-
-#[cfg(feature = "session-store")]
-async fn reject_persisted_runtime_state_for_interrupt_noop(
-    service: &meerkat::PersistentSessionService<FactoryAgentBuilder>,
-    session_id: &SessionId,
-) -> anyhow::Result<()> {
-    let Some(state) = service
-        .persisted_runtime_state(session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?
-    else {
-        return Ok(());
-    };
-    if persisted_runtime_state_blocks_interrupt_noop(state) {
-        anyhow::bail!("Failed to interrupt session: runtime is not interruptible while {state}");
-    }
-    Ok(())
 }
 
 #[cfg(all(feature = "comms", test))]
@@ -11245,15 +11335,6 @@ mod tests {
         ));
         assert!(!interrupt_not_ready_is_noop(
             meerkat_runtime::RuntimeState::Stopped
-        ));
-        assert!(persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Retired
-        ));
-        assert!(persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Stopped
-        ));
-        assert!(!persisted_runtime_state_blocks_interrupt_noop(
-            meerkat_runtime::RuntimeState::Idle
         ));
     }
 
@@ -15998,7 +16079,7 @@ capabilities = ["definitely_missing_capability"]
 
     #[cfg(feature = "session-store")]
     #[tokio::test]
-    async fn test_cli_interrupt_destroyed_noop_rejects_persisted_stopped_runtime() {
+    async fn test_cli_interrupt_destroyed_noop_ignores_persisted_stopped_projection() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let session_store = sqlite_session_store(&temp);
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
@@ -16012,7 +16093,7 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
-        let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
@@ -16045,22 +16126,24 @@ capabilities = ["definitely_missing_capability"]
             })
             .await
             .expect("runtime-backed CLI service should create deferred session");
-        runtime_store
-            .persist_runtime_state(
-                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
-                meerkat_runtime::RuntimeState::Stopped,
-            )
+        runtime_adapter
+            .register_session(created.session_id.clone())
+            .await;
+        runtime_adapter
+            .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
+        runtime_adapter
+            .unregister_session(&created.session_id)
+            .await;
 
-        let err = reject_persisted_runtime_state_for_interrupt_noop(
-            service.as_ref(),
-            &created.session_id,
-        )
-        .await
-        .expect_err("persisted stopped runtime must reject cold interrupt no-op");
-
-        assert!(err.to_string().contains("stopped"));
+        assert_eq!(
+            service
+                .persisted_runtime_state(&created.session_id)
+                .await
+                .expect("runtime-state projection load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Stopped)
+        );
     }
 
     #[tokio::test]

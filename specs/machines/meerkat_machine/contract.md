@@ -1934,6 +1934,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
+### `ClassifyExternalEnvelopeRequestPeerAddedIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
 ### `ClassifyExternalEnvelopeRequestPeerAddedRunning`
 - From: `Running`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -1952,6 +1961,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
+### `ClassifyExternalEnvelopeRequestPeerRetiredIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
+### `ClassifyExternalEnvelopeRequestPeerRetiredRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeRequestPeerRetiredStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Stopped`
+
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
 - From: `Running`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -1969,6 +2005,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_ingress_request_peer_unwired`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestPeerUnwiredIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
+### `ClassifyExternalEnvelopeRequestPeerUnwiredRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeRequestPeerUnwiredStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Stopped`
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
 - From: `Running`
@@ -2051,6 +2114,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
+### `ClassifyExternalEnvelopeLifecycleAddedIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
 ### `ClassifyExternalEnvelopeLifecycleAddedAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -2069,6 +2141,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
+### `ClassifyExternalEnvelopeLifecycleRetiredIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
+### `ClassifyExternalEnvelopeLifecycleRetiredRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeLifecycleRetiredStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Stopped`
+
 ### `ClassifyExternalEnvelopeLifecycleRetiredAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -2086,6 +2185,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_ingress_lifecycle_retired`
 - Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
+
+### `ClassifyExternalEnvelopeLifecycleUnwiredIdle`
+- From: `Idle`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Idle`
+
+### `ClassifyExternalEnvelopeLifecycleUnwiredRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeLifecycleUnwiredStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Stopped`
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
 - From: `Attached`

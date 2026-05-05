@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root_from_runfiles() {
+  if [[ -n "${RUNFILES_DIR:-}" && -d "${RUNFILES_DIR}/_main" ]]; then
+    printf '%s\n' "${RUNFILES_DIR}/_main"
+    return 0
+  fi
+
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  cd "${script_dir}/.." && pwd
+}
+
+runfiles_manifest_file() {
+  if [[ -n "${RUNFILES_MANIFEST_FILE:-}" && -f "${RUNFILES_MANIFEST_FILE}" ]]; then
+    printf '%s\n' "${RUNFILES_MANIFEST_FILE}"
+    return 0
+  fi
+  if [[ -f "${0}.runfiles_manifest" ]]; then
+    printf '%s\n' "${0}.runfiles_manifest"
+    return 0
+  fi
+  local script_dir script_name
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  script_name="$(basename -- "${BASH_SOURCE[0]}")"
+  if [[ -f "${script_dir}/${script_name}.runfiles_manifest" ]]; then
+    printf '%s\n' "${script_dir}/${script_name}.runfiles_manifest"
+    return 0
+  fi
+  return 1
+}
+
+absolute_runfile() {
+  local path="$1"
+  if [[ "${path}" == /* ]]; then
+    printf '%s\n' "${path}"
+    return 0
+  fi
+  if [[ -e "${workspace_root}/${path}" ]]; then
+    printf '%s/%s\n' "${workspace_root}" "${path}"
+    return 0
+  fi
+  local manifest_file
+  if manifest_file="$(runfiles_manifest_file)"; then
+    local key stripped resolved
+    stripped="${path#../}"
+    for key in "${path}" "_main/${path}" "${stripped}" "_main/${stripped}"; do
+      resolved="$(awk -v key="${key}" '$1 == key { print $2; exit }' "${manifest_file}")"
+      if [[ -n "${resolved}" ]]; then
+        printf '%s\n' "${resolved}"
+        return 0
+      fi
+    done
+  fi
+  printf '%s/%s\n' "${workspace_root}" "${path}"
+}
+
+manifest_tool_path() {
+  local tool="$1"
+  local manifest_file
+  if ! manifest_file="$(runfiles_manifest_file)"; then
+    return 1
+  fi
+  awk -v suffix="/bin/${tool}" '$1 ~ suffix "$" { print $2; exit }' "${manifest_file}"
+}
+
+execroot_from_runfiles() {
+  local path="${RUNFILES_DIR:-}"
+  if [[ "${path}" == *"/bazel-out/"* ]]; then
+    printf '%s\n' "${path%%/bazel-out/*}"
+    return 0
+  fi
+  return 1
+}
+
+prepend_path_dir() {
+  local path="$1"
+  if [[ -n "${path}" && -e "${path}" ]]; then
+    export PATH="$(dirname "${path}"):${PATH}"
+  fi
+}
+
+prepend_runfile_tool_dir() {
+  local tool="$1"
+  local candidate
+  local execroot
+  if execroot="$(execroot_from_runfiles)"; then
+    for candidate in \
+      "${execroot}/external/+http_archive+node_darwin_arm64/bin/${tool}" \
+      "${execroot}/external/node_darwin_arm64/bin/${tool}"; do
+      prepend_path_dir "${candidate}"
+      if command -v "${tool}" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+  fi
+  if command -v "${tool}" >/dev/null 2>&1; then
+    return 0
+  fi
+  prepend_path_dir "$(manifest_tool_path "${tool}")"
+  if command -v "${tool}" >/dev/null 2>&1; then
+    return 0
+  fi
+  for candidate in \
+    "${RUNFILES_DIR:-}/+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${RUNFILES_DIR:-}/node_darwin_arm64/bin/${tool}" \
+    "${RUNFILES_DIR:-}/_main/external/+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${workspace_root}/../+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${workspace_root}/external/+http_archive+node_darwin_arm64/bin/${tool}"; do
+    prepend_path_dir "${candidate}"
+    if command -v "${tool}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  candidate="$(
+    find -L "${RUNFILES_DIR:-${workspace_root}}" \
+      -path "*/node_darwin_arm64/bin/${tool}" \
+      2>/dev/null |
+      head -n 1
+  )"
+  prepend_path_dir "${candidate}"
+}
+
+runfile_path_matching() {
+  local pattern="$1"
+  find -L "${RUNFILES_DIR:-${workspace_root}}" \
+    -path "${pattern}" \
+    2>/dev/null |
+    head -n 1
+}
+
+install_node_tool_wrappers() {
+  local node_bin npm_cli npx_cli wrapper_dir
+  if [[ -n "${MEERKAT_E2E_NODE_BIN:-}" ]]; then
+    node_bin="$(absolute_runfile "${MEERKAT_E2E_NODE_BIN}")"
+  else
+    node_bin="$(runfile_path_matching "*/node_darwin_arm64/bin/node")"
+  fi
+  if [[ -n "${MEERKAT_E2E_NPM_CLI:-}" ]]; then
+    npm_cli="$(absolute_runfile "${MEERKAT_E2E_NPM_CLI}")"
+  else
+    npm_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npm-cli.js")"
+  fi
+  if [[ -n "${MEERKAT_E2E_NPX_CLI:-}" ]]; then
+    npx_cli="$(absolute_runfile "${MEERKAT_E2E_NPX_CLI}")"
+  else
+    npx_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npx-cli.js")"
+  fi
+  if [[ -z "${node_bin}" || -z "${npm_cli}" || -z "${npx_cli}" ]]; then
+    echo "warning: unable to install node tool wrappers; node_bin=${node_bin:-<missing>} npm_cli=${npm_cli:-<missing>} npx_cli=${npx_cli:-<missing>}" >&2
+    return 0
+  fi
+  wrapper_dir="${TEST_TMPDIR:-${TMPDIR:-/tmp}}/meerkat-node-tools"
+  mkdir -p "${wrapper_dir}"
+  cat >"${wrapper_dir}/npm" <<EOF
+#!/usr/bin/env bash
+exec "${node_bin}" "${npm_cli}" "\$@"
+EOF
+  cat >"${wrapper_dir}/npx" <<EOF
+#!/usr/bin/env bash
+exec "${node_bin}" "${npx_cli}" "\$@"
+EOF
+  chmod +x "${wrapper_dir}/npm" "${wrapper_dir}/npx"
+  export PATH="${wrapper_dir}:$(dirname "${node_bin}"):${PATH}"
+}
+
+prepend_python_runtime() {
+  local python_bin
+  if [[ -n "${MEERKAT_E2E_PYTHON_BIN:-}" ]]; then
+    python_bin="$(absolute_runfile "${MEERKAT_E2E_PYTHON_BIN}")"
+  else
+    python_bin="$(
+      find -L "${RUNFILES_DIR:-${workspace_root}}" \
+        \( -path "*/python_darwin_arm64*/bin/python3" -o -path "*/python_darwin_arm64*/python/bin/python3" \) \
+        2>/dev/null |
+        head -n 1
+    )"
+  fi
+  if [[ -n "${python_bin}" && -e "${python_bin}" ]]; then
+    export PATH="$(dirname "${python_bin}"):${PATH}"
+    export MEERKAT_PYTHON_BIN="${MEERKAT_PYTHON_BIN:-${python_bin}}"
+  fi
+}
+
+selection_args=()
+selection_count=0
+if [[ -n "${TEST:-}" ]]; then
+  selection_args=(--test "${TEST}")
+  selection_count=$((selection_count + 1))
+fi
+if [[ -n "${SCENARIO:-}" ]]; then
+  selection_args=(--scenario "${SCENARIO}")
+  selection_count=$((selection_count + 1))
+fi
+if [[ -n "${SUITE:-}" ]]; then
+  selection_args=(--suite "${SUITE}")
+  selection_count=$((selection_count + 1))
+fi
+if [[ "${selection_count}" -gt 1 ]]; then
+  echo "error: provide only one of TEST, SCENARIO, or SUITE" >&2
+  exit 2
+fi
+if [[ "${selection_count}" -eq 0 ]]; then
+  selection_args=(--lane smoke)
+fi
+
+workspace_root="$(workspace_root_from_runfiles)"
+prepend_runfile_tool_dir npm
+prepend_runfile_tool_dir node
+install_node_tool_wrappers
+prepend_python_runtime
+if ! command -v npm >/dev/null 2>&1; then
+  echo "warning: npm not found in remote e2e-smoke PATH" >&2
+  echo "warning: RUNFILES_DIR=${RUNFILES_DIR:-}" >&2
+  echo "warning: RUNFILES_MANIFEST_FILE=${RUNFILES_MANIFEST_FILE:-}" >&2
+  echo "warning: derived manifest=$(runfiles_manifest_file 2>/dev/null || true)" >&2
+  echo "warning: workspace_root=${workspace_root}" >&2
+fi
+e2e_artifacts_bin="$(absolute_runfile "${MEERKAT_E2E_ARTIFACTS_BIN:-tests/integration/e2e_artifacts_bin}")"
+if [[ ! -x "${e2e_artifacts_bin}" ]]; then
+  echo "error: missing executable e2e_artifacts_bin at ${e2e_artifacts_bin}" >&2
+  exit 1
+fi
+
+if [[ -n "${MEERKAT_E2E_WASM_PACK_BIN:-}" ]]; then
+  wasm_pack_bin="$(absolute_runfile "${MEERKAT_E2E_WASM_PACK_BIN}")"
+  export RKAT_WASM_PACK_BIN="${RKAT_WASM_PACK_BIN:-${wasm_pack_bin}}"
+  export WASM_PACK="${WASM_PACK:-${wasm_pack_bin}}"
+fi
+
+manifest_dir="${TEST_TMPDIR:-${TMPDIR:-/tmp}}/meerkat-e2e-smoke-remote"
+manifest="${manifest_dir}/artifact-manifest.json"
+mkdir -p "${manifest_dir}"
+
+export CARGO_TARGET_DIR="${manifest_dir}/cargo-target"
+mkdir -p "${CARGO_TARGET_DIR}"
+
+export HOME="${manifest_dir}/home"
+export npm_config_cache="${manifest_dir}/npm-cache"
+export NPM_CONFIG_CACHE="${npm_config_cache}"
+mkdir -p "${HOME}" "${npm_config_cache}"
+
+if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" ]]; then
+  google_credentials="${manifest_dir}/google-application-credentials.json"
+  printf '%s' "${GOOGLE_APPLICATION_CREDENTIALS_JSON}" >"${google_credentials}"
+  chmod 0600 "${google_credentials}"
+  export GOOGLE_APPLICATION_CREDENTIALS="${google_credentials}"
+fi
+
+export WORKSPACE_ROOT="${workspace_root}"
+export MEERKAT_E2E_BAZEL_BIN_DIR="${workspace_root}"
+export MEERKAT_E2E_ARTIFACT_MANIFEST="${manifest}"
+export MEERKAT_E2E_EXECUTION_MODE=prebuilt
+export MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT=1
+
+"${e2e_artifacts_bin}" materialize --manifest "${manifest}" "${selection_args[@]}"
+"${e2e_artifacts_bin}" run-smoke --manifest "${manifest}" "${selection_args[@]}"

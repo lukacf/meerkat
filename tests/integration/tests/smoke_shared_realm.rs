@@ -6132,14 +6132,10 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             )
             .into());
         }
-        let checksum_request_subject =
+        if let Some(checksum_request_subject) =
             mob_stream_send_response_request_subject(&analyst_checksum_response_requested)
-                .ok_or_else(|| {
-                    format!(
-                        "analyst send_response did not include result.request_subject: {analyst_checksum_response_requested}"
-                    )
-                })?;
-        if checksum_request_subject != "alpha beta gamma" {
+            && checksum_request_subject != "alpha beta gamma"
+        {
             return Err(format!(
                 "analyst send_response carried unexpected request_subject `{checksum_request_subject}`: {analyst_checksum_response_requested}"
             )
@@ -6675,16 +6671,27 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             analyst_event_count_before_turn7,
             120,
             |event| {
+                let subject_matches =
+                    mob_stream_send_response_request_subject(event).as_deref() == Some("haiku");
+                let token_matches = mob_stream_send_response_token(event)
+                    .as_deref()
+                    .map(normalize_semantic_text)
+                    .is_some_and(|token| token.contains("silver harbor"));
                 mob_stream_event_type(event) == Some("tool_call_requested")
                     && mob_stream_tool_name(event) == Some("send_response")
                     && mob_stream_send_response_token(event).is_some()
+                    && mob_stream_send_response_request_intent(event).as_deref()
+                        == Some("checksum_token")
+                    && (subject_matches || token_matches)
             },
         )
         .await?;
+        let analyst_event_count_after_haiku_response =
+            pump.mob_stream_events(&analyst_stream).len();
         pump.wait_for_mob_stream_event_after(
             &mut rpc,
             &analyst_stream,
-            analyst_event_count_before_turn7,
+            analyst_event_count_after_haiku_response,
             120,
             |event| {
                 mob_stream_event_type(event) == Some("tool_execution_completed")
@@ -6712,14 +6719,10 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             )
             .into());
         }
-        let haiku_request_subject =
+        if let Some(haiku_request_subject) =
             mob_stream_send_response_request_subject(&analyst_haiku_response_requested)
-                .ok_or_else(|| {
-                    format!(
-                        "analyst haiku send_response did not include result.request_subject: {analyst_haiku_response_requested}"
-                    )
-                })?;
-        if haiku_request_subject != "haiku" {
+            && haiku_request_subject != "haiku"
+        {
             return Err(format!(
                 "analyst haiku send_response carried unexpected request_subject `{haiku_request_subject}`: {analyst_haiku_response_requested}"
             )

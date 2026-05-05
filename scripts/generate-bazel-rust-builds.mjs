@@ -139,6 +139,9 @@ function localDeps(pkg, procMacroOnly, includeDev = false, consumerKey = package
 
 function crateFeaturesFor(key, pkg, extra = []) {
   const features = new Set(activeFeatures.get(pkg.id));
+  if (key === "meerkat-mcp-server") {
+    features.add("mob");
+  }
   if (key === "meerkat-schedule") {
     features.delete("machine-schema-exports");
   }
@@ -737,6 +740,51 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    tags = [`,
     `        "fast",`,
     `    ],`,
+    `)`,
+    ``,
+    `sh_test(`,
+    `    name = "e2e_smoke_remote_test",`,
+    `    srcs = ["scripts/buildbuddy-e2e-smoke-remote-test"],`,
+    `    data = [`,
+    `        ":workspace_runfiles",`,
+    `        "@node_darwin_arm64//:bin/node",`,
+    `        "@node_darwin_arm64//:lib/node_modules/npm/bin/npm-cli.js",`,
+    `        "@node_darwin_arm64//:lib/node_modules/npm/bin/npx-cli.js",`,
+    `        "@node_darwin_arm64//:node",`,
+    `        "@node_darwin_arm64//:npm_runtime",`,
+    `        "@python_darwin_arm64//:python/bin/python3",`,
+    `        "@python_darwin_arm64//:python",`,
+    `        "@wasm_pack_darwin_arm64//:wasm-pack",`,
+    `        "//meerkat-cli:cli_mobpack_live_smoke_test",`,
+    `        "//meerkat-cli:live_smoke_cli_test",`,
+    `        "//meerkat-cli:rkat",`,
+    `        "//meerkat-mcp-server:rkat_mcp_bin",`,
+    `        "//meerkat-mob:smoke_mob_flow_runtime_test",`,
+    `        "//meerkat-mob:smoke_mob_pictionary_test",`,
+    `        "//meerkat-mob:smoke_mob_resume_test",`,
+    `        "//meerkat-rest:rkat_rest_bin",`,
+    `        "//meerkat-rpc:live_smoke_rpc_test",`,
+    `        "//meerkat-rpc:rkat_rpc_bin",`,
+    `        "//tests/integration:e2e_artifacts_bin",`,
+    `        "//tests/integration:e2e_smoke_lane_test",`,
+    `        "//tests/integration:smoke_shared_realm_test",`,
+    `    ],`,
+    `    env = {`,
+    `        "MEERKAT_E2E_ARTIFACTS_BIN": "$(rootpath //tests/integration:e2e_artifacts_bin)",`,
+    `        "MEERKAT_E2E_NODE_BIN": "$(rootpath @node_darwin_arm64//:bin/node)",`,
+    `        "MEERKAT_E2E_NPM_CLI": "$(rootpath @node_darwin_arm64//:lib/node_modules/npm/bin/npm-cli.js)",`,
+    `        "MEERKAT_E2E_NPX_CLI": "$(rootpath @node_darwin_arm64//:lib/node_modules/npm/bin/npx-cli.js)",`,
+    `        "MEERKAT_E2E_PYTHON_BIN": "$(rootpath @python_darwin_arm64//:python/bin/python3)",`,
+    `        "MEERKAT_E2E_WASM_PACK_BIN": "$(rootpath @wasm_pack_darwin_arm64//:wasm-pack)",`,
+    `    },`,
+    `    size = "enormous",`,
+    `    tags = [`,
+    `        "buildbuddy",`,
+    `        "e2e",`,
+    `        "integration",`,
+    `        "live",`,
+    `    ],`,
+    `    timeout = "eternal",`,
     `)`,
     ``,
   ];

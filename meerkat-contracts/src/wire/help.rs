@@ -50,10 +50,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn help_request_defaults_to_explain_only() {
+    fn help_request_defaults_to_explain_only() -> serde_json::Result<()> {
         let request: HelpRequest =
-            serde_json::from_str(r#"{"question":"How do I add an MCP server?"}"#).unwrap();
+            serde_json::from_str(r#"{"question":"How do I add an MCP server?"}"#)?;
         assert_eq!(request.execution_mode, HelpExecutionMode::ExplainOnly);
         assert!(request.prompt.is_none());
+        Ok(())
     }
 }

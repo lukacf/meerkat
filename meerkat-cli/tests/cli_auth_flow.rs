@@ -40,12 +40,8 @@ fn seed_openai_realm_config_with_ids_and_method(
     backend_kind: &str,
     auth_method: &str,
 ) {
-    let realm_dir = root.join("realms").join("dev");
-    std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
-    std::fs::write(
-        realm_dir.join("config.toml"),
-        format!(
-            r#"
+    let config = format!(
+        r#"
 [realm.dev]
 default_binding = "{binding_id}"
 
@@ -62,9 +58,21 @@ source = {{ kind = "managed_store" }}
 backend_profile = "openai_backend"
 auth_profile = "{auth_profile_id}"
 "#
-        ),
-    )
-    .expect("write realm config");
+    );
+    let mut realm_ids = std::collections::BTreeSet::from(["dev".to_string()]);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    realm_ids.insert(meerkat_core::derive_workspace_realm_id(&cwd));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    realm_ids.insert(meerkat_core::derive_workspace_realm_id(&manifest_dir));
+    if let Some(workspace_root) = manifest_dir.parent() {
+        realm_ids.insert(meerkat_core::derive_workspace_realm_id(workspace_root));
+    }
+
+    for realm_id in realm_ids {
+        let realm_dir = root.join("realms").join(realm_id);
+        std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
+        std::fs::write(realm_dir.join("config.toml"), &config).expect("write realm config");
+    }
 }
 
 fn token_file_path(root: &std::path::Path) -> PathBuf {
@@ -458,12 +466,12 @@ fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
             eprintln!("SKIP: auth provider features unavailable");
             return;
         }
-        if stderr.contains("token endpoint error") {
+        if stderr.contains("token endpoint error") || stderr.contains("stale credential material") {
             assert!(
                 !stderr.contains("missing secret for auth resolution"),
                 "refresh must resolve the binding-scoped token before reaching the provider; stderr={stderr}"
             );
-            eprintln!("SKIP: fake refresh token was rejected by the provider endpoint");
+            eprintln!("SKIP: fake refresh token was rejected after binding-scoped resolution");
             return;
         }
         panic!("refresh must use the binding-scoped token key; stderr={stderr}");

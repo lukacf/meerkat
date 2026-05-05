@@ -107,13 +107,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     let mut methods = vec![
         RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
         RpcMethodDescriptor::typed(
-            "help/ask",
-            "Ask Meerkat usage help with the embedded platform skill",
-            "HelpRequest",
-            "HelpResponse",
-        )
-        .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
-        RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
             "CreateSessionParams",
@@ -284,6 +277,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "WireRealmConnectionSet",
         ),
     ];
+
+    if options.runtime_available {
+        methods.push(
+            RpcMethodDescriptor::typed(
+                "help/ask",
+                "Ask Meerkat usage help with the embedded platform skill",
+                "HelpRequest",
+                "HelpResponse",
+            )
+            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
+        );
+    }
 
     if options.blob_enabled {
         methods.extend([
@@ -840,6 +845,7 @@ mod tests {
     #[test]
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
+        assert!(methods.iter().any(|m| m == "help/ask"));
         assert!(methods.iter().any(|m| m == "session/inject_context"));
         assert!(methods.iter().any(|m| m == "runtime/host_info"));
         assert!(methods.iter().any(|m| m == "runtime/capabilities"));
@@ -863,6 +869,12 @@ mod tests {
         assert!(methods.iter().any(|m| m == "schedule/list"));
         assert!(methods.iter().any(|m| m == "schedule/occurrences"));
         assert!(methods.iter().any(|m| m == "schedule/call"));
+    }
+
+    #[test]
+    fn mini_surface_excludes_runtime_help_method() {
+        let methods = rpc_method_names(RpcMethodCatalogOptions::mini_surface());
+        assert!(!methods.iter().any(|m| m == "help/ask"));
     }
 
     #[test]

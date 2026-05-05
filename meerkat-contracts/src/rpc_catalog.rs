@@ -107,6 +107,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     let mut methods = vec![
         RpcMethodDescriptor::basic("initialize", "Handshake, returns server capabilities"),
         RpcMethodDescriptor::typed(
+            "help/ask",
+            "Ask Meerkat usage help with the embedded platform skill",
+            "HelpRequest",
+            "HelpResponse",
+        )
+        .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
+        RpcMethodDescriptor::typed(
             "session/create",
             "Create session + run first turn",
             "CreateSessionParams",
@@ -879,6 +886,10 @@ mod tests {
         };
 
         assert_eq!(
+            descriptor("help/ask").request_lifecycle.resolve(None),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
             descriptor("turn/start").request_lifecycle.resolve(None),
             RequestLifecycle::LongRunningPublishOnSuccess
         );
@@ -907,6 +918,10 @@ mod tests {
 
     #[test]
     fn mcp_tool_catalog_owns_request_lifecycle_rules() {
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_help"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_run"),
             RequestLifecycle::LongRunningPublishOnSuccess

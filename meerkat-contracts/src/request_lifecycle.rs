@@ -69,6 +69,10 @@ pub const MCP_TOOL_REQUEST_LIFECYCLE_CATALOG: McpToolRequestLifecycleCatalog =
         default_lifecycle: RequestLifecycle::LongRunningObservation,
         tools: &[
             McpToolRequestLifecycleDescriptor {
+                name: "meerkat_help",
+                request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+            },
+            McpToolRequestLifecycleDescriptor {
                 name: "meerkat_run",
                 request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
             },

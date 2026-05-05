@@ -1344,6 +1344,11 @@ const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 fn base_tools_list() -> Vec<Value> {
     vec![
         json!({
+            "name": "meerkat_help",
+            "description": "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
+            "inputSchema": meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>()
+        }),
+        json!({
             "name": "meerkat_run",
             "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
@@ -1542,6 +1547,13 @@ pub async fn handle_tools_call_with_notifier(
     }
 
     match tool_name {
+        "meerkat_help" => {
+            let input: meerkat_contracts::HelpRequest = serde_json::from_value(arguments.clone())
+                .map_err(|e| {
+                ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+            })?;
+            Box::pin(handle_meerkat_help(state, input, notifier, request_context)).await
+        }
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -2846,6 +2858,75 @@ fn normalize_mcp_comms_send_error(
 #[cfg(feature = "comms")]
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
+fn help_provider_to_mcp_provider(
+    raw: Option<String>,
+) -> Result<Option<ProviderInput>, ToolCallError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match meerkat_core::Provider::parse_strict(raw.as_str()) {
+        Some(meerkat_core::Provider::Anthropic) => Ok(Some(ProviderInput::Anthropic)),
+        Some(meerkat_core::Provider::OpenAI) => Ok(Some(ProviderInput::Openai)),
+        Some(meerkat_core::Provider::Gemini) => Ok(Some(ProviderInput::Gemini)),
+        Some(meerkat_core::Provider::SelfHosted) => Ok(Some(ProviderInput::Other)),
+        Some(meerkat_core::Provider::Other) | None => Err(ToolCallError::invalid_params(format!(
+            "invalid help provider `{raw}`"
+        ))),
+    }
+}
+
+async fn handle_meerkat_help(
+    state: &MeerkatMcpState,
+    input: meerkat_contracts::HelpRequest,
+    notifier: Option<EventNotifier>,
+    request_context: Option<RequestContext>,
+) -> Result<Value, ToolCallError> {
+    let prompt = meerkat::help::render_help_prompt(&input)
+        .map_err(|err| ToolCallError::invalid_params(err.to_string()))?;
+    let provider = help_provider_to_mcp_provider(input.provider.clone())?;
+    let run_input = MeerkatRunInput {
+        prompt,
+        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
+        model: input.model,
+        max_tokens: input.max_tokens,
+        provider,
+        output_schema: None,
+        structured_output_retries: None,
+        stream: false,
+        verbose: false,
+        tools: Vec::new(),
+        enable_builtins: Some(false),
+        builtin_config: Some(BuiltinConfigInput {
+            enable_shell: Some(false),
+            shell_timeout_secs: None,
+        }),
+        keep_alive: Some(false),
+        comms_name: None,
+        peer_meta: None,
+        hooks_override: None,
+        enable_memory: Some(false),
+        enable_mob: Some(false),
+        provider_params: None,
+        budget_limits: None,
+        preload_skills: Some(meerkat::help::platform_preload_skills()),
+        skill_refs: None,
+        skill_references: None,
+        labels: None,
+        additional_instructions: None,
+        app_context: None,
+        shell_env: None,
+        auth_binding: None,
+    };
+
+    Box::pin(handle_meerkat_run(
+        state,
+        run_input,
+        notifier,
+        request_context,
+    ))
+    .await
 }
 
 async fn handle_meerkat_run(
@@ -4425,6 +4506,10 @@ mod tests {
         };
 
         let run_tool = find_tool("meerkat_run");
+        let help_tool = find_tool("meerkat_help");
+        assert!(help_tool["inputSchema"]["properties"]["question"].is_object());
+        assert!(help_tool["inputSchema"]["properties"]["prompt"].is_object());
+        assert!(help_tool["inputSchema"]["properties"]["execution_mode"].is_object());
         assert!(run_tool["inputSchema"]["properties"]["prompt"].is_object());
         assert!(run_tool["inputSchema"]["properties"]["verbose"].is_object());
         assert!(

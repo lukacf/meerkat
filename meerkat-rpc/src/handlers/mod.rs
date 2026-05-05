@@ -10,6 +10,7 @@ pub mod comms;
 pub mod config;
 // Runtime-backed external-event convenience handler.
 pub mod event;
+pub mod help;
 pub mod initialize;
 pub mod mcp;
 #[cfg(feature = "mob")]

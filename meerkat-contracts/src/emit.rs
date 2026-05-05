@@ -45,6 +45,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
+        "HelpExecutionMode": schema_for!(crate::wire::HelpExecutionMode),
+        "HelpRequest": schema_for!(crate::wire::HelpRequest),
+        "HelpResponse": schema_for!(crate::wire::HelpResponse),
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
@@ -248,6 +251,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     // Params (only contracts-owned param types)
     let params = serde_json::json!({
         "CoreCreateParams": schema_for!(crate::wire::CoreCreateParams),
+        "HelpRequest": schema_for!(crate::wire::HelpRequest),
         "CommsParams": schema_for!(crate::wire::CommsParams),
         "SkillsParams": schema_for!(crate::wire::SkillsParams),
         "McpAddParams": schema_for!(crate::wire::McpAddParams),
@@ -1005,6 +1009,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
     fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
         match (path, method) {
+            ("/help", "post") => {
+                RestOperationContract::with_json_request("HelpRequest", "HelpResponse")
+            }
             ("/sessions", "get") => RestOperationContract::json("ListSessionsResponse"),
             ("/sessions", "post") => RestOperationContract::with_json_request(
                 "RestCreateSessionRequest",

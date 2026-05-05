@@ -1904,6 +1904,7 @@ pub fn router(state: AppState) -> Router {
     });
 
     let r = Router::new()
+        .route("/help", post(help))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(archive_session))
         .route("/sessions/{id}/history", get(get_session_history))
@@ -3803,6 +3804,60 @@ async fn create_session(
     let executor = state.request_executor.clone();
     let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+async fn help(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<meerkat_contracts::HelpRequest>,
+) -> Result<Json<SessionResponse>, ApiError> {
+    let create_req = help_request_to_create_session(req)?;
+    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let executor = state.request_executor.clone();
+    let outcome = Box::pin(create_session_inner(&state, create_req, req_ctx.clone())).await;
+    with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+fn help_request_to_create_session(
+    req: meerkat_contracts::HelpRequest,
+) -> Result<CreateSessionRequest, ApiError> {
+    let prompt = meerkat::help::render_help_prompt(&req)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let provider = req
+        .provider
+        .as_deref()
+        .map(|raw| {
+            Provider::parse_strict(raw)
+                .ok_or_else(|| ApiError::BadRequest(format!("invalid help provider `{raw}`")))
+        })
+        .transpose()?;
+
+    Ok(CreateSessionRequest {
+        prompt: prompt.into(),
+        system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
+        model: req.model.map(Cow::Owned),
+        provider,
+        max_tokens: req.max_tokens,
+        output_schema: None,
+        structured_output_retries: None,
+        verbose: false,
+        keep_alive: Some(false),
+        comms_name: None,
+        peer_meta: None,
+        hooks_override: None,
+        enable_builtins: Some(false),
+        enable_shell: Some(false),
+        enable_memory: Some(false),
+        enable_mob: Some(false),
+        budget_limits: None,
+        provider_params: None,
+        preload_skills: Some(meerkat::help::platform_preload_skills()),
+        skill_refs: None,
+        labels: None,
+        additional_instructions: None,
+        app_context: None,
+        shell_env: None,
+    })
 }
 
 fn create_session_error_to_api(err: SessionError) -> ApiError {
@@ -8716,6 +8771,38 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert_eq!(req.keep_alive, None);
         assert!(req.comms_name.is_none());
+    }
+
+    #[test]
+    fn test_help_request_to_create_session_preloads_platform_skill() {
+        let req = meerkat_contracts::HelpRequest {
+            question: "How do I add an MCP server?".to_string(),
+            prompt: Some("Write a game".to_string()),
+            execution_mode: meerkat_contracts::HelpExecutionMode::PlanExecution,
+            model: Some("claude-sonnet-4-5".to_string()),
+            provider: Some("anthropic".to_string()),
+            max_tokens: Some(512),
+        };
+
+        let create = help_request_to_create_session(req).expect("valid help request");
+        assert!(
+            matches!(create.prompt, ContentInput::Text(ref text) if text.contains("Write a game"))
+        );
+        assert!(
+            create
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("dedicated help surface"))
+        );
+        assert_eq!(create.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(create.provider, Some(Provider::Anthropic));
+        assert_eq!(create.max_tokens, Some(512));
+        assert_eq!(
+            create.preload_skills,
+            Some(meerkat::help::platform_preload_skills())
+        );
+        assert_eq!(create.enable_builtins, Some(false));
+        assert_eq!(create.enable_shell, Some(false));
     }
 
     #[tokio::test]

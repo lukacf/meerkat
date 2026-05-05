@@ -1272,6 +1272,18 @@ impl MethodRouter {
                 id,
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
             ),
+            #[cfg(not(feature = "mini-surface"))]
+            "help/ask" => {
+                Box::pin(handlers::help::handle_ask(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                    request_context.clone(),
+                ))
+                .await
+            }
             "session/create" => {
                 Box::pin(handlers::session::handle_create(
                     id,
@@ -4244,6 +4256,7 @@ args = [{}]
         let methods = result["methods"].as_array().unwrap();
         let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
         assert!(method_names.contains(&"initialize"));
+        assert!(method_names.contains(&"help/ask"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
         assert!(method_names.contains(&"session/external_event"));
@@ -4295,6 +4308,43 @@ args = [{}]
             assert!(!method_names.contains(&"mob/stream_close"));
         }
         assert!(method_names.contains(&"config/get"));
+    }
+
+    #[cfg(not(feature = "mini-surface"))]
+    #[tokio::test]
+    async fn help_ask_runs_help_session_with_platform_skill_prompt() {
+        let recorded_requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let (router, _notif_rx) = test_router_with_llm(Arc::new(RecordingMockLlmClient::new(
+            Arc::clone(&recorded_requests),
+        )))
+        .await;
+
+        let response = router
+            .dispatch(make_request(
+                "help/ask",
+                serde_json::json!({
+                    "question": "How do I add an MCP server?",
+                    "prompt": "Write a match-3 game",
+                    "execution_mode": "plan_execution"
+                }),
+            ))
+            .await
+            .expect("help response");
+
+        assert!(response.error.is_none(), "help/ask failed: {response:?}");
+        assert_eq!(result_value(&response)["text"], "Hello from mock");
+        let requests = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned");
+        let system_prompt = system_prompt_from_request(
+            requests
+                .first()
+                .expect("help session should reach the LLM request"),
+        )
+        .expect("help session should include a system prompt");
+        assert!(system_prompt.contains("dedicated help surface"));
+        assert!(system_prompt.contains("meerkat-platform"));
+        assert!(system_prompt.contains("Meerkat Platform Guide"));
     }
 
     #[cfg(feature = "mob")]

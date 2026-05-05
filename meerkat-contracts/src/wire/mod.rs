@@ -6,6 +6,7 @@ mod auth;
 mod comms;
 mod connection;
 mod event;
+mod help;
 mod host;
 mod image_generation;
 mod mcp_live;
@@ -62,6 +63,7 @@ pub use event::{
     EventsListSinceResult, EventsSnapshotBody, EventsSnapshotParams, EventsSnapshotResult,
     WireEvent,
 };
+pub use help::{HelpExecutionMode, HelpRequest, HelpResponse};
 pub use host::{
     RuntimeHostCapabilities, RuntimeHostEndpointProjection, RuntimeHostFeatureFlags,
     RuntimeHostHealth, RuntimeHostHealthStatus, RuntimeHostIdScope, RuntimeHostInfo,

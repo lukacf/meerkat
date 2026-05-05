@@ -194,6 +194,8 @@ pub use factory::{
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
 };
 
+pub mod help;
+
 mod persistence;
 pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
@@ -290,6 +292,19 @@ inventory::submit! {
     }
 }
 
+#[cfg(feature = "skills")]
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: help::MEERKAT_PLATFORM_SKILL_NAME,
+        name: "Meerkat Platform",
+        description: "Task-oriented reference for Meerkat CLI, RPC, REST, MCP, SDKs, skills, auth, scheduling, and mobs",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &[],
+        body: help::MEERKAT_PLATFORM_SKILL_BODY,
+        extensions: help::MEERKAT_PLATFORM_SKILL_EXTENSIONS,
+    }
+}
+
 // Re-export builtin tools infrastructure
 #[cfg(feature = "comms")]
 pub use meerkat_tools::CommsToolSurface;
@@ -320,12 +335,12 @@ pub use meerkat_core::skills::{
 pub use meerkat_contracts::{
     self as contracts, CapabilitiesResponse, CapabilityHint, CapabilityId, CapabilityRegistration,
     CapabilityScope, CapabilityStatus, CommsParams, ContractVersion, CoreCreateParams,
-    ErrorCategory, ErrorCode, HookParams, Protocol, RealtimeCapabilities,
-    RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeChannelRole,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeReconnectPolicy, RealtimeStatusParams, RealtimeStatusResult,
-    RealtimeTurningMode, SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams,
-    StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
+    ErrorCategory, ErrorCode, HelpExecutionMode, HelpRequest, HelpResponse, HookParams, Protocol,
+    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
+    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
+    RealtimeOpenInfo, RealtimeOpenRequest, RealtimeReconnectPolicy, RealtimeStatusParams,
+    RealtimeStatusResult, RealtimeTurningMode, SkillEntry, SkillInspectResponse, SkillListResponse,
+    SkillsParams, StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
     WireSessionSummary, WireUsage, build_capabilities,
 };
 

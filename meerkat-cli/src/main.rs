@@ -89,7 +89,8 @@ const EXIT_BUDGET_EXHAUSTED: u8 = 2;
 
 const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from the terminal";
 
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, realtime\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help, realtime\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
+const HELP_AFTER_HELP: &str = "Examples:\n  rkat help \"How do I add an mcp server and schedule to remove it in 30 minutes\"\n  rkat help \"Use gemini with my vertex auth, load ~/codex/skills\" --prompt \"Write a match-3 game in Erlang\"";
 
 const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
 
@@ -948,6 +949,7 @@ async fn handle_realtime_command(
 #[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"))]
 #[command(about = CLI_ABOUT)]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
+#[command(disable_help_subcommand = true)]
 #[command(after_help = ROOT_AFTER_HELP)]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
@@ -1250,6 +1252,64 @@ enum Commands {
             help_heading = "Auth options"
         )]
         auth_binding: Option<String>,
+    },
+
+    #[command(after_help = HELP_AFTER_HELP)]
+    /// Ask how to use Meerkat
+    Help {
+        /// The Meerkat usage question to answer
+        question: String,
+
+        /// Inert prompt payload for future execution-oriented help
+        #[arg(long, value_name = "PROMPT", help_heading = "Common options")]
+        prompt: Option<String>,
+
+        /// Plan future execution without executing anything
+        #[arg(
+            long = "plan-execution",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        plan_execution: bool,
+
+        /// Model to use for the help session (defaults to config when omitted)
+        #[arg(long, short = 'm', help_heading = "Common options")]
+        model: Option<String>,
+
+        /// LLM provider for the help session
+        #[arg(
+            long,
+            short = 'p',
+            value_enum,
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        provider: Option<Provider>,
+
+        /// Maximum tokens for the help session
+        #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
+        max_tokens: Option<u32>,
+
+        /// Output format (text, json)
+        #[arg(
+            long,
+            short = 'o',
+            default_value = "text",
+            help_heading = "Common options"
+        )]
+        output: String,
+
+        /// Convenience alias for --output json
+        #[arg(long, help_heading = "Common options")]
+        json: bool,
+
+        /// Stream LLM response tokens to stdout as they arrive
+        #[arg(long, short = 's', help_heading = "Common options")]
+        stream: bool,
+
+        /// Disable streaming output
+        #[arg(long, help_heading = "Common options")]
+        no_stream: bool,
     },
 
     /// Session management
@@ -2099,6 +2159,33 @@ async fn main() -> anyhow::Result<ExitCode> {
             ))
             .await
         }
+        Commands::Help {
+            question,
+            prompt,
+            plan_execution,
+            model,
+            provider,
+            max_tokens,
+            output,
+            json,
+            stream,
+            no_stream,
+        } => {
+            Box::pin(handle_help_command(
+                question,
+                prompt,
+                plan_execution,
+                model,
+                provider,
+                max_tokens,
+                output,
+                json,
+                stream,
+                no_stream,
+                &cli_scope,
+            ))
+            .await
+        }
         Commands::Sessions { command } => match command {
             SessionCommands::List {
                 limit,
@@ -2161,6 +2248,69 @@ async fn main() -> anyhow::Result<ExitCode> {
             ExitCode::from(EXIT_ERROR)
         }
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_help_command(
+    question: String,
+    prompt: Option<String>,
+    plan_execution: bool,
+    model: Option<String>,
+    provider: Option<Provider>,
+    max_tokens: Option<u32>,
+    output: String,
+    json: bool,
+    stream: bool,
+    no_stream: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let request = meerkat_contracts::HelpRequest {
+        question,
+        prompt,
+        execution_mode: if plan_execution {
+            meerkat_contracts::HelpExecutionMode::PlanExecution
+        } else {
+            meerkat_contracts::HelpExecutionMode::ExplainOnly
+        },
+        model: model.clone(),
+        provider: provider.map(|provider| provider.as_str().to_string()),
+        max_tokens,
+    };
+    let help_prompt = meerkat::help::render_help_prompt(&request)?;
+
+    handle_run_command(
+        help_prompt,
+        None,
+        Some(meerkat::help::help_system_prompt().to_string()),
+        model,
+        provider,
+        max_tokens,
+        None,
+        None,
+        output,
+        json,
+        stream,
+        no_stream,
+        Vec::new(),
+        None,
+        None,
+        vec![meerkat::help::MEERKAT_PLATFORM_SKILL_NAME.to_string()],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Some(ToolPreset::None),
+        false,
+        false,
+        false,
+        false,
+        StdinMode::Off,
+        LineFormat::Text,
+        None,
+        scope,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13019,6 +13169,41 @@ default_model = "gemma"
     }
 
     #[test]
+    fn test_help_command_parses_question_and_prompt_payload() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "help",
+            "How do I add an MCP server?",
+            "--prompt",
+            "Write a match-3 game",
+            "--plan-execution",
+            "--model",
+            "claude-sonnet-4-5",
+            "--provider",
+            "anthropic",
+        ])
+        .expect("help command should parse");
+
+        match cli.command {
+            Commands::Help {
+                question,
+                prompt,
+                plan_execution,
+                model,
+                provider,
+                ..
+            } => {
+                assert_eq!(question, "How do I add an MCP server?");
+                assert_eq!(prompt.as_deref(), Some("Write a match-3 game"));
+                assert!(plan_execution);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(provider, Some(Provider::Anthropic));
+            }
+            _ => unreachable!("expected help command"),
+        }
+    }
+
+    #[test]
     fn test_default_trace_filter_is_quiet_unless_run_verbose() {
         let cli = Cli::try_parse_from(normalize_cli_args(["rkat", "run", "hello"].map(Into::into)))
             .expect("run should parse");
@@ -13620,14 +13805,21 @@ default_model = "gemma"
         let top = render_help(Cli::command());
         assert!(top.contains("Usage: rkat [OPTIONS] <PROMPT>"));
         assert!(top.contains("cat story.txt | rkat \"summarize the story\""));
+        assert!(top.contains("rkat help \"How do I add an mcp server?\""));
         assert!(top.contains("tail -f app.log | rkat run --stdin lines"));
         assert!(top.contains("realtime"));
+        assert!(top.contains("help"));
 
         let run = render_help(Cli::command().find_subcommand("run").unwrap().clone());
         assert!(run.contains("--tools <TOOLS>"));
         assert!(run.contains("--yolo"));
         assert!(run.contains("--stdin <STDIN>"));
         assert!(run.contains("piped stdin is read as blob context"));
+
+        let help = render_help(Cli::command().find_subcommand("help").unwrap().clone());
+        assert!(help.contains("--prompt <PROMPT>"));
+        assert!(help.contains("--plan-execution"));
+        assert!(help.contains("How do I add an mcp server"));
 
         let realtime = render_help(Cli::command().find_subcommand("realtime").unwrap().clone());
         assert!(realtime.contains("open-info"));

@@ -594,6 +594,7 @@ function compileData(target, packageRoot, includeTests) {
   const labels = new Set();
   const includeRe = /\binclude_(?:str|bytes)!\(\s*"([^"]+)"\s*\)|\binclude!\(\s*"([^"]+)"\s*\)/g;
   const sourceFiles = new Set([target.src_path, ...rustSourceFiles(packageRoot, includeTests)]);
+  const platformSkillRoot = resolve(root, ".claude/skills/meerkat-platform");
   for (const sourceFile of sourceFiles) {
     const source = readFileSync(sourceFile, "utf8");
     for (const match of source.matchAll(includeRe)) {
@@ -603,6 +604,8 @@ function compileData(target, packageRoot, includeTests) {
       if (absolute.startsWith(`${packageRoot}/`)) {
         const rel = relative(packageRoot, absolute);
         if (rel && !rel.startsWith("..")) paths.add(rel);
+      } else if (absolute === platformSkillRoot || absolute.startsWith(`${platformSkillRoot}/`)) {
+        labels.add("//:meerkat_platform_skill_files");
       }
     }
     if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
@@ -702,6 +705,17 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        ],`,
     `        allow_empty = True,`,
     `    ),`,
+    `    visibility = ["//visibility:public"],`,
+    `)`,
+    ``,
+    `filegroup(`,
+    `    name = "meerkat_platform_skill_files",`,
+    `    srcs = [`,
+    `        ".claude/skills/meerkat-platform/SKILL.md",`,
+    `        ".claude/skills/meerkat-platform/references/api_reference.md",`,
+    `        ".claude/skills/meerkat-platform/references/migration_0_5.md",`,
+    `        ".claude/skills/meerkat-platform/references/mobs.md",`,
+    `    ],`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,

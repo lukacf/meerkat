@@ -45,6 +45,13 @@ impl RestPathDescriptor {
 pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
     vec![
         RestPathDescriptor::new(
+            "/help",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Ask Meerkat usage help",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/sessions",
             vec![
                 RestOperationDescriptor::new("get", "List sessions"),

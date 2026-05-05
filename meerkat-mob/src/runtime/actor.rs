@@ -63,6 +63,23 @@ struct SupervisorPrivateTrustInstall {
     removal_key: String,
 }
 
+struct SupervisorAuthorityActivationError {
+    error: MobError,
+    rollback_succeeded: bool,
+    rollback_error: Option<String>,
+}
+
+struct SupervisorAuthorityLoad {
+    durable: crate::store::SupervisorAuthorityRecord,
+    effective: crate::store::SupervisorAuthorityRecord,
+}
+
+struct SupervisorPendingRotationPersistence {
+    pending_authority_recorded: bool,
+    pending_authority_process_local: bool,
+    persisted_record: Option<crate::store::SupervisorAuthorityRecord>,
+}
+
 struct PreparedDslInput {
     authority: mob_dsl::MobMachineAuthority,
     effects: Vec<mob_dsl::MobMachineEffect>,
@@ -593,27 +610,68 @@ impl MobActor {
                         publish_epoch,
                     )
                     .await;
+                let cleanup = if already_bound {
+                    None
+                } else {
+                    Some(
+                        comms
+                            .remove_private_trusted_peer(&Self::trusted_peer_removal_key(&spec))
+                            .await,
+                    )
+                };
                 let mut reason = format!(
                     "supervisor private trust publication failed for session '{session_id}': {error}"
                 );
                 if let Err(rollback_error) = rollback {
                     reason.push_str(&format!("; rollback failed: {rollback_error}"));
                 }
+                if let Some(Err(cleanup_error)) = cleanup {
+                    reason.push_str(&format!(
+                        "; cleanup failed while removing new supervisor trust: {cleanup_error}"
+                    ));
+                }
                 return Err(MobError::WiringError(reason));
             }
 
-            adapter
+            if let Err(error) = adapter
                 .stage_supervisor_trust_published(
                     session_id,
                     publish_peer_id.clone(),
                     publish_epoch,
                 )
                 .await
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "supervisor private trust publication ack rejected for session '{session_id}': {error}"
-                    ))
-                })?;
+            {
+                let rollback = self
+                    .rollback_supervisor_private_trust_binding(
+                        adapter,
+                        session_id,
+                        &previous,
+                        &publish_peer_id,
+                        publish_epoch,
+                    )
+                    .await;
+                let cleanup = if already_bound {
+                    None
+                } else {
+                    Some(
+                        comms
+                            .remove_private_trusted_peer(&Self::trusted_peer_removal_key(&spec))
+                            .await,
+                    )
+                };
+                let mut reason = format!(
+                    "supervisor private trust publication ack rejected for session '{session_id}': {error}"
+                );
+                if let Err(rollback_error) = rollback {
+                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                }
+                if let Some(Err(cleanup_error)) = cleanup {
+                    reason.push_str(&format!(
+                        "; cleanup failed while removing new supervisor trust after rejected ack: {cleanup_error}"
+                    ));
+                }
+                return Err(MobError::WiringError(reason));
+            }
 
             if let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
                 peer_id: previous_peer_id,
@@ -939,25 +997,35 @@ impl MobActor {
         Ok(peer.clone())
     }
 
-    async fn load_supervisor_authority_with_process_local_pending(
+    async fn load_supervisor_authority_snapshot_with_process_local_pending(
         &self,
-    ) -> Result<Option<crate::store::SupervisorAuthorityRecord>, MobError> {
-        let Some(mut current) = self
+    ) -> Result<Option<SupervisorAuthorityLoad>, MobError> {
+        let Some(durable) = self
             .runtime_metadata
             .load_supervisor_authority(&self.definition.id)
             .await?
         else {
             return Ok(None);
         };
+        let mut effective = durable.clone();
         if let Some(fallback) = self
             .pending_supervisor_rotation_fallback
             .read()
             .await
             .clone()
         {
-            current.apply_process_local_pending_rotation(fallback);
+            effective.apply_process_local_pending_rotation(fallback);
         }
-        Ok(Some(current))
+        Ok(Some(SupervisorAuthorityLoad { durable, effective }))
+    }
+
+    async fn load_supervisor_authority_with_process_local_pending(
+        &self,
+    ) -> Result<Option<crate::store::SupervisorAuthorityRecord>, MobError> {
+        Ok(self
+            .load_supervisor_authority_snapshot_with_process_local_pending()
+            .await?
+            .map(|loaded| loaded.effective))
     }
 
     async fn clear_pending_supervisor_acceptance_for_peer_ids(
@@ -967,12 +1035,13 @@ impl MobActor {
         if peer_ids.iter().all(|peer_id| peer_id.is_empty()) {
             return Ok(());
         }
-        let Some(mut current) = self
-            .load_supervisor_authority_with_process_local_pending()
+        let Some(loaded) = self
+            .load_supervisor_authority_snapshot_with_process_local_pending()
             .await?
         else {
             return Ok(());
         };
+        let mut current = loaded.effective;
         let Some(mut pending) = current.pending_rotation.clone() else {
             return Ok(());
         };
@@ -987,12 +1056,22 @@ impl MobActor {
         };
         match self
             .runtime_metadata
-            .put_supervisor_authority(&self.definition.id, &current)
+            .compare_and_put_supervisor_authority(&self.definition.id, &loaded.durable, &current)
             .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 *self.pending_supervisor_rotation_fallback.write().await = None;
                 Ok(())
+            }
+            Ok(false) => {
+                *self.pending_supervisor_rotation_fallback.write().await =
+                    Some(process_local_pending);
+                Err(MobError::from(crate::store::MobStoreError::CasConflict(
+                    format!(
+                        "supervisor authority changed while clearing pending acceptance for mob '{}'",
+                        self.definition.id
+                    ),
+                )))
             }
             Err(error) => {
                 *self.pending_supervisor_rotation_fallback.write().await =
@@ -8349,8 +8428,8 @@ impl MobActor {
     async fn handle_rotate_supervisor(
         &self,
     ) -> Result<super::handle::SupervisorRotationReport, MobError> {
-        let current = self
-            .load_supervisor_authority_with_process_local_pending()
+        let loaded = self
+            .load_supervisor_authority_snapshot_with_process_local_pending()
             .await?
             .ok_or_else(|| {
                 MobError::Internal(format!(
@@ -8358,6 +8437,8 @@ impl MobActor {
                     self.definition.id
                 ))
             })?;
+        let mut durable_write_expected = loaded.durable;
+        let current = loaded.effective;
         let stable_current = current.without_pending_rotation();
         let pending_rotation = current.pending_rotation.clone();
         let mut accepted_peer_ids: BTreeSet<String> = pending_rotation
@@ -8436,9 +8517,10 @@ impl MobActor {
                             let reason = format!(
                                 "failed to verify pending supervisor authority for peer '{peer_id}': {error}"
                             );
-                            let (pending_authority_recorded, pending_authority_process_local) =
-                                self.persist_pending_supervisor_rotation(
+                            let pending_persistence = self
+                                .persist_pending_supervisor_rotation(
                                     &stable_current,
+                                    &durable_write_expected,
                                     &next,
                                     &accepted_peer_ids,
                                     true,
@@ -8450,8 +8532,10 @@ impl MobActor {
                                 attempted_public_peer_id: next.public_peer_id.clone(),
                                 rotated_peer_count: accepted_peer_ids.len(),
                                 rollback_succeeded: false,
-                                pending_authority_recorded,
-                                pending_authority_process_local,
+                                pending_authority_recorded: pending_persistence
+                                    .pending_authority_recorded,
+                                pending_authority_process_local: pending_persistence
+                                    .pending_authority_process_local,
                                 rollback_error: None,
                                 reason,
                             });
@@ -8600,9 +8684,10 @@ impl MobActor {
                                     accepted_peer_ids.remove(&peer.peer_id.to_string());
                                 }
                                 self.rotate_supervisor_bridge_to(&stable_current).await?;
-                                let (pending_authority_recorded, pending_authority_process_local) =
-                                    self.persist_pending_supervisor_rotation(
+                                let pending_persistence = self
+                                    .persist_pending_supervisor_rotation(
                                         &stable_current,
+                                        &durable_write_expected,
                                         &next,
                                         &accepted_peer_ids,
                                         pending_rotation.is_some(),
@@ -8614,17 +8699,20 @@ impl MobActor {
                                     attempted_public_peer_id: next.public_peer_id.clone(),
                                     rotated_peer_count: accepted_peer_count,
                                     rollback_succeeded: true,
-                                    pending_authority_recorded,
-                                    pending_authority_process_local,
+                                    pending_authority_recorded: pending_persistence
+                                        .pending_authority_recorded,
+                                    pending_authority_process_local: pending_persistence
+                                        .pending_authority_process_local,
                                     rollback_error: None,
                                     reason,
                                 });
                             }
                             Err(rollback_error) => {
                                 self.rotate_supervisor_bridge_to(&stable_current).await?;
-                                let (pending_authority_recorded, pending_authority_process_local) =
-                                    self.persist_pending_supervisor_rotation(
+                                let pending_persistence = self
+                                    .persist_pending_supervisor_rotation(
                                         &stable_current,
+                                        &durable_write_expected,
                                         &next,
                                         &accepted_peer_ids,
                                         pending_rotation.is_some(),
@@ -8636,8 +8724,10 @@ impl MobActor {
                                     attempted_public_peer_id: next.public_peer_id.clone(),
                                     rotated_peer_count: accepted_peer_count,
                                     rollback_succeeded: false,
-                                    pending_authority_recorded,
-                                    pending_authority_process_local,
+                                    pending_authority_recorded: pending_persistence
+                                        .pending_authority_recorded,
+                                    pending_authority_process_local: pending_persistence
+                                        .pending_authority_process_local,
                                     rollback_error: Some(rollback_error.to_string()),
                                     reason,
                                 });
@@ -8646,9 +8736,10 @@ impl MobActor {
                     }
                     if pending_rotation.is_some() {
                         self.rotate_supervisor_bridge_to(&stable_current).await?;
-                        let (pending_authority_recorded, pending_authority_process_local) = self
+                        let pending_persistence = self
                             .persist_pending_supervisor_rotation(
                                 &stable_current,
+                                &durable_write_expected,
                                 &next,
                                 &accepted_peer_ids,
                                 true,
@@ -8660,8 +8751,10 @@ impl MobActor {
                             attempted_public_peer_id: next.public_peer_id.clone(),
                             rotated_peer_count: accepted_peer_count,
                             rollback_succeeded: false,
-                            pending_authority_recorded,
-                            pending_authority_process_local,
+                            pending_authority_recorded: pending_persistence
+                                .pending_authority_recorded,
+                            pending_authority_process_local: pending_persistence
+                                .pending_authority_process_local,
                             rollback_error: None,
                             reason,
                         });
@@ -8674,15 +8767,19 @@ impl MobActor {
                 if !already_pending {
                     accepted_peer_ids.insert(effective_peer.peer_id.to_string());
                     rotated_peers.push((effective_peer, effective_binding));
-                    let (pending_authority_recorded, pending_authority_process_local) = self
+                    let pending_persistence = self
                         .persist_pending_supervisor_rotation(
                             &stable_current,
+                            &durable_write_expected,
                             &next,
                             &accepted_peer_ids,
                             true,
                         )
                         .await?;
-                    if !pending_authority_recorded {
+                    if let Some(record) = pending_persistence.persisted_record.clone() {
+                        durable_write_expected = record;
+                    }
+                    if !pending_persistence.pending_authority_recorded {
                         self.rotate_supervisor_bridge_to(&stable_current).await?;
                         return Err(MobError::SupervisorRotationIncomplete {
                             previous_epoch: stable_current.epoch,
@@ -8690,8 +8787,10 @@ impl MobActor {
                             attempted_public_peer_id: next.public_peer_id.clone(),
                             rotated_peer_count: accepted_peer_ids.len(),
                             rollback_succeeded: false,
-                            pending_authority_recorded,
-                            pending_authority_process_local,
+                            pending_authority_recorded: pending_persistence
+                                .pending_authority_recorded,
+                            pending_authority_process_local: pending_persistence
+                                .pending_authority_process_local,
                             rollback_error: None,
                             reason:
                                 "failed to persist pending supervisor rotation after a remote accepted attempted authority"
@@ -8703,7 +8802,7 @@ impl MobActor {
         }
         let public_peer_id = next.public_peer_id.clone();
         match self
-            .activate_supervisor_authority(&stable_current, &next)
+            .activate_supervisor_authority(&stable_current, &durable_write_expected, &next)
             .await
         {
             Ok(()) => Ok(super::handle::SupervisorRotationReport {
@@ -8711,29 +8810,41 @@ impl MobActor {
                 current_epoch: next.epoch,
                 public_peer_id,
             }),
-            Err(error) if pending_rotation.is_some() || !accepted_peer_ids.is_empty() => {
-                self.rotate_supervisor_bridge_to(&stable_current).await?;
-                let (pending_authority_recorded, pending_authority_process_local) = self
-                    .persist_pending_supervisor_rotation(
+            Err(error) => {
+                let has_remote_pending =
+                    pending_rotation.is_some() || !accepted_peer_ids.is_empty();
+                let pending_persistence = if has_remote_pending {
+                    self.persist_pending_supervisor_rotation(
                         &stable_current,
+                        &durable_write_expected,
                         &next,
                         &accepted_peer_ids,
                         true,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    SupervisorPendingRotationPersistence {
+                        pending_authority_recorded: false,
+                        pending_authority_process_local: false,
+                        persisted_record: None,
+                    }
+                };
                 Err(MobError::SupervisorRotationIncomplete {
                     previous_epoch: stable_current.epoch,
                     attempted_epoch: next.epoch,
                     attempted_public_peer_id: next.public_peer_id.clone(),
                     rotated_peer_count: accepted_peer_ids.len(),
-                    rollback_succeeded: false,
-                    pending_authority_recorded,
-                    pending_authority_process_local,
-                    rollback_error: None,
-                    reason: format!("failed to commit confirmed supervisor authority: {error}"),
+                    rollback_succeeded: error.rollback_succeeded && !has_remote_pending,
+                    pending_authority_recorded: pending_persistence.pending_authority_recorded,
+                    pending_authority_process_local: pending_persistence
+                        .pending_authority_process_local,
+                    rollback_error: error.rollback_error,
+                    reason: format!(
+                        "failed to commit confirmed supervisor authority: {}",
+                        error.error
+                    ),
                 })
             }
-            Err(error) => Err(error),
         }
     }
 
@@ -8755,8 +8866,10 @@ impl MobActor {
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             return match rejection.typed_cause() {
-                Some(super::bridge_protocol::BridgeRejectionCause::NotBound)
-                | Some(super::bridge_protocol::BridgeRejectionCause::SenderMismatch) => Ok(false),
+                Some(
+                    super::bridge_protocol::BridgeRejectionCause::NotBound
+                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
+                ) => Ok(false),
                 Some(super::bridge_protocol::BridgeRejectionCause::StaleSupervisor) => {
                     Err(Self::bridge_rejection_error_with_reason(
                         &rejection,
@@ -8796,10 +8909,11 @@ impl MobActor {
     async fn persist_pending_supervisor_rotation(
         &self,
         current: &crate::store::SupervisorAuthorityRecord,
+        expected_durable: &crate::store::SupervisorAuthorityRecord,
         pending: &crate::store::SupervisorAuthorityRecord,
         accepted_peer_ids: &BTreeSet<String>,
         retain_process_local_empty_pending: bool,
-    ) -> Result<(bool, bool), MobError> {
+    ) -> Result<SupervisorPendingRotationPersistence, MobError> {
         let mut record = current.without_pending_rotation();
         let pending_rotation = crate::store::SupervisorPendingRotationRecord::from_authority(
             pending,
@@ -8813,12 +8927,27 @@ impl MobActor {
             .then_some(pending_rotation);
         match self
             .runtime_metadata
-            .put_supervisor_authority(&self.definition.id, &record)
+            .compare_and_put_supervisor_authority(&self.definition.id, expected_durable, &record)
             .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 *self.pending_supervisor_rotation_fallback.write().await = None;
-                Ok((record.pending_rotation.is_some(), false))
+                Ok(SupervisorPendingRotationPersistence {
+                    pending_authority_recorded: record.pending_rotation.is_some(),
+                    pending_authority_process_local: false,
+                    persisted_record: Some(record),
+                })
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    "supervisor authority changed while persisting pending rotation; not retaining stale process-local pending authority"
+                );
+                Ok(SupervisorPendingRotationPersistence {
+                    pending_authority_recorded: false,
+                    pending_authority_process_local: false,
+                    persisted_record: None,
+                })
             }
             Err(error) if process_local_pending_rotation.is_some() => {
                 tracing::warn!(
@@ -8828,7 +8957,11 @@ impl MobActor {
                 );
                 *self.pending_supervisor_rotation_fallback.write().await =
                     process_local_pending_rotation;
-                Ok((false, true))
+                Ok(SupervisorPendingRotationPersistence {
+                    pending_authority_recorded: false,
+                    pending_authority_process_local: true,
+                    persisted_record: None,
+                })
             }
             Err(error) => Err(MobError::from(error)),
         }
@@ -8863,13 +8996,14 @@ impl MobActor {
     async fn activate_supervisor_authority(
         &self,
         current: &crate::store::SupervisorAuthorityRecord,
+        expected_durable: &crate::store::SupervisorAuthorityRecord,
         next: &crate::store::SupervisorAuthorityRecord,
-    ) -> Result<(), MobError> {
-        self.runtime_metadata
-            .put_supervisor_authority(&self.definition.id, next)
-            .await?;
-        *self.pending_supervisor_rotation_fallback.write().await = None;
-        self.supervisor_bridge.rotate(next.clone()).await?;
+    ) -> Result<(), SupervisorAuthorityActivationError> {
+        if let Err(error) = self.supervisor_bridge.rotate(next.clone()).await {
+            return Err(self
+                .supervisor_activation_error_with_rollback(current, &[], error)
+                .await);
+        }
         let previous_private_trust_removal_key = current.public_peer_id.clone();
         let session_member_refs = {
             let roster = self.roster.read().await;
@@ -8881,20 +9015,101 @@ impl MobActor {
                 })
                 .collect::<Vec<_>>()
         };
+        let mut activated_session_trust: Vec<(SessionId, Arc<dyn CoreCommsRuntime>)> = Vec::new();
         for member_ref in session_member_refs {
             if let (Some(session_id), Some(comms)) = (
                 member_ref.bridge_session_id().cloned(),
                 self.provisioner_comms(&member_ref).await,
             ) {
-                self.install_supervisor_private_trust_for_session(
-                    &session_id,
-                    &comms,
-                    Some(&previous_private_trust_removal_key),
-                )
-                .await?;
+                match self
+                    .install_supervisor_private_trust_for_session(
+                        &session_id,
+                        &comms,
+                        Some(&previous_private_trust_removal_key),
+                    )
+                    .await
+                {
+                    Ok(_) => activated_session_trust.push((session_id, comms)),
+                    Err(error) => {
+                        return Err(self
+                            .supervisor_activation_error_with_rollback(
+                                current,
+                                &activated_session_trust,
+                                error,
+                            )
+                            .await);
+                    }
+                }
             }
         }
+        match self
+            .runtime_metadata
+            .compare_and_put_supervisor_authority(&self.definition.id, expected_durable, next)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let rollback_authority = self
+                    .runtime_metadata
+                    .load_supervisor_authority(&self.definition.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|record| record.without_pending_rotation())
+                    .unwrap_or_else(|| current.clone());
+                return Err(self
+                    .supervisor_activation_error_with_rollback(
+                        &rollback_authority,
+                        &activated_session_trust,
+                        MobError::from(crate::store::MobStoreError::CasConflict(format!(
+                            "supervisor authority changed before final commit for mob '{}'",
+                            self.definition.id
+                        ))),
+                    )
+                    .await);
+            }
+            Err(error) => {
+                return Err(self
+                    .supervisor_activation_error_with_rollback(
+                        current,
+                        &activated_session_trust,
+                        MobError::from(error),
+                    )
+                    .await);
+            }
+        }
+        *self.pending_supervisor_rotation_fallback.write().await = None;
         Ok(())
+    }
+
+    async fn supervisor_activation_error_with_rollback(
+        &self,
+        current: &crate::store::SupervisorAuthorityRecord,
+        activated_session_trust: &[(SessionId, Arc<dyn CoreCommsRuntime>)],
+        error: MobError,
+    ) -> SupervisorAuthorityActivationError {
+        let mut rollback_errors = Vec::new();
+        if let Err(rollback_error) = self.rotate_supervisor_bridge_to(current).await {
+            rollback_errors.push(format!(
+                "supervisor bridge rollback failed: {rollback_error}"
+            ));
+        } else {
+            for (session_id, comms) in activated_session_trust.iter().rev() {
+                if let Err(rollback_error) = self
+                    .install_supervisor_private_trust_for_session(session_id, comms, None)
+                    .await
+                {
+                    rollback_errors.push(format!(
+                        "session '{session_id}' private trust rollback failed: {rollback_error}"
+                    ));
+                }
+            }
+        }
+        SupervisorAuthorityActivationError {
+            error,
+            rollback_succeeded: rollback_errors.is_empty(),
+            rollback_error: (!rollback_errors.is_empty()).then(|| rollback_errors.join("; ")),
+        }
     }
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`

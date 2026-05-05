@@ -1741,7 +1741,16 @@ pub struct MobDestroyResult {
 pub struct MobRotateSupervisorResult {
     pub mob_id: String,
     pub ok: bool,
-    pub report: Value,
+    pub report: SupervisorRotationReportWire,
+}
+
+/// Confirmed supervisor rotation report returned by `mob/rotate_supervisor`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SupervisorRotationReportWire {
+    pub previous_epoch: u64,
+    pub current_epoch: u64,
+    pub public_peer_id: String,
 }
 
 /// Shared request payload for mob readiness waits.

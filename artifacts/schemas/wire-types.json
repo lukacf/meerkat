@@ -11803,6 +11803,32 @@
     "type": "object"
   },
   "MobRotateSupervisorResult": {
+    "$defs": {
+      "SupervisorRotationReportWire": {
+        "description": "Confirmed supervisor rotation report returned by `mob/rotate_supervisor`.",
+        "properties": {
+          "current_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "previous_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "public_peer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "previous_epoch",
+          "current_epoch",
+          "public_peer_id"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/rotate_supervisor`.",
     "properties": {
@@ -11812,7 +11838,9 @@
       "ok": {
         "type": "boolean"
       },
-      "report": true
+      "report": {
+        "$ref": "#/$defs/SupervisorRotationReportWire"
+      }
     },
     "required": [
       "mob_id",
@@ -20226,6 +20254,32 @@
       "skills"
     ],
     "title": "SkillListResponse",
+    "type": "object"
+  },
+  "SupervisorRotationReportWire": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Confirmed supervisor rotation report returned by `mob/rotate_supervisor`.",
+    "properties": {
+      "current_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "previous_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "public_peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "previous_epoch",
+      "current_epoch",
+      "public_peer_id"
+    ],
+    "title": "SupervisorRotationReportWire",
     "type": "object"
   },
   "WireAssistantBlock": {

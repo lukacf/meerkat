@@ -48,6 +48,7 @@ import {
   type RealtimeOpenRequest,
   type RealtimeStatusResult,
   type MobTurnStartParams,
+  type MobRotateSupervisorResult,
   type RuntimeRealtimeAttachmentStatusResult,
   type McpAddParams,
   type McpLiveOpResponse,
@@ -1437,9 +1438,9 @@ export class MeerkatClient {
    * full `SupervisorRotationReport` so operators can inspect per-member
    * rotation outcomes instead of getting a bare `ok: true`.
    */
-  async mobRotateSupervisor(mobId: string): Promise<Record<string, unknown>> {
+  async mobRotateSupervisor(mobId: string): Promise<MobRotateSupervisorResult> {
     const result = await this.request("mob/rotate_supervisor", { mob_id: mobId });
-    return result;
+    return result as unknown as MobRotateSupervisorResult;
   }
 
   /**

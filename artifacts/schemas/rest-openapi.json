@@ -2076,7 +2076,8 @@
           "SKILL_RESOLUTION_FAILED",
           "INVALID_PARAMS",
           "INTERNAL_ERROR",
-          "DUPLICATE_INPUT"
+          "DUPLICATE_INPUT",
+          "SUPERVISOR_ROTATION_INCOMPLETE"
         ],
         "title": "ErrorCode",
         "type": "string"

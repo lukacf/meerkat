@@ -38,6 +38,7 @@ pub enum ErrorCode {
     InvalidParams,
     InternalError,
     DuplicateInput,
+    SupervisorRotationIncomplete,
 }
 
 impl ErrorCode {
@@ -59,6 +60,7 @@ impl ErrorCode {
             Self::InvalidParams => -32602,
             Self::InternalError => -32603,
             Self::DuplicateInput => -32004,
+            Self::SupervisorRotationIncomplete => -32024,
         }
     }
 
@@ -80,6 +82,7 @@ impl ErrorCode {
             -32602 => Some(Self::InvalidParams),
             -32603 => Some(Self::InternalError),
             -32004 => Some(Self::DuplicateInput),
+            -32024 => Some(Self::SupervisorRotationIncomplete),
             _ => None,
         }
     }
@@ -88,7 +91,10 @@ impl ErrorCode {
     pub const fn http_status(self) -> u16 {
         match self {
             Self::SessionNotFound | Self::ScheduleNotFound | Self::SkillNotFound => 404,
-            Self::SessionBusy | Self::SessionNotRunning | Self::DuplicateInput => 409,
+            Self::SessionBusy
+            | Self::SessionNotRunning
+            | Self::DuplicateInput
+            | Self::SupervisorRotationIncomplete => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
@@ -118,6 +124,7 @@ impl ErrorCode {
             Self::InvalidParams => 2,
             Self::InternalError => 1,
             Self::DuplicateInput => 13,
+            Self::SupervisorRotationIncomplete => 44,
         }
     }
 }
@@ -159,7 +166,8 @@ impl ErrorCode {
             | Self::ScheduleNotFound
             | Self::SessionBusy
             | Self::SessionNotRunning
-            | Self::DuplicateInput => ErrorCategory::Session,
+            | Self::DuplicateInput
+            | Self::SupervisorRotationIncomplete => ErrorCategory::Session,
             Self::RequestCancelled => ErrorCategory::Request,
             Self::ProviderError => ErrorCategory::Provider,
             Self::BudgetExhausted => ErrorCategory::Budget,
@@ -300,6 +308,7 @@ mod tests {
             ErrorCode::InvalidParams,
             ErrorCode::InternalError,
             ErrorCode::DuplicateInput,
+            ErrorCode::SupervisorRotationIncomplete,
         ] {
             let rpc = code.jsonrpc_code();
             let http = code.http_status();

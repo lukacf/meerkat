@@ -234,7 +234,7 @@ impl MobSupervisorBridge {
                 "unexpected receipt for supervisor request".to_string(),
             ));
         };
-        self.wait_for_response(&runtime, envelope_id, timeout).await
+        self.wait_for_response(runtime, envelope_id, timeout).await
     }
 
     async fn wait_for_response(

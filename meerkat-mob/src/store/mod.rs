@@ -174,6 +174,16 @@ impl SupervisorAuthorityRecord {
         if self.epoch.checked_add(1) != Some(pending.epoch) {
             return false;
         }
+        if pending.accepted_peer_ids.is_empty() {
+            return match self.pending_rotation.as_ref() {
+                Some(durable) if durable.same_attempted_authority(&pending) => {
+                    self.pending_rotation = None;
+                    true
+                }
+                None => false,
+                Some(_) => false,
+            };
+        }
         match self.pending_rotation.as_ref() {
             Some(durable) if durable.same_attempted_authority(&pending) => {
                 self.pending_rotation = Some(pending);
@@ -216,7 +226,9 @@ impl SupervisorPendingRotationRecord {
         self.secret_key == other.secret_key
             && self.public_peer_id == other.public_peer_id
             && self.epoch == other.epoch
-            && self.protocol_version == other.protocol_version
+            && self
+                .protocol_version
+                .same_protocol_as(other.protocol_version)
     }
 
     pub fn remove_accepted_peer_ids(&mut self, peer_ids: &[String]) -> bool {
@@ -318,6 +330,18 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
         mob_id: &MobId,
         record: &SupervisorAuthorityRecord,
     ) -> Result<(), MobStoreError>;
+
+    /// Compare-and-put the mob-owned supervisor authority record.
+    ///
+    /// Returns `true` when the persisted record exactly matched `expected`
+    /// and was replaced by `record`, `false` when another writer changed or
+    /// removed the record first.
+    async fn compare_and_put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &SupervisorAuthorityRecord,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError>;
 
     /// Insert the mob-owned supervisor authority record if it is missing.
     ///

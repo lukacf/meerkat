@@ -696,11 +696,19 @@ class MobDestroyResult:
 
 
 @dataclass
+class SupervisorRotationReportWire:
+    """Confirmed supervisor rotation report returned by `mob/rotate_supervisor`."""
+    current_epoch: int
+    previous_epoch: int
+    public_peer_id: str
+
+
+@dataclass
 class MobRotateSupervisorResult:
     """Response payload for `mob/rotate_supervisor`."""
     mob_id: str
     ok: bool
-    report: Any
+    report: SupervisorRotationReportWire
 
 
 @dataclass

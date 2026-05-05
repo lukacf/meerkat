@@ -302,6 +302,7 @@ pub use wire::{
     SkillSourceProvenance,
     SkillsParams,
     StructuredOutputParams,
+    SupervisorRotationReportWire,
     ToolCallTimeoutContext,
     UpdateScheduleParams,
     VisibilityClass,

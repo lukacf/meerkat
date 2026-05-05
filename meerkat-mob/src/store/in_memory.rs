@@ -99,6 +99,20 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
         Ok(())
     }
 
+    async fn compare_and_put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &SupervisorAuthorityRecord,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let mut guard = self.supervisor_records.write().await;
+        if guard.get(mob_id) != Some(expected) {
+            return Ok(false);
+        }
+        guard.insert(mob_id.clone(), record.clone());
+        Ok(true)
+    }
+
     async fn put_supervisor_authority_if_absent(
         &self,
         mob_id: &MobId,
@@ -1551,6 +1565,42 @@ mod tests {
         assert_eq!(
             store.load_supervisor_authority(&mob_id).await.unwrap(),
             Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_metadata_store_compare_and_put_supervisor_authority() {
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("mob-runtime-cas");
+        let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let third = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+
+        store
+            .put_supervisor_authority(&mob_id, &first)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .compare_and_put_supervisor_authority(&mob_id, &second, &third)
+                .await
+                .unwrap(),
+            "mismatched expected authority must not update"
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first.clone())
+        );
+        assert!(
+            store
+                .compare_and_put_supervisor_authority(&mob_id, &first, &second)
+                .await
+                .unwrap(),
+            "matching expected authority should update"
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(second)
         );
     }
 

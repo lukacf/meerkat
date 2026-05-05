@@ -511,10 +511,16 @@ export interface MobDestroyResult {
   ok: boolean;
 }
 
+export interface SupervisorRotationReportWire {
+  current_epoch: number;
+  previous_epoch: number;
+  public_peer_id: string;
+}
+
 export interface MobRotateSupervisorResult {
   mob_id: string;
   ok: boolean;
-  report: unknown;
+  report: SupervisorRotationReportWire;
 }
 
 export interface MobSubmitWorkParams {

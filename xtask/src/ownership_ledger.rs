@@ -3186,12 +3186,12 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["roster", "runtime_bridge"],
-            "Supervisor-bridge rotation protocol + local authority advance after partial-rotation",
+            "Supervisor-bridge rotation protocol + fail-closed incomplete rotation on partial remote failure",
             &[
-                "rotation advances local authority; partial-failure against a rotated remote leaves local state as source of truth",
+                "rotation defers durable current-authority advance until remote acceptance and local supervisor activation are confirmed",
             ],
             &[
-                "rotation rollback is best-effort; post-forward-rotation the local authority never reverts to superseded state",
+                "partial remote or local activation failure returns a typed incomplete outcome with rollback and retry/pending state instead of committing current local authority",
             ],
             EntryStatus::Closed,
         ),

@@ -44,6 +44,7 @@ from .generated.types import (
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
+    MobRotateSupervisorResult,
     MobTurnStartParams,
     RealtimeCapabilitiesResult,
     RealtimeOpenInfo,
@@ -1930,7 +1931,7 @@ class MeerkatClient:
         """
         return await self._request("mob/destroy", {"mob_id": mob_id})
 
-    async def mob_rotate_supervisor(self, mob_id: str) -> dict[str, Any]:
+    async def mob_rotate_supervisor(self, mob_id: str) -> MobRotateSupervisorResult:
         """Rotate the supervisor bridge for all members of a mob.
 
         Wraps the ``mob/rotate_supervisor`` RPC (DELETE_ME C10). Returns

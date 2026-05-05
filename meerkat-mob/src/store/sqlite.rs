@@ -541,6 +541,37 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         .await
     }
 
+    async fn compare_and_put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &SupervisorAuthorityRecord,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "UPDATE mob_runtime_supervisors
+                     SET record_json = ?2
+                     WHERE mob_id = ?1 AND record_json = ?3",
+                    params![
+                        mob_id.as_str(),
+                        encode_json(&record)?,
+                        encode_json(&expected)?
+                    ],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn put_supervisor_authority_if_absent(
         &self,
         mob_id: &MobId,
@@ -3047,6 +3078,45 @@ mod tests {
         assert_eq!(
             store.load_supervisor_authority(&mob_id).await.unwrap(),
             Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_runtime_metadata_store_compare_and_put_supervisor_authority() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        let mob_id = MobId::from("mob-cas");
+        let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let third = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+
+        store
+            .put_supervisor_authority(&mob_id, &first)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .compare_and_put_supervisor_authority(&mob_id, &second, &third)
+                .await
+                .unwrap(),
+            "mismatched expected authority must not update"
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first.clone())
+        );
+        assert!(
+            store
+                .compare_and_put_supervisor_authority(&mob_id, &first, &second)
+                .await
+                .unwrap(),
+            "matching expected authority should update"
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(second)
         );
     }
 

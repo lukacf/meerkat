@@ -60,6 +60,10 @@ impl BridgeProtocolVersion {
         matches!(self.0, 2)
     }
 
+    pub const fn same_protocol_as(self, other: Self) -> bool {
+        self.0 == other.0
+    }
+
     pub fn supported() -> &'static [Self] {
         Self::SUPPORTED
     }

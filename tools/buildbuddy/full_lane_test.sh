@@ -182,7 +182,14 @@ case "${lane}" in
     configure_rust "aarch64-apple-darwin__stable_tools"
     configure_node
     configure_python
-    "${CARGO}" build -p meerkat-rpc
+    rkat_rpc_bin="$(find_runfile "*/meerkat-rpc/rkat_rpc_bin")"
+    if [[ -n "${rkat_rpc_bin}" ]]; then
+      # Use the Bazel-built binary — avoids a cold cargo build inside the sandbox.
+      mkdir -p "${work_root}/target/debug"
+      cp "${rkat_rpc_bin}" "${work_root}/target/debug/rkat-rpc"
+    else
+      "${CARGO}" build -p meerkat-rpc
+    fi
     (cd sdks/python &&
       "${PYTHON}" -m pip install --upgrade pip &&
       "${PYTHON}" -m pip install -e ".[dev]" &&

@@ -5684,6 +5684,112 @@ async fn test_resume_destroy_storage_finalizing_without_metadata_does_not_recrea
 }
 
 #[tokio::test]
+async fn test_resume_after_destroying_marker_replays_retire_before_storage_cleanup() {
+    let definition = with_unique_mob_id(sample_definition(), "destroying-replay-retire");
+    let mob_id = definition.id.clone();
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        definition,
+        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone()),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create mob");
+    let worker = AgentIdentity::from("destroying-retry-worker");
+    let bridge_session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from(worker.as_str()),
+            None,
+        )
+        .await
+        .expect("spawn worker before simulated destroy crash")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed worker");
+    events
+        .append(NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobDestroying,
+        })
+        .await
+        .expect("append durable destroy marker");
+    drop(handle);
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume after durable destroy marker");
+    assert_eq!(
+        resumed.status().await.unwrap(),
+        MobState::Destroyed,
+        "durable destroy marker must close public authority after resume"
+    );
+    assert!(
+        resumed
+            .list_members_including_retiring()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == worker),
+        "retry anchor must retain the member that still needs canonical retire cleanup"
+    );
+
+    events.fail_clear();
+    let err = resumed
+        .destroy()
+        .await
+        .expect_err("event clear failure should retain the retry anchor after cleanup replay");
+    let report = match err {
+        crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
+        other => panic!("expected incomplete destroy, got {other:?}"),
+    };
+    assert!(
+        !report.metadata_scrubbed && !report.events_cleared,
+        "failed final event clear must restore metadata and report incomplete storage cleanup: {report:?}"
+    );
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("check bridge session after resumed destroy retry"),
+        "retry after MobDestroying must still archive the member bridge session before storage clear"
+    );
+    let retained_events = events.replay_all().await.expect("replay retained events");
+    assert!(
+        retained_events.iter().any(|event| matches!(
+            event.kind,
+            MobEventKind::MemberRetired { ref agent_identity, .. } if agent_identity == &worker
+        )),
+        "retry must persist the member retire event before attempting final storage clear"
+    );
+
+    events.allow_clear();
+    let retry_report = resumed
+        .destroy()
+        .await
+        .expect("retry should finish once final storage clear recovers");
+    assert!(retry_report.metadata_scrubbed);
+    assert!(retry_report.events_cleared);
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("events after complete retry")
+            .is_empty(),
+        "complete retry should clear the retained destroy anchor"
+    );
+}
+
+#[tokio::test]
 async fn test_destroy_marker_append_failure_precedes_cleanup_side_effects() {
     let definition = with_unique_mob_id(sample_definition(), "destroy-marker-first");
     let events = Arc::new(FaultInjectedMobEventStore::new());

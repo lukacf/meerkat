@@ -1915,21 +1915,29 @@ impl MethodRouter {
             {
                 Ok(()) => RpcResponse::success(id, json!({"archived": true})),
                 Err(err) => {
-                    if self
-                        .mob_state
-                        .has_bridge_session_scoped_mobs(&session_id.to_string())
-                        .await
-                    {
-                        return match self
+                    let still_mob_owned = self.mob_state.owns_live_bridge_session(&session_id).await
+                        || self
                             .mob_state
-                            .destroy_bridge_session_mobs(&session_id.to_string())
+                            .owns_persisted_bridge_session(&session_id)
+                            .await;
+                    if !still_mob_owned {
+                        if self
+                            .mob_state
+                            .has_bridge_session_scoped_mobs(&session_id.to_string())
                             .await
                         {
-                            Ok(()) => RpcResponse::success(id, json!({"archived": true})),
-                            Err(error) => mob_destroy_cleanup_error_response(id, error),
-                        };
+                            return match self
+                                .mob_state
+                                .destroy_bridge_session_mobs(&session_id.to_string())
+                                .await
+                            {
+                                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                                Err(error) => mob_destroy_cleanup_error_response(id, error),
+                            };
+                        }
+                        return RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string());
                     }
-                    RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string())
+                    RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string())
                 }
             },
             None => {
@@ -2802,6 +2810,7 @@ mod tests {
     struct RouterFailClearEventStore {
         inner: meerkat_mob::store::InMemoryMobEventStore,
         fail_clear: AtomicBool,
+        fail_member_retired: AtomicBool,
     }
 
     #[cfg(feature = "mob")]
@@ -2810,11 +2819,16 @@ mod tests {
             Self {
                 inner: meerkat_mob::store::InMemoryMobEventStore::new(),
                 fail_clear: AtomicBool::new(true),
+                fail_member_retired: AtomicBool::new(false),
             }
         }
 
         fn allow_clear(&self) {
             self.fail_clear.store(false, Ordering::Relaxed);
+        }
+
+        fn fail_member_retired_appends(&self) {
+            self.fail_member_retired.store(true, Ordering::Relaxed);
         }
     }
 
@@ -2825,6 +2839,16 @@ mod tests {
             &self,
             event: meerkat_mob::NewMobEvent,
         ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
+            if self.fail_member_retired.load(Ordering::Relaxed)
+                && matches!(
+                    event.kind,
+                    meerkat_mob::MobEventKind::MemberRetired { .. }
+                )
+            {
+                return Err(meerkat_mob::store::MobStoreError::Internal(
+                    "forced router mob retire event failure".to_string(),
+                ));
+            }
             self.inner.append(event).await
         }
 

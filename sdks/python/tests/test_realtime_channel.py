@@ -93,7 +93,7 @@ async def test_realtime_channel_connects_and_exchanges_frames() -> None:
         client.realtime_open_info = fake_open_info  # type: ignore[method-assign]
 
         channel = RealtimeChannel.session(client, "session-1")
-        connection = await channel.connect()
+        connection = await channel.connect(wait_for_attachment=False)
         await connection.send_input({"kind": "text_chunk", "text": "hello"})
         frame = await connection.recv()
         assert frame["type"] == "channel.event"

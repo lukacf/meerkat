@@ -8071,9 +8071,17 @@ impl MobActor {
                     &retiring_comms,
                 )
                 .await
-                && first_error.is_none()
             {
-                first_error = Some(error);
+                if Self::is_peer_destroying_admission_rejection(&error) {
+                    tracing::debug!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %ctx.agent_identity,
+                        peer_id = %peer_identity,
+                        "dispose_notify_peers: peer rejected lifecycle notice (already retiring)"
+                    );
+                } else if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
             if let Some(recipient_comms) = recipient_comms {
                 if let Err(error) = recipient_comms
@@ -8101,6 +8109,16 @@ impl MobActor {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    fn is_peer_destroying_admission_rejection(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::CommsError(meerkat_core::comms::SendError::AdmissionDropped {
+                reason: meerkat_core::comms::AdmissionDropReason::ClassificationRejected
+                    | meerkat_core::comms::AdmissionDropReason::SessionClosed,
+            })
+        )
     }
 
     /// Archive the member's session. Treats NotFound as success.

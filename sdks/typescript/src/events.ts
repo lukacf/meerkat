@@ -116,6 +116,7 @@ export interface RunCompletedEvent {
   readonly type: "run_completed";
   readonly sessionId: string;
   readonly result: string;
+  readonly structuredOutput?: unknown;
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
 }
@@ -384,6 +385,7 @@ export interface InteractionCompleteEvent {
   readonly type: "interaction_complete";
   readonly interactionId: string;
   readonly result: string;
+  readonly structuredOutput?: unknown;
 }
 
 export interface InteractionFailedEvent {
@@ -1018,6 +1020,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         sessionId: requireStringField(raw, "session_id"),
         result: requireStringField(raw, "result"),
+        ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
         usage: parseUsage(raw.usage),
         ...terminalCauseKindField(raw),
       };
@@ -1131,7 +1134,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Interaction (comms)
     case "interaction_complete":
-      return { type, interactionId: requireStringField(raw, "interaction_id"), result: requireStringField(raw, "result") };
+      return {
+        type,
+        interactionId: requireStringField(raw, "interaction_id"),
+        result: requireStringField(raw, "result"),
+        ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
+      };
     case "interaction_failed":
       return { type, interactionId: requireStringField(raw, "interaction_id"), error: requireStringField(raw, "error") };
 

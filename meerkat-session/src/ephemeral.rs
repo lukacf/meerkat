@@ -2878,6 +2878,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
+                structured_output: None,
                 usage: Usage::default(),
                 terminal_cause_kind: None,
             },
@@ -2911,6 +2912,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
+                structured_output: None,
                 usage: Usage::default(),
                 terminal_cause_kind: None,
             },

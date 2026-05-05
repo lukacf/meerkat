@@ -362,6 +362,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
             result: "done".to_string(),
+            structured_output: Some(serde_json::json!({"ok": true})),
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -589,6 +590,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
             result: "done".to_string(),
+            structured_output: None,
             usage: Usage::default(),
             terminal_cause_kind: None,
         },
@@ -709,6 +711,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             ))
             .unwrap(),
             result: "ok".to_string(),
+            structured_output: Some(serde_json::json!({"answer": 42})),
         },
         AgentEvent::InteractionFailed {
             interaction_id: serde_json::from_value(serde_json::json!(

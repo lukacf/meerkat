@@ -375,6 +375,7 @@ mod tests {
                 AgentEvent::RunCompleted {
                     session_id: sid.clone(),
                     result: "Hi there!".to_string(),
+                    structured_output: None,
                     usage: Usage::default(),
                     terminal_cause_kind: None,
                 },

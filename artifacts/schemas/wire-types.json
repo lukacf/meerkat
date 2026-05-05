@@ -406,6 +406,9 @@
               "session_id": {
                 "$ref": "#/$defs/SessionId"
               },
+              "structured_output": {
+                "description": "Structured output from the completed run, when schema extraction\nproduced a typed value."
+              },
               "terminal_cause_kind": {
                 "anyOf": [
                   {
@@ -1076,6 +1079,9 @@
               },
               "result": {
                 "type": "string"
+              },
+              "structured_output": {
+                "description": "Structured output from the completed interaction, when schema\nextraction produced a typed value."
               },
               "type": {
                 "const": "interaction_complete",

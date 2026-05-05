@@ -9775,7 +9775,10 @@ impl MobActor {
                 (TerminalizationTarget::Canceled, MobRunStatus::Failed)
             )
         {
-            return Ok(TerminalizationOutcome::Noop);
+            return self
+                .flow_engine
+                .repair_persisted_terminalization(run_id, flow_id, target)
+                .await;
         }
 
         let authority_input = command.authority_input(&run_id);

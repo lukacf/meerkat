@@ -93,6 +93,7 @@ class RunCompleted(Event):
     result: str = ""
     usage: Usage = field(default_factory=Usage)
     terminal_cause_kind: TurnTerminalCauseKind | None = None
+    structured_output: Any = None
 
 
 TurnTerminalOutcome = Literal[
@@ -426,6 +427,7 @@ class InteractionComplete(Event):
 
     interaction_id: str = ""
     result: str = ""
+    structured_output: Any = None
 
 
 @dataclass(frozen=True, slots=True)

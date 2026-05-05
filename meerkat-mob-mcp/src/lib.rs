@@ -1824,6 +1824,7 @@ impl SessionService for LocalSessionService {
                 AgentEvent::RunCompleted {
                     session_id: id.clone(),
                     result: "ok".to_string(),
+                    structured_output: None,
                     usage,
                     terminal_cause_kind: None,
                 },
@@ -3310,6 +3311,7 @@ mod tests {
                     .send(AgentEvent::InteractionComplete {
                         interaction_id: interaction_id_for_task,
                         result: "ok".to_string(),
+                        structured_output: None,
                     })
                     .await;
             });

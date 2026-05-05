@@ -17,7 +17,7 @@ pub use sqlite::{
 };
 
 use crate::definition::MobDefinition;
-use crate::event::{MemberRef, MobEvent, NewMobEvent};
+use crate::event::{MemberRef, MobEvent, MobEventKind, NewMobEvent};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -37,6 +37,19 @@ use tokio::sync::broadcast;
 
 /// Receiver for append-driven structural mob events.
 pub type MobEventReceiver = broadcast::Receiver<MobEvent>;
+
+pub(crate) fn terminal_event_identity(kind: &MobEventKind) -> Option<(&RunId, &FlowId)> {
+    match kind {
+        MobEventKind::FlowCompleted {
+            run_id, flow_id, ..
+        }
+        | MobEventKind::FlowFailed {
+            run_id, flow_id, ..
+        }
+        | MobEventKind::FlowCanceled { run_id, flow_id } => Some((run_id, flow_id)),
+        _ => None,
+    }
+}
 
 /// Frame-aware atomic persistence operation required by the flow/frame store contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +198,13 @@ pub struct ExternalBindingOverlayRecord {
 pub trait MobEventStore: Send + Sync {
     /// Append a new event to the store.
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError>;
+
+    /// Append a terminal flow event only when no terminal event for the same
+    /// mob/run/flow has already been persisted.
+    async fn append_terminal_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError>;
 
     /// Append multiple events atomically.
     ///

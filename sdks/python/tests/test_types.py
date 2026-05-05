@@ -67,6 +67,7 @@ from meerkat.events import (
     CompactionStarted,
     Event,
     HookDenied,
+    InteractionComplete,
     Retrying,
     RunCompleted,
     RunFailed,
@@ -1063,6 +1064,19 @@ def test_parse_turn_started():
     assert event.turn_number == 3
 
 
+def test_parse_interaction_complete_structured_output():
+    raw = {
+        "type": "interaction_complete",
+        "interaction_id": "i1",
+        "result": "{\"answer\":42}",
+        "structured_output": {"answer": 42},
+    }
+    event = parse_event(raw)
+    assert isinstance(event, InteractionComplete)
+    assert event.interaction_id == "i1"
+    assert event.structured_output == {"answer": 42}
+
+
 def test_parse_scoped_mob_event_omits_runtime_binding_atoms():
     raw = {
         "scope_id": "mob:writer",
@@ -1415,12 +1429,14 @@ def test_parse_run_completed():
         "type": "run_completed",
         "session_id": "abc-123",
         "result": "Done!",
+        "structured_output": {"answer": 42},
         "usage": {"input_tokens": 100, "output_tokens": 50},
     }
     event = parse_event(raw)
     assert isinstance(event, RunCompleted)
     assert event.session_id == "abc-123"
     assert event.result == "Done!"
+    assert event.structured_output == {"answer": 42}
     assert event.usage.input_tokens == 100
 
 

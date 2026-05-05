@@ -1305,6 +1305,10 @@ pub enum AgentEvent {
     RunCompleted {
         session_id: SessionId,
         result: String,
+        /// Structured output from the completed run, when schema extraction
+        /// produced a typed value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<Value>,
         usage: Usage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
@@ -1484,6 +1488,10 @@ pub enum AgentEvent {
     InteractionComplete {
         interaction_id: crate::interaction::InteractionId,
         result: String,
+        /// Structured output from the completed interaction, when schema
+        /// extraction produced a typed value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<Value>,
     },
 
     /// An interaction reached an external callback boundary and is waiting for
@@ -2225,6 +2233,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                structured_output: None,
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
@@ -2260,6 +2269,7 @@ mod tests {
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "agent response".to_string(),
+                structured_output: None,
             },
             AgentEvent::InteractionCallbackPending {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -2745,6 +2755,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                structured_output: None,
                 usage: Usage::default(),
                 terminal_cause_kind: None,
             },
@@ -2866,6 +2877,7 @@ mod tests {
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "ok".to_string(),
+                structured_output: None,
             },
             AgentEvent::InteractionCallbackPending {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),

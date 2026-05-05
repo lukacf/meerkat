@@ -752,8 +752,18 @@ impl FlowEngine {
             };
 
             match terminal {
-                Ok(FlowTurnOutcome::Completed { output }) => {
-                    match parse_output_value(&output, step_id, target, &output_format) {
+                Ok(FlowTurnOutcome::Completed {
+                    output,
+                    structured_output,
+                }) => {
+                    let output_value = completed_output_value(
+                        &output,
+                        structured_output,
+                        step_id,
+                        target,
+                        &output_format,
+                    );
+                    match output_value {
                         Ok(value) => {
                             self.run_store
                                 .append_step_entry(
@@ -1554,16 +1564,26 @@ impl FlowEngine {
             }
         }
 
-        self.terminalize_completed(run_id.clone(), flow_id).await
+        self.terminalize_completed(
+            run_id.clone(),
+            flow_id,
+            flow_structured_output_from_outputs(outputs),
+        )
+        .await
     }
 
     pub(crate) async fn terminalize_completed(
         &self,
         run_id: RunId,
         flow_id: FlowId,
+        structured_output: Option<Value>,
     ) -> Result<TerminalizationOutcome, MobError> {
-        self.terminalize(run_id, flow_id, TerminalizationTarget::Completed)
-            .await
+        self.terminalize(
+            run_id,
+            flow_id,
+            TerminalizationTarget::Completed { structured_output },
+        )
+        .await
     }
 
     pub(crate) async fn terminalize_failed(
@@ -1614,9 +1634,11 @@ impl FlowEngine {
         target: TerminalizationTarget,
     ) -> Result<TerminalizationOutcome, MobError> {
         let input = match &target {
-            TerminalizationTarget::Completed => MobMachineFlowRunCommand::TerminalizeCompleted(
-                flow_run::inputs::TerminalizeCompleted {},
-            ),
+            TerminalizationTarget::Completed { .. } => {
+                MobMachineFlowRunCommand::TerminalizeCompleted(
+                    flow_run::inputs::TerminalizeCompleted {},
+                )
+            }
             TerminalizationTarget::Failed { .. } => {
                 MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {})
             }
@@ -1626,6 +1648,17 @@ impl FlowEngine {
         };
         self.handle
             .commit_flow_terminalization(run_id, flow_id, target, input, "flow_terminalize")
+            .await
+    }
+
+    pub(super) async fn repair_persisted_terminalization(
+        &self,
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        self.terminalization
+            .repair_persisted_terminalization(run_id, flow_id, target)
             .await
     }
 
@@ -1649,7 +1682,9 @@ impl FlowEngine {
                     (TerminalizationTarget::Canceled, MobRunStatus::Failed)
                 )
             {
-                return Ok(TerminalizationOutcome::Noop);
+                return self
+                    .repair_persisted_terminalization(run_id, flow_id, target)
+                    .await;
             }
             let next_state = apply_mob_machine_flow_run_command(
                 &run.flow_state,
@@ -1933,6 +1968,34 @@ fn parse_output_value(
             "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
         )
     })
+}
+
+fn completed_output_value(
+    raw: &str,
+    structured_output: Option<Value>,
+    step_id: &StepId,
+    target: &MeerkatId,
+    format: &StepOutputFormat,
+) -> Result<Value, String> {
+    match (format, structured_output) {
+        (StepOutputFormat::Json, Some(value)) => Ok(value),
+        _ => parse_output_value(raw, step_id, target, format),
+    }
+}
+
+fn flow_structured_output_from_outputs(outputs: &IndexMap<StepId, Value>) -> Option<Value> {
+    if outputs.is_empty() {
+        return None;
+    }
+
+    let mut steps = Map::new();
+    for (step_id, output) in outputs {
+        steps.insert(step_id.as_str().to_string(), output.clone());
+    }
+
+    let mut structured_output = Map::new();
+    structured_output.insert("steps".to_string(), Value::Object(steps));
+    Some(Value::Object(structured_output))
 }
 
 /// Strip markdown code fences from LLM output.
@@ -2552,6 +2615,40 @@ mod template_tests {
             }
             other => panic!("expected rendered blocks, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod completed_output_value_tests {
+    use super::{StepOutputFormat, completed_output_value};
+    use crate::ids::{AgentIdentity, StepId};
+
+    #[test]
+    fn json_format_preserves_typed_structured_output() {
+        let value = completed_output_value(
+            "not-json",
+            Some(serde_json::json!({"answer": 42})),
+            &StepId::from("step-1"),
+            &AgentIdentity::from("worker-1"),
+            &StepOutputFormat::Json,
+        )
+        .expect("structured output should be accepted directly");
+
+        assert_eq!(value, serde_json::json!({"answer": 42}));
+    }
+
+    #[test]
+    fn text_format_keeps_raw_text_output() {
+        let value = completed_output_value(
+            "plain text",
+            Some(serde_json::json!({"answer": 42})),
+            &StepId::from("step-1"),
+            &AgentIdentity::from("worker-1"),
+            &StepOutputFormat::Text,
+        )
+        .expect("text output should be accepted as raw text");
+
+        assert_eq!(value, serde_json::json!("plain text"));
     }
 }
 

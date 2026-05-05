@@ -255,6 +255,7 @@ export interface RunStartedEvent {
 export interface RunCompletedEvent {
   result: string;
   session_id: SessionId;
+  structured_output?: unknown;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_completed";
   usage: Usage;
@@ -420,6 +421,7 @@ export interface SkillResolutionFailedEvent {
 export interface InteractionCompleteEvent {
   interaction_id: InteractionId;
   result: string;
+  structured_output?: unknown;
   type: "interaction_complete";
 }
 

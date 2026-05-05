@@ -6,7 +6,7 @@
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityRecord,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, terminal_event_identity,
 };
 use crate::definition::MobDefinition;
 use crate::error::MobError;
@@ -779,6 +779,70 @@ impl MobEventStore for SqliteMobEventStore {
         })
         .await?;
         self.event_bus.publish_committed(stored.clone());
+        Ok(stored)
+    }
+
+    async fn append_terminal_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
+            return Err(MobStoreError::Internal(
+                "append_terminal_event_if_absent requires a terminal flow event".to_string(),
+            ));
+        };
+        let run_id = run_id.clone();
+        let flow_id = flow_id.clone();
+        let mob_id = event.mob_id.clone();
+
+        let path = self.path.clone();
+        let stored = run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let mut stmt = tx
+                .prepare("SELECT event_json FROM mob_events ORDER BY cursor")
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                let existing = decode_stored_mob_event(&bytes)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+                if existing.mob_id == mob_id
+                    && terminal_event_identity(&existing.kind).is_some_and(
+                        |(existing_run_id, existing_flow_id)| {
+                            existing_run_id == &run_id && existing_flow_id == &flow_id
+                        },
+                    )
+                {
+                    return Ok(None);
+                }
+            }
+            drop(stmt);
+
+            let cursor = next_event_cursor(&tx)?;
+            let stored = MobEvent {
+                cursor,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            let encoded = encode_stored_mob_event(&stored)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
+                params![cursor_to_i64(cursor)?, encoded],
+            )
+            .map_err(se)?;
+            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            tx.commit().map_err(se)?;
+            Ok(Some(stored))
+        })
+        .await?;
+        if let Some(stored) = stored.as_ref() {
+            self.event_bus.publish_committed(stored.clone());
+        }
         Ok(stored)
     }
 

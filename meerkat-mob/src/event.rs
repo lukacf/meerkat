@@ -387,7 +387,13 @@ pub enum MobEventKind {
         params: serde_json::Value,
     },
     /// Flow run completed.
-    FlowCompleted { run_id: RunId, flow_id: FlowId },
+    FlowCompleted {
+        run_id: RunId,
+        flow_id: FlowId,
+        /// Typed flow outputs captured at completion time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<serde_json::Value>,
+    },
     /// Flow run failed.
     FlowFailed {
         run_id: RunId,
@@ -722,6 +728,13 @@ mod tests {
         roundtrip(&MobEventKind::FlowCompleted {
             run_id: run_id.clone(),
             flow_id: flow_id.clone(),
+            structured_output: Some(serde_json::json!({
+                "steps": {
+                    "step-a": {
+                        "ok": true
+                    }
+                }
+            })),
         });
         roundtrip(&MobEventKind::FlowFailed {
             run_id: run_id.clone(),

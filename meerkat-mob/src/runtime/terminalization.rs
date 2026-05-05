@@ -2,14 +2,15 @@ use super::flow_system_step_id;
 use crate::error::MobError;
 use crate::event::{MobEventKind, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId};
-use crate::run::{FailureLedgerEntry, MobRunStatus};
+use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus};
 use crate::store::{MobEventStore, MobRunStore};
 use chrono::Utc;
+use serde_json::{Map, Value};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(super) enum TerminalizationTarget {
-    Completed,
+    Completed { structured_output: Option<Value> },
     Failed { reason: String },
     Canceled,
 }
@@ -17,7 +18,7 @@ pub(super) enum TerminalizationTarget {
 impl TerminalizationTarget {
     pub(super) fn status(&self) -> MobRunStatus {
         match self {
-            Self::Completed => MobRunStatus::Completed,
+            Self::Completed { .. } => MobRunStatus::Completed,
             Self::Failed { .. } => MobRunStatus::Failed,
             Self::Canceled => MobRunStatus::Canceled,
         }
@@ -25,7 +26,7 @@ impl TerminalizationTarget {
 
     fn event_name(&self) -> &'static str {
         match self {
-            Self::Completed => "FlowCompleted",
+            Self::Completed { .. } => "FlowCompleted",
             Self::Failed { .. } => "FlowFailed",
             Self::Canceled => "FlowCanceled",
         }
@@ -33,7 +34,11 @@ impl TerminalizationTarget {
 
     fn into_event_kind(self, run_id: RunId, flow_id: FlowId) -> MobEventKind {
         match self {
-            Self::Completed => MobEventKind::FlowCompleted { run_id, flow_id },
+            Self::Completed { structured_output } => MobEventKind::FlowCompleted {
+                run_id,
+                flow_id,
+                structured_output,
+            },
             Self::Failed { reason } => MobEventKind::FlowFailed {
                 run_id,
                 flow_id,
@@ -99,6 +104,99 @@ impl FlowTerminalizationAuthority {
         Ok(TerminalizationOutcome::Transitioned)
     }
 
+    pub(super) async fn repair_persisted_terminalization(
+        &self,
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        let run = self
+            .run_store
+            .get_run(&run_id)
+            .await?
+            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+        if !run.status.is_terminal() {
+            return Ok(TerminalizationOutcome::Noop);
+        }
+        let target = Self::repair_target_for_run(&run, target);
+        let event_name = target.event_name();
+        let event_kind = target.into_event_kind(run_id.clone(), flow_id);
+        match self
+            .events
+            .append_terminal_event_if_absent(NewMobEvent {
+                mob_id: self.mob_id.clone(),
+                timestamp: None,
+                kind: event_kind,
+            })
+            .await
+        {
+            Ok(Some(_)) | Ok(None) => Ok(TerminalizationOutcome::Noop),
+            Err(append_error) => {
+                self.record_terminal_event_append_failure(
+                    &run_id,
+                    event_name,
+                    MobError::from(append_error),
+                )
+                .await
+            }
+        }
+    }
+
+    fn repair_target_for_run(
+        run: &MobRun,
+        requested: TerminalizationTarget,
+    ) -> TerminalizationTarget {
+        match run.status {
+            MobRunStatus::Completed => {
+                let requested_output = match requested {
+                    TerminalizationTarget::Completed { structured_output } => structured_output,
+                    _ => None,
+                };
+                TerminalizationTarget::Completed {
+                    structured_output: requested_output
+                        .or_else(|| structured_output_from_run_outputs(run)),
+                }
+            }
+            MobRunStatus::Failed => {
+                let reason = match requested {
+                    TerminalizationTarget::Failed { reason } => reason,
+                    _ => run
+                        .failure_ledger
+                        .last()
+                        .map(|entry| entry.reason.clone())
+                        .unwrap_or_else(|| "run already failed".to_string()),
+                };
+                TerminalizationTarget::Failed { reason }
+            }
+            MobRunStatus::Canceled => TerminalizationTarget::Canceled,
+            MobRunStatus::Pending | MobRunStatus::Running => requested,
+        }
+    }
+}
+
+fn structured_output_from_run_outputs(run: &MobRun) -> Option<Value> {
+    if run.root_step_outputs.is_empty() && run.loop_iteration_outputs.is_empty() {
+        return None;
+    }
+
+    let mut steps = Map::new();
+    for (step_id, output) in &run.root_step_outputs {
+        steps.insert(step_id.as_str().to_string(), output.clone());
+    }
+    for iterations in run.loop_iteration_outputs.values() {
+        for iteration in iterations {
+            for (step_id, output) in iteration {
+                steps.insert(step_id.as_str().to_string(), output.clone());
+            }
+        }
+    }
+
+    let mut structured_output = Map::new();
+    structured_output.insert("steps".to_string(), Value::Object(steps));
+    Some(Value::Object(structured_output))
+}
+
+impl FlowTerminalizationAuthority {
     async fn record_terminal_event_append_failure(
         &self,
         run_id: &RunId,
@@ -145,9 +243,11 @@ impl FlowTerminalizationAuthority {
 mod tests {
     use super::{FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget};
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
-    use crate::ids::{FlowId, MobId, RunId, StepId};
+    use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
     use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
-    use crate::store::{InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError};
+    use crate::store::{
+        InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, terminal_event_identity,
+    };
     use async_trait::async_trait;
     use chrono::Utc;
     use std::collections::HashSet;
@@ -156,13 +256,19 @@ mod tests {
 
     struct RecordingRunStore {
         inner: InMemoryMobRunStore,
+        fail_get_run: RwLock<bool>,
     }
 
     impl RecordingRunStore {
         fn new() -> Self {
             Self {
                 inner: InMemoryMobRunStore::new(),
+                fail_get_run: RwLock::new(false),
             }
+        }
+
+        async fn fail_get_run(&self, fail: bool) {
+            *self.fail_get_run.write().await = fail;
         }
     }
 
@@ -173,6 +279,11 @@ mod tests {
         }
 
         async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
+            if *self.fail_get_run.read().await {
+                return Err(MobStoreError::Internal(
+                    "fault-injected get_run failure".to_string(),
+                ));
+            }
             self.inner.get_run(run_id).await
         }
 
@@ -699,6 +810,10 @@ mod tests {
             self.fail_on_kind.write().await.insert(kind);
         }
 
+        async fn allow_appends_for(&self, kind: &'static str) {
+            self.fail_on_kind.write().await.remove(kind);
+        }
+
         fn kind_label(kind: &MobEventKind) -> &'static str {
             match kind {
                 MobEventKind::FlowCompleted { .. } => "FlowCompleted",
@@ -727,6 +842,47 @@ mod tests {
             };
             events.push(stored.clone());
             Ok(stored)
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: NewMobEvent,
+        ) -> Result<Option<MobEvent>, MobStoreError> {
+            let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
+                return Err(MobStoreError::Internal(
+                    "append_terminal_event_if_absent requires a terminal flow event".to_string(),
+                ));
+            };
+            let run_id = run_id.clone();
+            let flow_id = flow_id.clone();
+            let mob_id = event.mob_id.clone();
+
+            let mut events = self.events.write().await;
+            if events.iter().any(|existing| {
+                existing.mob_id == mob_id
+                    && terminal_event_identity(&existing.kind).is_some_and(
+                        |(existing_run_id, existing_flow_id)| {
+                            existing_run_id == &run_id && existing_flow_id == &flow_id
+                        },
+                    )
+            }) {
+                return Ok(None);
+            }
+
+            let kind = Self::kind_label(&event.kind);
+            if self.fail_on_kind.read().await.contains(kind) {
+                return Err(MobStoreError::Internal(format!(
+                    "fault-injected append failure for {kind}"
+                )));
+            }
+            let stored = MobEvent {
+                cursor: events.len() as u64 + 1,
+                timestamp: Utc::now(),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            events.push(stored.clone());
+            Ok(Some(stored))
         }
 
         async fn poll(
@@ -817,6 +973,308 @@ mod tests {
             .await
             .expect("terminalize");
         assert_eq!(outcome, TerminalizationOutcome::Transitioned);
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_carries_structured_output() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
+        run.root_step_outputs
+            .insert(StepId::from("step-1"), serde_json::json!({"answer": 42}));
+        run_store.create_run(run).await.expect("create run");
+
+        let outcome = authority
+            .record_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({
+                        "steps": {
+                            "step-1": {
+                                "answer": 42
+                            }
+                        }
+                    })),
+                },
+            )
+            .await
+            .expect("terminalize");
+        assert_eq!(outcome, TerminalizationOutcome::Transitioned);
+
+        let emitted = events.replay_all().await.expect("replay events");
+        match &emitted[0].kind {
+            MobEventKind::FlowCompleted {
+                structured_output, ..
+            } => assert_eq!(
+                structured_output,
+                &Some(serde_json::json!({
+                    "steps": {
+                        "step-1": {
+                            "answer": 42
+                        }
+                    }
+                }))
+            ),
+            other => panic!("expected FlowCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_does_not_read_snapshot_for_structured_output() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
+        run.root_step_outputs
+            .insert(StepId::from("step-1"), serde_json::json!({"answer": 42}));
+        run_store.create_run(run).await.expect("create run");
+        run_store.fail_get_run(true).await;
+
+        let outcome = authority
+            .record_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({
+                        "steps": {
+                            "step-1": {
+                                "answer": 42
+                            }
+                        }
+                    })),
+                },
+            )
+            .await
+            .expect("terminalize");
+
+        assert_eq!(outcome, TerminalizationOutcome::Transitioned);
+        assert_eq!(
+            events.replay_all().await.expect("replay events").len(),
+            1,
+            "FlowCompleted should use the target output and avoid an extra run read"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_repair_appends_missing_event() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        run_store
+            .create_run(sample_run(run_id.clone(), MobRunStatus::Completed))
+            .await
+            .expect("create run");
+        events.fail_appends_for("FlowCompleted").await;
+        authority
+            .record_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({
+                        "steps": {
+                            "step-1": {
+                                "answer": 42
+                            }
+                        }
+                    })),
+                },
+            )
+            .await
+            .expect_err("initial terminal event append should fail");
+        events.allow_appends_for("FlowCompleted").await;
+
+        let outcome = authority
+            .repair_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({
+                        "steps": {
+                            "step-1": {
+                                "answer": 42
+                            }
+                        }
+                    })),
+                },
+            )
+            .await
+            .expect("repair terminal event");
+        assert_eq!(outcome, TerminalizationOutcome::Noop);
+
+        let emitted = events.replay_all().await.expect("replay events");
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0].kind {
+            MobEventKind::FlowCompleted {
+                structured_output, ..
+            } => assert_eq!(
+                structured_output,
+                &Some(serde_json::json!({
+                    "steps": {
+                        "step-1": {
+                            "answer": 42
+                        }
+                    }
+                }))
+            ),
+            other => panic!("expected FlowCompleted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_repair_is_idempotent() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        run_store
+            .create_run(sample_run(run_id.clone(), MobRunStatus::Completed))
+            .await
+            .expect("create run");
+
+        authority
+            .record_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({"steps": {"step-1": "ok"}})),
+                },
+            )
+            .await
+            .expect("record terminal event");
+        let outcome = authority
+            .repair_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Completed {
+                    structured_output: Some(serde_json::json!({"steps": {"step-1": "ok"}})),
+                },
+            )
+            .await
+            .expect("repair terminal event");
+
+        assert_eq!(outcome, TerminalizationOutcome::Noop);
+        assert_eq!(events.replay_all().await.expect("replay events").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_repair_uses_persisted_status() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
+        run.root_step_outputs
+            .insert(StepId::from("step-1"), serde_json::json!({"answer": 42}));
+        run_store.create_run(run).await.expect("create run");
+
+        let outcome = authority
+            .repair_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Failed {
+                    reason: "fallback failure".to_string(),
+                },
+            )
+            .await
+            .expect("repair terminal event");
+        assert_eq!(outcome, TerminalizationOutcome::Noop);
+
+        let emitted = events.replay_all().await.expect("replay events");
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0].kind {
+            MobEventKind::FlowCompleted {
+                structured_output, ..
+            } => assert_eq!(
+                structured_output,
+                &Some(serde_json::json!({
+                    "steps": {
+                        "step-1": {
+                            "answer": 42
+                        }
+                    }
+                }))
+            ),
+            other => panic!("expected FlowCompleted repair, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completed_terminalization_repair_preserves_loop_outputs() {
+        let run_store = Arc::new(RecordingRunStore::new());
+        let events = Arc::new(FaultInjectedEventStore::default());
+        let authority = FlowTerminalizationAuthority::new(
+            run_store.clone(),
+            events.clone(),
+            MobId::from("mob"),
+        );
+
+        let run_id = RunId::new();
+        let mut run = sample_run(run_id.clone(), MobRunStatus::Completed);
+        let mut iteration = indexmap::IndexMap::new();
+        iteration.insert(StepId::from("body-step"), serde_json::json!({"loop": true}));
+        run.loop_iteration_outputs
+            .insert(LoopId::from("loop-1"), vec![iteration]);
+        run_store.create_run(run).await.expect("create run");
+
+        let outcome = authority
+            .repair_persisted_terminalization(
+                run_id.clone(),
+                FlowId::from("flow"),
+                TerminalizationTarget::Failed {
+                    reason: "fallback failure".to_string(),
+                },
+            )
+            .await
+            .expect("repair terminal event");
+        assert_eq!(outcome, TerminalizationOutcome::Noop);
+
+        let emitted = events.replay_all().await.expect("replay events");
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0].kind {
+            MobEventKind::FlowCompleted {
+                structured_output, ..
+            } => assert_eq!(
+                structured_output,
+                &Some(serde_json::json!({
+                    "steps": {
+                        "body-step": {
+                            "loop": true
+                        }
+                    }
+                }))
+            ),
+            other => panic!("expected FlowCompleted repair, got {other:?}"),
+        }
     }
 
     #[tokio::test]

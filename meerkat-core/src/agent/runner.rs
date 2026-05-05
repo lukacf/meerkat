@@ -726,6 +726,7 @@ where
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
                 result: result.text.clone(),
+                structured_output: result.structured_output.clone(),
                 usage: result.usage.clone(),
                 terminal_cause_kind: result.terminal_cause_kind,
             },

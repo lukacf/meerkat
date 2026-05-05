@@ -2237,11 +2237,11 @@ async fn archive_session_with_runtime_cleanup(
             &session_id,
         )
         .await;
-        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. })) {
-            if let Err(error) = cleanup.run(&session_id).await {
-                let _ = result_tx.send(Err(error));
-                return;
-            }
+        if matches!(result, Ok(()) | Err(SessionError::NotFound { .. }))
+            && let Err(error) = cleanup.run(&session_id).await
+        {
+            let _ = result_tx.send(Err(error));
+            return;
         }
         #[cfg(feature = "mob")]
         let result = if had_cleanup_anchor && matches!(result, Err(SessionError::NotFound { .. })) {
@@ -3989,6 +3989,13 @@ mod tests {
             event: meerkat_mob::NewMobEvent,
         ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
             self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
         }
 
         async fn append_batch(

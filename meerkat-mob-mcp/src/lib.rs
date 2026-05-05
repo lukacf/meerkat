@@ -2002,6 +2002,7 @@ impl SessionService for LocalSessionService {
                 AgentEvent::RunCompleted {
                     session_id: id.clone(),
                     result: "ok".to_string(),
+                    structured_output: None,
                     usage,
                     terminal_cause_kind: None,
                 },
@@ -3527,6 +3528,7 @@ mod tests {
                     .send(AgentEvent::InteractionComplete {
                         interaction_id: interaction_id_for_task,
                         result: "ok".to_string(),
+                        structured_output: None,
                     })
                     .await;
             });
@@ -5609,7 +5611,7 @@ mod tests {
         assert!(
             members
                 .iter()
-                .any(|member| member.agent_identity == AgentIdentity::from("worker-1")),
+                .any(|member| member.agent_identity == "worker-1"),
             "incomplete destroy must retain the failed member as retry work"
         );
         let mobs = state.mob_list().await;

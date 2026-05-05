@@ -1577,10 +1577,8 @@ async fn destroy_session_with_services(
         .destroy_bridge_session_mobs(&session_id.to_string())
         .await
         .map_err(WebDestroySessionError::Mob)?;
-    if !retained_mob_cleanup {
-        if let Some(error) = archive_not_found {
-            return Err(WebDestroySessionError::Session(error));
-        }
+    if !retained_mob_cleanup && let Some(error) = archive_not_found {
+        return Err(WebDestroySessionError::Session(error));
     }
     Ok(())
 }
@@ -2699,6 +2697,13 @@ capabilities = [{capability_values}]
             event: meerkat_mob::NewMobEvent,
         ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
             self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
         }
 
         async fn append_batch(

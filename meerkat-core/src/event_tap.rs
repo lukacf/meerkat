@@ -204,6 +204,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
+                structured_output: None,
                 usage: crate::types::Usage::default(),
                 terminal_cause_kind: None,
             },
@@ -223,6 +224,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
+                structured_output: None,
                 usage: crate::types::Usage::default(),
                 terminal_cause_kind: None,
             },

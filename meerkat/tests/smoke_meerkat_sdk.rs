@@ -677,7 +677,7 @@ mod scenario_05_multi_turn {
 }
 
 // ============================================================================
-// SCENARIO 6: Hooks pipeline (observe + rewrite + guardrail)
+// SCENARIO 6: Hooks pipeline (observe + guardrail)
 // ============================================================================
 
 mod scenario_06_hooks {
@@ -696,16 +696,16 @@ mod scenario_06_hooks {
         // Track whether each hook type was invoked
         let observer_called = Arc::new(AtomicBool::new(false));
         let guardrail_called = Arc::new(AtomicBool::new(false));
-        let rewriter_called = Arc::new(AtomicBool::new(false));
+        let post_llm_observer_called = Arc::new(AtomicBool::new(false));
 
         let observer_called_clone = observer_called.clone();
         let guardrail_called_clone = guardrail_called.clone();
-        let rewriter_called_clone = rewriter_called.clone();
+        let post_llm_observer_called_clone = post_llm_observer_called.clone();
 
         // Build a HooksConfig with three hook entries:
         // 1. Observer on RunStarted
         // 2. Guardrail on PreLlmRequest (always Allow)
-        // 3. Rewriter on PostLlmResponse (appends " [REVIEWED]")
+        // 3. Observer on PostLlmResponse
         let hooks_config = HooksConfig {
             entries: vec![
                 HookEntryConfig {
@@ -739,17 +739,17 @@ mod scenario_06_hooks {
                     .unwrap(),
                 },
                 HookEntryConfig {
-                    id: HookId::new("rewriter"),
+                    id: HookId::new("post_llm_observer"),
                     enabled: true,
                     point: HookPoint::PostLlmResponse,
                     mode: HookExecutionMode::Foreground,
-                    capability: HookCapability::Rewrite,
+                    capability: HookCapability::Observe,
                     priority: 80,
                     failure_policy: None,
                     timeout_ms: None,
                     runtime: HookRuntimeConfig::new(
                         HookRuntimeKind::InProcess,
-                        Some(serde_json::json!({"name": "rewriter"})),
+                        Some(serde_json::json!({"name": "post_llm_observer"})),
                     )
                     .unwrap(),
                 },
@@ -791,23 +791,20 @@ mod scenario_06_hooks {
             )
             .await;
 
-        // Register rewriter handler (appends " [REVIEWED]" to assistant text)
+        // Register post-LLM observer handler
         engine
             .register_in_process_handler(
-                "rewriter",
+                "post_llm_observer",
                 Arc::new(move |invocation| {
-                    rewriter_called_clone.store(true, Ordering::SeqCst);
-                    let original_text = invocation
-                        .llm_response
-                        .as_ref()
-                        .map(|r| r.assistant_text.clone())
-                        .unwrap_or_default();
+                    post_llm_observer_called_clone.store(true, Ordering::SeqCst);
+                    assert!(
+                        invocation.llm_response.is_some(),
+                        "post-LLM observer should receive an LLM response projection"
+                    );
                     Box::pin(async move {
                         Ok(RuntimeHookResponse {
                             decision: None,
-                            patches: vec![HookPatch::AssistantText {
-                                text: format!("{original_text} [REVIEWED]"),
-                            }],
+                            patches: Vec::new(),
                         })
                     })
                 }),
@@ -848,15 +845,8 @@ mod scenario_06_hooks {
             "Guardrail hook should have been called"
         );
         assert!(
-            rewriter_called.load(Ordering::SeqCst),
-            "Rewriter hook should have been called"
-        );
-
-        // Verify the rewrite was applied
-        assert!(
-            result.text.contains("[REVIEWED]"),
-            "Result text should end with [REVIEWED] after rewrite: {}",
-            result.text
+            post_llm_observer_called.load(Ordering::SeqCst),
+            "Post-LLM observer hook should have been called"
         );
     }
 }

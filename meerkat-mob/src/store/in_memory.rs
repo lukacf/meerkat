@@ -3,7 +3,7 @@
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityRecord,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, terminal_event_identity,
 };
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
@@ -205,6 +205,44 @@ impl MobEventStore for InMemoryMobEventStore {
         drop(events);
         let _ = self.event_tx.send(stored.clone());
         Ok(stored)
+    }
+
+    async fn append_terminal_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
+            return Err(MobStoreError::Internal(
+                "append_terminal_event_if_absent requires a terminal flow event".to_string(),
+            ));
+        };
+        let run_id = run_id.clone();
+        let flow_id = flow_id.clone();
+        let mob_id = event.mob_id.clone();
+
+        let mut events = self.events.write().await;
+        if events.iter().any(|existing| {
+            existing.mob_id == mob_id
+                && terminal_event_identity(&existing.kind).is_some_and(
+                    |(existing_run_id, existing_flow_id)| {
+                        existing_run_id == &run_id && existing_flow_id == &flow_id
+                    },
+                )
+        }) {
+            return Ok(None);
+        }
+
+        let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
+        let stored = MobEvent {
+            cursor,
+            timestamp: event.timestamp.unwrap_or_else(Utc::now),
+            mob_id: event.mob_id,
+            kind: event.kind,
+        };
+        events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
+        Ok(Some(stored))
     }
 
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {

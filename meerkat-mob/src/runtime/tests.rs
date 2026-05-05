@@ -13,7 +13,7 @@ use crate::store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, MobEventStore,
     MobRunStore, MobRuntimeMetadataStore, MobStoreError, RealmProfileStore,
-    SupervisorAuthorityRecord,
+    SupervisorAuthorityRecord, terminal_event_identity,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1279,6 +1279,7 @@ impl SessionService for MockSessionService {
                             AgentEvent::RunCompleted {
                                 session_id,
                                 result: completed_result,
+                                structured_output: None,
                                 usage: Usage::default(),
                                 terminal_cause_kind: None,
                             },
@@ -1470,6 +1471,7 @@ impl SubscribableInjector for CountingInjector {
                 AgentEvent::InteractionComplete {
                     interaction_id: interaction_id_for_task,
                     result: completed_result,
+                    structured_output: None,
                 }
             };
             let _ = tx.send(event).await;
@@ -1714,6 +1716,10 @@ impl FaultInjectedMobEventStore {
         self.fail_clear.store(false, Ordering::Relaxed);
     }
 
+    async fn allow_appends_for(&self, kind: &'static str) {
+        self.fail_on_kind.write().await.remove(kind);
+    }
+
     fn replay_calls(&self) -> u64 {
         self.replay_calls.load(Ordering::Relaxed)
     }
@@ -1778,6 +1784,50 @@ impl MobEventStore for FaultInjectedMobEventStore {
         drop(events);
         let _ = self.event_tx.send(stored.clone());
         Ok(stored)
+    }
+
+    async fn append_terminal_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
+            return Err(MobStoreError::Internal(
+                "append_terminal_event_if_absent requires a terminal flow event".to_string(),
+            ));
+        };
+        let run_id = run_id.clone();
+        let flow_id = flow_id.clone();
+        let mob_id = event.mob_id.clone();
+
+        let mut events = self.events.write().await;
+        if events.iter().any(|existing| {
+            existing.mob_id == mob_id
+                && terminal_event_identity(&existing.kind).is_some_and(
+                    |(existing_run_id, existing_flow_id)| {
+                        existing_run_id == &run_id && existing_flow_id == &flow_id
+                    },
+                )
+        }) {
+            return Ok(None);
+        }
+
+        let kind_label = Self::kind_label(&event.kind);
+        if self.fail_on_kind.read().await.contains(kind_label) {
+            return Err(MobStoreError::Internal(format!(
+                "fault-injected append failure for {kind_label}"
+            )));
+        }
+        let cursor = events.len() as u64 + 1;
+        let stored = MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: event.mob_id,
+            kind: event.kind,
+        };
+        events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
+        Ok(Some(stored))
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -4558,6 +4608,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
             .send(AgentEvent::RunCompleted {
                 session_id,
                 result: result.text.clone(),
+                structured_output: result.structured_output.clone(),
                 usage: result.usage.clone(),
                 terminal_cause_kind: None,
             })
@@ -5386,7 +5437,7 @@ async fn test_destroy_remote_orphan_retains_events_and_metadata_for_retry() {
             matches!(
                 &event.kind,
                 MobEventKind::MemberSpawned(spawned)
-                    if spawned.agent_identity == MeerkatId::from("w-ext")
+                    if spawned.agent_identity == "w-ext"
             )
         }),
         "remote orphan must leave the member-spawn event available for retry/recovery"
@@ -5481,7 +5532,7 @@ async fn test_destroy_event_clear_failure_restores_runtime_metadata_for_retry() 
             .await
             .expect("list restored overlays")
             .iter()
-            .any(|overlay| overlay.agent_identity == AgentIdentity::from("overlay-retry-anchor")),
+            .any(|overlay| overlay.agent_identity == "overlay-retry-anchor"),
         "incomplete destroy must restore external binding overlays for retry"
     );
     let replayed_after_partial = events
@@ -18213,7 +18264,9 @@ async fn test_flow_run_start_and_completion_persist_authority_inputs_with_projec
         .commit_flow_terminalization(
             run_id.clone(),
             FlowId::from("test-flow"),
-            super::terminalization::TerminalizationTarget::Completed,
+            super::terminalization::TerminalizationTarget::Completed {
+                structured_output: None,
+            },
             crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
                 crate::run::flow_run::inputs::TerminalizeCompleted {},
             ),
@@ -19041,8 +19094,11 @@ async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry(
 async fn test_flow_completed_append_failure_records_coherence_failure_ledger_entry() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowCompleted").await;
-    let (handle, _service) =
-        create_test_mob_with_events(sample_definition_with_single_step_flow(500, 8), events).await;
+    let (handle, _service) = create_test_mob_with_events(
+        sample_definition_with_single_step_flow(500, 8),
+        events.clone(),
+    )
+    .await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
@@ -19074,6 +19130,62 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
     assert_eq!(
         machine_state.active_run_count, 0,
         "terminal append failure must not leave MobMachine active_run_count running"
+    );
+    let events_after_failed_append = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events_after_failed_append
+            .iter()
+            .any(|event| matches!(&event.kind, MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id)),
+        "fallback error handling must not append FlowFailed for a run persisted as Completed"
+    );
+
+    events.allow_appends_for("FlowCompleted").await;
+    let outcome = handle
+        .commit_flow_terminalization(
+            run_id.clone(),
+            FlowId::from("demo"),
+            super::terminalization::TerminalizationTarget::Completed {
+                structured_output: Some(serde_json::json!({
+                    "steps": {
+                        "start": "Turn completed"
+                    }
+                })),
+            },
+            crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                crate::run::flow_run::inputs::TerminalizeCompleted {},
+            ),
+            "test_repair_flow_completed_event",
+        )
+        .await
+        .expect("retry should repair missing FlowCompleted event");
+    assert_eq!(
+        outcome,
+        super::terminalization::TerminalizationOutcome::Noop
+    );
+
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id)),
+        "completed repair must not leave a duplicate wrong FlowFailed event"
+    );
+    let completed = events.iter().find_map(|event| match &event.kind {
+        MobEventKind::FlowCompleted {
+            run_id: event_run_id,
+            structured_output,
+            ..
+        } if event_run_id == &run_id => Some(structured_output),
+        _ => None,
+    });
+    assert_eq!(
+        completed,
+        Some(&Some(serde_json::json!({
+            "steps": {
+                "start": "Turn completed"
+            }
+        }))),
+        "retry should repair missing FlowCompleted event with structured output"
     );
 }
 

@@ -2,17 +2,17 @@
   "disable": ["global_observer"],
   "entries": [
     {
-      "id": "fixture_pre_tool_rewrite",
+      "id": "fixture_pre_tool_guardrail",
       "enabled": true,
       "point": "pre_tool_execution",
       "mode": "foreground",
-      "capability": "rewrite",
+      "capability": "guardrail",
       "priority": 10,
       "failure_policy": "fail_closed",
       "timeout_ms": 800,
       "runtime": {
         "type": "in_process",
-        "name": "fixture.pre_tool_rewrite"
+        "name": "fixture.pre_tool_guardrail"
       }
     },
     {

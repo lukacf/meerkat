@@ -114,7 +114,7 @@ Web search is enabled by default for all catalog models with `supports_web_searc
 
 **Extraction turns:** Web search tools are stripped during structured output extraction to maintain the deterministic, tool-free invariant.
 
-**Hook interaction:** Pre-LLM hooks see the merged tool defaults in `HookLlmRequest.provider_params`. Hook patches replace the entire effective params (existing contract).
+**Hook interaction:** Pre-LLM hooks see the merged tool defaults in `HookLlmRequest.provider_params` as an observational projection. Hooks cannot rewrite effective provider params.
 
 ## MCP server loading
 

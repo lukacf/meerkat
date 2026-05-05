@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentErrorClass, AgentEvent, AgentLlmClient, AgentSessionStore,
     AgentToolDispatcher, HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation,
-    HookOutcome, HookPatch, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason,
-    ToolCallArguments, ToolCallView, ToolDef, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
+    HookOutcome, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView,
+    ToolDef, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -200,15 +200,14 @@ fn factory_policy_session() -> meerkat_core::Session {
 
 #[derive(Default)]
 struct TestHookEngine {
-    pre_llm_max_tokens: Option<u32>,
-    post_llm_text: Option<String>,
     pre_tool_deny: bool,
     run_started_deny: bool,
     turn_boundary_deny: bool,
-    pre_tool_args_patch: Option<Value>,
-    post_tool_content_patch: Option<String>,
     invocations: Arc<Mutex<Vec<HookPoint>>>,
+    pre_llm_seen_max_tokens: Arc<Mutex<Vec<u32>>>,
+    post_llm_seen_text: Arc<Mutex<Vec<String>>>,
     pre_tool_seen_args: Arc<Mutex<Vec<Value>>>,
+    post_tool_seen_content: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -218,7 +217,6 @@ impl HookEngine for TestHookEngine {
         invocation: HookInvocation,
         _overrides: Option<&meerkat_core::HookRunOverrides>,
     ) -> Result<HookExecutionReport, meerkat_core::HookEngineError> {
-        let mut patches = Vec::new();
         let mut decision = None;
         self.invocations.lock().await.push(invocation.point);
 
@@ -232,17 +230,19 @@ impl HookEngine for TestHookEngine {
                 ));
             }
             HookPoint::PreLlmRequest => {
-                if let Some(max_tokens) = self.pre_llm_max_tokens {
-                    patches.push(HookPatch::LlmRequest {
-                        max_tokens: Some(max_tokens),
-                        temperature: None,
-                        provider_params: None,
-                    });
+                if let Some(llm_request) = invocation.llm_request.as_ref() {
+                    self.pre_llm_seen_max_tokens
+                        .lock()
+                        .await
+                        .push(llm_request.max_tokens);
                 }
             }
             HookPoint::PostLlmResponse => {
-                if let Some(text) = &self.post_llm_text {
-                    patches.push(HookPatch::AssistantText { text: text.clone() });
+                if let Some(llm_response) = invocation.llm_response.as_ref() {
+                    self.post_llm_seen_text
+                        .lock()
+                        .await
+                        .push(llm_response.assistant_text.clone());
                 }
             }
             HookPoint::PreToolExecution => {
@@ -260,19 +260,13 @@ impl HookEngine for TestHookEngine {
                         None,
                     ));
                 }
-                if let Some(args) = &self.pre_tool_args_patch {
-                    patches.push(HookPatch::ToolArgs {
-                        args: ToolCallArguments::from_value(args.clone())
-                            .expect("test hook patch args must be an object"),
-                    });
-                }
             }
             HookPoint::PostToolExecution => {
-                if let Some(content) = &self.post_tool_content_patch {
-                    patches.push(HookPatch::ToolResult {
-                        content: content.clone(),
-                        is_error: Some(false),
-                    });
+                if let Some(tool_result) = invocation.tool_result.as_ref() {
+                    self.post_tool_seen_content
+                        .lock()
+                        .await
+                        .push(tool_result.content.clone());
                 }
             }
             HookPoint::TurnBoundary if self.turn_boundary_deny => {
@@ -286,7 +280,7 @@ impl HookEngine for TestHookEngine {
             _ => {}
         }
 
-        let outcomes = if patches.is_empty() && decision.is_none() {
+        let outcomes = if decision.is_none() {
             Vec::new()
         } else {
             vec![HookOutcome {
@@ -295,7 +289,7 @@ impl HookEngine for TestHookEngine {
                 priority: 1,
                 registration_index: 0,
                 decision: decision.clone(),
-                patches: patches.clone(),
+                patches: Vec::new(),
                 published_patches: vec![],
                 error: None,
                 duration_ms: Some(0),
@@ -305,7 +299,7 @@ impl HookEngine for TestHookEngine {
         Ok(HookExecutionReport {
             outcomes,
             decision,
-            patches,
+            patches: Vec::new(),
             published_patches: vec![],
         })
     }
@@ -334,7 +328,10 @@ async fn build_agent(
 fn test_hooks() -> TestHookEngine {
     TestHookEngine {
         invocations: Arc::new(Mutex::new(Vec::new())),
+        pre_llm_seen_max_tokens: Arc::new(Mutex::new(Vec::new())),
+        post_llm_seen_text: Arc::new(Mutex::new(Vec::new())),
         pre_tool_seen_args: Arc::new(Mutex::new(Vec::new())),
+        post_tool_seen_content: Arc::new(Mutex::new(Vec::new())),
         ..Default::default()
     }
 }
@@ -546,13 +543,10 @@ async fn pre_tool_deny_blocks_dispatch() {
 }
 
 #[tokio::test]
-async fn pre_tool_rewrite_mutates_args() {
+async fn pre_tool_hooks_do_not_mutate_args() {
     let seen_args = Arc::new(Mutex::new(Vec::new()));
     let seen_tokens = Arc::new(Mutex::new(Vec::new()));
-    let hooks = TestHookEngine {
-        pre_tool_args_patch: Some(serde_json::json!({"value": "patched"})),
-        ..test_hooks()
-    };
+    let hooks = test_hooks();
     let mut agent = build_agent(
         ClientMode::ToolThenText,
         hooks,
@@ -564,17 +558,15 @@ async fn pre_tool_rewrite_mutates_args() {
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let args = seen_args.lock().await;
     assert_eq!(args.len(), 1);
-    assert_eq!(args[0], serde_json::json!({"value": "patched"}));
+    assert_eq!(args[0], serde_json::json!({"value": "orig"}));
 }
 
 #[tokio::test]
-async fn post_tool_rewrite_mutates_result() {
+async fn post_tool_hooks_do_not_mutate_result() {
     let seen_args = Arc::new(Mutex::new(Vec::new()));
     let seen_tokens = Arc::new(Mutex::new(Vec::new()));
-    let hooks = TestHookEngine {
-        post_tool_content_patch: Some("patched-result".to_string()),
-        ..test_hooks()
-    };
+    let hooks = test_hooks();
+    let post_tool_seen_content = Arc::clone(&hooks.post_tool_seen_content);
     let mut agent = build_agent(ClientMode::ToolThenText, hooks, seen_args, seen_tokens).await;
 
     let _ = agent.run("test".to_string().into()).await.unwrap();
@@ -588,36 +580,46 @@ async fn post_tool_rewrite_mutates_result() {
         })
         .expect("tool results message should exist");
 
-    assert_eq!(tool_result_message[0].text_content(), "patched-result");
+    assert_eq!(tool_result_message[0].text_content(), r#"{"value":"orig"}"#);
+    assert_eq!(
+        post_tool_seen_content.lock().await.as_slice(),
+        [r#"{"value":"orig"}"#.to_string()],
+        "post-tool hooks should observe the canonical tool result projection"
+    );
 }
 
 #[tokio::test]
-async fn pre_llm_rewrite_mutates_request_payload() {
+async fn pre_llm_hooks_do_not_mutate_request_payload() {
     let seen_args = Arc::new(Mutex::new(Vec::new()));
     let seen_tokens = Arc::new(Mutex::new(Vec::new()));
-    let hooks = TestHookEngine {
-        pre_llm_max_tokens: Some(42),
-        ..test_hooks()
-    };
+    let hooks = test_hooks();
+    let pre_llm_seen_max_tokens = Arc::clone(&hooks.pre_llm_seen_max_tokens);
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens.clone()).await;
 
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let observed = seen_tokens.lock().await;
-    assert_eq!(observed.first().copied(), Some(42));
+    assert_eq!(
+        pre_llm_seen_max_tokens.lock().await.as_slice(),
+        observed.as_slice(),
+        "pre-LLM hooks should observe the same max_tokens the runtime sends"
+    );
 }
 
 #[tokio::test]
-async fn post_llm_rewrite_mutates_assistant_content() {
+async fn post_llm_hooks_do_not_mutate_assistant_content() {
     let seen_args = Arc::new(Mutex::new(Vec::new()));
     let seen_tokens = Arc::new(Mutex::new(Vec::new()));
-    let hooks = TestHookEngine {
-        post_llm_text: Some("patched".to_string()),
-        ..test_hooks()
-    };
+    let hooks = test_hooks();
+    let post_llm_seen_text = Arc::clone(&hooks.post_llm_seen_text);
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
 
     let result = agent.run("test".to_string().into()).await.unwrap();
-    assert_eq!(result.text, "patched");
+    assert_eq!(result.text, "original");
+    assert_eq!(
+        post_llm_seen_text.lock().await.as_slice(),
+        ["original".to_string()],
+        "post-LLM hooks should observe canonical assistant text without rewriting it"
+    );
 }
 
 #[tokio::test]

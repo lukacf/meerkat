@@ -2166,6 +2166,13 @@ mod tests {
             self.inner.append(event).await
         }
 
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: NewMobEvent,
+        ) -> Result<Option<MobEvent>, MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
+        }
+
         async fn append_batch(
             &self,
             events: Vec<NewMobEvent>,

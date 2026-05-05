@@ -520,11 +520,10 @@ async fn await_guarded_session_cleanup(
         if matches!(operation, GuardedSessionCleanupOperation::Archive)
             && matches!(result, Ok(()) | Err(SessionError::NotFound { .. }))
             && let Some(cleanup) = runtime_cleanup.as_ref()
+            && let Err(error) = cleanup.run(&session_id).await
         {
-            if let Err(error) = cleanup.run(&session_id).await {
-                let _ = result_tx.send(Err(error));
-                return;
-            }
+            let _ = result_tx.send(Err(error));
+            return;
         }
         let _ = result_tx.send(result);
     });
@@ -617,11 +616,11 @@ async fn await_session_archive_with_runtime_cleanup(
         } else {
             false
         };
-        if result.is_ok() || service_not_found {
-            if let Err(error) = runtime_cleanup.run(&session_id).await {
-                let _ = result_tx.send(Err(error));
-                return;
-            }
+        if (result.is_ok() || service_not_found)
+            && let Err(error) = runtime_cleanup.run(&session_id).await
+        {
+            let _ = result_tx.send(Err(error));
+            return;
         }
         if service_not_found && retained_mob_cleanup {
             let _ = result_tx.send(Ok(()));
@@ -13116,6 +13115,13 @@ mod tests {
             event: meerkat_mob::NewMobEvent,
         ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
             self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
         }
 
         async fn append_batch(

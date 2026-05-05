@@ -23,7 +23,7 @@ inventory::submit! {
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Hooks,
-        description: "8 hook points, 3 runtimes (in-process/command/HTTP), deny/allow/rewrite semantics",
+        description: "8 hook points, 3 runtimes (in-process/command/HTTP), observe/allow/deny semantics",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],
@@ -62,6 +62,8 @@ pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 pub struct RuntimeHookResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HookDecision>,
+    /// Retired compatibility field. `HookPatch` has no valid variants, so
+    /// non-empty legacy semantic patch payloads fail deserialization.
     #[serde(default)]
     pub patches: Vec<HookPatch>,
 }
@@ -921,7 +923,7 @@ mod tests {
                 point: HookPoint::PreLlmRequest,
                 priority: 10,
                 runtime: runtime_in_process("a"),
-                capability: HookCapability::Rewrite,
+                capability: HookCapability::Observe,
                 ..Default::default()
             },
             HookEntryConfig {
@@ -929,7 +931,7 @@ mod tests {
                 point: HookPoint::PreLlmRequest,
                 priority: 5,
                 runtime: runtime_in_process("b"),
-                capability: HookCapability::Rewrite,
+                capability: HookCapability::Guardrail,
                 ..Default::default()
             },
         ];
@@ -940,11 +942,7 @@ mod tests {
                 "a",
                 static_handler(RuntimeHookResponse {
                     decision: None,
-                    patches: vec![HookPatch::LlmRequest {
-                        max_tokens: Some(100),
-                        temperature: None,
-                        provider_params: None,
-                    }],
+                    patches: Vec::new(),
                 }),
             )
             .await;
@@ -952,12 +950,8 @@ mod tests {
             .register_in_process_handler(
                 "b",
                 static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: vec![HookPatch::LlmRequest {
-                        max_tokens: Some(50),
-                        temperature: None,
-                        provider_params: None,
-                    }],
+                    decision: Some(HookDecision::Allow),
+                    patches: Vec::new(),
                 }),
             )
             .await;
@@ -988,70 +982,21 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(report.patches.len(), 2);
-        let mut values = Vec::new();
-        for patch in report.patches {
-            if let HookPatch::LlmRequest { max_tokens, .. } = patch {
-                values.push(max_tokens.unwrap_or_default());
-            }
-        }
-        assert_eq!(values, vec![50, 100]);
-    }
-
-    #[tokio::test]
-    async fn pre_background_rewrite_attempt_is_rejected() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("hook-pre-bg"),
-            point: HookPoint::PreToolExecution,
-            mode: HookExecutionMode::Background,
-            capability: HookCapability::Observe,
-            runtime: runtime_in_process("pre-bg"),
-            ..Default::default()
-        }];
-
-        let engine = DefaultHookEngine::new(config);
-        engine
-            .register_in_process_handler(
-                "pre-bg",
-                static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: vec![HookPatch::ToolArgs {
-                        args: meerkat_core::ToolCallArguments::from_value(serde_json::json!({
-                            "x": 1
-                        }))
-                        .expect("test tool args must be an object"),
-                    }],
-                }),
-            )
-            .await;
-
-        let report = engine
-            .execute(
-                HookInvocation {
-                    point: HookPoint::PreToolExecution,
-                    session_id: SessionId::new(),
-                    turn_number: Some(1),
-                    prompt_input: None,
-                    prompt: None,
-                    error_report: None,
-                    error_class: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-
+        let hook_ids: Vec<_> = report
+            .outcomes
+            .iter()
+            .map(|outcome| &outcome.hook_id)
+            .collect();
+        assert_eq!(
+            hook_ids,
+            vec![&HookId::new("hook-b"), &HookId::new("hook-a")]
+        );
+        assert!(matches!(report.decision, Some(HookDecision::Allow)));
         assert!(report.patches.is_empty());
     }
 
     #[tokio::test]
-    async fn post_background_rewrite_is_published() {
+    async fn background_hooks_are_observation_only_and_publish_no_patches() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("hook-post-bg"),
@@ -1068,16 +1013,13 @@ mod tests {
                 "post-bg",
                 static_handler(RuntimeHookResponse {
                     decision: None,
-                    patches: vec![HookPatch::ToolResult {
-                        content: "patched".to_string(),
-                        is_error: Some(false),
-                    }],
+                    patches: Vec::new(),
                 }),
             )
             .await;
 
         let session_id = SessionId::new();
-        let first = engine
+        let report = engine
             .execute(
                 HookInvocation {
                     point: HookPoint::PostToolExecution,
@@ -1098,58 +1040,58 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(first.patches.is_empty());
-        let mut published = first.published_patches;
-        for _ in 0..20 {
-            if !published.is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            published.extend(engine.drain_published_patches(&session_id).await.unwrap());
-        }
-        assert_eq!(published.len(), 1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(report.patches.is_empty());
+        assert!(report.published_patches.is_empty());
+        assert!(
+            engine
+                .drain_published_patches(&session_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
-    async fn background_patches_are_drained_by_session() {
+    async fn legacy_semantic_patch_payload_from_command_runtime_fails_closed() {
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
-            id: HookId::new("hook-post-bg-session"),
-            point: HookPoint::PostToolExecution,
-            mode: HookExecutionMode::Background,
-            capability: HookCapability::Observe,
-            runtime: runtime_in_process("post-bg-session"),
+            id: HookId::new("legacy-patch-command"),
+            point: HookPoint::PreLlmRequest,
+            capability: HookCapability::Rewrite,
+            runtime: HookRuntimeConfig::new(
+                HookRuntimeKind::Command,
+                Some(serde_json::json!({
+                    "command": "sh",
+                    "args": [
+                        "-c",
+                        "cat >/dev/null; printf '%s' '{\"patches\":[{\"patch_type\":\"llm_request\",\"max_tokens\":1}]}'"
+                    ],
+                    "env": {}
+                })),
+            )
+            .unwrap_or_default(),
             ..Default::default()
         }];
 
         let engine = DefaultHookEngine::new(config);
-        engine
-            .register_in_process_handler(
-                "post-bg-session",
-                static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: vec![HookPatch::ToolResult {
-                        content: "patched".to_string(),
-                        is_error: Some(false),
-                    }],
-                }),
-            )
-            .await;
-
-        let session_a = SessionId::new();
-        let session_b = SessionId::new();
-        engine
+        let err = engine
             .execute(
                 HookInvocation {
-                    point: HookPoint::PostToolExecution,
-                    session_id: session_a.clone(),
+                    point: HookPoint::PreLlmRequest,
+                    session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
                     prompt: None,
                     error_report: None,
                     error_class: None,
                     error: None,
-                    llm_request: None,
+                    llm_request: Some(HookLlmRequest {
+                        max_tokens: 256,
+                        temperature: None,
+                        provider_params: None,
+                        message_count: 1,
+                    }),
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
@@ -1157,21 +1099,13 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect_err("legacy semantic patch payloads must fail closed");
 
-        let mut drained_b = Vec::new();
-        let mut drained_a = Vec::new();
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            drained_b.extend(engine.drain_published_patches(&session_b).await.unwrap());
-            drained_a.extend(engine.drain_published_patches(&session_a).await.unwrap());
-            if !drained_a.is_empty() {
-                break;
-            }
-        }
-
-        assert!(drained_b.is_empty());
-        assert_eq!(drained_a.len(), 1);
+        assert!(matches!(
+            err,
+            HookEngineError::ExecutionFailed { ref hook_id, .. }
+                if hook_id == &HookId::new("legacy-patch-command")
+        ));
     }
 
     #[tokio::test]
@@ -1183,7 +1117,7 @@ mod tests {
                 point: HookPoint::PreLlmRequest,
                 priority: 100,
                 runtime: runtime_in_process("slow"),
-                capability: HookCapability::Rewrite,
+                capability: HookCapability::Observe,
                 ..Default::default()
             },
             HookEntryConfig {
@@ -1191,7 +1125,7 @@ mod tests {
                 point: HookPoint::PreLlmRequest,
                 priority: 1,
                 runtime: runtime_in_process("fast"),
-                capability: HookCapability::Rewrite,
+                capability: HookCapability::Observe,
                 ..Default::default()
             },
         ];
@@ -1204,11 +1138,7 @@ mod tests {
                     100,
                     RuntimeHookResponse {
                         decision: None,
-                        patches: vec![HookPatch::LlmRequest {
-                            max_tokens: Some(200),
-                            temperature: None,
-                            provider_params: None,
-                        }],
+                        patches: Vec::new(),
                     },
                 ),
             )
@@ -1220,11 +1150,7 @@ mod tests {
                     1,
                     RuntimeHookResponse {
                         decision: None,
-                        patches: vec![HookPatch::LlmRequest {
-                            max_tokens: Some(20),
-                            temperature: None,
-                            provider_params: None,
-                        }],
+                        patches: Vec::new(),
                     },
                 ),
             )
@@ -1256,15 +1182,19 @@ mod tests {
             .await
             .unwrap();
 
-        let values: Vec<u32> = report
-            .patches
-            .into_iter()
-            .filter_map(|patch| match patch {
-                HookPatch::LlmRequest { max_tokens, .. } => max_tokens,
-                _ => None,
-            })
+        let hook_ids: Vec<_> = report
+            .outcomes
+            .iter()
+            .map(|outcome| &outcome.hook_id)
             .collect();
-        assert_eq!(values, vec![20, 200]);
+        assert_eq!(
+            hook_ids,
+            vec![
+                &HookId::new("fast-high-priority"),
+                &HookId::new("slow-low-priority")
+            ]
+        );
+        assert!(report.patches.is_empty());
     }
 
     #[tokio::test]

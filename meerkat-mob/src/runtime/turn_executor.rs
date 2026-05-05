@@ -5,6 +5,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::ContentInput;
+use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +33,13 @@ impl fmt::Debug for FlowTurnTicket {
 
 #[derive(Debug)]
 pub enum FlowTurnOutcome {
-    Completed { output: String },
-    Failed { reason: String },
+    Completed {
+        output: String,
+        structured_output: Option<Value>,
+    },
+    Failed {
+        reason: String,
+    },
     Canceled,
 }
 

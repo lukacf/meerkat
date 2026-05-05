@@ -6031,16 +6031,16 @@ async fn archive_session_with_runtime_cleanup(
         };
         #[cfg(not(feature = "mob"))]
         let retained_mob_cleanup = false;
-        if result.is_ok() || not_found {
-            if let Err(error) = cleanup_archived_session_runtime(&state, &session_id).await {
-                let _ = result_tx.send(Err(error));
-                return;
-            }
+        if (result.is_ok() || not_found)
+            && let Err(error) = cleanup_archived_session_runtime(&state, &session_id).await
+        {
+            let _ = result_tx.send(Err(error));
+            return;
         }
         if not_found && retained_mob_cleanup {
             let _ = result_tx.send(Ok(()));
             return;
-        };
+        }
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {
@@ -6912,6 +6912,13 @@ mod tests {
             event: meerkat_mob::NewMobEvent,
         ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
             self.inner.append(event).await
+        }
+
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
         }
 
         async fn append_batch(

@@ -18,8 +18,8 @@ use meerkat_contracts::{
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
-    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPatch,
-    HookPoint, HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
+    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPoint,
+    HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
     ToolCallArguments, ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
     Usage,
 };
@@ -362,6 +362,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
             result: "done".to_string(),
+            structured_output: Some(serde_json::json!({"ok": true})),
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -397,13 +398,6 @@ fn agent_event_all_variants_roundtrip() {
             reason_code: HookReasonCode::PolicyViolation,
             message: "denied".to_string(),
             payload: None,
-        },
-        AgentEvent::HookRewriteApplied {
-            hook_id: HookId::new("h1"),
-            point: HookPoint::PostLlmResponse,
-            patch: HookPatch::AssistantText {
-                text: "rewritten".to_string(),
-            },
         },
         AgentEvent::TurnStarted { turn_number: 1 },
         AgentEvent::ReasoningDelta {
@@ -542,22 +536,6 @@ fn agent_event_all_variants_roundtrip() {
 
     // Variants constructed via JSON to avoid direct chrono/uuid crate dependencies.
     let json_constructed_variants: Vec<serde_json::Value> = vec![
-        // HookPatchPublished requires chrono::DateTime<Utc>
-        serde_json::json!({
-            "type": "hook_patch_published",
-            "hook_id": "h2",
-            "point": "post_llm_response",
-            "envelope": {
-                "revision": 1,
-                "hook_id": "h2",
-                "point": "post_llm_response",
-                "patch": {
-                    "patch_type": "assistant_text",
-                    "text": "patched"
-                },
-                "published_at": "2025-01-01T00:00:00Z"
-            }
-        }),
         // InteractionComplete requires uuid::Uuid for InteractionId
         serde_json::json!({
             "type": "interaction_complete",
@@ -592,7 +570,7 @@ fn agent_event_all_variants_roundtrip() {
         );
     }
 
-    // All 32 AgentEvent variants are covered: 29 direct + 3 from JSON.
+    // AgentEvent variants are covered: direct variants plus JSON-only UUID cases.
     // If a new variant is added and not covered here, the exhaustive
     // agent_event_type() match in meerkat-core will fail to compile,
     // prompting addition here too.
@@ -612,6 +590,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
             result: "done".to_string(),
+            structured_output: None,
             usage: Usage::default(),
             terminal_cause_kind: None,
         },
@@ -642,28 +621,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             reason_code: HookReasonCode::RuntimeError,
             message: "denied".to_string(),
             payload: None,
-        },
-        AgentEvent::HookRewriteApplied {
-            hook_id: HookId::new("hook-1"),
-            point: HookPoint::RunStarted,
-            patch: HookPatch::AssistantText {
-                text: "patched".to_string(),
-            },
-        },
-        AgentEvent::HookPatchPublished {
-            hook_id: HookId::new("hook-1"),
-            point: HookPoint::RunStarted,
-            envelope: serde_json::from_value(serde_json::json!({
-                "revision": 1,
-                "hook_id": "hook-1",
-                "point": "run_started",
-                "patch": {
-                    "patch_type": "assistant_text",
-                    "text": "patched"
-                },
-                "published_at": "2026-03-24T00:00:00Z"
-            }))
-            .unwrap(),
         },
         AgentEvent::TurnStarted { turn_number: 1 },
         AgentEvent::ReasoningDelta {
@@ -754,6 +711,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             ))
             .unwrap(),
             result: "ok".to_string(),
+            structured_output: Some(serde_json::json!({"answer": 42})),
         },
         AgentEvent::InteractionFailed {
             interaction_id: serde_json::from_value(serde_json::json!(

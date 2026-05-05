@@ -116,6 +116,7 @@ export interface RunCompletedEvent {
   readonly type: "run_completed";
   readonly sessionId: string;
   readonly result: string;
+  readonly structuredOutput?: unknown;
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
 }
@@ -327,20 +328,6 @@ export interface HookDeniedEvent {
   readonly payload?: unknown;
 }
 
-export interface HookRewriteAppliedEvent {
-  readonly type: "hook_rewrite_applied";
-  readonly hookId: HookId;
-  readonly point: HookPoint;
-  readonly patch: Record<string, unknown>;
-}
-
-export interface HookPatchPublishedEvent {
-  readonly type: "hook_patch_published";
-  readonly hookId: HookId;
-  readonly point: HookPoint;
-  readonly envelope: Record<string, unknown>;
-}
-
 // ---------------------------------------------------------------------------
 // Skill events
 // ---------------------------------------------------------------------------
@@ -398,6 +385,7 @@ export interface InteractionCompleteEvent {
   readonly type: "interaction_complete";
   readonly interactionId: string;
   readonly result: string;
+  readonly structuredOutput?: unknown;
 }
 
 export interface InteractionFailedEvent {
@@ -515,8 +503,6 @@ export type AgentEvent =
   | HookCompletedEvent
   | HookFailedEvent
   | HookDeniedEvent
-  | HookRewriteAppliedEvent
-  | HookPatchPublishedEvent
   | SkillsResolvedEvent
   | SkillResolutionFailedEvent
   | InteractionCompleteEvent
@@ -1034,6 +1020,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         sessionId: requireStringField(raw, "session_id"),
         result: requireStringField(raw, "result"),
+        ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
         usage: parseUsage(raw.usage),
         ...terminalCauseKindField(raw),
       };
@@ -1123,12 +1110,6 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, error: requireStringField(raw, "error") };
     case "hook_denied":
       return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, reasonCode: requireStringField(raw, "reason_code"), message: requireStringField(raw, "message"), ...(raw.payload != null ? { payload: raw.payload } : {}) };
-    case "hook_rewrite_applied":
-      if (!isPlainRecord(raw.patch)) throw new Error("patch must be object");
-      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, patch: raw.patch };
-    case "hook_patch_published":
-      if (!isPlainRecord(raw.envelope)) throw new Error("envelope must be object");
-      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, envelope: raw.envelope };
 
     // Skills
     case "skills_resolved":
@@ -1153,7 +1134,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Interaction (comms)
     case "interaction_complete":
-      return { type, interactionId: requireStringField(raw, "interaction_id"), result: requireStringField(raw, "result") };
+      return {
+        type,
+        interactionId: requireStringField(raw, "interaction_id"),
+        result: requireStringField(raw, "result"),
+        ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
+      };
     case "interaction_failed":
       return { type, interactionId: requireStringField(raw, "interaction_id"), error: requireStringField(raw, "error") };
 

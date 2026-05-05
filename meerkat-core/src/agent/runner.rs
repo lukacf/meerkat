@@ -3,7 +3,7 @@
 use crate::budget::Budget;
 use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
-use crate::hooks::{HookInvocation, HookPatch, HookPoint};
+use crate::hooks::{HookInvocation, HookPoint};
 use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
@@ -711,34 +711,6 @@ where
             return Err(error);
         }
 
-        for outcome in &report.outcomes {
-            for patch in &outcome.patches {
-                if let HookPatch::RunResult { text } = patch {
-                    crate::event_tap::tap_emit(
-                        &self.event_tap,
-                        event_tx,
-                        AgentEvent::HookRewriteApplied {
-                            hook_id: outcome.hook_id.clone(),
-                            point: HookPoint::RunCompleted,
-                            patch: HookPatch::RunResult { text: text.clone() },
-                        },
-                    )
-                    .await;
-                    result.text.clone_from(text);
-                    if result.structured_output.is_some() {
-                        tracing::info!(
-                            hook_id = %outcome.hook_id,
-                            "clearing structured_output after hook text rewrite"
-                        );
-                        result.structured_output = None;
-                    }
-                    self.apply_run_result_text_patch(text);
-                }
-            }
-        }
-        if let Err(err) = self.store.save(&self.session).await {
-            tracing::warn!("Failed to save session after run_completed hooks: {}", err);
-        }
         self.run_completed_hooks_applied = true;
         Ok(())
     }
@@ -754,6 +726,7 @@ where
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
                 result: result.text.clone(),
+                structured_output: result.structured_output.clone(),
                 usage: result.usage.clone(),
                 terminal_cause_kind: result.terminal_cause_kind,
             },
@@ -817,27 +790,6 @@ where
             tracing::warn!(?hook_err, "run_failed hook execution failed");
         }
         self.emit_run_failed_event(error, event_tx).await;
-    }
-
-    fn apply_run_result_text_patch(&mut self, text: &str) {
-        use super::state::rewrite_assistant_text;
-        let messages = self.session.messages_mut_internal();
-        if let Some(last_assistant) = messages
-            .iter_mut()
-            .rev()
-            .find(|message| matches!(message, Message::BlockAssistant(_) | Message::Assistant(_)))
-        {
-            match last_assistant {
-                Message::BlockAssistant(block_assistant) => {
-                    rewrite_assistant_text(&mut block_assistant.blocks, text.to_string());
-                }
-                Message::Assistant(assistant) => {
-                    assistant.content = text.to_string();
-                }
-                _ => {}
-            }
-            self.session.touch();
-        }
     }
 
     async fn run_failed_hooks(

@@ -5,7 +5,7 @@
 use crate::error::{
     AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
 };
-use crate::hooks::{HookId, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
@@ -863,8 +863,6 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::HookCompleted { .. } => "hook_completed",
         AgentEvent::HookFailed { .. } => "hook_failed",
         AgentEvent::HookDenied { .. } => "hook_denied",
-        AgentEvent::HookRewriteApplied { .. } => "hook_rewrite_applied",
-        AgentEvent::HookPatchPublished { .. } => "hook_patch_published",
         AgentEvent::TurnStarted { .. } => "turn_started",
         AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
         AgentEvent::ReasoningComplete { .. } => "reasoning_complete",
@@ -1307,6 +1305,10 @@ pub enum AgentEvent {
     RunCompleted {
         session_id: SessionId,
         result: String,
+        /// Structured output from the completed run, when schema extraction
+        /// produced a typed value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<Value>,
         usage: Usage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
@@ -1350,20 +1352,6 @@ pub enum AgentEvent {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<Value>,
-    },
-
-    /// A rewrite patch was applied synchronously.
-    HookRewriteApplied {
-        hook_id: HookId,
-        point: HookPoint,
-        patch: HookPatch,
-    },
-
-    /// A background patch was published for downstream surfaces.
-    HookPatchPublished {
-        hook_id: HookId,
-        point: HookPoint,
-        envelope: HookPatchEnvelope,
     },
 
     // === LLM Interaction ===
@@ -1500,6 +1488,10 @@ pub enum AgentEvent {
     InteractionComplete {
         interaction_id: crate::interaction::InteractionId,
         result: String,
+        /// Structured output from the completed interaction, when schema
+        /// extraction produced a typed value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<Value>,
     },
 
     /// An interaction reached an external callback boundary and is waiting for
@@ -2241,6 +2233,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                structured_output: None,
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
@@ -2276,6 +2269,7 @@ mod tests {
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "agent response".to_string(),
+                structured_output: None,
             },
             AgentEvent::InteractionCallbackPending {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -2761,6 +2755,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                structured_output: None,
                 usage: Usage::default(),
                 terminal_cause_kind: None,
             },
@@ -2795,26 +2790,6 @@ mod tests {
                 reason_code: HookReasonCode::PolicyViolation,
                 message: "nope".to_string(),
                 payload: None,
-            },
-            AgentEvent::HookRewriteApplied {
-                hook_id: HookId::new("hook-1"),
-                point: HookPoint::RunStarted,
-                patch: HookPatch::AssistantText {
-                    text: "patched".to_string(),
-                },
-            },
-            AgentEvent::HookPatchPublished {
-                hook_id: HookId::new("hook-1"),
-                point: HookPoint::RunStarted,
-                envelope: HookPatchEnvelope {
-                    revision: crate::hooks::HookRevision(1),
-                    hook_id: HookId::new("hook-1"),
-                    point: HookPoint::RunStarted,
-                    patch: HookPatch::AssistantText {
-                        text: "patched".to_string(),
-                    },
-                    published_at: chrono::Utc::now(),
-                },
             },
             AgentEvent::TurnStarted { turn_number: 1 },
             AgentEvent::ReasoningDelta {
@@ -2902,6 +2877,7 @@ mod tests {
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "ok".to_string(),
+                structured_output: None,
             },
             AgentEvent::InteractionCallbackPending {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -2935,6 +2911,7 @@ mod tests {
             ),
         ];
 
+        let expected_event_count = events.len();
         let mut kinds = std::collections::BTreeSet::new();
         for event in events {
             let kind = agent_event_type(&event);
@@ -2944,9 +2921,10 @@ mod tests {
             );
             kinds.insert(kind);
         }
-        assert!(
-            kinds.len() >= 33,
-            "expected at least one discriminator per covered event variant"
+        assert_eq!(
+            kinds.len(),
+            expected_event_count,
+            "expected one distinct discriminator per covered event variant"
         );
     }
 

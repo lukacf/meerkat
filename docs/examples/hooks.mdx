@@ -1,6 +1,6 @@
 ---
 title: "Hooks"
-description: "Lifecycle hooks for audit, guardrails, and content rewriting at 8 hook points."
+description: "Lifecycle hooks for audit and guardrails at 8 hook points."
 icon: "anchor"
 ---
 
@@ -267,16 +267,43 @@ Register a Rust closure directly -- no subprocess, no serialization overhead. On
     ```rust
     let engine = DefaultHookEngine::new(hooks_config)
         .with_in_process_handler(
-            "pii-scrub",
+            "pii-guard",
             Arc::new(|invocation| Box::pin(async move {
-                let text = invocation.tool_result.as_ref()
-                    .map(|r| r.content.as_str()).unwrap_or("");
-                let scrubbed = redact_pii(text);
+                let text = invocation.tool_call.as_ref()
+                    .map(|call| call.args.as_value().to_string()).unwrap_or_default();
+                let decision = if contains_pii(&text) {
+                    Some(HookDecision::deny(
+                        HookId::new("pii-guard"),
+                        HookReasonCode::PolicyViolation,
+                        "tool arguments contain PII",
+                        None,
+                    ))
+                } else {
+                    None
+                };
                 Ok(RuntimeHookResponse {
-                    patches: vec![HookPatch::ToolResult {
-                        content: scrubbed,
-                        is_error: None,
-                    }],
+                    decision,
+                    ..Default::default()
+                })
+            })),
+        );
+    ```
+  </Tab>
+</Tabs>
+
+Hooks receive typed projections of the request, response, tool call, and tool result. They can allow, deny, or observe those facts; they cannot rewrite canonical LLM, tool, or run output.
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    let engine = DefaultHookEngine::new(hooks_config)
+        .with_in_process_handler(
+            "tool-audit",
+            Arc::new(|invocation| Box::pin(async move {
+                let content = invocation.tool_result.as_ref()
+                    .map(|r| r.content.as_str()).unwrap_or("");
+                audit_tool_result(content).await;
+                Ok(RuntimeHookResponse {
                     ..Default::default()
                 })
             })),
@@ -432,11 +459,7 @@ Use the `disable` list to turn off hooks defined in the realm config without rem
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    rkat run "Quick test" --hooks-override-json '{
-      "disable": ["safety-gate", "audit-log"]
-    }'
-    ```
+    Run-scoped hook override flags are not currently exposed on the normal `rkat run` surface. Use JSON-RPC, REST, MCP, or SDK/embedded surfaces for per-run hook override testing.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -515,9 +538,6 @@ Hooks emit events into the session event stream. Subscribe to these to build das
 
 // HookFailed -- emitted when a hook errors or times out
 {"type": "hook_failed", "hook_id": "audit-log", "point": "post_tool_execution", "error": "process exited with code 1"}
-
-// HookRewriteApplied -- emitted when a hook applies a patch
-{"type": "hook_rewrite_applied", "hook_id": "pii-scrub", "point": "post_tool_execution", "patch": {"ToolResult": {"content": "***", "is_error": null}}}
 ```
 
 ## Next step

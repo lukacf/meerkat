@@ -137,6 +137,20 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse interaction_complete structured output", () => {
+    const event = parseEvent({
+      type: "interaction_complete",
+      interaction_id: "i1",
+      result: "{\"answer\":42}",
+      structured_output: { answer: 42 },
+    });
+    assert.equal(event.type, "interaction_complete");
+    if (event.type === "interaction_complete") {
+      assert.equal(event.interactionId, "i1");
+      assert.deepEqual(event.structuredOutput, { answer: 42 });
+    }
+  });
+
   it("should parse turn_completed with usage in camelCase", () => {
     const event = parseEvent({
       type: "turn_completed",
@@ -268,11 +282,13 @@ describe("Typed Events", () => {
       type: "run_completed",
       session_id: "abc-123",
       result: "Done!",
+      structured_output: { answer: 42 },
       usage: { input_tokens: 100, output_tokens: 50 },
     });
     if (isRunCompleted(event)) {
       assert.equal(event.sessionId, "abc-123");
       assert.equal(event.result, "Done!");
+      assert.deepEqual(event.structuredOutput, { answer: 42 });
       assert.equal(event.usage.inputTokens, 100);
     } else {
       assert.fail("Expected RunCompletedEvent");

@@ -2189,6 +2189,7 @@ mod tests {
                     .send(AgentEvent::InteractionComplete {
                         interaction_id: interaction_id_for_task,
                         result: "ok".to_string(),
+                        structured_output: None,
                     })
                     .await;
             });

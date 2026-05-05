@@ -2873,6 +2873,13 @@ mod tests {
             self.inner.append(event).await
         }
 
+        async fn append_terminal_event_if_absent(
+            &self,
+            event: meerkat_mob::NewMobEvent,
+        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
+            self.inner.append_terminal_event_if_absent(event).await
+        }
+
         async fn append_batch(
             &self,
             events: Vec<meerkat_mob::NewMobEvent>,

@@ -112,6 +112,7 @@ impl SessionAgent for MockAgent {
             .send(AgentEvent::RunCompleted {
                 session_id: self.session_id.clone(),
                 result: "Hello from mock".to_string(),
+                structured_output: None,
                 usage: usage.clone(),
                 terminal_cause_kind: None,
             })

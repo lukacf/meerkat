@@ -156,7 +156,7 @@ For setup, provider parameters, result fields, and troubleshooting, see [Image g
 
 ## Composition
 
-Tools from different sources (custom, MCP, built-in) are composed into a single dispatcher. The agent sees one flat tool list regardless of where each tool comes from. Hooks can intercept tool calls before and after execution for guardrails, audit, or argument rewriting.
+Tools from different sources (custom, MCP, built-in) are composed into a single dispatcher. The agent sees one flat tool list regardless of where each tool comes from. Hooks can observe tool calls before and after execution, and guardrails can deny unsafe calls before dispatch.
 
 ## Mob tools (`meerkat-mob-mcp`)
 
